@@ -1,12 +1,14 @@
 # Geosteering AI — Preset: P1 Baseline
 # Cenario mais simples: 5 features EM, sem noise, sem GS.
 # Util para debugging e baseline de performance.
+# Nota: LR=1e-4 e patience=60 sao os defaults S21.
+#       Para ref-compat legado, use learning_rate: 1.0e-3 e patience: 20.
 
 use_noise: false
 use_curriculum: false
 use_dual_validation: false
 model_type: "ResNet_18"
 loss_type: "rmse"
-learning_rate: 1.0e-3
+learning_rate: 1.0e-4
 epochs: 400
-early_stopping_patience: 20
+early_stopping_patience: 60

@@ -196,3 +196,19 @@ class TestValidation:
     def test_output_channels_valid(self):
         with pytest.raises(AssertionError):
             PipelineConfig(output_channels=3)
+
+    def test_inference_mode_valid(self):
+        with pytest.raises(AssertionError, match="invalido"):
+            PipelineConfig(inference_mode="streaming")
+
+    def test_scaler_type_valid(self):
+        with pytest.raises(AssertionError, match="invalido"):
+            PipelineConfig(scaler_type="invalid_scaler")
+
+    def test_optimizer_valid(self):
+        with pytest.raises(AssertionError, match="invalido"):
+            PipelineConfig(optimizer="invalid_opt")
+
+    def test_smoothing_type_valid(self):
+        with pytest.raises(AssertionError, match="invalido"):
+            PipelineConfig(smoothing_type="cubic_spline")

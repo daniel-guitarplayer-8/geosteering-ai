@@ -1,0 +1,470 @@
+"""Testes unitarios para o modulo data/ (Bloco 2).
+
+Cobre: loading, splitting, feature_views, geosignals, scaling, pipeline.
+Usa dados sinteticos (sem dependencia de .dat/.out reais).
+"""
+
+import os
+import sys
+import math
+import tempfile
+import struct
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from geosteering_ai.config import PipelineConfig
+from geosteering_ai.data.loading import (
+    AngleGroup,
+    OutMetadata,
+    parse_out_metadata,
+    load_binary_dat,
+    apply_decoupling,
+    segregate_by_angle,
+    EM_COMPONENTS,
+)
+from geosteering_ai.data.splitting import (
+    DataSplits,
+    split_model_ids,
+    apply_split,
+)
+from geosteering_ai.data.feature_views import (
+    apply_feature_view,
+    VALID_VIEWS,
+    EPS,
+)
+from geosteering_ai.data.geosignals import (
+    compute_expanded_features,
+    compute_geosignals,
+    FAMILY_DEPS,
+)
+from geosteering_ai.data.scaling import (
+    apply_target_scaling,
+    inverse_target_scaling,
+    create_scaler,
+    fit_scaler,
+    transform_features,
+)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# FIXTURES — Dados sinteticos
+# ════════════════════════════════════════════════════════════════════════
+
+def _make_synthetic_out(tmp_path, n_models=10, n_angles=1, n_freqs=1, nmeds=600):
+    """Cria arquivo .out sintetico."""
+    out_path = str(tmp_path / "test.out")
+    with open(out_path, "w") as f:
+        f.write(f"{n_angles} {n_freqs} {n_models}\n")
+        f.write("0.0\n")           # theta=0
+        f.write("20000.0\n")       # freq=20kHz
+        f.write(f"{nmeds}\n")      # nmeds para theta=0
+    return out_path
+
+
+def _make_synthetic_dat(tmp_path, n_rows, n_columns=22):
+    """Cria arquivo .dat binario sintetico no formato 22-col."""
+    dat_path = str(tmp_path / "test.dat")
+    rng = np.random.default_rng(42)
+
+    with open(dat_path, "wb") as f:
+        for i in range(n_rows):
+            # Col 0: meds (int32)
+            f.write(struct.pack("<i", i % 600))
+            # Col 1: zobs (float64) — profundidade em metros
+            z = (i % 600) * 0.25  # 0 a 150 m
+            f.write(struct.pack("<d", z))
+            # Col 2-3: res_h, res_v (float64)
+            f.write(struct.pack("<d", 10.0 ** rng.uniform(0, 3)))
+            f.write(struct.pack("<d", 10.0 ** rng.uniform(0, 3)))
+            # Col 4-21: componentes EM (float64)
+            for _ in range(18):
+                f.write(struct.pack("<d", rng.normal(0, 1e-3)))
+
+    return dat_path
+
+
+def _make_synthetic_angle_group(n_seq=20, nmeds=600, n_feat=5, n_tgt=2):
+    """Cria AngleGroup sintetico para testes de split."""
+    rng = np.random.default_rng(42)
+    return AngleGroup(
+        theta=0.0,
+        x=rng.standard_normal((n_seq, nmeds, n_feat)).astype(np.float64),
+        y=np.abs(rng.standard_normal((n_seq, nmeds, n_tgt))).astype(np.float64) + 0.1,
+        z_meters=np.tile(np.linspace(0, 150, nmeds), (n_seq, 1)),
+        model_ids=np.arange(n_seq, dtype=np.int32),
+        nmeds=nmeds,
+    )
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTS — Loading
+# ════════════════════════════════════════════════════════════════════════
+
+class TestParseOut:
+    """parse_out_metadata: parsing de arquivo .out."""
+
+    def test_basic_parsing(self, tmp_path):
+        out_path = _make_synthetic_out(tmp_path)
+        meta = parse_out_metadata(out_path)
+        assert meta.n_angles == 1
+        assert meta.n_freqs == 1
+        assert meta.n_models == 10
+        assert meta.theta_list == [0.0]
+        assert meta.freq_list == [20000.0]
+        assert meta.nmeds_list == [600]
+        assert meta.total_rows == 10 * 600
+
+    def test_multi_angle(self, tmp_path):
+        out_path = str(tmp_path / "multi.out")
+        with open(out_path, "w") as f:
+            f.write("2 1 5\n")
+            f.write("0.0 30.0\n")
+            f.write("20000.0\n")
+            f.write("600 622\n")
+        meta = parse_out_metadata(out_path)
+        assert meta.n_angles == 2
+        assert meta.nmeds_list == [600, 622]
+        assert meta.rows_per_model == 600 + 622
+
+    def test_file_not_found(self):
+        with pytest.raises(FileNotFoundError):
+            parse_out_metadata("/nonexistent/path.out")
+
+
+class TestLoadDat:
+    """load_binary_dat: carregamento de .dat binario."""
+
+    def test_load_22col(self, tmp_path):
+        n_rows = 6000  # 10 models * 600 nmeds
+        dat_path = _make_synthetic_dat(tmp_path, n_rows)
+        data = load_binary_dat(dat_path, n_columns=22)
+        assert data.shape == (n_rows, 22)
+        assert data.dtype == np.float64
+
+    def test_expected_rows_validation(self, tmp_path):
+        dat_path = _make_synthetic_dat(tmp_path, 6000)
+        with pytest.raises(ValueError, match="Esperadas"):
+            load_binary_dat(dat_path, expected_rows=5000)
+
+    def test_zobs_column(self, tmp_path):
+        dat_path = _make_synthetic_dat(tmp_path, 600)
+        data = load_binary_dat(dat_path)
+        # zobs esta na coluna 1 e deve variar de 0 a ~150
+        z = data[:, 1]
+        assert z.min() >= 0.0
+        assert z.max() <= 150.0
+
+
+class TestDecoupling:
+    """apply_decoupling: remocao de acoplamento direto."""
+
+    def test_decoupling_values(self):
+        config = PipelineConfig.baseline()
+        data = np.zeros((10, 22), dtype=np.float64)
+        data[:, 4] = 1.0   # Re{Hxx}
+        data[:, 12] = 1.0  # Re{Hyy}
+        data[:, 20] = 1.0  # Re{Hzz}
+
+        result = apply_decoupling(data, config)
+
+        L = 1.0
+        ACp = -1.0 / (4.0 * math.pi * L**3)
+        ACx = +1.0 / (2.0 * math.pi * L**3)
+
+        np.testing.assert_allclose(result[:, 4], 1.0 - ACp, rtol=1e-10)
+        np.testing.assert_allclose(result[:, 12], 1.0 - ACp, rtol=1e-10)
+        np.testing.assert_allclose(result[:, 20], 1.0 - ACx, rtol=1e-10)
+
+    def test_decoupling_preserves_other_columns(self):
+        config = PipelineConfig.baseline()
+        data = np.ones((5, 22), dtype=np.float64)
+        result = apply_decoupling(data, config)
+        # Coluna 1 (zobs) inalterada
+        np.testing.assert_array_equal(result[:, 1], data[:, 1])
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTS — Splitting
+# ════════════════════════════════════════════════════════════════════════
+
+class TestSplitting:
+    """split_model_ids + apply_split: particionamento [P1]."""
+
+    def test_split_no_overlap(self):
+        train, val, test = split_model_ids(100)
+        assert train & val == set()
+        assert train & test == set()
+        assert val & test == set()
+        assert len(train) + len(val) + len(test) == 100
+
+    def test_split_ratios(self):
+        train, val, test = split_model_ids(1000, 0.7, 0.15, 0.15)
+        assert len(train) == 700
+        assert len(val) == 150
+
+    def test_split_deterministic(self):
+        t1, v1, _ = split_model_ids(50, seed=42)
+        t2, v2, _ = split_model_ids(50, seed=42)
+        assert t1 == t2
+        assert v1 == v2
+
+    def test_apply_split_shapes(self):
+        group = _make_synthetic_angle_group(n_seq=20)
+        train, val, test = split_model_ids(20, 0.7, 0.15, 0.15)
+        splits = apply_split(group, train, val, test)
+
+        total = splits.x_train.shape[0] + splits.x_val.shape[0] + splits.x_test.shape[0]
+        assert total == 20
+        assert splits.z_train.shape[0] == splits.x_train.shape[0]
+        assert splits.z_val.shape[0] == splits.x_val.shape[0]
+        assert splits.z_test.shape[0] == splits.x_test.shape[0]
+
+    def test_z_meters_preserved(self):
+        group = _make_synthetic_angle_group(n_seq=10)
+        train, val, test = split_model_ids(10, 0.7, 0.15, 0.15)
+        splits = apply_split(group, train, val, test)
+
+        # z_meters deve estar em metros (0 a 150), nunca normalizado
+        if splits.z_train.size > 0:
+            assert splits.z_train.min() >= 0.0
+            assert splits.z_train.max() <= 150.0
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTS — Feature Views
+# ════════════════════════════════════════════════════════════════════════
+
+class TestFeatureViews:
+    """6 Feature Views com numpy."""
+
+    @pytest.fixture
+    def x_3d(self):
+        """Dados sinteticos: (n_seq, seq_len, 5) = [z, Re_H1, Im_H1, Re_H2, Im_H2]."""
+        rng = np.random.default_rng(42)
+        return rng.uniform(0.001, 1.0, size=(4, 100, 5))
+
+    def test_identity_passthrough(self, x_3d):
+        result = apply_feature_view(x_3d, "identity")
+        np.testing.assert_array_equal(result, x_3d)
+
+    def test_raw_passthrough(self, x_3d):
+        result = apply_feature_view(x_3d, "raw")
+        np.testing.assert_array_equal(result, x_3d)
+
+    def test_shape_preserved_all_views(self, x_3d):
+        for view in VALID_VIEWS:
+            result = apply_feature_view(x_3d, view)
+            assert result.shape == x_3d.shape, f"Shape changed for view '{view}'"
+
+    def test_z_preserved(self, x_3d):
+        """z (coluna 0) nunca e modificado por nenhuma FV."""
+        for view in VALID_VIEWS:
+            result = apply_feature_view(x_3d, view)
+            np.testing.assert_array_equal(
+                result[:, :, 0], x_3d[:, :, 0],
+                err_msg=f"z modificado em view '{view}'",
+            )
+
+    def test_invalid_view_raises(self, x_3d):
+        with pytest.raises(ValueError, match="invalida"):
+            apply_feature_view(x_3d, "nonexistent_view")
+
+    def test_H1_logH2_transforms_h2(self, x_3d):
+        result = apply_feature_view(x_3d, "H1_logH2")
+        # Re(H1) e Im(H1) devem estar inalterados
+        np.testing.assert_array_equal(result[:, :, 1], x_3d[:, :, 1])
+        np.testing.assert_array_equal(result[:, :, 2], x_3d[:, :, 2])
+        # Col 3 deve ser log10|H2| (diferente do original)
+        assert not np.allclose(result[:, :, 3], x_3d[:, :, 3])
+
+    def test_logH1_logH2_all_transformed(self, x_3d):
+        result = apply_feature_view(x_3d, "logH1_logH2")
+        # Nenhum canal EM deve ser igual ao original
+        for i in range(1, 5):
+            assert not np.allclose(result[:, :, i], x_3d[:, :, i])
+
+    def test_2d_input(self):
+        """Feature Views devem funcionar com entrada 2D."""
+        x_2d = np.random.uniform(0.001, 1.0, size=(100, 5))
+        for view in VALID_VIEWS:
+            result = apply_feature_view(x_2d, view)
+            assert result.shape == x_2d.shape
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTS — Geosignals
+# ════════════════════════════════════════════════════════════════════════
+
+class TestGeosignals:
+    """5 familias de geosinais."""
+
+    @pytest.fixture
+    def raw_data_22(self):
+        """Dados sinteticos: (1000, 22) com componentes EM."""
+        rng = np.random.default_rng(42)
+        data = np.zeros((1000, 22), dtype=np.float64)
+        data[:, 1] = np.linspace(0, 150, 1000)  # zobs
+        data[:, 2] = rng.uniform(1, 100, 1000)  # res_h
+        data[:, 3] = rng.uniform(1, 100, 1000)  # res_v
+        for i in range(4, 22):
+            data[:, i] = rng.normal(0, 1e-3, 1000)
+        return data
+
+    def test_expanded_features_usd_uhr(self):
+        result = compute_expanded_features([1, 4, 5, 20, 21], ["USD", "UHR"])
+        # USD precisa ZZ(20,21), XZ(8,9), ZX(16,17)
+        # UHR precisa ZZ(20,21), XX(4,5), YY(12,13)
+        assert 8 in result and 9 in result   # XZ
+        assert 12 in result and 13 in result  # YY
+        assert 16 in result and 17 in result  # ZX
+        assert result == sorted(result)  # deve estar ordenado
+
+    def test_expanded_features_all_base_preserved(self):
+        base = [1, 4, 5, 20, 21]
+        result = compute_expanded_features(base, ["USD"])
+        for col in base:
+            assert col in result
+
+    def test_compute_gs_shape(self, raw_data_22):
+        gs = compute_geosignals(raw_data_22, ["USD", "UHR"])
+        assert gs.shape == (1000, 4)  # 2 familias × 2 canais
+
+    def test_compute_gs_all_families(self, raw_data_22):
+        all_fams = list(FAMILY_DEPS.keys())
+        gs = compute_geosignals(raw_data_22, all_fams)
+        assert gs.shape == (1000, 2 * len(all_fams))
+
+    def test_compute_gs_attenuation_range(self, raw_data_22):
+        gs = compute_geosignals(raw_data_22, ["UHR"])
+        att = gs[:, 0]
+        assert att.min() >= -100.0
+        assert att.max() <= 100.0
+
+    def test_unknown_family_raises(self, raw_data_22):
+        with pytest.raises(ValueError, match="desconhecida"):
+            compute_geosignals(raw_data_22, ["INVALID"])
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTS — Scaling
+# ════════════════════════════════════════════════════════════════════════
+
+class TestTargetScaling:
+    """apply_target_scaling + inverse_target_scaling: roundtrip."""
+
+    def test_log10_roundtrip(self):
+        y = np.array([1.0, 10.0, 100.0, 1000.0])
+        scaled = apply_target_scaling(y, "log10")
+        recovered = inverse_target_scaling(scaled, "log10")
+        np.testing.assert_allclose(recovered, y, rtol=1e-10)
+
+    def test_sqrt_roundtrip(self):
+        y = np.array([4.0, 16.0, 25.0])
+        scaled = apply_target_scaling(y, "sqrt")
+        recovered = inverse_target_scaling(scaled, "sqrt")
+        np.testing.assert_allclose(recovered, y, rtol=1e-10)
+
+    def test_none_identity(self):
+        y = np.array([1.0, 2.0, 3.0])
+        np.testing.assert_array_equal(apply_target_scaling(y, "none"), y)
+
+
+class TestScalers:
+    """create_scaler + fit_scaler + transform_features."""
+
+    def test_all_scaler_types(self):
+        for st in ["standard", "minmax", "robust", "maxabs", "none"]:
+            scaler = create_scaler(st)
+            if st == "none":
+                assert scaler is None
+            else:
+                assert scaler is not None
+
+    def test_fit_and_transform_3d(self):
+        x = np.random.randn(10, 100, 5).astype(np.float64)
+        scaler = fit_scaler(x, "standard")
+        x_scaled = transform_features(x, scaler)
+        assert x_scaled.shape == x.shape
+        # Mean should be ~0 after standard scaling
+        flat = x_scaled.reshape(-1, 5)
+        np.testing.assert_allclose(flat.mean(axis=0), 0.0, atol=1e-10)
+
+    def test_none_scaler_is_copy(self):
+        x = np.random.randn(5, 100, 3)
+        result = transform_features(x, None)
+        np.testing.assert_array_equal(result, x)
+        # Must be a copy, not same object
+        assert result is not x
+
+    def test_invalid_scaler_raises(self):
+        with pytest.raises(ValueError, match="invalido"):
+            create_scaler("nonexistent")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTS — Pipeline Integration (sem .dat/.out reais)
+# ════════════════════════════════════════════════════════════════════════
+
+class TestPipelineIntegration:
+    """DataPipeline: testes de integracao com dados sinteticos."""
+
+    def test_pipeline_init_baseline(self):
+        config = PipelineConfig.baseline()
+        from geosteering_ai.data.pipeline import DataPipeline
+        pipeline = DataPipeline(config)
+        assert pipeline.is_onthefly is False
+
+    def test_pipeline_init_geosinais(self):
+        config = PipelineConfig.geosinais_p4()
+        from geosteering_ai.data.pipeline import DataPipeline
+        pipeline = DataPipeline(config)
+        assert pipeline.is_onthefly is True
+
+    def test_prepare_with_synthetic_data(self, tmp_path):
+        """Teste end-to-end: .out + .dat sinteticos → PreparedData."""
+        n_models = 10
+        nmeds = 600
+        n_rows = n_models * nmeds
+
+        out_path = _make_synthetic_out(tmp_path, n_models=n_models, nmeds=nmeds)
+        dat_path = _make_synthetic_dat(tmp_path, n_rows)
+
+        config = PipelineConfig.baseline()
+        from geosteering_ai.data.pipeline import DataPipeline
+        pipeline = DataPipeline(config)
+        data = pipeline.prepare(dat_path, out_path)
+
+        # Shapes basicos
+        assert data.x_train.ndim == 3
+        assert data.y_train.ndim == 3
+        assert data.z_train.ndim == 2
+        assert data.x_train.shape[-1] == config.n_base_features
+        assert data.y_train.shape[-1] == len(config.output_targets)
+
+        # z_meters em metros (0 a 150), nunca normalizado
+        assert data.z_train.min() >= 0.0
+        assert data.z_train.max() <= 150.0
+        assert data.z_test.min() >= 0.0
+
+        # Total sequences = n_models
+        total = data.x_train.shape[0] + data.x_val.shape[0] + data.x_test.shape[0]
+        assert total == n_models
+
+    def test_z_meters_not_scaled(self, tmp_path):
+        """Bug fix: z_meters NUNCA deve ser normalizado."""
+        out_path = _make_synthetic_out(tmp_path, n_models=10, nmeds=600)
+        dat_path = _make_synthetic_dat(tmp_path, 6000)
+
+        config = PipelineConfig.baseline()
+        from geosteering_ai.data.pipeline import DataPipeline
+        pipeline = DataPipeline(config)
+        data = pipeline.prepare(dat_path, out_path)
+
+        # z_meters deve estar no range fisico [0, 150] metros
+        all_z = np.concatenate([data.z_train.ravel(), data.z_val.ravel(), data.z_test.ravel()])
+        assert all_z.min() >= 0.0, "z_meters tem valores negativos (normalizado?)"
+        assert all_z.max() <= 150.0, "z_meters excede 150m (dados corrompidos?)"
+        # Se fosse normalizado (StandardScaler), teria media ~0 e desvio ~1
+        assert all_z.mean() > 10.0, "z_meters parece normalizado (media muito baixa)"

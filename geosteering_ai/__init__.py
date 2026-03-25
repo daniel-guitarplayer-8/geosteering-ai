@@ -1,3 +1,19 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  PACOTE: geosteering_ai                                                    ║
+# ║                                                                            ║
+# ║  Geosteering AI v2.0 — Inversao 1D de Resistividade via Deep Learning     ║
+# ║  Autor: Daniel Leal                                                        ║
+# ║  Framework: TensorFlow 2.x / Keras (exclusivo — PyTorch PROIBIDO)         ║
+# ║  Ambiente: VSCode + Claude Code (dev) · GitHub CI · Colab Pro+ GPU (exec) ║
+# ║  Pacote: geosteering_ai (pip installable via pyproject.toml)              ║
+# ║                                                                            ║
+# ║  Subpacotes: data, noise, models, losses, training, inference,            ║
+# ║              evaluation, visualization, utils                              ║
+# ║  Ref: docs/ARCHITECTURE_v2.md                                             ║
+# ║                                                                            ║
+# ║  Historico:                                                                ║
+# ║    v2.0.0 (2026-03) — Implementacao inicial (Bloco 1: config + estrutura)║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
 """Geosteering AI — Pipeline de Inversao Geofisica 1D com Deep Learning.
 
 Reproduz, com fidelidade fisica, a inversao eletromagnetica em tempo real
@@ -34,14 +50,26 @@ Example:
     >>> history = TrainingLoop(config, model, pipeline, data).run()
 """
 
+# ──────────────────────────────────────────────────────────────────────
+# Metadados do pacote
+# ──────────────────────────────────────────────────────────────────────
 __version__ = "2.0.0"
 __author__ = "Daniel Leal"
 __framework__ = "TensorFlow 2.x / Keras"
 
+# ──────────────────────────────────────────────────────────────────────
+# Imports publicos — re-export da classe principal
+# ──────────────────────────────────────────────────────────────────────
 from geosteering_ai.config import PipelineConfig
 
+# ──────────────────────────────────────────────────────────────────────
+# D8: Exports publicos — agrupados semanticamente
+# ──────────────────────────────────────────────────────────────────────
 __all__ = [
+    # --- Classe principal (Bloco 1: Config) ---
     "PipelineConfig",
+    # --- Metadados do pacote ---
     "__version__",
     "__author__",
+    "__framework__",
 ]

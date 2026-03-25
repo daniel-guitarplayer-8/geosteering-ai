@@ -120,6 +120,32 @@ Val/test transformados offline. Train permanece raw para on-the-fly.
 
 ---
 
+## Padroes de Documentacao (D1-D10)
+
+Todo codigo em `geosteering_ai/` DEVE seguir os padroes D1-D10 definidos na
+skill `geosteering-v2` (secao 15). Resumo:
+
+| Padrao | Requisito | Onde |
+|:-------|:----------|:-----|
+| **D1** | Mega-header Unicode com 14 campos | Topo de cada modulo .py |
+| **D2** | Cabecalho de secao com 4+ linhas de contexto | Cada bloco logico |
+| **D3** | Diagramas ASCII com Unicode borders | >= 3 caminhos/categorias |
+| **D4** | Atributos de config com 4+ linhas por grupo | config.py |
+| **D5** | Docstrings Google-style com 5+ campos | Todas as funcoes |
+| **D6** | Docstrings de classes com Attributes + Example | Todas as classes |
+| **D7** | Comentarios inline semanticos | Operacoes de dominio |
+| **D8** | Inventario de exports com __all__ semantico | Todos os modulos |
+| **D9** | Logging estruturado (NUNCA print) | Toda saida |
+| **D10** | Constantes com documentacao fisica | Valores criticos |
+| **D11** | Tabelas de formulas ASCII em catalogos | Catalogos de componentes |
+| **D12** | Cross-references Note: em docstrings | Toda funcao publica |
+| **D13** | Branch comments com layout de saida | Toda transformacao if/elif |
+| **D14** | Diagrama noise × FV × GS | pipeline.py |
+
+Referencia completa: `/geosteering-v2` secao 15.
+
+---
+
 ## Workflow de Desenvolvimento
 
 ### Ciclo: Editar → Testar → Commitar → CI → Treinar
@@ -173,6 +199,7 @@ Testes minimos por modulo:
 
 | Skill | Uso |
 |:------|:----|
+| **geosteering-v2** | Skill PRINCIPAL v2.0 — dominio fisico (geofisica/petrofisica/EM), padroes de codigo v2.0 (PipelineConfig/Factory), DL aplicado a geociencias. Usar para TODAS as questoes do projeto |
 | **geosteering-v5015** | Skill LEGADA para celulas C0-C73. Usar apenas para referencia ao codigo legado |
 | **feature-dev** | Desenvolvimento guiado de features com foco em arquitetura |
 | **code-review** | Revisao de PRs e codigo |
