@@ -1,0 +1,24 @@
+# Geosteering AI — Preset: Geosteering Realtime (Causal)
+# Modo causal com sliding window para inferencia em tempo real.
+# Treinamento: Fase 1 acausal + Fase 2 finetune causal.
+
+model_type: "WaveNet"
+inference_mode: "realtime"
+# use_causal_mode: auto-derivado de inference_mode="realtime"
+loss_type: "rmse"
+learning_rate: 1.0e-4
+epochs: 400
+batch_size: 32
+early_stopping_patience: 60
+
+# Output com incerteza
+output_channels: 6
+
+# Noise on-the-fly
+use_noise: true
+noise_level_max: 0.08
+use_curriculum: true
+epochs_no_noise: 10
+noise_ramp_epochs: 80
+
+use_dual_validation: true

@@ -1,0 +1,68 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Geosteering AI — .gitignore
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Dados binarios (grandes, ficam no Google Drive) ──────────────────────────
+*.dat
+*.out
+*.bin
+
+# ── Modelos treinados ────────────────────────────────────────────────────────
+*.keras
+*.h5
+*.pb
+*.tflite
+saved_model/
+checkpoints/
+experiments/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Ambientes virtuais ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Jupyter / Colab ──────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── Credenciais ──────────────────────────────────────────────────────────────
+.env
+*.key
+credentials.json
+
+# ── Plots e saidas temporarias ───────────────────────────────────────────────
+Plotagens/
+*.png
+*.jpg
+*.pdf
+!docs/**/*.png
+!docs/**/*.pdf
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Dados grandes no Drive ───────────────────────────────────────────────────
+Fortran_Gerador/*.dat
+Fortran_Gerador/*.out
+
+# ── Pacotes de Skill legados ─────────────────────────────────────────────────
+*.skill

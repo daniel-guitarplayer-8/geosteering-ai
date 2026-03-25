@@ -1,0 +1,27 @@
+# Geosteering AI — Preset: P4 Geosinais On-the-Fly
+# Geosinais (USD+UHR) computados de EM ruidoso — fisicamente correto.
+# Cadeia on-the-fly: noise → FV → GS → scale.
+
+model_type: "ResNet_18"
+loss_type: "rmse"
+learning_rate: 1.0e-4
+epochs: 400
+batch_size: 32
+early_stopping_patience: 60
+
+# Geosinais P4
+use_geosignal_features: true
+geosignal_set: "usd_uhr"
+
+# Noise on-the-fly (obrigatorio com GS para fidelidade fisica)
+use_noise: true
+noise_level_max: 0.08
+use_curriculum: true
+epochs_no_noise: 10
+noise_ramp_epochs: 80
+
+# Per-group scalers [P3]: StandardScaler(EM) + RobustScaler(GS)
+use_per_group_scalers: true
+gs_scaler_type: "robust"
+
+use_dual_validation: true

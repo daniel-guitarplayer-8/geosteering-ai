@@ -1,0 +1,25 @@
+# Geosteering AI — Preset: N-Stage N=3 (Exploratorio)
+# Stage 1: clean (LR=1e-4) → Stage 2: noise 4% (LR=5e-5) → Stage 3: noise 8% (LR=2.5e-5)
+# Adaptacao progressiva com 3 niveis de ruido.
+
+model_type: "ResNet_18"
+loss_type: "rmse"
+learning_rate: 1.0e-4
+epochs: 400
+batch_size: 32
+early_stopping_patience: 60
+
+# N-Stage N=3
+use_nstage: true
+n_training_stages: 3
+nstage_stage1_epochs: 20
+stage_lr_decay: 0.5
+nstage_base_patience: 30
+use_stage_mini_curriculum: true
+stage_ramp_fraction: 0.25
+
+use_noise: true
+noise_level_max: 0.08
+use_curriculum: false
+
+use_dual_validation: true

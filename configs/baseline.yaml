@@ -1,0 +1,12 @@
+# Geosteering AI — Preset: P1 Baseline
+# Cenario mais simples: 5 features EM, sem noise, sem GS.
+# Util para debugging e baseline de performance.
+
+use_noise: false
+use_curriculum: false
+use_dual_validation: false
+model_type: "ResNet_18"
+loss_type: "rmse"
+learning_rate: 1.0e-3
+epochs: 400
+early_stopping_patience: 20

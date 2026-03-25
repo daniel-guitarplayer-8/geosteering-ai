@@ -1,0 +1,25 @@
+# Geosteering AI — Preset: E-Robusto S21
+# Cenario padrao para producao: curriculum 3-phase, noise 8%, LR 1e-4.
+# Defaults do PipelineConfig — este arquivo e referencia explicita.
+
+model_type: "ResNet_18"
+loss_type: "rmse"
+learning_rate: 1.0e-4
+epochs: 400
+batch_size: 32
+early_stopping_patience: 60
+use_restore_best_weights: false
+
+# Noise on-the-fly
+use_noise: true
+noise_level_max: 0.08
+noise_types: ["gaussian"]
+noise_weights: [1.0]
+
+# Curriculum 3-phase
+use_curriculum: true
+epochs_no_noise: 10
+noise_ramp_epochs: 80
+
+# Dual validation [P2]
+use_dual_validation: true

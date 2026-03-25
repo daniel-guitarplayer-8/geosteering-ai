@@ -1,0 +1,26 @@
+# Geosteering AI — Preset: N-Stage N=2 + Mini-Curriculum
+# Stage 1: clean (LR=1e-4) → Stage 2: noise 8% (LR=5e-5)
+# Separacao entre convergencia clean e adaptacao a ruido.
+
+model_type: "ResNet_18"
+loss_type: "rmse"
+learning_rate: 1.0e-4
+epochs: 400
+batch_size: 32
+early_stopping_patience: 60
+
+# N-Stage
+use_nstage: true
+n_training_stages: 2
+nstage_stage1_epochs: 15
+stage_lr_decay: 0.5
+nstage_base_patience: 30
+use_stage_mini_curriculum: true
+stage_ramp_fraction: 0.25
+
+# Noise (gerenciado pelo N-Stage, nao curriculum)
+use_noise: true
+noise_level_max: 0.08
+use_curriculum: false
+
+use_dual_validation: true
