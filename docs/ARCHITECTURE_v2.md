@@ -1015,6 +1015,263 @@ assert EPS_TF == 1e-12               # NUNCA 1e-30 (float32)
 
 ---
 
-*Documento gerado em 2026-03-25 | Geosteering AI v5.0.15 → v2.0*
+---
+
+## 13. Avaliacao Avancada (C48-C57 → evaluation/)
+
+### 13.1 Modulos e Funcoes
+
+```
+evaluation/
+├── metrics.py        ← JA EXISTE (R2, RMSE, MAE, MBE, MAPE, MetricsReport)
+├── comparison.py     ← JA EXISTE (compare_models, ComparisonResult)
+├── predict.py        ← CRIAR: predict_test(model, test_ds, config) → y_pred
+├── advanced.py       ← CRIAR: 6 funcoes de avaliacao avancada
+├── manifest.py       ← CRIAR: create_manifest(config, results) → JSON
+├── report.py         ← CRIAR: generate_report(config, metrics, figures) → .md
+├── realtime_comparison.py  ← CRIAR: compare_modes(offline, realtime) → ΔR²
+└── geosteering_metrics.py  ← CRIAR: DTB error, look-ahead accuracy
+```
+
+### 13.2 evaluation/predict.py
+
+```python
+def predict_test(model, test_ds, config: PipelineConfig) -> PredictionResult:
+    """Gera predicoes no conjunto de teste com inverse scaling.
+
+    Pipeline: model.predict(test_ds) → inverse_target_scaling → Ohm.m
+    Retorna PredictionResult com y_true, y_pred em ambos os dominios.
+    """
+
+@dataclass
+class PredictionResult:
+    y_true_scaled: np.ndarray    # (N, 600, 2) no dominio log10
+    y_pred_scaled: np.ndarray    # (N, 600, 2) no dominio log10
+    y_true_ohm: np.ndarray       # (N, 600, 2) em Ohm.m
+    y_pred_ohm: np.ndarray       # (N, 600, 2) em Ohm.m
+```
+
+### 13.3 evaluation/advanced.py — 6 Funcoes
+
+```python
+def interface_metrics(y_true, y_pred, *, threshold=0.5) -> InterfaceReport:
+    """C50: Deteccao de interfaces + sharpness ratio.
+
+    Detecta interfaces como pontos onde |Δy_true| > threshold.
+    Sharpness = max|Δy_pred| / max|Δy_true| proximo a interfaces.
+    """
+
+def error_by_resistivity_band(y_true, y_pred, *,
+    bands=None) -> dict:
+    """C51: RMSE por faixa de resistividade (log10 Ohm.m).
+
+    Bins default: [-1,0], [0,1], [1,2], [2,3], [3,4] (log10).
+    Equivalente: 0.1-1, 1-10, 10-100, 100-1000, 1000-10000 Ohm.m.
+    """
+
+def error_by_anisotropy(y_true, y_pred) -> dict:
+    """C52: RMSE por faixa de lambda = rho_v/rho_h.
+
+    Bins: [0.5-1] (quasi-isotropico), [1-2], [2-5], [5+] (altamente anisotropico).
+    """
+
+def spatial_error_profile(y_true, y_pred) -> np.ndarray:
+    """C53: RMSE(z) ao longo dos 600 pontos de medicao.
+
+    Retorna RMSE por indice de profundidade — detecta efeitos de borda.
+    """
+
+def physical_coherence_check(y_pred) -> CoherenceReport:
+    """C54: Verifica rho_v >= rho_h (restricao TIV).
+
+    Conta violacoes, calcula percentual, identifica regioes problematicas.
+    """
+
+def stability_analysis(model, x_test, *, n_perturbations=10,
+    sigma=0.01) -> StabilityReport:
+    """C55: Analise de perturbacao → variancia da predicao.
+
+    Adiciona ruido gaussiano(sigma) a x_test, mede variancia de y_pred.
+    Identifica regioes de alta sensibilidade.
+    """
+```
+
+### 13.4 evaluation/geosteering_metrics.py
+
+```python
+@dataclass
+class GeoMetrics:
+    dtb_error_mean: float     # erro medio DTB em metros
+    dtb_error_std: float      # desvio padrao DTB
+    look_ahead_accuracy: float # % de interfaces previstas N pontos antes
+    inference_latency_ms: float # latencia media em ms
+
+def compute_geosteering_metrics(y_true, y_pred, *,
+    config: PipelineConfig) -> GeoMetrics:
+    """C71: Metricas especificas de geosteering."""
+```
+
+---
+
+## 14. Visualizacao Avancada (C58-C65 → visualization/)
+
+### 14.1 Modulos
+
+```
+visualization/
+├── holdout.py     ← JA EXISTE (plot_holdout_samples)
+├── picasso.py     ← JA EXISTE (plot_picasso_dod)
+├── eda.py         ← JA EXISTE (plot_eda_summary)
+├── realtime.py    ← JA EXISTE (RealtimeMonitor)
+├── training.py    ← CRIAR: plot_training_history, plot_lr_schedule
+├── error_maps.py  ← CRIAR: plot_error_heatmap, plot_error_by_band
+├── uncertainty.py ← CRIAR: plot_uncertainty_histograms, plot_confidence_bands
+├── optuna_viz.py  ← CRIAR: plot_optuna_results (opt-in, requer optuna)
+├── geosteering.py ← CRIAR: plot_curtain, plot_dtb_profile
+└── export.py      ← CRIAR: export_all_figures (batch PNG/PDF/SVG)
+```
+
+### 14.2 visualization/training.py
+
+```python
+def plot_training_history(history: dict, *, config=None, save_path=None):
+    """C59: Curvas de treinamento (loss, val_loss, LR, noise_level).
+
+    4 subplots: (1) train/val loss, (2) R² por epoca,
+    (3) LR schedule, (4) noise_level curriculum.
+    """
+
+def plot_lr_schedule(history: dict, *, config=None, save_path=None):
+    """Plot isolado do schedule de learning rate."""
+```
+
+### 14.3 visualization/error_maps.py
+
+```python
+def plot_error_heatmap(y_true, y_pred, *, component=0, save_path=None):
+    """C60: Heatmap 2D do erro (amostra × profundidade).
+
+    Eixo X: indice de amostra/modelo geologico.
+    Eixo Y: profundidade (0-600 pontos).
+    Cor: magnitude do erro.
+    """
+
+def plot_error_by_band(band_results: dict, *, save_path=None):
+    """C51 viz: Barplot de RMSE por faixa de resistividade."""
+```
+
+### 14.4 visualization/geosteering.py
+
+```python
+def plot_curtain(y_pred, *, z_obs=None, uncertainty=None, save_path=None):
+    """C72: Curtain plot 2D de resistividade vs profundidade.
+
+    Resistividade color-coded com bandas de incerteza ±1σ.
+    Interface markers sobrepostos.
+    """
+
+def plot_dtb_profile(dtb_true, dtb_pred, *, save_path=None):
+    """C72: Perfil DTB (Distance-to-Boundary) vs profundidade."""
+```
+
+---
+
+## 15. Geosteering Avancado (C66-C73 → inference/ + training/)
+
+### 15.1 Modulos
+
+```
+inference/
+├── pipeline.py     ← JA EXISTE (InferencePipeline.predict)
+├── realtime.py     ← JA EXISTE (RealtimeInference.update)
+├── export.py       ← JA EXISTE (SavedModel, TFLite, ONNX)
+└── uncertainty.py  ← CRIAR: UncertaintyEstimator (MC/Ensemble/Evidential)
+
+training/
+└── adaptation.py   ← CRIAR: DomainAdapter (fine-tune campo)
+```
+
+### 15.2 inference/uncertainty.py
+
+```python
+class UncertaintyEstimator:
+    """C67: Quantificacao de incerteza via multiplos metodos.
+
+    Metodos suportados:
+        mc_dropout: N forward passes com dropout ativo → mean + std
+        ensemble: N modelos independentes → mean + std
+        probabilistic: modelo prediz (mu, log_sigma) → NLL calibrada
+        evidential: Deep Evidential Regression (Amini et al. 2020)
+
+    Selecao via config.uncertainty_method.
+    """
+
+    def __init__(self, model, config: PipelineConfig, method="mc_dropout"):
+        ...
+
+    def estimate(self, x, *, n_samples=30) -> UncertaintyResult:
+        """Retorna media, std, e intervalos de confianca."""
+        ...
+```
+
+### 15.3 training/adaptation.py
+
+```python
+class DomainAdapter:
+    """C69: Adaptacao de dominio sintetico → campo.
+
+    Estrategias:
+        fine_tune: congela backbone, retreina head com dados de campo
+        self_supervised: pre-treino contrastivo em dados nao-rotulados
+        adversarial: domain-adversarial neural network (DANN)
+    """
+
+    def __init__(self, model, config: PipelineConfig):
+        ...
+
+    def adapt(self, field_data, *, strategy="fine_tune", epochs=50):
+        ...
+```
+
+### 15.4 Callbacks Faltantes (C40 expansao)
+
+```
+training/callbacks.py — Adicionar:
+├── DualValidationCallback     ← P2: val_clean + val_noisy separados
+├── PINNSLambdaScheduleCallback ← annealing lambda_pinns por epoca
+├── CausalDegradationMonitor   ← gap causal vs acausal
+├── SlidingWindowValidation    ← validacao por janela deslizante
+├── PeriodicCheckpoint         ← salva modelo a cada N epocas
+├── MetricPlateauDetector      ← detecta estagnacao de metricas
+├── OneCycleLR                 ← Smith 2018 super-convergence
+├── CosineWarmRestarts         ← SGDR (Loshchilov & Hutter 2017)
+├── CyclicalLR                 ← triangular (Smith 2017)
+├── MemoryMonitor              ← GPU/RAM tracking
+├── LatencyBenchmark           ← latencia de inferencia por ponto
+└── EpochSummary               ← log resumido por epoca
+```
+
+---
+
+## 16. Estrutura Final Completa do Pacote
+
+```
+geosteering_ai/
+├── __init__.py           ← v2.0.0, 42 re-exports
+├── config.py             ← PipelineConfig (121 campos)
+├── data/                 ← 6 modulos (loading, splitting, FV, GS, scaling, pipeline)
+├── noise/                ← 2 modulos (functions, curriculum)
+├── models/               ← 11 modulos (blocks, 7 familias, registry)
+├── losses/               ← 2 modulos (catalog: 26 losses, factory)
+├── training/             ← 5+2 modulos (loop, callbacks+12, metrics, nstage, optuna, adaptation)
+├── inference/            ← 3+1 modulos (pipeline, realtime, export, uncertainty)
+├── evaluation/           ← 2+5 modulos (metrics, comparison, predict, advanced, manifest, report, geo_metrics)
+├── visualization/        ← 4+5 modulos (holdout, picasso, eda, realtime, training, error_maps, uncertainty, optuna_viz, geosteering, export)
+└── utils/                ← 6 modulos (logger, timer, validation, formatting, system, io)
+```
+
+---
+
+*Documento atualizado em 2026-03-26 | Geosteering AI v2.0*
 *Autor: Daniel Leal | Assistente: Claude Code*
 *Repositorio: github.com/daniel-leal/geosteering-ai*

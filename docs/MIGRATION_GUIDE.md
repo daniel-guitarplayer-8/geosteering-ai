@@ -92,10 +92,60 @@
 | C46 | Model saving | `inference/export.py` | EXTRAIR |
 | C47 | Training summary | Integrado em TrainingLoop.run() return | INTEGRADO |
 
-### Secoes 5-7: A Implementar (C48-C73)
+### Secao 5: Avaliacao Avancada (C48-C57)
 
-| Secao | Destino v2.0 | Acao |
-|:-----:|:-------------|:----:|
-| Secao 5 (C48-C57): Avaliacao | `evaluation/` | CRIAR do zero |
-| Secao 6 (C58-C65): Visualizacao | `visualization/` | CRIAR do zero |
-| Secao 7 (C66-C73): Geosteering | `inference/realtime.py` + `visualization/realtime_monitor.py` | CRIAR do zero |
+| Celula | Funcao | Destino v2.0 | Acao |
+|:------:|:-------|:-------------|:----:|
+| C48 | Predicao no teste (y_pred) | `evaluation/predict.py` predict_test() | CRIAR |
+| C49 | Metricas globais + MBE por componente | `evaluation/metrics.py` (JA EXISTE) | EXPANDIR |
+| C50 | Metricas por interface + sharpness | `evaluation/advanced.py` interface_metrics() | CRIAR |
+| C51 | Erro por faixa de resistividade | `evaluation/advanced.py` error_by_resistivity_band() | CRIAR |
+| C52 | Erro por faixa de anisotropia | `evaluation/advanced.py` error_by_anisotropy() | CRIAR |
+| C53 | Erro espacial por profundidade | `evaluation/advanced.py` spatial_error_profile() | CRIAR |
+| C54 | Coerencia fisica (rho_v >= rho_h) | `evaluation/advanced.py` physical_coherence_check() | CRIAR |
+| C55 | Analise de estabilidade (perturbacao) | `evaluation/advanced.py` stability_analysis() | CRIAR |
+| C56 | Holdout evaluation | `evaluation/metrics.py` evaluate_predictions() (JA EXISTE) | EXPANDIR |
+| C57 | Comparacao multi-modelo | `evaluation/comparison.py` (JA EXISTE) | EXPANDIR |
+
+### Secao 6: Visualizacao Avancada (C58-C65)
+
+| Celula | Funcao | Destino v2.0 | Acao |
+|:------:|:-------|:-------------|:----:|
+| C58 | Perfis predito vs verdadeiro | `visualization/holdout.py` (JA EXISTE) | EXPANDIR |
+| C59 | Historico de treinamento (loss, LR) | `visualization/training.py` plot_training_history() | CRIAR |
+| C60 | Mapas de erro (heatmaps) | `visualization/error_maps.py` plot_error_maps() | CRIAR |
+| C61 | Analise de incerteza (histogramas, CI) | `visualization/uncertainty.py` plot_uncertainty() | CRIAR |
+| C62 | Visualizacoes Optuna (se HPO ativo) | `visualization/optuna_viz.py` plot_optuna_results() | CRIAR |
+| C63 | Exportacao de figuras (PNG/PDF/SVG) | `visualization/export.py` export_all_figures() | CRIAR |
+| C64 | Manifesto JSON do experimento | `evaluation/manifest.py` create_manifest() | CRIAR |
+| C65 | Relatorio final automatizado | `evaluation/report.py` generate_report() | CRIAR |
+
+### Secao 7: Geosteering Avancado (C66-C73)
+
+| Celula | Funcao | Destino v2.0 | Acao |
+|:------:|:-------|:-------------|:----:|
+| C66 | Inference pipeline realtime | `inference/realtime.py` (JA EXISTE) | EXPANDIR |
+| C67 | Quantificacao de incerteza (MC/Ensemble) | `inference/uncertainty.py` UncertaintyEstimator | CRIAR |
+| C68 | Edge export (TFLite/ONNX) | `inference/export.py` (JA EXISTE) | EXPANDIR |
+| C69 | Domain adaptation (fine-tune campo) | `training/adaptation.py` DomainAdapter | CRIAR |
+| C70 | Comparacao offline vs realtime | `evaluation/realtime_comparison.py` compare_modes() | CRIAR |
+| C71 | Metricas geosteering (DTB, look-ahead) | `evaluation/geosteering_metrics.py` GeoMetrics | CRIAR |
+| C72 | Visualizacao geosteering (curtain plots) | `visualization/geosteering.py` plot_curtain() | CRIAR |
+| C73 | Relatorio geosteering | `evaluation/geosteering_report.py` generate_geo_report() | CRIAR |
+
+### Callbacks Faltantes (C40 expansao)
+
+| Callback Legado | Destino v2.0 | Prioridade |
+|:----------------|:-------------|:-----------|
+| DualValidationCallback (P2) | `training/callbacks.py` | ALTA |
+| PINNSLambdaScheduleCallback | `training/callbacks.py` | ALTA |
+| CausalDegradationMonitorCallback | `training/callbacks.py` | ALTA |
+| SlidingWindowValidationCallback | `training/callbacks.py` | ALTA |
+| PeriodicCheckpointCallback | `training/callbacks.py` | MEDIA |
+| MetricPlateauDetectorCallback | `training/callbacks.py` | MEDIA |
+| OneCycleLRCallback | `training/callbacks.py` | MEDIA |
+| CosineWarmRestartsCallback | `training/callbacks.py` | MEDIA |
+| CyclicalLRCallback | `training/callbacks.py` | MEDIA |
+| MemoryMonitorCallback | `training/callbacks.py` | BAIXA |
+| LatencyBenchmarkCallback | `training/callbacks.py` | BAIXA |
+| EpochSummaryCallback | `training/callbacks.py` | BAIXA |
