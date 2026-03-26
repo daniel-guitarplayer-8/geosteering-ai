@@ -71,7 +71,7 @@ __all__ = [
 ]
 
 
-@dataclass
+@dataclass(frozen=True)
 class PipelineConfig:
     """Configuracao unica e validada do pipeline de inversao geofisica.
 
@@ -402,9 +402,13 @@ class PipelineConfig:
         assert self.epochs > 0, "epochs deve ser > 0"
         assert len(self.noise_types) == len(self.noise_weights), \
             "noise_types e noise_weights devem ter o mesmo tamanho"
+        assert self.train_ratio > 0, "train_ratio deve ser > 0"
+        assert self.val_ratio > 0, "val_ratio deve ser > 0"
+        assert self.test_ratio >= 0, "test_ratio deve ser >= 0"
         assert self.train_ratio + self.val_ratio + self.test_ratio <= 1.0 + 1e-9, \
             "Soma de train/val/test ratios deve ser <= 1.0"
-        assert self.eps_tf > 0, "eps_tf deve ser > 0 (recomendado: 1e-12)"
+        assert self.eps_tf >= 1e-15, \
+            "eps_tf deve ser >= 1e-15 (Errata v5.0.15: NUNCA 1e-30 para float32)"
         assert self.output_channels in (2, 4, 6), \
             "output_channels deve ser 2, 4 ou 6"
 
@@ -423,10 +427,10 @@ class PipelineConfig:
         assert self.feature_view in _VALID_FV, \
             f"feature_view '{self.feature_view}' invalido. Validos: {_VALID_FV}"
 
-        # ── Target scaling valido ────────────────────────────────────
-        _VALID_TS = {"none", "linear", "log10", "sqrt", "cbrt", "asinh", "yj", "pt"}
-        assert self.target_scaling in _VALID_TS, \
-            f"target_scaling '{self.target_scaling}' invalido. Validos: {_VALID_TS}"
+        # ── Target scaling ──────────────────────────────────────────
+        # Nota: target_scaling eh fixado em "log10" pela Errata v4.4.5
+        # (validado acima). O enum completo (none, sqrt, cbrt, asinh, yj, pt)
+        # sera habilitado quando a errata for flexibilizada em versao futura.
 
         # ── Scaler type valido ───────────────────────────────────────
         _VALID_SC = {"standard", "minmax", "robust", "maxabs",
@@ -835,7 +839,13 @@ class PipelineConfig:
         """
         if namespace is None:
             import inspect
-            namespace = inspect.currentframe().f_back.f_globals
+            frame = inspect.currentframe()
+            if frame is None or frame.f_back is None:
+                raise RuntimeError(
+                    "inject_as_globals: nao foi possivel detectar namespace "
+                    "do chamador. Passe namespace=globals() explicitamente."
+                )
+            namespace = frame.f_back.f_globals
         for field_name, value in self.to_dict().items():
             flag_name = field_name.upper()
             namespace[flag_name] = value

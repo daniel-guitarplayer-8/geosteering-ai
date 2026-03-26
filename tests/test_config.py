@@ -212,3 +212,40 @@ class TestValidation:
     def test_smoothing_type_valid(self):
         with pytest.raises(AssertionError, match="invalido"):
             PipelineConfig(smoothing_type="cubic_spline")
+
+    def test_eps_tf_too_small(self):
+        """eps_tf=1e-30 proibido pela Errata v5.0.15 (float32 unsafe)."""
+        with pytest.raises(AssertionError, match="1e-15"):
+            PipelineConfig(eps_tf=1e-30)
+
+    def test_eps_tf_valid(self):
+        config = PipelineConfig(eps_tf=1e-12)
+        assert config.eps_tf == 1e-12
+
+    def test_train_ratio_zero_raises(self):
+        with pytest.raises(AssertionError, match="train_ratio"):
+            PipelineConfig(train_ratio=0.0)
+
+    def test_val_ratio_zero_raises(self):
+        with pytest.raises(AssertionError, match="val_ratio"):
+            PipelineConfig(val_ratio=0.0)
+
+
+class TestFrozenImmutability:
+    """PipelineConfig eh frozen (imutavel apos construcao)."""
+
+    def test_cannot_mutate_after_init(self):
+        config = PipelineConfig.baseline()
+        with pytest.raises(AttributeError):
+            config.learning_rate = 0.999
+
+    def test_errata_fields_immutable(self):
+        config = PipelineConfig()
+        with pytest.raises(AttributeError):
+            config.frequency_hz = 2.0
+
+    def test_copy_creates_new_instance(self):
+        config = PipelineConfig.robusto()
+        config2 = config.copy(learning_rate=3e-4)
+        assert config2.learning_rate == 3e-4
+        assert config.learning_rate == 1e-4

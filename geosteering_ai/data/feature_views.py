@@ -170,6 +170,11 @@ def apply_feature_view(
     # Layout: [prefix...] [z] [Re(H1)] [Im(H1)] [Re(H2)] [Im(H2)] [GS...]
     # em_start aponta para Re(H1), pulando prefix + z_obs
     em_start = n_prefix + 1  # pula prefix + z
+    if result.shape[-1] < em_start + 4:
+        raise ValueError(
+            f"Array tem {result.shape[-1]} colunas mas em_start={em_start} "
+            f"requer pelo menos {em_start + 4} (n_prefix={n_prefix}, z=1, 4 EM)"
+        )
     re_h1 = result[:, em_start]      # Re(Hxx) — componente planar real
     im_h1 = result[:, em_start + 1]  # Im(Hxx) — componente planar imaginaria
     re_h2 = result[:, em_start + 2]  # Re(Hzz) — componente axial real
@@ -279,6 +284,10 @@ def apply_feature_view_tf(
     # ── Fatiamento das componentes EM do tensor de entrada ──
     # em_start aponta para Re(H1), pulando prefix + z_obs
     em_start = n_prefix + 1
+    tf.debugging.assert_greater_equal(
+        tf.shape(x)[-1], em_start + 4,
+        message=f"Tensor precisa de >= {em_start + 4} colunas para FV"
+    )
     prefix_and_z = x[:, :, :em_start]         # colunas antes das componentes EM
     re_h1 = x[:, :, em_start]                 # Re(Hxx) — componente planar real
     im_h1 = x[:, :, em_start + 1]             # Im(Hxx) — componente planar imaginaria

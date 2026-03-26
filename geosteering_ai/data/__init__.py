@@ -48,6 +48,7 @@ from geosteering_ai.data.loading import (
     load_dataset,
     parse_out_metadata,
     apply_decoupling,
+    segregate_by_angle,
     COL_MAP_22,
     EM_COMPONENTS,
 )
@@ -101,6 +102,7 @@ __all__ = [
     "load_dataset",
     "parse_out_metadata",
     "apply_decoupling",
+    "segregate_by_angle",
     "COL_MAP_22",
     "EM_COMPONENTS",
     # --- splitting.py: split por modelo geologico (P1) ---

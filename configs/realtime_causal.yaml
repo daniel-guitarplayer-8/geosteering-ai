@@ -11,7 +11,9 @@ epochs: 400
 batch_size: 32
 early_stopping_patience: 60
 
-# Output com incerteza
+# Output com incerteza (P5: rho_h, rho_v, dtb_up, dtb_down, unc_h, unc_v)
+# O preset PipelineConfig.realtime() usa output_channels=2 (baseline).
+# Este YAML overrida para 6 (configuracao avancada com UQ + DTB).
 output_channels: 6
 
 # Noise on-the-fly
