@@ -252,7 +252,7 @@ def plot_holdout_samples(
         ax_v.set_xlabel(r"$\log_{10}(\rho_v)$ [$\Omega\cdot$m]")
         ax_v.set_title(r"$\rho_v$ (vertical)")
         ax_v.legend(loc="lower right", fontsize=8)
-        ax_v.invert_yaxis()
+        # invert_yaxis ja aplicado em ax_h (sharey=True compartilha)
         ax_v.grid(True, alpha=0.3)
 
         # --- Titulo da figura ---

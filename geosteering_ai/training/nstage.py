@@ -14,11 +14,11 @@
 # ║    • Stage 1: convergencia clean (nstage_stage1_epochs, noise = 0)        ║
 # ║    • Stages 2..N: noise_k, lr_k, patience_k auto-calculados              ║
 # ║    • Mini-curriculum opcional dentro de cada stage (stage_ramp_fraction)   ║
-# ║    • TrainingResult: container para resultado unificado multi-stage       ║
+# ║    • NStageResult: container para resultado unificado multi-stage       ║
 # ║    • Merge de histories Keras em historico unico                          ║
 # ║                                                                            ║
 # ║  Dependencias: config.py (PipelineConfig), TensorFlow 2.x / Keras        ║
-# ║  Exports: ~2 (TrainingResult, NStageTrainer) — ver __all__               ║
+# ║  Exports: ~2 (NStageResult, NStageTrainer) — ver __all__               ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 6.2 (N-Stage Training)               ║
 # ║                                                                            ║
 # ║  Historico:                                                                ║
@@ -71,7 +71,7 @@ Example:
 Note:
     Framework: TensorFlow 2.x / Keras (EXCLUSIVO — PyTorch PROIBIDO).
     Referenciado em:
-        - training/__init__.py: re-export NStageTrainer, TrainingResult
+        - training/__init__.py: re-export NStageTrainer, NStageResult
         - config.py: secao 10 (N-Stage fields), preset nstage()
         - tests/test_nstage.py: TestNStageTrainer (compute, run, merge)
     Ref: docs/ARCHITECTURE_v2.md secao 6.2 (N-Stage Training).
@@ -95,7 +95,7 @@ logger = logging.getLogger(__name__)
 # ────────────────────────────────────────────────────────────────────────
 __all__ = [
     # --- Container de resultado ---
-    "TrainingResult",
+    "NStageResult",
     # --- Treinador N-Stage ---
     "NStageTrainer",
 ]
@@ -116,7 +116,7 @@ __all__ = [
 # ════════════════════════════════════════════════════════════════════════
 
 @dataclass
-class TrainingResult:
+class NStageResult:
     """Resultado unificado de treinamento multi-stage.
 
     Encapsula historicos Keras de todos os stages e metadados de cada
@@ -131,7 +131,7 @@ class TrainingResult:
         best_val_loss: Melhor val_loss encontrada em qualquer stage.
 
     Example:
-        >>> result = TrainingResult(
+        >>> result = NStageResult(
         ...     merged_history={'loss': [0.5, 0.3, 0.2], 'val_loss': [0.6, 0.4, 0.3]},
         ...     stage_histories=[{'loss': [0.5]}, {'loss': [0.3, 0.2]}],
         ...     stage_params=[{'noise_level': 0.0}, {'noise_level': 0.08}],
@@ -142,7 +142,7 @@ class TrainingResult:
     Note:
         Referenciado em:
             - training/nstage.py: NStageTrainer.run() (retorno principal)
-            - training/__init__.py: re-export TrainingResult
+            - training/__init__.py: re-export NStageResult
         Ref: docs/ARCHITECTURE_v2.md secao 6.2.
         merged_history e compativel com Keras history.history format.
     """
@@ -177,7 +177,7 @@ class TrainingResult:
 # │       │    4. model.fit(epochs_k)                                 │
 # │       │    5. Merge history                                       │
 # │       │                                                            │
-# │       └─ return TrainingResult (merged)                           │
+# │       └─ return NStageResult (merged)                           │
 # └────────────────────────────────────────────────────────────────────┘
 #
 # Auto-calculo por stage (formulas S21+):
@@ -392,7 +392,7 @@ class NStageTrainer:
     # │    4. callbacks = build_callbacks_fn(params['patience'])     │
     # │    5. history = model.fit(..., epochs=params['epochs'])      │
     # │    6. Merge history → result                                 │
-    # │  return TrainingResult                                       │
+    # │  return NStageResult                                       │
     # └───────────────────────────────────────────────────────────────┘
     #
     # Observacoes:
@@ -412,12 +412,12 @@ class NStageTrainer:
         val_ds: Any,
         build_callbacks_fn: Callable[[int], List[Any]],
         noise_level_var: Any,
-    ) -> TrainingResult:
+    ) -> NStageResult:
         """Executa treinamento N-Stage completo.
 
         Para cada stage: ajusta noise, recompila modelo com novo LR,
         constroi callbacks com patience atualizado, e executa model.fit().
-        Retorna TrainingResult com historicos mesclados.
+        Retorna NStageResult com historicos mesclados.
 
         Args:
             model: Modelo Keras compilado (tf.keras.Model).
@@ -432,7 +432,7 @@ class NStageTrainer:
                 train_map_fn para controle dinamico do nivel de ruido.
 
         Returns:
-            TrainingResult com historico mesclado de todos os stages.
+            NStageResult com historico mesclado de todos os stages.
 
         Raises:
             RuntimeError: Se model.fit() falhar em qualquer stage.
@@ -461,7 +461,7 @@ class NStageTrainer:
         import tensorflow as tf  # D10: lazy import TF
 
         cfg = self.config
-        result = TrainingResult()
+        result = NStageResult()
         global_epoch = 0  # Contador global de epocas (para initial_epoch)
 
         logger.info(

@@ -317,9 +317,10 @@ class InferencePipeline:
             y_mean_ohm = inverse_target_scaling(
                 y_mean, method=self.config.target_scaling
             )
-            y_std_ohm = inverse_target_scaling(
-                y_std, method=self.config.target_scaling
-            )
+            # std em log10 decades — NAO aplicar inverse scaling
+            # (10^std e fisicamente errado para desvio-padrao).
+            # y_std ja esta em unidades interpretaveis: 0.1 = ~0.1 decada log10.
+            y_std_ohm = y_std
 
             logger.info(
                 "Inferencia MC Dropout concluida — %d amostras, "

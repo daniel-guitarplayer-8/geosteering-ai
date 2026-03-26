@@ -252,7 +252,8 @@ def rmsle_loss(y_true, y_pred):
     Note:
         Referenciado em: losses/factory.py (registry #9).
     """
-    return rmse_loss(y_true, y_pred)  # same formula on log domain
+    import tensorflow as tf
+    return tf.sqrt(msle_loss(y_true, y_pred) + EPS)
 
 
 def nrmse_loss(y_true, y_pred):
@@ -458,18 +459,17 @@ def make_log_scale_aware(
         lo_count = tf.reduce_sum(lo_mask) + EPS
         under_penalty = tf.reduce_sum(tf.nn.relu(y_true - y_pred) * lo_mask) / lo_count
 
-        # Penalty scale (normaliza pela magnitude do base loss)
-        p_scale = tf.stop_gradient(rmse_base) + EPS
-
         a_eff = w * alpha
         b_eff = w * beta
         g_eff = w * gamma
         w_base = tf.maximum(1.0 - a_eff - b_eff - g_eff, 0.01)
 
+        # Penalidades ja estao em unidades log10 (mesmo dominio que RMSE) —
+        # sem multiplicacao por p_scale (evita scaling quadratico).
         return (w_base * rmse_base
-                + a_eff * interface_err * p_scale
-                + b_eff * osc_penalty * p_scale
-                + g_eff * under_penalty * p_scale)
+                + a_eff * interface_err
+                + b_eff * osc_penalty
+                + g_eff * under_penalty)
 
     return log_scale_aware_loss
 
@@ -545,16 +545,15 @@ def make_adaptive_log_scale(
         under_pen = tf.reduce_sum(tf.nn.relu(y_true - y_pred) * lo_mask) / (
             tf.reduce_sum(lo_mask) + EPS)
 
-        p_scale = tf.stop_gradient(rmse_base) + EPS
         a_eff = w * alpha
         b_eff = w * beta_eff
         g_eff = w * gamma
         w_base = tf.maximum(1.0 - a_eff - b_eff - g_eff, 0.01)
 
         return (w_base * rmse_base
-                + a_eff * iface_err * p_scale
-                + b_eff * osc_pen * p_scale
-                + g_eff * under_pen * p_scale)
+                + a_eff * iface_err
+                + b_eff * osc_pen
+                + g_eff * under_pen)
 
     return adaptive_log_scale_loss
 
@@ -619,7 +618,6 @@ def make_robust_log_scale(
         under_pen = tf.reduce_sum(tf.nn.relu(y_true - y_pred) * lo_mask) / (
             tf.reduce_sum(lo_mask) + EPS)
 
-        p_scale = tf.stop_gradient(huber_base) + EPS
         a_eff = w * alpha
         b_eff = w * beta
         g_eff = w * gamma
@@ -627,10 +625,10 @@ def make_robust_log_scale(
         w_base = tf.maximum(1.0 - a_eff - b_eff - g_eff - d_eff, 0.01)
 
         return (w_base * huber_base
-                + a_eff * iface_err * p_scale
-                + b_eff * osc_pen * p_scale
-                + d_eff * smooth_pen * p_scale
-                + g_eff * under_pen * p_scale)
+                + a_eff * iface_err
+                + b_eff * osc_pen
+                + d_eff * smooth_pen
+                + g_eff * under_pen)
 
     return robust_log_scale_loss
 
@@ -712,13 +710,11 @@ def make_adaptive_robust(
         under_pen = tf.reduce_sum(tf.nn.relu(y_true - y_pred) * lo_mask) / (
             tf.reduce_sum(lo_mask) + EPS)
 
-        p_scale = tf.stop_gradient(huber_base) + EPS
-
         return (w_base * huber_base
-                + a_eff * iface_err * p_scale
-                + b_eff * osc_pen * p_scale
-                + d_eff * smooth_pen * p_scale
-                + g_eff * under_pen * p_scale)
+                + a_eff * iface_err
+                + b_eff * osc_pen
+                + d_eff * smooth_pen
+                + g_eff * under_pen)
 
     return adaptive_robust_loss
 

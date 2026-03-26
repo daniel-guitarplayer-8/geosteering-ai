@@ -40,11 +40,16 @@ from geosteering_ai.training.metrics import (
     AnisotropyRatioError,
     build_metrics,
 )
+from geosteering_ai.training.nstage import NStageTrainer, NStageResult
+from geosteering_ai.training.optuna_hpo import run_hpo
 
 __all__ = [
     # ── Loop ──────────────────────────────────────────────────────────────
     "TrainingLoop",
     "TrainingResult",
+    # ── N-Stage ───────────────────────────────────────────────────────────
+    "NStageTrainer",
+    "NStageResult",
     # ── Callbacks ─────────────────────────────────────────────────────────
     "UpdateNoiseLevelCallback",
     "GradientMonitorCallback",
@@ -55,4 +60,6 @@ __all__ = [
     "PerComponentMetric",
     "AnisotropyRatioError",
     "build_metrics",
+    # ── Optuna HPO ────────────────────────────────────────────────────────
+    "run_hpo",
 ]

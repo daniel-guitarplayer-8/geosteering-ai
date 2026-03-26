@@ -858,8 +858,8 @@ def _extract_best_epoch(
 ) -> tuple:
     """Extrai best_epoch e best_val_loss do historico acumulado.
 
-    Localiza a epoca (1-indexed) com menor val_loss. Se val_loss
-    nao esta disponivel no historico, retorna (-1, inf).
+    Localiza a epoca (0-indexed, convencao Keras) com menor val_loss.
+    Se val_loss nao esta disponivel no historico, retorna (-1, inf).
 
     Args:
         history: Historico acumulado de metricas. None se nenhum
@@ -867,7 +867,7 @@ def _extract_best_epoch(
 
     Returns:
         Tuple (best_epoch, best_val_loss):
-            - best_epoch (int): Epoca 1-indexed com menor val_loss.
+            - best_epoch (int): Epoca 0-indexed com menor val_loss.
               -1 se val_loss nao disponivel.
             - best_val_loss (float): Valor de val_loss na best_epoch.
               float('inf') se nao disponivel.
@@ -875,13 +875,13 @@ def _extract_best_epoch(
     Example:
         >>> h = {"loss": [0.5, 0.3], "val_loss": [0.6, 0.4]}
         >>> _extract_best_epoch(h)
-        (2, 0.4)
+        (1, 0.4)
 
     Note:
         Referenciado em:
             - training/loop.py: TrainingLoop.fit() (calculo de best_epoch)
         Ref: docs/ARCHITECTURE_v2.md secao 6.
-        Epoch 1-indexed: argmin + 1. Compativel com Keras convention.
+        Epoch 0-indexed: consistente com BestEpochTracker e Keras.
     """
     if history is None:
         return -1, float("inf")
@@ -890,9 +890,8 @@ def _extract_best_epoch(
     if not val_losses:
         return -1, float("inf")
 
-    # argmin sobre val_loss acumulado — epoch 1-indexed
+    # argmin sobre val_loss acumulado — epoch 0-indexed (Keras convention)
     best_idx = int(min(range(len(val_losses)), key=lambda i: val_losses[i]))
     best_val_loss = float(val_losses[best_idx])
-    best_epoch = best_idx + 1  # 1-indexed
 
-    return best_epoch, best_val_loss
+    return best_idx, best_val_loss

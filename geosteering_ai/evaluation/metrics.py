@@ -142,8 +142,9 @@ def compute_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     ss_res = np.sum((y_true - y_pred) ** 2)
     ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
 
-    # Variancia nula: retorna 0.0 (evita divisao por zero)
-    if ss_tot < EPS:
+    # Variancia nula (targets constantes): R² indefinido, retorna 0.0
+    if ss_tot == 0.0:
+        logger.warning("compute_r2: variancia nula (ss_tot=0). Retornando 0.0.")
         return 0.0
 
     return float(1.0 - ss_res / ss_tot)
