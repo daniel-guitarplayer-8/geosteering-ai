@@ -277,10 +277,19 @@ class PipelineConfig:
     # 26 funcoes de perda no LossFactory (13 gen + 4 geo + 9 adv).
     # loss_type seleciona a loss base via LossFactory.get(config).
     # Composicao: combined = base + look_ahead + DTB + PINNs.
-    # Alphas/betas/gammas controlam pesos relativos dos termos.
     # TARGET_SCALING-aware: losses operam no dominio scaled (log10).
-    # morales_hybrid: combina loss supervisionada + physics-informed.
+    #
+    # Sub-secoes:
+    #   11a — Loss base + combinacao (loss_type, look_ahead, DTB, PINNs)
+    #   11b — Geofisicas (#14-#17): thresholds, gangorra, robust
+    #   11c — Geosteering (#19): look-ahead decay
+    #   11d — Avancadas (#20-#26): DILATE, Sobolev, Spectral, Morales
     # ══════════════════════════════════════════════════════════════════
+
+    # ── 11a: Loss base + combinacao ──────────────────────────────────
+    # loss_alpha/beta/gamma: pesos para log_scale_aware (#14) —
+    #   alpha = interface, beta = oscilacao, gamma = subestimacao.
+    # morales_physics_omega: peso MSE vs MAE no Morales hybrid (#26).
     loss_type: str = "rmse"
     loss_alpha: float = 1.0
     loss_beta: float = 0.5
@@ -293,6 +302,61 @@ class PipelineConfig:
     pinns_lambda: float = 0.01
     use_morales_hybrid_loss: bool = False
     morales_physics_omega: float = 0.85
+
+    # ── 11b: Geofisicas (#14-#17) — thresholds e pesos ──────────────
+    # penalty_warmup_epochs: epocas iniciais com RMSE/Huber puro
+    #   antes de ativar penalidades fisicas (rampa 0→1).
+    # interface_threshold: |gradiente| em dominio scaled acima do qual
+    #   um ponto e considerado transicao geologica (boundary).
+    # high_rho_threshold: resistividade (Ohm.m) acima da qual zona e
+    #   considerada "alta rho" (OscillationPenalty ativa). Log10 interno.
+    # low_rho_threshold: resistividade (Ohm.m) abaixo da qual zona e
+    #   considerada condutiva (UnderestimationPenalty ativa). Log10 interno.
+    penalty_warmup_epochs: int = 10
+    interface_threshold: float = 0.5
+    high_rho_threshold: float = 300.0
+    low_rho_threshold: float = 50.0
+
+    # ── Gangorra noise-aware (#15) — beta varia com noise_level ──────
+    # gangorra_beta_min: peso oscilacao quando noise=0 (fitting agressivo).
+    # gangorra_beta_max: peso oscilacao quando noise=max (suavidade).
+    # gangorra_max_noise: noise_level esperado para saturacao do ratio.
+    gangorra_beta_min: float = 0.1
+    gangorra_beta_max: float = 0.5
+    gangorra_max_noise: float = 0.1
+
+    # ── Robust (#16-#17) — pesos Huber + suavidade global ────────────
+    # Mesmo significado que loss_alpha/beta/gamma, mas para Huber base.
+    # robust_delta_smooth: penalidade TV (Total Variation) 1a ordem.
+    robust_alpha: float = 0.15
+    robust_beta: float = 0.1
+    robust_gamma: float = 0.15
+    robust_delta_smooth: float = 0.05
+
+    # ── 11c: Geosteering (#19) — look-ahead decay ───────────────────
+    # Decaimento exponencial: w[i] = exp(-decay * i / N).
+    # Valores maiores concentram mais peso nos pontos proximos a broca.
+    look_ahead_decay_rate: float = 10.0
+
+    # ── 11d: Avancadas (#20-#26) — DILATE, Sobolev, etc. ────────────
+    # dilate_alpha: peso Soft-DTW vs TDI (0=TDI puro, 1=DTW puro).
+    # dilate_gamma: suavizacao do Soft-DTW (menor = mais DTW-like).
+    # dilate_downsample: fator de reducao temporal para eficiencia.
+    dilate_alpha: float = 0.5
+    dilate_gamma: float = 0.01
+    dilate_downsample: int = 10
+    # enc_decoder_recon_weight: peso da loss de reconstrucao.
+    enc_decoder_recon_weight: float = 0.1
+    # sobolev_lambda: peso da penalidade de gradiente (Sobolev H1).
+    sobolev_lambda: float = 0.1
+    # cross_gradient_lambda: peso da regularizacao cruzada rho_h/rho_v.
+    cross_gradient_lambda: float = 0.1
+    # spectral_lambda: peso do MSE no espaco de frequencias (FFT).
+    spectral_lambda: float = 0.5
+    # Morales adaptive omega: rampa omega_initial → morales_physics_omega.
+    use_adaptive_omega: bool = False
+    morales_omega_initial: float = 0.15
+    morales_ramp_epochs: int = 50
 
     # ══════════════════════════════════════════════════════════════════
     # SECAO 12: REGULARIZACAO

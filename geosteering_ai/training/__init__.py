@@ -30,7 +30,7 @@ Uso tipico:
 from geosteering_ai.training.loop import TrainingLoop, TrainingResult
 from geosteering_ai.training.callbacks import (
     UpdateNoiseLevelCallback,
-    GradientMonitorCallback,
+    WeightNormMonitor,
     BestEpochTracker,
     build_callbacks,
 )
@@ -52,7 +52,7 @@ __all__ = [
     "NStageResult",
     # ── Callbacks ─────────────────────────────────────────────────────────
     "UpdateNoiseLevelCallback",
-    "GradientMonitorCallback",
+    "WeightNormMonitor",
     "BestEpochTracker",
     "build_callbacks",
     # ── Metrics ───────────────────────────────────────────────────────────

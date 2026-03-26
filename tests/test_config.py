@@ -249,3 +249,65 @@ class TestFrozenImmutability:
         config2 = config.copy(learning_rate=3e-4)
         assert config2.learning_rate == 3e-4
         assert config.learning_rate == 1e-4
+
+
+class TestLossConfigFields:
+    """Verifica que os 22 campos de loss avancada existem com defaults corretos."""
+
+    def test_geophysical_thresholds_exist(self):
+        config = PipelineConfig()
+        assert config.penalty_warmup_epochs == 10
+        assert config.interface_threshold == 0.5
+        assert config.high_rho_threshold == 300.0
+        assert config.low_rho_threshold == 50.0
+
+    def test_gangorra_fields_exist(self):
+        config = PipelineConfig()
+        assert config.gangorra_beta_min == 0.1
+        assert config.gangorra_beta_max == 0.5
+        assert config.gangorra_max_noise == 0.1
+
+    def test_robust_fields_exist(self):
+        config = PipelineConfig()
+        assert config.robust_alpha == 0.15
+        assert config.robust_beta == 0.1
+        assert config.robust_gamma == 0.15
+        assert config.robust_delta_smooth == 0.05
+
+    def test_advanced_loss_fields_exist(self):
+        config = PipelineConfig()
+        assert config.look_ahead_decay_rate == 10.0
+        assert config.dilate_alpha == 0.5
+        assert config.dilate_gamma == 0.01
+        assert config.dilate_downsample == 10
+        assert config.enc_decoder_recon_weight == 0.1
+        assert config.sobolev_lambda == 0.1
+        assert config.cross_gradient_lambda == 0.1
+        assert config.spectral_lambda == 0.5
+
+    def test_morales_fields_exist(self):
+        config = PipelineConfig()
+        assert config.use_adaptive_omega is False
+        assert config.morales_omega_initial == 0.15
+        assert config.morales_ramp_epochs == 50
+
+    def test_yaml_roundtrip_new_fields(self):
+        """Novos campos devem sobreviver YAML roundtrip."""
+        import tempfile, os
+        config = PipelineConfig(
+            penalty_warmup_epochs=20,
+            high_rho_threshold=500.0,
+            gangorra_beta_max=0.7,
+            sobolev_lambda=0.05,
+        )
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as f:
+            path = f.name
+        try:
+            config.to_yaml(path)
+            loaded = PipelineConfig.from_yaml(path)
+            assert loaded.penalty_warmup_epochs == 20
+            assert loaded.high_rho_threshold == 500.0
+            assert loaded.gangorra_beta_max == 0.7
+            assert loaded.sobolev_lambda == 0.05
+        finally:
+            os.unlink(path)

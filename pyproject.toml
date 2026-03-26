@@ -27,25 +27,34 @@ classifiers = [
 ]
 
 dependencies = [
-    "tensorflow>=2.13",
     "numpy>=1.24",
+    "pyyaml>=6.0",
     "scipy>=1.10",
     "scikit-learn>=1.2",
-    "pandas>=2.0",
-    "matplotlib>=3.7",
-    "pyyaml>=6.0",
-    "joblib>=1.2",
-    "tqdm>=4.65",
 ]
 
 [project.optional-dependencies]
+train = [
+    "tensorflow>=2.13",
+]
+viz = [
+    "matplotlib>=3.5",
+]
+hpo = [
+    "optuna>=3.0",
+]
+all = [
+    "tensorflow>=2.13",
+    "matplotlib>=3.5",
+    "optuna>=3.0",
+    "joblib>=1.2",
+    "pandas>=2.0",
+    "tqdm>=4.65",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "mypy>=1.0",
-]
-optuna = [
-    "optuna>=3.0",
 ]
 
 [tool.setuptools.packages.find]

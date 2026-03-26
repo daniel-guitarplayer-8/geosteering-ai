@@ -12,7 +12,8 @@
 # ║  Proposito:                                                               ║
 # ║    • 3 Keras custom metrics: R2Score, PerComponentMetric,                ║
 # ║      AnisotropyRatioError                                                ║
-# ║    • 5 funcoes numpy de avaliacao: R2, RMSE, MAE, MBE, MAPE            ║
+# ║    • 5 funcoes numpy re-exportadas de evaluation.metrics (DRY):         ║
+# ║      compute_r2, compute_rmse, compute_mae, compute_mbe, compute_mape  ║
 # ║    • build_metrics(config) — factory de metricas para model.compile()   ║
 # ║                                                                           ║
 # ║  Dependencias: config.py (PipelineConfig via TYPE_CHECKING)              ║
@@ -64,10 +65,21 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, List
 
-import numpy as np
-
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
+
+# ────────────────────────────────────────────────────────────────────────
+# DRY: funcoes numpy de avaliacao importadas de evaluation.metrics
+# (implementacao canonica). Re-exportadas via __all__ para manter
+# backward compatibility com consumidores de training.metrics.
+# ────────────────────────────────────────────────────────────────────────
+from geosteering_ai.evaluation.metrics import (  # noqa: E402
+    compute_r2,
+    compute_rmse,
+    compute_mae,
+    compute_mbe,
+    compute_mape,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -514,240 +526,6 @@ class AnisotropyRatioError:
         """
         self.sum_abs_error.assign(0.0)
         self.count.assign(0.0)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# SECAO: FUNCOES NUMPY DE AVALIACAO
-# ════════════════════════════════════════════════════════════════════════════
-# Funcoes puras (sem TensorFlow) para avaliacao pos-treinamento.
-# Operam sobre arrays numpy completos (nao por batch). Usadas em
-# evaluation/ para relatorio final de performance.
-#
-# Todas recebem y_true e y_pred como np.ndarray e retornam float.
-# eps = 1e-12 para protecao numerica em divisoes.
-#
-# Metricas disponiveis:
-#   ┌──────────┬───────────────────────────────────────────────────────────┐
-#   │ Funcao   │ Formula                                                   │
-#   ├──────────┼───────────────────────────────────────────────────────────┤
-#   │ R2       │ 1 - sum((y-yp)^2) / (sum((y-mean)^2) + eps)             │
-#   │ RMSE     │ sqrt(mean((y-yp)^2))                                     │
-#   │ MAE      │ mean(|y-yp|)                                             │
-#   │ MBE      │ mean(yp-y)   (bias: positivo=superestima)                │
-#   │ MAPE     │ mean(|y-yp| / (|y| + eps)) * 100                        │
-#   └──────────┴───────────────────────────────────────────────────────────┘
-#
-# Ref: docs/ARCHITECTURE_v2.md secao 7.2 (funcoes de avaliacao numpy).
-# ──────────────────────────────────────────────────────────────────────────
-
-
-def compute_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Computa coeficiente de determinacao R^2.
-
-    R^2 mede a proporcao da variancia explicada pelo modelo.
-    R^2 = 1.0 indica ajuste perfeito; R^2 = 0.0 indica que o modelo
-    prediz a media; R^2 < 0 indica pior que predizer a media.
-
-    Args:
-        y_true: Array de valores verdadeiros. Shape arbitrario
-            (sera achatado internamente).
-        y_pred: Array de predicoes. Mesmo shape que y_true.
-
-    Returns:
-        R^2 como escalar float. Intervalo tipico: [-inf, 1.0].
-
-    Raises:
-        ValueError: Se shapes de y_true e y_pred nao coincidem.
-
-    Example:
-        >>> r2 = compute_r2(np.array([1, 2, 3]), np.array([1.1, 2.0, 2.9]))
-        >>> assert r2 > 0.95
-
-    Note:
-        Formula: R^2 = 1 - SSE / (SST + eps).
-        eps = 1e-12 protege contra SST ~ 0 (targets constantes).
-        Referenciado em:
-            - evaluation/: relatorio de performance.
-        Ref: docs/ARCHITECTURE_v2.md secao 7.2.
-    """
-    y_true = np.asarray(y_true, dtype=np.float64).ravel()
-    y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
-
-    if y_true.shape != y_pred.shape:
-        raise ValueError(
-            f"Shapes incompativeis: y_true={y_true.shape}, y_pred={y_pred.shape}"
-        )
-
-    ss_res = np.sum((y_true - y_pred) ** 2)
-    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-
-    r2 = 1.0 - ss_res / (ss_tot + EPS)
-    logger.debug("R2 = %.6f (SSE=%.4e, SST=%.4e)", r2, ss_res, ss_tot)
-    return float(r2)
-
-
-def compute_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Computa Root Mean Squared Error (RMSE).
-
-    RMSE penaliza erros grandes mais fortemente que MAE (pelo quadrado).
-    Mesma unidade que os targets (log10(Ohm.m) no dominio scaled).
-
-    Args:
-        y_true: Array de valores verdadeiros. Shape arbitrario.
-        y_pred: Array de predicoes. Mesmo shape que y_true.
-
-    Returns:
-        RMSE como escalar float. Intervalo: [0, +inf).
-
-    Raises:
-        ValueError: Se shapes de y_true e y_pred nao coincidem.
-
-    Example:
-        >>> rmse = compute_rmse(np.array([1, 2, 3]), np.array([1, 2, 3]))
-        >>> assert rmse == 0.0
-
-    Note:
-        Formula: RMSE = sqrt(mean((y_true - y_pred)^2)).
-        Referenciado em:
-            - evaluation/: relatorio de performance.
-        Ref: docs/ARCHITECTURE_v2.md secao 7.2.
-    """
-    y_true = np.asarray(y_true, dtype=np.float64).ravel()
-    y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
-
-    if y_true.shape != y_pred.shape:
-        raise ValueError(
-            f"Shapes incompativeis: y_true={y_true.shape}, y_pred={y_pred.shape}"
-        )
-
-    rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-    logger.debug("RMSE = %.6f", rmse)
-    return rmse
-
-
-def compute_mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Computa Mean Absolute Error (MAE).
-
-    MAE e mais robusto a outliers que RMSE (sem quadrado). Mesma unidade
-    que os targets. Interpretacao direta: erro medio absoluto.
-
-    Args:
-        y_true: Array de valores verdadeiros. Shape arbitrario.
-        y_pred: Array de predicoes. Mesmo shape que y_true.
-
-    Returns:
-        MAE como escalar float. Intervalo: [0, +inf).
-
-    Raises:
-        ValueError: Se shapes de y_true e y_pred nao coincidem.
-
-    Example:
-        >>> mae = compute_mae(np.array([1, 2, 3]), np.array([1.5, 2.5, 3.5]))
-        >>> assert abs(mae - 0.5) < 1e-10
-
-    Note:
-        Formula: MAE = mean(|y_true - y_pred|).
-        Referenciado em:
-            - evaluation/: relatorio de performance.
-            - build_metrics(): incluido como Keras MAE quando config.verbose.
-        Ref: docs/ARCHITECTURE_v2.md secao 7.2.
-    """
-    y_true = np.asarray(y_true, dtype=np.float64).ravel()
-    y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
-
-    if y_true.shape != y_pred.shape:
-        raise ValueError(
-            f"Shapes incompativeis: y_true={y_true.shape}, y_pred={y_pred.shape}"
-        )
-
-    mae = float(np.mean(np.abs(y_true - y_pred)))
-    logger.debug("MAE = %.6f", mae)
-    return mae
-
-
-def compute_mbe(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Computa Mean Bias Error (MBE).
-
-    MBE detecta bias sistematico: positivo = modelo superestima,
-    negativo = modelo subestima. MBE ~ 0 com RMSE alto indica
-    erro aleatorio sem bias (ideal para noise robustness).
-
-    Args:
-        y_true: Array de valores verdadeiros. Shape arbitrario.
-        y_pred: Array de predicoes. Mesmo shape que y_true.
-
-    Returns:
-        MBE como escalar float. Intervalo: (-inf, +inf).
-        Positivo = superestima, negativo = subestima.
-
-    Raises:
-        ValueError: Se shapes de y_true e y_pred nao coincidem.
-
-    Example:
-        >>> mbe = compute_mbe(np.array([1, 2, 3]), np.array([1.1, 2.1, 3.1]))
-        >>> assert abs(mbe - 0.1) < 1e-10
-
-    Note:
-        Formula: MBE = mean(y_pred - y_true).
-        Convencao: pred - true (positivo = superestima).
-        Referenciado em:
-            - evaluation/: diagnostico de bias.
-        Ref: docs/ARCHITECTURE_v2.md secao 7.2.
-    """
-    y_true = np.asarray(y_true, dtype=np.float64).ravel()
-    y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
-
-    if y_true.shape != y_pred.shape:
-        raise ValueError(
-            f"Shapes incompativeis: y_true={y_true.shape}, y_pred={y_pred.shape}"
-        )
-
-    mbe = float(np.mean(y_pred - y_true))
-    logger.debug("MBE = %.6f", mbe)
-    return mbe
-
-
-def compute_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Computa Mean Absolute Percentage Error (MAPE).
-
-    MAPE expressa o erro em percentual relativo ao valor verdadeiro.
-    Util para comparacao entre escalas diferentes. Instavel quando
-    y_true ~ 0 (protegido por eps no denominador).
-
-    Args:
-        y_true: Array de valores verdadeiros. Shape arbitrario.
-        y_pred: Array de predicoes. Mesmo shape que y_true.
-
-    Returns:
-        MAPE em percentual (0-100+). Intervalo: [0, +inf).
-
-    Raises:
-        ValueError: Se shapes de y_true e y_pred nao coincidem.
-
-    Example:
-        >>> mape = compute_mape(np.array([100, 200]), np.array([110, 190]))
-        >>> assert abs(mape - 7.5) < 1e-10  # (10/100 + 10/200)/2 * 100
-
-    Note:
-        Formula: MAPE = mean(|y_true - y_pred| / (|y_true| + eps)) * 100.
-        eps = 1e-12 protege contra y_true ~ 0.
-        No dominio log10, y_true ~ 0 corresponde a rho ~ 1 Ohm.m (raro
-        mas possivel em arenitos saturados).
-        Referenciado em:
-            - evaluation/: relatorio de performance percentual.
-        Ref: docs/ARCHITECTURE_v2.md secao 7.2.
-    """
-    y_true = np.asarray(y_true, dtype=np.float64).ravel()
-    y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
-
-    if y_true.shape != y_pred.shape:
-        raise ValueError(
-            f"Shapes incompativeis: y_true={y_true.shape}, y_pred={y_pred.shape}"
-        )
-
-    mape = float(np.mean(np.abs(y_true - y_pred) / (np.abs(y_true) + EPS)) * 100.0)
-    logger.debug("MAPE = %.2f%%", mape)
-    return mape
 
 
 # ════════════════════════════════════════════════════════════════════════════

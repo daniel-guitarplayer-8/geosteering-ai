@@ -13,11 +13,11 @@
 # ║    • Custom Keras callbacks para curriculum noise, gradient monitoring    ║
 # ║    • BestEpochTracker: rastreia melhor epoca e metrica                    ║
 # ║    • UpdateNoiseLevelCallback: scheduler 3-phase (clean→ramp→stable)     ║
-# ║    • GradientMonitorCallback: norma de gradientes por epoca              ║
+# ║    • WeightNormMonitor: norma L2 de pesos por epoca                     ║
 # ║    • build_callbacks(): factory que monta lista de callbacks do config    ║
 # ║                                                                            ║
 # ║  Dependencias: config.py (PipelineConfig), TensorFlow 2.x (lazy import) ║
-# ║  Exports: ~4 (UpdateNoiseLevelCallback, GradientMonitorCallback,         ║
+# ║  Exports: ~4 (UpdateNoiseLevelCallback, WeightNormMonitor,               ║
 # ║           BestEpochTracker, build_callbacks)                              ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 6.2 (callbacks)                      ║
 # ║                                                                            ║
@@ -124,7 +124,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     # --- Custom Keras callbacks ---
     "UpdateNoiseLevelCallback",
-    "GradientMonitorCallback",
+    "WeightNormMonitor",
     "BestEpochTracker",
     # --- Factory function ---
     "build_callbacks",
@@ -300,26 +300,30 @@ class UpdateNoiseLevelCallback:
 
 
 # ════════════════════════════════════════════════════════════════════════
-# CALLBACK 2: GradientMonitorCallback — Monitoramento de gradientes
+# CALLBACK 2: WeightNormMonitor — Monitoramento de normas de pesos
 #
-# Loga estatisticas (media, maximo) das normas de gradiente por epoca.
+# Loga estatisticas (media, maximo) das normas L2 de pesos por epoca.
 # Util para diagnosticar:
-#   - Vanishing gradients (norma → 0)
-#   - Exploding gradients (norma → ∞)
+#   - Weight decay excessivo (norma → 0)
+#   - Pesos explodindo (norma → ∞)
 #   - Estabilidade do treinamento (norma constante)
 #
-# Opera via GradientTape no on_epoch_end usando um batch do train_ds.
+# Calcula tf.norm(var, ord=2) para cada variavel treinavel.
 # Nao interfere no treinamento — apenas observa e loga.
 #
-# Referencia: C40 legado (GradientMonitor callback).
+# Referencia: C40 legado (GradientMonitor callback — renomeado).
 # ════════════════════════════════════════════════════════════════════════
 
-class GradientMonitorCallback:
-    """Monitoramento de normas de gradiente por epoca.
+class WeightNormMonitor:
+    """Monitors weight norm statistics per epoch.
 
-    Loga media e maximo das normas L2 dos gradientes de cada variavel
-    treinavel do modelo. Util para diagnosticar vanishing/exploding
-    gradients durante o treinamento.
+    Loga media e maximo das normas L2 dos pesos de cada variavel
+    treinavel do modelo. Util para diagnosticar pesos explodindo,
+    decaindo excessivamente ou instabilidades durante o treinamento.
+
+    NOTA: Esta classe computa normas de PESOS (tf.norm(var)), NAO
+    normas de gradientes via GradientTape. O nome anterior
+    (GradientMonitorCallback) era enganoso.
 
     Herda de tf.keras.callbacks.Callback (lazy import).
 
@@ -329,24 +333,24 @@ class GradientMonitorCallback:
     Example:
         >>> import tensorflow as tf
         >>> model = tf.keras.Sequential([tf.keras.layers.Dense(10)])
-        >>> cb = GradientMonitorCallback(model)
+        >>> cb = WeightNormMonitor(model)
 
     Note:
         Referenciado em:
             - training/callbacks.py: build_callbacks() (futuro, opt-in)
         Ref: docs/ARCHITECTURE_v2.md secao 6.2.
-        Norma L2 por variavel: ||g_i||_2 para cada peso treinavel.
-        Nao altera gradientes — apenas observa (zero overhead no forward).
+        Norma L2 por variavel: ||w_i||_2 para cada peso treinavel.
+        Nao altera pesos — apenas observa (zero overhead no forward).
     """
 
     def __new__(cls, model: Any):
         """Cria instancia herdando de tf.keras.callbacks.Callback (lazy).
 
         Args:
-            model: Modelo tf.keras.Model cujos gradientes serao monitorados.
+            model: Modelo tf.keras.Model cujas normas de pesos serao monitoradas.
 
         Returns:
-            Instancia de GradientMonitorCallback.
+            Instancia de WeightNormMonitor.
 
         Note:
             Lazy import de TensorFlow.
@@ -361,11 +365,11 @@ class GradientMonitorCallback:
         return instance
 
     def __init__(self, model: Any) -> None:
-        """Inicializa o monitor de gradientes.
+        """Inicializa o monitor de normas de pesos.
 
         Args:
-            model: Modelo tf.keras.Model cujos gradientes serao monitorados.
-                Deve estar compilado (model.compiled_loss definido).
+            model: Modelo tf.keras.Model cujas normas de pesos serao
+                monitoradas. Deve ter ao menos uma variavel treinavel.
 
         Note:
             Referenciado em:
@@ -379,26 +383,25 @@ class GradientMonitorCallback:
         self._model_ref = model
 
         logger.info(
-            "GradientMonitorCallback inicializado: %d variaveis treinaveis",
+            "WeightNormMonitor inicializado: %d variaveis treinaveis",
             len(model.trainable_variables),
         )
 
     def on_epoch_end(self, epoch: int, logs: Optional[dict] = None) -> None:
-        """Loga estatisticas de gradiente ao final de cada epoca.
+        """Loga estatisticas de norma de pesos ao final de cada epoca.
 
-        Calcula norma L2 dos gradientes de cada variavel treinavel
-        usando um dummy forward pass (zeros) para estimar magnitudes.
+        Calcula norma L2 de cada variavel treinavel do modelo.
 
         Args:
             epoch: Indice da epoca atual (0-based).
-            logs: Dict de metricas (metricas de gradiente sao adicionadas).
+            logs: Dict de metricas (metricas de norma de pesos sao adicionadas).
 
         Note:
             Referenciado em:
                 - Keras training loop (chamado automaticamente)
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
-            Norma L2: sqrt(sum(g_i^2)) por variavel treinavel.
-            Logs adicionados: grad_norm_mean, grad_norm_max.
+            Norma L2: sqrt(sum(w_i^2)) por variavel treinavel.
+            Logs adicionados: weight_norm_mean, weight_norm_max.
         """
         import tensorflow as tf
 
@@ -408,23 +411,23 @@ class GradientMonitorCallback:
         if not trainable_vars:
             return
 
-        # Coleta normas L2 de cada variavel treinavel
-        grad_norms = []
+        # Coleta normas L2 de cada variavel treinavel (pesos, nao gradientes)
+        weight_norms = []
         for var in trainable_vars:
-            # Norma L2 do tensor de pesos como proxy da norma de gradientes
+            # Norma L2 do tensor de pesos
             norm = tf.norm(var, ord=2).numpy()
-            grad_norms.append(float(norm))
+            weight_norms.append(float(norm))
 
-        if grad_norms:
-            mean_norm = sum(grad_norms) / len(grad_norms)
-            max_norm = max(grad_norms)
+        if weight_norms:
+            mean_norm = sum(weight_norms) / len(weight_norms)
+            max_norm = max(weight_norms)
 
             if logs is not None:
-                logs["grad_norm_mean"] = mean_norm
-                logs["grad_norm_max"] = max_norm
+                logs["weight_norm_mean"] = mean_norm
+                logs["weight_norm_max"] = max_norm
 
             logger.debug(
-                "Epoch %d: grad_norm_mean=%.6f, grad_norm_max=%.6f",
+                "Epoch %d: weight_norm_mean=%.6f, weight_norm_max=%.6f",
                 epoch,
                 mean_norm,
                 max_norm,

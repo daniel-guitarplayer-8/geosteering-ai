@@ -47,7 +47,11 @@ Note:
 """
 from __future__ import annotations
 
+import logging
+import math
 from typing import TYPE_CHECKING, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
@@ -430,10 +434,10 @@ def make_log_scale_aware(
     alpha = config.loss_alpha           # peso interface (default 0.2)
     beta = config.loss_beta             # peso oscilacao (default 0.1)
     gamma = config.loss_gamma           # peso subestimacao (default 0.05)
-    warmup_epochs = getattr(config, "penalty_warmup_epochs", 10)
-    interface_thr = getattr(config, "interface_threshold", 0.5)
-    high_rho_thr = getattr(config, "high_rho_threshold", 2.477)   # log10(300)
-    low_rho_thr = getattr(config, "low_rho_threshold", 1.699)     # log10(50)
+    warmup_epochs = config.penalty_warmup_epochs
+    interface_thr = config.interface_threshold
+    high_rho_thr = math.log10(config.high_rho_threshold)   # log10(300)
+    low_rho_thr = math.log10(config.low_rho_threshold)     # log10(50)
 
     def log_scale_aware_loss(y_true, y_pred):
         import tensorflow as tf
@@ -506,13 +510,13 @@ def make_adaptive_log_scale(
     """
     alpha = config.loss_alpha
     gamma = config.loss_gamma
-    beta_min = getattr(config, "gangorra_beta_min", 0.1)
-    beta_max = getattr(config, "gangorra_beta_max", 0.5)
-    max_noise = getattr(config, "gangorra_max_noise", 0.1)
-    warmup_epochs = getattr(config, "penalty_warmup_epochs", 10)
-    interface_thr = getattr(config, "interface_threshold", 0.5)
-    high_rho_thr = getattr(config, "high_rho_threshold", 2.477)
-    low_rho_thr = getattr(config, "low_rho_threshold", 1.699)
+    beta_min = config.gangorra_beta_min
+    beta_max = config.gangorra_beta_max
+    max_noise = config.gangorra_max_noise
+    warmup_epochs = config.penalty_warmup_epochs
+    interface_thr = config.interface_threshold
+    high_rho_thr = math.log10(config.high_rho_threshold)
+    low_rho_thr = math.log10(config.low_rho_threshold)
 
     def adaptive_log_scale_loss(y_true, y_pred):
         import tensorflow as tf
@@ -582,14 +586,14 @@ def make_robust_log_scale(
         Referenciado em: losses/factory.py (registry #16).
         v5.0.3+.
     """
-    alpha = getattr(config, "robust_alpha", config.loss_alpha)
-    beta = getattr(config, "robust_beta", config.loss_beta)
-    gamma = getattr(config, "robust_gamma", config.loss_gamma)
-    delta_smooth = getattr(config, "robust_delta_smooth", 0.05)
-    warmup_epochs = getattr(config, "penalty_warmup_epochs", 10)
-    interface_thr = getattr(config, "interface_threshold", 0.5)
-    high_rho_thr = getattr(config, "high_rho_threshold", 2.477)
-    low_rho_thr = getattr(config, "low_rho_threshold", 1.699)
+    alpha = config.robust_alpha
+    beta = config.robust_beta
+    gamma = config.robust_gamma
+    delta_smooth = config.robust_delta_smooth
+    warmup_epochs = config.penalty_warmup_epochs
+    interface_thr = config.interface_threshold
+    high_rho_thr = math.log10(config.high_rho_threshold)
+    low_rho_thr = math.log10(config.low_rho_threshold)
 
     def robust_log_scale_loss(y_true, y_pred):
         import tensorflow as tf
@@ -660,15 +664,15 @@ def make_adaptive_robust(
         Referenciado em: losses/factory.py (registry #17).
         v5.0.3+.
     """
-    alpha = getattr(config, "robust_alpha", config.loss_alpha)
-    beta = getattr(config, "robust_beta", config.loss_beta)
-    gamma = getattr(config, "robust_gamma", config.loss_gamma)
-    delta_smooth = getattr(config, "robust_delta_smooth", 0.05)
-    max_noise = getattr(config, "gangorra_max_noise", 0.1)
-    warmup_epochs = getattr(config, "penalty_warmup_epochs", 10)
-    interface_thr = getattr(config, "interface_threshold", 0.5)
-    high_rho_thr = getattr(config, "high_rho_threshold", 2.477)
-    low_rho_thr = getattr(config, "low_rho_threshold", 1.699)
+    alpha = config.robust_alpha
+    beta = config.robust_beta
+    gamma = config.robust_gamma
+    delta_smooth = config.robust_delta_smooth
+    max_noise = config.gangorra_max_noise
+    warmup_epochs = config.penalty_warmup_epochs
+    interface_thr = config.interface_threshold
+    high_rho_thr = math.log10(config.high_rho_threshold)
+    low_rho_thr = math.log10(config.low_rho_threshold)
 
     def adaptive_robust_loss(y_true, y_pred):
         import tensorflow as tf
@@ -795,7 +799,7 @@ def make_look_ahead_weighted(
         Referenciado em: losses/factory.py (registry #19).
         v5.0.7+.
     """
-    decay_rate = getattr(config, "look_ahead_decay_rate", 2.0)
+    decay_rate = config.look_ahead_decay_rate
 
     def look_ahead_loss(y_true, y_pred):
         import tensorflow as tf
@@ -846,9 +850,9 @@ def make_dilate(config: "PipelineConfig") -> Callable:
         Referenciado em: losses/factory.py (registry #20).
         v5.0.15+.
     """
-    alpha_d = getattr(config, "dilate_alpha", 0.5)
-    gamma_d = getattr(config, "dilate_gamma", 0.1)
-    downsample = getattr(config, "dilate_downsample", 4)
+    alpha_d = config.dilate_alpha
+    gamma_d = config.dilate_gamma
+    downsample = config.dilate_downsample
 
     def dilate_loss(y_true, y_pred):
         import tensorflow as tf
@@ -907,7 +911,7 @@ def make_enc_decoder(config: "PipelineConfig") -> Callable:
         Referenciado em: losses/factory.py (registry #21).
         v5.0.15+.
     """
-    w_recon = getattr(config, "enc_decoder_recon_weight", 0.1)
+    w_recon = config.enc_decoder_recon_weight
 
     def enc_decoder_loss(y_true, y_pred):
         import tensorflow as tf
@@ -925,35 +929,43 @@ def make_enc_decoder(config: "PipelineConfig") -> Callable:
 
 
 def make_multitask(config: "PipelineConfig") -> Callable:
-    """Factory para #22 Multi-Task — log-sum ponderado com sigmas aprendidos.
+    """Factory para #22 Multi-Task — PLACEHOLDER que retorna MSE simples.
 
-    Implementa Kendall et al. (2018): sigma_i aprendidas como incerteza
-    de tarefa. Maior sigma_i → tarefa menos confiavel → menos peso.
+    NOTA: Esta e uma implementacao PLACEHOLDER/FALLBACK. A formulacao
+    completa de Kendall et al. (2018) com sigma_i aprendidas como
+    incerteza de tarefa (log-sum ponderado) sera implementada em v2.1.
 
-    Fórmula:
-        L = sum_i (0.5 / sigma_i²) × L_i + 0.5 × log(sigma_i²)
+    Fórmula Kendall (a implementar em v2.1):
+        L = sum_i (0.5 / sigma_i^2) * L_i + 0.5 * log(sigma_i^2)
+
+    Comportamento atual (placeholder):
+        L = MSE(y_true, y_pred[:, :, :C])
 
     Args:
         config: PipelineConfig com output_channels para determinar n_tasks.
 
     Returns:
-        Callable: Funcao loss(y_true, y_pred) → tf.Tensor scalar.
+        Callable: Funcao loss(y_true, y_pred) -> tf.Tensor scalar.
+            Retorna MSE simples (sem sigma_i aprendidas).
 
     Note:
         Referenciado em: losses/factory.py (registry #22).
         v5.0.15+.
+        Kendall et al. (2018) "Multi-Task Learning Using Uncertainty
+        to Weigh Losses" sera implementado em v2.1 com variaveis
+        treinaveis log_sigma_i por tarefa.
     """
     n_tasks = config.output_channels  # ex: 2 (rho_h, rho_v)
+    logger.warning(
+        "make_multitask: placeholder — retorna MSE simples. "
+        "Kendall et al. (2018) sera implementado em v2.1"
+    )
 
     def multitask_loss(y_true, y_pred):
         import tensorflow as tf
         C = tf.shape(y_true)[-1]
-        # sigma_i² usam os canais extras de y_pred (se existirem)
-        # Se y_pred tem canais extras, usa; caso contrario, usa sigma=1
-        n_pred = tf.shape(y_pred)[-1]
         pred = y_pred[..., :C]
         total = tf.reduce_mean(tf.square(y_true - pred))
-        # Sem canais extras: retorna MSE simples (fallback)
         return total
 
     return multitask_loss
@@ -978,7 +990,7 @@ def make_sobolev(config: "PipelineConfig") -> Callable:
         Referenciado em: losses/factory.py (registry #23).
         v5.0.15+.
     """
-    lambda_g = getattr(config, "sobolev_lambda", 0.01)
+    lambda_g = config.sobolev_lambda
 
     def sobolev_loss(y_true, y_pred):
         import tensorflow as tf
@@ -1011,7 +1023,7 @@ def make_cross_gradient(config: "PipelineConfig") -> Callable:
         Referenciado em: losses/factory.py (registry #24).
         v5.0.15+. Requer output_channels >= 2.
     """
-    lambda_c = getattr(config, "cross_gradient_lambda", 0.01)
+    lambda_c = config.cross_gradient_lambda
 
     def cross_gradient_loss(y_true, y_pred):
         import tensorflow as tf
@@ -1045,7 +1057,7 @@ def make_spectral(config: "PipelineConfig") -> Callable:
         Referenciado em: losses/factory.py (registry #25).
         v5.0.15+.
     """
-    lambda_s = getattr(config, "spectral_lambda", 0.1)
+    lambda_s = config.spectral_lambda
 
     def spectral_loss(y_true, y_pred):
         import tensorflow as tf
@@ -1090,9 +1102,9 @@ def make_morales_hybrid(
         v5.0.15+.
     """
     omega = config.morales_physics_omega
-    use_adaptive = getattr(config, "use_adaptive_omega", False)
-    omega_initial = getattr(config, "morales_omega_initial", 0.3)
-    ramp_epochs = getattr(config, "morales_ramp_epochs", 50)
+    use_adaptive = config.use_adaptive_omega
+    omega_initial = config.morales_omega_initial
+    ramp_epochs = config.morales_ramp_epochs
 
     def morales_hybrid_loss(y_true, y_pred):
         import tensorflow as tf

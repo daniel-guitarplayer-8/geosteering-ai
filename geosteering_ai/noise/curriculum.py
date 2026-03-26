@@ -12,7 +12,7 @@
 # ║  Proposito:                                                                ║
 # ║    • CurriculumSchedule: encapsula logica de 3 fases do curriculum        ║
 # ║    • compute_noise_level(): funcao pura epoch→noise_level                 ║
-# ║    • UpdateNoiseLevelCallback: Keras callback para atualizar tf.Variable  ║
+# ║    • UpdateNoiseLevelCallback: re-exportado de training.callbacks (DRY)  ║
 # ║                                                                            ║
 # ║  Dependencias: config.py (PipelineConfig), noise/functions.py             ║
 # ║  Exports: ~3 simbolos — ver __all__                                       ║
@@ -26,8 +26,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
-
 from geosteering_ai.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -220,88 +218,17 @@ def compute_noise_level(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECAO: KERAS CALLBACK
+# SECAO: KERAS CALLBACK (DRY — re-exportado de training.callbacks)
 # ════════════════════════════════════════════════════════════════════════════
-# UpdateNoiseLevelCallback atualiza o tf.Variable compartilhado
-# no inicio de cada epoca, seguindo o CurriculumSchedule.
-# Quando use_curriculum=False, mantem noise constante em noise_level_max.
-# Ref: Legado C40 UpdateNoiseLevelCallback, adaptado para v2.0.
+# UpdateNoiseLevelCallback: implementacao canonica em training/callbacks.py.
+# Re-exportado aqui para backward compatibility com consumidores de
+# noise.curriculum.UpdateNoiseLevelCallback.
+#
+# Ref: training/callbacks.py (implementacao completa com PipelineConfig,
+#      lazy TF import via __new__, logging detalhado).
 # ──────────────────────────────────────────────────────────────────────────
 
-
-class UpdateNoiseLevelCallback:
-    """Keras callback que atualiza noise level por epoca.
-
-    Atualiza o tf.Variable compartilhado no inicio de cada epoca
-    seguindo o CurriculumSchedule (3 fases). Quando curriculum
-    esta desativado (use_curriculum=False), mantem noise constante
-    no valor noise_level_max desde a epoca 0.
-
-    Herda de tf.keras.callbacks.Callback (importacao lazy para
-    evitar dependencia de TF em testes CPU-only).
-
-    Attributes:
-        noise_var (tf.Variable): Variable compartilhado com pipeline.
-        schedule (CurriculumSchedule): Schedule de 3 fases.
-        use_curriculum (bool): Se False, noise constante.
-
-    Example:
-        >>> from geosteering_ai.noise import create_noise_level_var
-        >>> from geosteering_ai.noise.curriculum import (
-        ...     CurriculumSchedule, UpdateNoiseLevelCallback)
-        >>> noise_var = create_noise_level_var(0.0)
-        >>> sched = CurriculumSchedule(0.08, 10, 80)
-        >>> cb = UpdateNoiseLevelCallback(noise_var, sched, use_curriculum=True)
-
-    Note:
-        Referenciado em:
-            - training/callbacks.py: build_callbacks() inclui este callback
-            - training/loop.py: model.fit(callbacks=[...])
-        Ref: Legado C40 UpdateNoiseLevelCallback.
-        Quando use_curriculum=False, noise_var.assign(noise_level_max)
-        desde a epoca 0 (noise constante, sem rampa).
-    """
-
-    def __init__(
-        self,
-        noise_var: "tf.Variable",
-        schedule: CurriculumSchedule,
-        use_curriculum: bool = True,
-        log: Optional[logging.Logger] = None,
-    ) -> None:
-        """Inicializa callback.
-
-        Args:
-            noise_var: tf.Variable escalar compartilhado.
-            schedule: CurriculumSchedule com parametros das 3 fases.
-            use_curriculum: Se True, aplica schedule 3-fases.
-                Se False, noise constante em schedule.noise_level_max.
-            log: Logger opcional.
-        """
-        self.noise_var = noise_var
-        self.schedule = schedule
-        self.use_curriculum = use_curriculum
-        self._log = log or logger
-
-    def on_epoch_begin(self, epoch: int, logs: Optional[dict] = None) -> None:
-        """Atualiza noise level no inicio da epoca.
-
-        Args:
-            epoch: Numero da epoca (0-indexed).
-            logs: Dict de logs do Keras (ignorado).
-        """
-        if self.use_curriculum:
-            level = self.schedule.get_level(epoch)
-            phase = self.schedule.get_phase(epoch)
-        else:
-            # ── Noise constante (sem curriculum) ──────────────────────
-            level = self.schedule.noise_level_max
-            phase = "constant"
-
-        self.noise_var.assign(level)
-        self._log.debug(
-            "Epoch %d: noise_level=%.6f (phase=%s)", epoch, level, phase,
-        )
+from geosteering_ai.training.callbacks import UpdateNoiseLevelCallback  # noqa: E402
 
 
 # ════════════════════════════════════════════════════════════════════════════
