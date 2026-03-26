@@ -6,7 +6,7 @@
 # ║  Autor: Daniel Leal                                                        ║
 # ║  Framework: TensorFlow 2.x / Keras (exclusivo — PyTorch PROIBIDO)         ║
 # ║                                                                            ║
-# ║  Modulos: loop, callbacks, metrics, nstage, optuna_hpo                    ║
+# ║  Modulos: loop, callbacks, metrics, nstage, optuna_hpo, adaptation        ║
 # ║  Exports: ~10 simbolos publicos — ver __all__                             ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 7                                    ║
 # ║                                                                            ║
@@ -32,6 +32,18 @@ from geosteering_ai.training.callbacks import (
     UpdateNoiseLevelCallback,
     WeightNormMonitor,
     BestEpochTracker,
+    DualValidationCallback,
+    PINNSLambdaScheduleCallback,
+    CausalDegradationMonitor,
+    SlidingWindowValidation,
+    PeriodicCheckpoint,
+    MetricPlateauDetector,
+    OneCycleLR,
+    CosineWarmRestarts,
+    CyclicalLR,
+    MemoryMonitor,
+    LatencyBenchmark,
+    EpochSummary,
     build_callbacks,
 )
 from geosteering_ai.training.metrics import (
@@ -42,6 +54,7 @@ from geosteering_ai.training.metrics import (
 )
 from geosteering_ai.training.nstage import NStageTrainer, NStageResult
 from geosteering_ai.training.optuna_hpo import run_hpo
+from geosteering_ai.training.adaptation import DomainAdapter, AdaptationResult
 
 __all__ = [
     # ── Loop ──────────────────────────────────────────────────────────────
@@ -50,10 +63,26 @@ __all__ = [
     # ── N-Stage ───────────────────────────────────────────────────────────
     "NStageTrainer",
     "NStageResult",
-    # ── Callbacks ─────────────────────────────────────────────────────────
+    # ── Callbacks (originais) ────────────────────────────────────────────
     "UpdateNoiseLevelCallback",
     "WeightNormMonitor",
     "BestEpochTracker",
+    # ── Callbacks (high priority) ────────────────────────────────────────
+    "DualValidationCallback",
+    "PINNSLambdaScheduleCallback",
+    "CausalDegradationMonitor",
+    "SlidingWindowValidation",
+    # ── Callbacks (medium priority) ──────────────────────────────────────
+    "PeriodicCheckpoint",
+    "MetricPlateauDetector",
+    "OneCycleLR",
+    "CosineWarmRestarts",
+    "CyclicalLR",
+    # ── Callbacks (low priority) ─────────────────────────────────────────
+    "MemoryMonitor",
+    "LatencyBenchmark",
+    "EpochSummary",
+    # ── Factory ──────────────────────────────────────────────────────────
     "build_callbacks",
     # ── Metrics ───────────────────────────────────────────────────────────
     "R2Score",
@@ -62,4 +91,7 @@ __all__ = [
     "build_metrics",
     # ── Optuna HPO ────────────────────────────────────────────────────────
     "run_hpo",
+    # ── Domain Adaptation (C69) ──────────────────────────────────────────
+    "DomainAdapter",
+    "AdaptationResult",
 ]

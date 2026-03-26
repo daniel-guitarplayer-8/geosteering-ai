@@ -57,6 +57,14 @@ from geosteering_ai.inference.export import (
 )
 
 # ──────────────────────────────────────────────────────────────────────
+# Imports: uncertainty.py — quantificacao de incerteza (MC Dropout, Ensemble)
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.inference.uncertainty import (
+    UncertaintyResult,
+    UncertaintyEstimator,
+)
+
+# ──────────────────────────────────────────────────────────────────────
 # D8: Exports publicos — agrupados semanticamente por modulo
 # ──────────────────────────────────────────────────────────────────────
 __all__ = [
@@ -68,4 +76,7 @@ __all__ = [
     "export_saved_model",
     "export_tflite",
     "export_onnx",
+    # --- uncertainty.py: quantificacao de incerteza ---
+    "UncertaintyResult",
+    "UncertaintyEstimator",
 ]

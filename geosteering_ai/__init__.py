@@ -169,6 +169,8 @@ try:
         export_saved_model,
         export_tflite,
         export_onnx,
+        UncertaintyResult,
+        UncertaintyEstimator,
     )
 except ImportError as _e:  # pragma: no cover
     _logger.debug("inference subpackage nao disponivel: %s", _e)
@@ -177,6 +179,8 @@ except ImportError as _e:  # pragma: no cover
     export_saved_model = None  # type: ignore[assignment]
     export_tflite = None  # type: ignore[assignment]
     export_onnx = None  # type: ignore[assignment]
+    UncertaintyResult = None  # type: ignore[assignment, misc]
+    UncertaintyEstimator = None  # type: ignore[assignment, misc]
 
 # ──────────────────────────────────────────────────────────────────────
 # Bloco 8: evaluation — MetricsReport, compute_all_metrics, compare
@@ -189,6 +193,22 @@ try:
         evaluate_predictions,
         ComparisonResult,
         compare_models,
+        InterfaceReport,
+        CoherenceReport,
+        StabilityReport,
+        interface_metrics,
+        error_by_resistivity_band,
+        error_by_anisotropy,
+        spatial_error_profile,
+        physical_coherence_check,
+        stability_analysis,
+        PredictionResult,
+        predict_test,
+        ModeComparisonResult,
+        compare_modes,
+        GeoMetrics,
+        compute_geosteering_metrics,
+        generate_geosteering_report,
     )
 except ImportError as _e:  # pragma: no cover
     _logger.debug("evaluation subpackage nao disponivel: %s", _e)
@@ -197,6 +217,22 @@ except ImportError as _e:  # pragma: no cover
     evaluate_predictions = None  # type: ignore[assignment]
     ComparisonResult = None  # type: ignore[assignment, misc]
     compare_models = None  # type: ignore[assignment]
+    InterfaceReport = None  # type: ignore[assignment, misc]
+    CoherenceReport = None  # type: ignore[assignment, misc]
+    StabilityReport = None  # type: ignore[assignment, misc]
+    interface_metrics = None  # type: ignore[assignment]
+    error_by_resistivity_band = None  # type: ignore[assignment]
+    error_by_anisotropy = None  # type: ignore[assignment]
+    spatial_error_profile = None  # type: ignore[assignment]
+    physical_coherence_check = None  # type: ignore[assignment]
+    stability_analysis = None  # type: ignore[assignment]
+    PredictionResult = None  # type: ignore[assignment, misc]
+    predict_test = None  # type: ignore[assignment]
+    ModeComparisonResult = None  # type: ignore[assignment, misc]
+    compare_modes = None  # type: ignore[assignment]
+    GeoMetrics = None  # type: ignore[assignment, misc]
+    compute_geosteering_metrics = None  # type: ignore[assignment]
+    generate_geosteering_report = None  # type: ignore[assignment]
 
 # ──────────────────────────────────────────────────────────────────────
 # Bloco 9: visualization — holdout, picasso, eda, realtime
@@ -208,6 +244,19 @@ try:
         plot_picasso_dod,
         plot_eda_summary,
         RealtimeMonitor,
+        plot_training_history,
+        plot_lr_schedule,
+        plot_error_heatmap,
+        plot_error_by_band,
+        plot_spatial_error,
+        export_all_figures,
+        save_figure,
+        plot_uncertainty_histograms,
+        plot_confidence_bands,
+        plot_calibration_curve,
+        plot_curtain,
+        plot_dtb_profile,
+        plot_geosteering_dashboard,
     )
 except ImportError as _e:  # pragma: no cover
     _logger.debug("visualization subpackage nao disponivel: %s", _e)
@@ -215,6 +264,19 @@ except ImportError as _e:  # pragma: no cover
     plot_picasso_dod = None  # type: ignore[assignment]
     plot_eda_summary = None  # type: ignore[assignment]
     RealtimeMonitor = None  # type: ignore[assignment, misc]
+    plot_training_history = None  # type: ignore[assignment]
+    plot_lr_schedule = None  # type: ignore[assignment]
+    plot_error_heatmap = None  # type: ignore[assignment]
+    plot_error_by_band = None  # type: ignore[assignment]
+    plot_spatial_error = None  # type: ignore[assignment]
+    export_all_figures = None  # type: ignore[assignment]
+    save_figure = None  # type: ignore[assignment]
+    plot_uncertainty_histograms = None  # type: ignore[assignment]
+    plot_confidence_bands = None  # type: ignore[assignment]
+    plot_calibration_curve = None  # type: ignore[assignment]
+    plot_curtain = None  # type: ignore[assignment]
+    plot_dtb_profile = None  # type: ignore[assignment]
+    plot_geosteering_dashboard = None  # type: ignore[assignment]
 
 # ──────────────────────────────────────────────────────────────────────
 # Bloco 5: utils — logger, timer, validation, formatting, system, io
@@ -270,17 +332,48 @@ __all__ = [
     "export_saved_model",
     "export_tflite",
     "export_onnx",
+    "UncertaintyResult",
+    "UncertaintyEstimator",
     # ── evaluation (Bloco 8) ─────────────────────────────────────────
     "MetricsReport",
     "compute_all_metrics",
     "evaluate_predictions",
     "ComparisonResult",
     "compare_models",
+    "InterfaceReport",
+    "CoherenceReport",
+    "StabilityReport",
+    "interface_metrics",
+    "error_by_resistivity_band",
+    "error_by_anisotropy",
+    "spatial_error_profile",
+    "physical_coherence_check",
+    "stability_analysis",
+    "PredictionResult",
+    "predict_test",
+    "ModeComparisonResult",
+    "compare_modes",
+    "GeoMetrics",
+    "compute_geosteering_metrics",
+    "generate_geosteering_report",
     # ── visualization (Bloco 9) ──────────────────────────────────────
     "plot_holdout_samples",
     "plot_picasso_dod",
     "plot_eda_summary",
     "RealtimeMonitor",
+    "plot_training_history",
+    "plot_lr_schedule",
+    "plot_error_heatmap",
+    "plot_error_by_band",
+    "plot_spatial_error",
+    "export_all_figures",
+    "save_figure",
+    "plot_uncertainty_histograms",
+    "plot_confidence_bands",
+    "plot_calibration_curve",
+    "plot_curtain",
+    "plot_dtb_profile",
+    "plot_geosteering_dashboard",
     # ── utils (Bloco 5 — subset principal) ───────────────────────────
     "get_logger",
     "setup_logger",
