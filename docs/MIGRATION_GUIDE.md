@@ -149,3 +149,70 @@
 | MemoryMonitorCallback | `training/callbacks.py` | BAIXA |
 | LatencyBenchmarkCallback | `training/callbacks.py` | BAIXA |
 | EpochSummaryCallback | `training/callbacks.py` | BAIXA |
+
+### Gaps Remanescentes (identificados na auditoria de 2026-03-26)
+
+#### Noise Catalog (C12 → noise/)
+
+| Recurso Legado | Destino v2.0 | Status |
+|:---------------|:-------------|:------:|
+| NOISE_CATALOG 35 tipos | `noise/catalog.py` (CRIAR) + `noise/functions.py` (EXPANDIR) | FALTA |
+| 9 CORE: varying, gaussian_local/global, speckle, drift, quantization, saturation, depth_dependent, pink | `noise/functions.py` | FALTA (4 de 35 impl.) |
+| 12 EXTENDED: cross_talk, orientation, emi, freq_dependent, noise_floor, proportional, reim_diff, component_diff, gaussian_keras, motion, thermal, spikes | `noise/functions.py` | FALTA |
+| 13 EXPERIMENTAL: dropouts, uniform, arma, fractal, step, mixture, phase_shift, synthetic_geological, poisson, salt_pepper, lognormal, rayleigh, rician, spectral_custom | `noise/functions.py` | FALTA |
+| NOISE_APPLICATION_STAGE | `config.py` noise_application_stage | FALTA (campo) |
+| NOISE_COMBINATION_MODE | `config.py` noise_combination_mode | FALTA (campo) |
+
+#### PINNs (C13 → losses/ + config.py)
+
+| Recurso Legado | Destino v2.0 | Status |
+|:---------------|:-------------|:------:|
+| 15 FLAGS PINNs (cenarios, norms, hard constraint, surrogate) | `config.py` SECAO 18 | FALTA |
+| 3 cenarios L_physics (oracle, surrogate, maxwell) | `losses/pinns.py` (CRIAR) | FALTA |
+| Hard constraint layer (Morales I1) | `models/blocks.py` | FALTA |
+| Lambda schedule 4 metodos (linear, cosine, step, fixed) | `training/callbacks.py` PINNSLambdaScheduleCallback | PARCIAL (so linear) |
+| Custom training loop com GradientTape (maxwell) | `training/loop.py` | FALTA |
+
+#### Geological Parser + DTB (C20 → data/)
+
+| Recurso Legado | Destino v2.0 | Status |
+|:---------------|:-------------|:------:|
+| parse_geological_structure() | `data/boundaries.py` (CRIAR) | FALTA |
+| detect_boundaries() (3 metodos) | `data/boundaries.py` | FALTA |
+| compute_dtb_labels() (3 estrategias, 3 scalings) | `data/boundaries.py` | FALTA |
+
+#### tf.data Optimization (C24 → data/pipeline.py)
+
+| Recurso Legado | Destino v2.0 | Status |
+|:---------------|:-------------|:------:|
+| .prefetch(tf.data.AUTOTUNE) | `data/pipeline.py` build_tf_dataset() | FALTA |
+| .cache() para val/test | `data/pipeline.py` | FALTA |
+| num_parallel_calls=AUTOTUNE no .map() | `data/pipeline.py` | FALTA |
+| Mixed Precision set_global_policy | `training/loop.py` _setup_mixed_precision() | FALTA |
+
+#### EDA + Picasso (C26 → visualization/)
+
+| Recurso Legado | Destino v2.0 | Status |
+|:---------------|:-------------|:------:|
+| plot_feature_distributions() | `visualization/eda.py` | FALTA |
+| plot_correlation_heatmap() | `visualization/eda.py` | FALTA |
+| plot_sample_profiles() | `visualization/eda.py` | FALTA |
+| plot_train_val_test_comparison() | `visualization/eda.py` | FALTA |
+| plot_sensitivity_heatmap() | `visualization/eda.py` | FALTA |
+| compute_picasso_dod() modelo analitico 2-layer | `visualization/picasso.py` | FALTA |
+| Picasso multi-frequencia (A1) | `visualization/picasso.py` | FALTA |
+| Picasso multi-espacamento (A2) | `visualization/picasso.py` | FALTA |
+| Picasso multi-angulo | `visualization/picasso.py` | FALTA |
+| Picasso side-by-side (B2) | `visualization/picasso.py` | FALTA |
+| Picasso assimetria (B3) | `visualization/picasso.py` | FALTA |
+| Export .npy + .json (B4) | `visualization/picasso.py` | FALTA |
+
+#### LR Schedule Helpers (C40 → training/)
+
+| Recurso Legado | Destino v2.0 | Status |
+|:---------------|:-------------|:------:|
+| _make_cosine_schedule() (Loshchilov 2016) | `training/callbacks.py` | FALTA |
+| _make_step_schedule() | `training/callbacks.py` | FALTA |
+| _make_warmup_cosine_schedule() (Vaswani 2017) | `training/callbacks.py` | FALTA |
+| EpochTierCallback (P5 offline tiers) | `training/callbacks.py` | FALTA |
+| GradientMonitorCallback (GradientTape real) | `training/callbacks.py` | FALTA |

@@ -1272,6 +1272,494 @@ geosteering_ai/
 
 ---
 
+---
+
+## 17. Catalogo de Ruido Completo (35 tipos → noise/)
+
+### 17.1 Status Atual vs Requerido
+
+O legado C12 define 35 tipos de ruido. A v2.0 implementou 4.
+Todos os 35 devem ser migrados para `noise/functions.py` ou um novo
+`noise/catalog.py` com registro extensivel.
+
+### 17.2 Estrutura v2.0 para Catalogo
+
+```
+noise/
+├── __init__.py
+├── functions.py       ← implementacoes de cada tipo (numpy + tf)
+├── catalog.py         ← CRIAR: NOISE_CATALOG dict + NoiseFn registry
+└── curriculum.py      ← JA EXISTE
+```
+
+```python
+# noise/catalog.py — Registro extensivel
+NOISE_CATALOG: Dict[str, NoiseSpec] = {
+    "nome": NoiseSpec(
+        enabled=bool, tier="A"|"B"|"C", weight=float,
+        params={...}, apply_fn=Callable, apply_fn_tf=Callable,
+    ),
+}
+```
+
+### 17.3 Catalogo Completo (35 Tipos)
+
+#### CORE (9 tipos — ativados por default, Tier A/B)
+
+| # | Nome | Tier | Formula | Params | Modelo fisico |
+|:-:|:-----|:----:|:--------|:-------|:-------------|
+| 1 | `varying` | A | `x + N(0,1) * U(σ_min, σ_max) * \|x\|` | sigma_min=0.01, sigma_max=0.10 | Heteroscedastico |
+| 2 | `gaussian_local` | A | `x + N(0, pct * \|x\|)` | pct=0.05 | Ruido termico local |
+| 3 | `gaussian_global` | A | `x + N(0, pct * std_global)` | pct=0.05 | Ruido termico global |
+| 4 | `speckle` | A | `x * (1 + N(0, intensity²))` | intensity=0.05 | Gain do amplificador |
+| 5 | `drift` | A | `x + cumsum(N(0, std²)) * phi` | phi=0.95, std=0.01 | Deriva termica AR(1) |
+| 6 | `quantization` | A | `round(x / q) * q` | bits=16 | Discretizacao ADC |
+| 7 | `saturation` | A | `clip(x, -x_max, +x_max)` | clip_pct=99.5 | Range dinamico ADC |
+| 8 | `depth_dependent` | B | `σ(z) = σ_0 * (1 + α*z)` | alpha=0.001, base_sigma=0.03 | Skin depth |
+| 9 | `pink` | B | `FFT → 1/f^α → IFFT` | alpha=1.0, intensity=0.05 | Flicker 1/f |
+
+#### EXTENDED (12 tipos — desativados por default)
+
+| # | Nome | Tier | Params | Modelo fisico |
+|:-:|:-----|:----:|:-------|:-------------|
+| 10 | `cross_talk` | A | epsilon=0.02 | Acoplamento entre antenas |
+| 11 | `orientation` | A | delta_deg=2.0 | Mistura Hxx/Hyy por orientacao |
+| 12 | `emi_noise` | A | fundamental_hz=60, n_harmonics=3, amp=0.01 | EMI 60Hz do rig |
+| 13 | `freq_dependent` | A | alpha=0.5, ref_hz=20000 | Dependencia frequencial |
+| 14 | `noise_floor` | A | floor_value=1e-8 | Piso do receptor (~1e-8 A/m) |
+| 15 | `proportional` | A | level=0.03 | Erro proporcional ~3% LWD |
+| 16 | `reim_diff` | A | imag_factor=1.5 | Im 1.5x mais ruidosa que Re |
+| 17 | `component_diff` | A | factors={Hxx:1.0, Hyy:1.2, Hzz:0.8} | Sensibilidade por componente |
+| 18 | `gaussian_keras` | B | stddev=0.05 | GaussianNoise Keras nativo |
+| 19 | `motion` | B | amplitude=0.02, freq=5, velocity=10 | Vibracao/stick-slip |
+| 20 | `thermal` | B | temperature_k=448, resistance_ohm=50 | Johnson-Nyquist a 175°C |
+| 21 | `spikes` | B | probability=0.001, magnitude=5.0 | Outliers pontuais (5σ) |
+
+#### EXPERIMENTAL (13 tipos — desativados)
+
+| # | Nome | Tier | Params | Modelo fisico |
+|:-:|:-----|:----:|:-------|:-------------|
+| 22 | `dropouts` | B | probability=0.001 | Falha de comunicacao |
+| 23 | `uniform` | B | range=0.05 | Quantizacao simplificada |
+| 24 | `arma` | B | phi=0.8, theta=0.3, std=0.01 | Autocorrelacao temporal |
+| 25 | `fractal` | B | exponent=2.0, intensity=0.05 | Brownian motion 1/f² |
+| 26 | `step` | B | amplitude=0.05, position_frac=0.5 | Recalibracao abrupta |
+| 27 | `mixture` | B | gauss_weight=0.9, sp_weight=0.1 | Gaussiano + salt&pepper |
+| 28 | `phase_shift` | B | max_deg=5.0 | Erro de fase demodulador |
+| 29 | `synthetic_geological` | B | amplitude=0.02, wavelength_m=10 | Tendencia senoidal |
+| 30 | `poisson` | C | gain=1e6 | Shot noise (reservado) |
+| 31 | `salt_pepper` | C | ratio=0.001 | Outliers binarios min/max |
+| 32 | `lognormal` | C | sigma=0.1 | Distribuicao assimetrica |
+| 33 | `rayleigh` | C | scale=0.05 | Envoltoria I/Q gaussiana |
+| 34 | `rician` | C | nu=0.0, sigma=0.05 | Generalizacao Rayleigh |
+| 35 | `spectral_custom` | C | filter_type="lowpass", cutoff_hz=100 | Filtro espectral |
+
+### 17.4 Campos PipelineConfig para Noise (a adicionar)
+
+```python
+# Alem dos existentes (noise_types, noise_weights, noise_level_max, etc.):
+noise_application_stage: str = "raw_em"  # "raw_em" | "post_normalization" | "both"
+noise_combination_mode: str = "sequential"  # "sequential" | "additive" | "random_single"
+noise_seed: int = 42
+```
+
+---
+
+## 18. PINNs Completo (Physics-Informed Neural Networks)
+
+### 18.1 Status e Escopo
+
+L_physics NUNCA foi implementada — nem no legado nem na v2.0.
+O codigo legado C41 contem `L_physics = tf.constant(0.0)` (placeholder).
+A infraestrutura (λ scheduling, config, callback) existe na v2.0.
+A implementacao da logica fisica e trabalho de pesquisa.
+
+### 18.2 Modulos v2.0
+
+```
+losses/
+├── catalog.py     ← JA EXISTE (26 losses incl. morales_hybrid #26)
+├── factory.py     ← JA EXISTE (build_combined com slot para PINNs)
+└── pinns.py       ← CRIAR: 3 cenarios + hard constraint layer
+```
+
+### 18.3 Tres Cenarios de L_physics
+
+```python
+# losses/pinns.py
+
+def oracle_physics_loss(y_pred, h_reference, config):
+    """Cenario Oracle: compara com dados do simulador Fortran.
+
+    L = ||rho_pred - rho_reference||_norm
+    rho_reference vem dos arquivos .dat (ground truth do forward problem).
+    Mais estavel, lambda recomendado: 0.01-0.1.
+    """
+
+def surrogate_physics_loss(y_pred, surrogate_model, x_input, config):
+    """Cenario Surrogate: rede neural forward (rho → H_EM).
+
+    L = ||H_measured - H_surrogate(rho_pred)||_norm
+    Requer pre-treino do surrogate_model: rho → campo EM.
+    End-to-end diferenciavel. Lambda: 0.1-0.5.
+    """
+
+def maxwell_physics_loss(y_pred, x_input, config):
+    """Cenario Maxwell: residuo PDE via GradientTape.
+
+    L = ||nabla²E + k²E||_norm  (equacao de Helmholtz)
+    Requer tf.GradientTape para derivadas de 2a ordem.
+    Alto custo computacional. Lambda: 0.001-0.01.
+    """
+
+def hard_constraint_layer(x, activation="softplus"):
+    """Camada de saida que garante rho > 0 (Morales I1).
+
+    Ativacoes: softplus (recomendada), relu, sigmoid, exponential.
+    """
+```
+
+### 18.4 Lambda Schedule (4 metodos)
+
+```python
+def compute_pinns_lambda(epoch, config):
+    """Schedule de lambda: 0 → target ao longo do warmup+ramp.
+
+    Metodos (config.pinns_lambda_schedule):
+      "linear": frac = (epoch - warmup) / ramp
+      "cosine": frac = 0.5 * (1 - cos(pi * progress))  ← Morales I2
+      "step":   frac = 0 se progress < 0.5 senao 1
+      "fixed":  frac = 1 (sem rampa, salta apos warmup)
+    """
+```
+
+### 18.5 Campos PipelineConfig para PINNs (15 campos a adicionar)
+
+```python
+# SECAO 18: PINNS (Physics-Informed Neural Networks)
+# 3 cenarios: oracle (Fortran ref), surrogate (neural forward),
+# maxwell (PDE Helmholtz via GradientTape).
+# Morales et al. (2025): hard constraint, lambda schedule,
+# norms hibridas, per-scenario calibration, forward surrogate.
+
+# Base (5 campos)
+pinns_scenario: str = "oracle"           # "oracle" | "surrogate" | "maxwell"
+pinns_warmup_epochs: int = 10            # epocas com lambda=0
+pinns_ramp_epochs: int = 20              # epocas de rampa 0→lambda
+pinns_lambda_schedule: str = "linear"    # "linear" | "cosine" | "step" | "fixed"
+
+# Morales (9 campos)
+pinns_hard_constraint: bool = False      # camada de saida rho > 0
+pinns_constraint_activation: str = "softplus"  # ativacao do hard constraint
+pinns_physics_norm: str = "l2"           # norma da L_physics: "l1" | "l2" | "huber"
+pinns_data_norm: str = "l2"              # norma da L_data com PINNs ativo
+pinns_lambda_per_scenario: Optional[Dict[str, float]] = None  # {scenario: lambda}
+pinns_use_forward_surrogate: bool = False  # auto-ativa surrogate se modelo existe
+surrogate_model_path: str = ""           # path do surrogate (.keras ou SavedModel)
+
+# Realtime (2 campos)
+use_pinns_realtime_constraint: bool = False  # soft-constraint em inferencia
+pinns_realtime_weight: float = 0.1           # peso do constraint realtime
+
+# Experimental (1 campo)
+use_petrophysical_inversion: bool = False    # Klein TI equations (pos-DL)
+```
+
+---
+
+## 19. Geological Model Parser + DTB Labels (data/)
+
+### 19.1 Modulos v2.0
+
+```
+data/
+├── loading.py      ← JA EXISTE (parse .out, load .dat, decoupling)
+├── boundaries.py   ← CRIAR: detect_boundaries + compute_dtb_labels
+└── pipeline.py     ← JA EXISTE (DataPipeline)
+```
+
+### 19.2 Funcoes a Implementar
+
+```python
+# data/boundaries.py
+
+def parse_geological_structure(
+    rho_profiles: np.ndarray, z_obs: np.ndarray,
+    config: PipelineConfig, *, threshold: float = 0.5,
+) -> dict:
+    """Reconstroi estrutura de camadas a partir de perfis rho em log10.
+
+    Retorna: {"n_models": int, "models": [{"n_layers": int,
+              "layers": [{"depth_top", "depth_bottom", "rho_h_mean", "rho_v_mean"}],
+              "boundary_depths": np.ndarray}]}
+    """
+
+def detect_boundaries(
+    y_true: np.ndarray, config: PipelineConfig, *,
+    method: str = "gradient", threshold: float = 0.5,
+    window_size: int = 10,
+) -> list:
+    """Detecta interfaces entre camadas geologicas.
+
+    Input: (n_models, n_meas, 2) em log10.
+    Output: lista de n_models arrays com indices das boundaries.
+
+    Metodos:
+      "gradient":       |Delta_log10(rho)/Delta_z| > threshold
+      "edge_detection": Sobel 1D kernel [-1, 0, +1] + threshold
+      "change_point":   Razao de variancia windowed + NMS
+    """
+
+def compute_dtb_labels(
+    y_true: np.ndarray, boundaries: list, z_obs: np.ndarray,
+    config: PipelineConfig, *,
+    strategy: str = "nearest_interface",
+    dtb_max: float = 30.0,
+    dtb_scaling: str = "linear",
+) -> np.ndarray:
+    """Calcula DTB (Distance-to-Boundary) labels.
+
+    Output: (n_models, n_meas, 2) com [DTB_up, DTB_down].
+    DTB_up: distancia para boundary acima (z menor).
+    DTB_down: distancia para boundary abaixo (z maior).
+
+    Estrategias:
+      "nearest_interface":       min(|z - z_boundary|) por direcao
+      "deepest_interface":       distancia para boundary mais profunda
+      "first_major_transition":  distancia para 1a transicao forte (|Delta_rho| > 2*threshold)
+
+    Scaling: "linear" | "log" (log1p) | "normalized" (DTB/dtb_max → [0,1])
+    """
+```
+
+---
+
+## 20. tf.data Pipeline Optimization (data/pipeline.py)
+
+### 20.1 Estado Atual
+
+`DataPipeline.prepare()` retorna `PreparedData` com arrays numpy.
+A construcao do `tf.data.Dataset` com `.map()`, `.batch()`, `.prefetch()`
+deve ser adicionada ao pipeline ou ao `TrainingLoop`.
+
+### 20.2 Funcoes a Implementar/Expandir
+
+```python
+# data/pipeline.py — expandir DataPipeline
+
+def build_tf_dataset(
+    self, prepared: PreparedData, split: str = "train",
+    noise_level_var=None,
+) -> "tf.data.Dataset":
+    """Constroi tf.data.Dataset otimizado a partir de PreparedData.
+
+    Otimizacoes obrigatorias:
+      1. tf.data.Dataset.from_tensor_slices() para criar dataset
+      2. .shuffle(buffer_size) para train (buffer = min(n_samples, 10000))
+      3. .batch(config.batch_size)
+      4. .map(train_map_fn, num_parallel_calls=tf.data.AUTOTUNE) para train
+      5. .cache() para val e test (dados estaticos, sem noise on-the-fly)
+      6. .prefetch(tf.data.AUTOTUNE) para TODOS os splits
+
+    Pipeline resultante:
+      train: from_slices → shuffle → batch → map(noise+FV+GS+scale) → prefetch
+      val:   from_slices → batch → map(FV+GS+scale) → cache → prefetch
+      test:  from_slices → batch → cache → prefetch (ja preprocessado)
+    """
+```
+
+### 20.3 Mixed Precision Setup Completo
+
+```python
+# training/loop.py — expandir TrainingLoop.compile()
+
+def _setup_mixed_precision(self):
+    """Configura Mixed Precision ANTES de build_model().
+
+    1. tf.keras.mixed_precision.set_global_policy("mixed_float16")
+    2. Todas as layers computam em float16
+    3. Optimizer wrappado com LossScaleOptimizer (ja existe)
+    4. Master weights permanecem float32
+    5. Ganho estimado: 30-50% em V100/A100, 20% em T4/L4
+    """
+```
+
+---
+
+## 21. EDA + Picasso Completo (visualization/)
+
+### 21.1 Modulos v2.0
+
+```
+visualization/
+├── eda.py           ← EXPANDIR: +5 funcoes EDA detalhadas
+├── picasso.py       ← EXPANDIR: +7 variantes Picasso + modelo analitico 2-layer
+├── holdout.py       ← JA EXISTE
+└── ...
+```
+
+### 21.2 EDA — 6 Funcoes (5 a adicionar)
+
+```python
+# visualization/eda.py — expandir
+
+def plot_feature_distributions(x_train, x_val, x_test, *,
+    feature_names=None, save_path=None, dpi=150):
+    """Histogramas com KDE overlay por feature, 3 splits sobrepostos."""
+
+def plot_correlation_heatmap(data, *, feature_names=None,
+    method="pearson", threshold=0.5, save_path=None, dpi=150):
+    """Heatmap de correlacao com anotacoes numericas."""
+
+def plot_sample_profiles(data, z_obs, *, n_samples=3,
+    save_path=None, dpi=150):
+    """Perfis de componentes EM vs profundidade (exemplos)."""
+
+def plot_train_val_test_comparison(x_train, x_val, x_test,
+    y_train, y_val, y_test, *, save_path=None, dpi=150):
+    """Box plots comparando distribuicoes entre splits (detecta leakage)."""
+
+def plot_sensitivity_heatmap(sensitivities, *, feature_names=None,
+    layer_depths=None, save_path=None, dpi=150):
+    """Heatmap features × profundidade (variancia/gradiente por posicao)."""
+```
+
+### 21.3 Picasso — Modelo Analitico 2-Layer + 8 Variantes
+
+```python
+# visualization/picasso.py — expandir
+
+def compute_picasso_dod(rho_1_range, rho_2_range, *,
+    frequency_hz=20000.0, spacing_m=1.0,
+    geosignal_name="UHRA", threshold=0.25,
+    theta_deg=0.0, dtb_max=40.0, n_dtb=200,
+    config=None) -> np.ndarray:
+    """Modelo analitico 2-layer para DOD (Depth of Detection).
+
+    Calcula resposta EM homogenea (dipolo magnetico):
+      k = sqrt(i * omega * mu * sigma)
+      ZZ: fator geometrico ∝ (kL)²
+      XX: fator geometrico ∝ (kL)²/2
+
+    Mixing Born-like com decay diferencial:
+      f_zz = exp(-2 * DTB_proj / delta_1)
+      f_xx = exp(-2 * DTB_proj / (delta_1 * 0.65))
+      H_mix = H_r1 * (1-f) + H_r2 * f
+
+    Projecao angular (v5.0.15+):
+      DTB_normal = DTB / sin(theta)
+      SIN_MIN_GUARD = 0.0175 (sin(1°))
+
+    DOD = max DTB onde |Delta_geosignal| > threshold
+    """
+
+def plot_picasso_diagram(rho_1_range, rho_2_range, dod_matrix, *,
+    geosignal_name="UHRA", threshold=0.25,
+    frequency_hz=None, spacing_m=None, theta_deg=0.0,
+    show_diagonal=True, contour_labels=True,
+    save_path=None, dpi=150, ax=None):
+    """Plot Picasso com diagonal R1=R2 (A3), contour labels (A4),
+    titulo parametrizado (A5)."""
+
+def plot_picasso_multifreq(rho_range, *,
+    frequencies=(2000, 5000, 20000, 96000),
+    config=None, save_path=None, dpi=150):
+    """Variante A1: sweep multi-frequencia."""
+
+def plot_picasso_multispacing(rho_range, *,
+    spacings=(0.5, 1.0, 2.0, 3.3),
+    config=None, save_path=None, dpi=150):
+    """Variante A2: sweep multi-espacamento."""
+
+def plot_picasso_multiangle(rho_range, *,
+    angles=(0, 15, 30, 45, 60, 75, 89),
+    config=None, save_path=None, dpi=150):
+    """Sweep multi-angulo com projecao DTB/sin(theta)."""
+
+def plot_picasso_comparison(rho_range, dod_matrices, *,
+    geosignal_names=None, save_path=None, dpi=150):
+    """Variante B2: side-by-side de multiplos geosinais."""
+
+def compute_dod_asymmetry(dod_matrix, rho_1_range, rho_2_range):
+    """Variante B3: assimetria DOD(R1>R2) vs DOD(R1<R2)."""
+
+def export_dod_data(dod_matrix, rho_1_range, rho_2_range, *,
+    geosignal_name, threshold, frequency_hz, spacing_m,
+    theta_deg, export_dir):
+    """Variante B4: export .npy + .json com metadata completa."""
+```
+
+---
+
+## 22. Callbacks LR Schedule Helpers (training/)
+
+### 22.1 Funcoes a Adicionar
+
+```python
+# training/callbacks.py — adicionar helpers de LR schedule
+
+def make_cosine_schedule(lr_initial, lr_min, total_epochs):
+    """Cosine annealing (Loshchilov & Hutter 2016).
+
+    LR(t) = lr_min + 0.5 * (lr_0 - lr_min) * (1 + cos(pi * t / T))
+    Retorna callable: epoch -> learning_rate.
+    """
+
+def make_step_schedule(lr_initial, factor=0.1, step_size=50, lr_min=1e-7):
+    """Step decay: LR = max(lr_min, lr_initial * factor^(epoch // step_size)).
+
+    Retorna callable: epoch -> learning_rate.
+    """
+
+def make_warmup_cosine_schedule(lr_initial, lr_min, total_epochs,
+    warmup_epochs=10):
+    """Warmup linear + cosine decay (Vaswani 2017 / Goyal 2017).
+
+    Fase 1 (warmup): LR cresce linearmente de lr_min a lr_initial.
+    Fase 2 (cosine): LR decai de lr_initial a lr_min.
+    Retorna callable: epoch -> learning_rate.
+    """
+```
+
+---
+
+## 23. Resumo de Contagens Atualizado
+
+| Componente | Atual | Apos Completar | Delta |
+|:-----------|:-----:|:--------------:|:-----:|
+| Arquivos .py | 67 | ~75 | +8 |
+| Linhas de codigo | 32.567 | ~40.000 | +7.400 |
+| PipelineConfig campos | 121 | ~140 | +19 |
+| Tipos de ruido | 4 | 35 | +31 |
+| Funcoes EDA | 1 | 6 | +5 |
+| Variantes Picasso | 1 | 8 | +7 |
+| LR schedule helpers | 0 | 3 | +3 |
+| Cenarios PINNs | 0 (placeholder) | 3 | +3 |
+| DTB funcoes | 0 | 3 | +3 |
+| tf.data optimizado | nao | sim | GPU |
+| Mixed Precision setup | parcial | completo | GPU |
+
+---
+
+## 24. Plano de Implementacao por Prioridade
+
+| Fase | Componente | Modulos | Estimativa |
+|:----:|:-----------|:--------|:-----------|
+| **I** | tf.data optimization + Mixed Precision | pipeline.py, loop.py | ~300 linhas |
+| **II** | Noise catalog (35 tipos) | noise/catalog.py, noise/functions.py | ~2.000 linhas |
+| **III** | DTB + Geological parser | data/boundaries.py | ~600 linhas |
+| **IV** | EDA avancado (5 funcoes) | visualization/eda.py | ~500 linhas |
+| **V** | Picasso completo (7 variantes + modelo 2-layer) | visualization/picasso.py | ~1.200 linhas |
+| **VI** | LR schedule helpers (3 funcoes) | training/callbacks.py | ~150 linhas |
+| **VII** | PINNs FLAGS (15 campos config) | config.py | ~100 linhas |
+| **VIII** | PINNs cenarios (oracle/surrogate/maxwell) | losses/pinns.py | ~800 linhas |
+| **IX** | PINNs custom training loop (GradientTape) | training/loop.py | ~500 linhas |
+| **X** | PINNs hard constraint layer | models/blocks.py | ~100 linhas |
+
+**Total estimado: ~6.250 linhas adicionais**
+
+---
+
 *Documento atualizado em 2026-03-26 | Geosteering AI v2.0*
 *Autor: Daniel Leal | Assistente: Claude Code*
 *Repositorio: github.com/daniel-leal/geosteering-ai*
