@@ -43,69 +43,30 @@ Referencia: docs/ARCHITECTURE_v2.md secao 9.
 """
 
 # ──────────────────────────────────────────────────────────────────────
-# Imports: holdout.py — comparacao true vs predicted
+# Imports: eda.py — analise exploratoria de dados (sumario + 5 avancados)
 # ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.visualization.holdout import plot_holdout_samples
-
-# ──────────────────────────────────────────────────────────────────────
-# Imports: picasso.py — mapas Picasso DOD
-# ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.visualization.picasso import plot_picasso_dod
-
-# ──────────────────────────────────────────────────────────────────────
-# Imports: eda.py — analise exploratoria de dados
-# ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.visualization.eda import plot_eda_summary
-
-# ──────────────────────────────────────────────────────────────────────
-# Imports: realtime.py — monitoramento ao vivo
-# ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.visualization.realtime import RealtimeMonitor
-
-# ──────────────────────────────────────────────────────────────────────
-# Imports: training.py — curvas de treinamento (C59)
-# ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.visualization.training import (
-    plot_training_history,
-    plot_lr_schedule,
+from geosteering_ai.visualization.eda import (
+    plot_correlation_heatmap,
+    plot_eda_summary,
+    plot_feature_distributions,
+    plot_sample_profiles,
+    plot_sensitivity_heatmap,
+    plot_train_val_test_comparison,
 )
 
 # ──────────────────────────────────────────────────────────────────────
 # Imports: error_maps.py — heatmap, barras por banda, perfil espacial
 # ──────────────────────────────────────────────────────────────────────
 from geosteering_ai.visualization.error_maps import (
-    plot_error_heatmap,
     plot_error_by_band,
+    plot_error_heatmap,
     plot_spatial_error,
 )
 
 # ──────────────────────────────────────────────────────────────────────
 # Imports: export.py — batch export de figuras
 # ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.visualization.export import (
-    export_all_figures,
-    save_figure,
-)
-
-# ──────────────────────────────────────────────────────────────────────
-# Imports: uncertainty.py — visualizacao de incerteza (histogramas, CI, calibracao)
-# ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.visualization.uncertainty import (
-    plot_uncertainty_histograms,
-    plot_confidence_bands,
-    plot_calibration_curve,
-)
-
-# ──────────────────────────────────────────────────────────────────────
-# Imports: optuna_viz.py — visualizacoes Optuna (C62)
-# ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.visualization.optuna_viz import (
-    plot_optuna_results,
-    plot_optimization_history,
-    plot_param_importances,
-    plot_contour,
-    plot_parallel_coordinate,
-)
+from geosteering_ai.visualization.export import export_all_figures, save_figure
 
 # ──────────────────────────────────────────────────────────────────────
 # Imports: geosteering.py — curtain, DTB, dashboard (C72)
@@ -117,15 +78,64 @@ from geosteering_ai.visualization.geosteering import (
 )
 
 # ──────────────────────────────────────────────────────────────────────
+# Imports: holdout.py — comparacao true vs predicted
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.visualization.holdout import (
+    plot_holdout_clean_noisy,
+    plot_holdout_samples,
+)
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: optuna_viz.py — visualizacoes Optuna (C62)
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.visualization.optuna_viz import (
+    plot_contour,
+    plot_optimization_history,
+    plot_optuna_results,
+    plot_parallel_coordinate,
+    plot_param_importances,
+)
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: picasso.py — mapas Picasso DOD
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.visualization.picasso import plot_picasso_dod
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: realtime.py — monitoramento ao vivo
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.visualization.realtime import RealtimeMonitor
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: training.py — curvas de treinamento (C59)
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.visualization.training import plot_lr_schedule, plot_training_history
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: uncertainty.py — visualizacao de incerteza (histogramas, CI, calibracao)
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.visualization.uncertainty import (
+    plot_calibration_curve,
+    plot_confidence_bands,
+    plot_uncertainty_histograms,
+)
+
+# ──────────────────────────────────────────────────────────────────────
 # D8: Exports publicos — agrupados semanticamente por modulo
 # ──────────────────────────────────────────────────────────────────────
 __all__ = [
-    # --- holdout.py: comparacao true vs predicted ---
+    # --- holdout.py: comparacao true vs predicted + clean vs noisy ---
     "plot_holdout_samples",
+    "plot_holdout_clean_noisy",
     # --- picasso.py: mapas Picasso DOD ---
     "plot_picasso_dod",
-    # --- eda.py: analise exploratoria ---
+    # --- eda.py: analise exploratoria (sumario + 5 avancados) ---
     "plot_eda_summary",
+    "plot_feature_distributions",
+    "plot_correlation_heatmap",
+    "plot_sample_profiles",
+    "plot_train_val_test_comparison",
+    "plot_sensitivity_heatmap",
     # --- realtime.py: monitoramento ao vivo ---
     "RealtimeMonitor",
     # --- training.py: curvas de treinamento (C59) ---

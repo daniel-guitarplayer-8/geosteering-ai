@@ -86,9 +86,9 @@ except ImportError as _e:  # pragma: no cover
 # ──────────────────────────────────────────────────────────────────────
 try:
     from geosteering_ai.noise import (
+        CurriculumSchedule,
         apply_noise_tf,
         apply_raw_em_noise,
-        CurriculumSchedule,
         create_noise_level_var,
     )
 except ImportError as _e:  # pragma: no cover
@@ -124,10 +124,10 @@ except ImportError as _e:  # pragma: no cover
 # ──────────────────────────────────────────────────────────────────────
 try:
     from geosteering_ai.losses import (
+        VALID_LOSS_TYPES,
         LossFactory,
         build_loss_fn,
         list_available_losses,
-        VALID_LOSS_TYPES,
     )
 except ImportError as _e:  # pragma: no cover
     _logger.debug("losses subpackage nao disponivel: %s", _e)
@@ -142,10 +142,12 @@ except ImportError as _e:  # pragma: no cover
 # ──────────────────────────────────────────────────────────────────────
 try:
     from geosteering_ai.training import (
+        GradientMonitor,
+        NStageResult,
+        NStageTrainer,
         TrainingLoop,
         TrainingResult,
-        NStageTrainer,
-        NStageResult,
+        add_gradient_monitor,
         build_callbacks,
         build_metrics,
     )
@@ -157,6 +159,8 @@ except ImportError as _e:  # pragma: no cover
     NStageResult = None  # type: ignore[assignment, misc]
     build_callbacks = None  # type: ignore[assignment]
     build_metrics = None  # type: ignore[assignment]
+    GradientMonitor = None  # type: ignore[assignment, misc]
+    add_gradient_monitor = None  # type: ignore[assignment]
 
 # ──────────────────────────────────────────────────────────────────────
 # Bloco 7: inference — InferencePipeline, RealtimeInference, export
@@ -166,11 +170,11 @@ try:
     from geosteering_ai.inference import (
         InferencePipeline,
         RealtimeInference,
+        UncertaintyEstimator,
+        UncertaintyResult,
+        export_onnx,
         export_saved_model,
         export_tflite,
-        export_onnx,
-        UncertaintyResult,
-        UncertaintyEstimator,
     )
 except ImportError as _e:  # pragma: no cover
     _logger.debug("inference subpackage nao disponivel: %s", _e)
@@ -188,27 +192,27 @@ except ImportError as _e:  # pragma: no cover
 # ──────────────────────────────────────────────────────────────────────
 try:
     from geosteering_ai.evaluation import (
-        MetricsReport,
-        compute_all_metrics,
-        evaluate_predictions,
-        ComparisonResult,
-        compare_models,
-        InterfaceReport,
         CoherenceReport,
-        StabilityReport,
-        interface_metrics,
-        error_by_resistivity_band,
-        error_by_anisotropy,
-        spatial_error_profile,
-        physical_coherence_check,
-        stability_analysis,
-        PredictionResult,
-        predict_test,
-        ModeComparisonResult,
-        compare_modes,
+        ComparisonResult,
         GeoMetrics,
+        InterfaceReport,
+        MetricsReport,
+        ModeComparisonResult,
+        PredictionResult,
+        StabilityReport,
+        compare_models,
+        compare_modes,
+        compute_all_metrics,
         compute_geosteering_metrics,
+        error_by_anisotropy,
+        error_by_resistivity_band,
+        evaluate_predictions,
         generate_geosteering_report,
+        interface_metrics,
+        physical_coherence_check,
+        predict_test,
+        spatial_error_profile,
+        stability_analysis,
     )
 except ImportError as _e:  # pragma: no cover
     _logger.debug("evaluation subpackage nao disponivel: %s", _e)
@@ -240,23 +244,23 @@ except ImportError as _e:  # pragma: no cover
 # ──────────────────────────────────────────────────────────────────────
 try:
     from geosteering_ai.visualization import (
-        plot_holdout_samples,
-        plot_picasso_dod,
-        plot_eda_summary,
         RealtimeMonitor,
-        plot_training_history,
-        plot_lr_schedule,
-        plot_error_heatmap,
-        plot_error_by_band,
-        plot_spatial_error,
         export_all_figures,
-        save_figure,
-        plot_uncertainty_histograms,
-        plot_confidence_bands,
         plot_calibration_curve,
+        plot_confidence_bands,
         plot_curtain,
         plot_dtb_profile,
+        plot_eda_summary,
+        plot_error_by_band,
+        plot_error_heatmap,
         plot_geosteering_dashboard,
+        plot_holdout_samples,
+        plot_lr_schedule,
+        plot_picasso_dod,
+        plot_spatial_error,
+        plot_training_history,
+        plot_uncertainty_histograms,
+        save_figure,
     )
 except ImportError as _e:  # pragma: no cover
     _logger.debug("visualization subpackage nao disponivel: %s", _e)
@@ -283,7 +287,7 @@ except ImportError as _e:  # pragma: no cover
 #   Dependencia: stdlib apenas (sem TF)
 # ──────────────────────────────────────────────────────────────────────
 try:
-    from geosteering_ai.utils import get_logger, setup_logger, set_all_seeds
+    from geosteering_ai.utils import get_logger, set_all_seeds, setup_logger
 except ImportError as _e:  # pragma: no cover
     _logger.debug("utils subpackage nao disponivel: %s", _e)
     get_logger = None  # type: ignore[assignment]
@@ -326,6 +330,8 @@ __all__ = [
     "NStageResult",
     "build_callbacks",
     "build_metrics",
+    "GradientMonitor",
+    "add_gradient_monitor",
     # ── inference (Bloco 7) ──────────────────────────────────────────
     "InferencePipeline",
     "RealtimeInference",

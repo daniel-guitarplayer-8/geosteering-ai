@@ -146,6 +146,34 @@ class PipelineConfig:
     global_seed: int = 42
 
     # ══════════════════════════════════════════════════════════════════
+    # SECAO 2B: PERSPECTIVAS P2/P3 — Angulo e Frequencia como Features
+    # Theta (angulo de inclinacao) e frequencia da ferramenta LWD
+    # injetados como colunas PREFIXO no array de features. Nao existem
+    # no .dat (22-col) — vem do header (.out) e sao broadcast por seq.
+    #   theta_norm = theta/90.0 → [0.0, 1.0]
+    #   f_norm = log10(freq) → [3.3, 5.6] para 2kHz-400kHz
+    # Layout resultante:
+    #   P1:    [z, Re(H1), Im(H1), Re(H2), Im(H2)]       → 5 feat
+    #   P2:    [theta_norm, z, H1, H2]                     → 6 feat
+    #   P3:    [f_norm, z, H1, H2]                         → 6 feat
+    #   P2+P3: [theta_norm, f_norm, z, H1, H2]            → 7 feat
+    # Ref: docs/physics/perspectivas.md secoes P2, P3.
+    # Nota: theta e freq sao PROTEGIDOS do noise (parametros conhecidos,
+    #        nao medidos pelo sensor EM).
+    # ══════════════════════════════════════════════════════════════════
+    use_theta_as_feature: bool = False
+    use_freq_as_feature: bool = False
+    freq_normalization: str = "log10"
+    # ── Modo de injecao de variaveis estaticas (theta, freq) ──────────
+    # "broadcast"  → Abordagem A: colunas repetidas no array (default)
+    # "dual_input" → Abordagem B: escalares separados + broadcast no modelo
+    # "film"       → Abordagem C: FiLM conditioning (modulacao γ×h+β)
+    # Ref: Perez et al. (2018) "FiLM: Visual Reasoning with Conditioning"
+    # Nota: "film" restrito a arquiteturas compativeis (CNN, TCN, Transformer,
+    #        Geosteering, Hybrid). Incompativeis: N-BEATS, N-HiTS, FNO, DeepONet.
+    static_injection_mode: str = "broadcast"
+
+    # ══════════════════════════════════════════════════════════════════
     # SECAO 3: FEATURE VIEWS E GEOSINAIS
     # Feature Views (FV) transformam componentes EM brutos em
     # representacoes mais informativas (log, razao, etc.).
@@ -252,8 +280,38 @@ class PipelineConfig:
     use_gradient_clipping: bool = True
     gradient_clip_norm: float = 1.0
     use_mixed_precision: bool = False
+    # ── XLA (Accelerated Linear Algebra) ───────────────────────────────
+    # Habilita compilacao JIT via jit_compile=True no model.compile().
+    # XLA funde operacoes elementares (Conv+BN+ReLU) em kernels GPU
+    # unicos, eliminando alocacoes intermediarias de VRAM e reduzindo
+    # overhead de kernel launch. Ganho tipico: 20-40% em throughput
+    # para modelos com muitas operacoes elementares (ResNets, Transformers).
+    # Default False (opt-in): nem todas as operacoes TF suportam XLA
+    # (ex: tf.py_function, custom ops). Se uma op nao-suportada for
+    # encontrada, TF gera erro de compilacao em tempo de build.
+    # Recomendado para: ResNet-18, ConvNeXt, Transformer, PatchTST.
+    # NAO recomendado para: modelos com tf.py_function ou ops dinamicas.
+    # Ref: XLA overview (tensorflow.org/xla) — fusao de ops, eliminacao
+    #   de materialization, otimizacao de layout de memoria.
+    # Ref: Sabne (2020) "XLA: Compiling Machine Learning for Peak
+    #   Performance" — benchmarks em GPUs V100/A100.
+    # Nota: v2.0.1 (2026-03 — GPU completeness, opt-in)
+    use_xla: bool = False
     use_tensorboard: bool = True
     use_csv_logger: bool = True
+    # ── GradientMonitor — monitoramento de gradientes reais via GradientTape
+    # Habilita o GradientMonitor callback que computa normas de gradiente
+    # reais (nao normas de pesos) via tf.GradientTape em um batch de amostra.
+    # Util para diagnosticar gradient explosion (norma > threshold) ou
+    # gradient vanishing (norma < threshold) durante o treinamento.
+    # gradient_monitor_freq: frequencia de amostragem (a cada N epocas).
+    # Manter freq >= 5 para evitar overhead significativo de GradientTape.
+    # Ref: Goodfellow et al. (2016) Deep Learning — secao 8.2.5.
+    # Nota: v2.0.2 (2026-03 — Fase E, GAP 7 corrigido)
+    use_gradient_monitor: bool = False
+    gradient_monitor_freq: int = 5
+    gradient_explosion_threshold: float = 100.0
+    gradient_vanishing_threshold: float = 1e-7
 
     # ══════════════════════════════════════════════════════════════════
     # SECAO 10: N-STAGE TRAINING
@@ -435,61 +493,142 @@ class PipelineConfig:
             Mutual exclusivity: use_nstage e use_curriculum (NUNCA ambos True).
         """
         # ── Errata v4.4.5 (valores fisicos imutaveis) ────────────────
-        assert self.frequency_hz == 20000.0, \
-            "Errata v4.4.5: FREQUENCY_HZ DEVE ser 20000.0 (NUNCA 2.0)"
-        assert self.spacing_meters == 1.0, \
-            "Errata v4.4.5: SPACING_METERS DEVE ser 1.0 (NUNCA 1000.0)"
-        assert self.sequence_length == 600, \
-            "SEQUENCE_LENGTH DEVE ser 600 (NUNCA 601)"
-        assert self.target_scaling == "log10", \
-            "TARGET_SCALING DEVE ser 'log10' (NUNCA 'log')"
+        assert (
+            self.frequency_hz == 20000.0
+        ), "Errata v4.4.5: FREQUENCY_HZ DEVE ser 20000.0 (NUNCA 2.0)"
+        assert (
+            self.spacing_meters == 1.0
+        ), "Errata v4.4.5: SPACING_METERS DEVE ser 1.0 (NUNCA 1000.0)"
+        assert self.sequence_length == 600, "SEQUENCE_LENGTH DEVE ser 600 (NUNCA 601)"
+        assert (
+            self.target_scaling == "log10"
+        ), "TARGET_SCALING DEVE ser 'log10' (NUNCA 'log')"
 
         # ── Errata v5.0.15 (mapeamento 22-col) ──────────────────────
-        assert self.input_features == [1, 4, 5, 20, 21], \
-            "INPUT_FEATURES 22-col: [1,4,5,20,21] (NUNCA [0,3,4,7,8])"
-        assert self.output_targets == [2, 3], \
-            "OUTPUT_TARGETS 22-col: [2,3] (NUNCA [1,2])"
-        assert set(self.input_features) & set(self.output_targets) == set(), \
-            "Features e targets NAO podem ter overlap"
+        # Validacao semantica: baseline [1,4,5,20,21] OBRIGATORIO como
+        # subconjunto. Features adicionais (Hxy, Hxz, etc.) permitidas.
+        # Indices do formato antigo 9-col (0,3,7,8) PROIBIDOS.
+        # Ref: docs/physics/errata_valores.md, CLAUDE.md.
+        #
+        #   ┌──────────────────────────────────────────────────────────┐
+        #   │  BASELINE OBRIGATORIO (z_obs + Hxx + Hzz):             │
+        #   │    col 1  = z_obs (profundidade)                        │
+        #   │    col 4,5 = Re(Hxx), Im(Hxx) (planar)                │
+        #   │    col 20,21 = Re(Hzz), Im(Hzz) (axial)               │
+        #   │                                                          │
+        #   │  EXTENSOES PERMITIDAS (off-diagonal do tensor H):       │
+        #   │    col 6,7 = Hxy   col 8,9 = Hxz   col 10,11 = Hyx   │
+        #   │    col 12,13 = Hyy  col 14,15 = Hyz  col 16,17 = Hzx  │
+        #   │    col 18,19 = Hzy                                      │
+        #   │                                                          │
+        #   │  PROIBIDO:                                               │
+        #   │    col 0 = meds (contador de metadata, NUNCA feature)   │
+        #   │                                                          │
+        #   │  O formato antigo 9-col [0,3,4,7,8] eh rejeitado por: │
+        #   │    - col 0 proibida (metadata)                           │
+        #   │    - col 3 overlap com targets [2,3]                    │
+        #   │    - baseline {1,4,5,20,21} obrigatorio como subconjunto│
+        #   └──────────────────────────────────────────────────────────┘
+        _BASELINE_REQUIRED = {1, 4, 5, 20, 21}
+        _FORBIDDEN_METADATA = {0}  # col 0 = meds (contador, NUNCA feature)
+        _input_set = set(self.input_features)
+
+        _meta_found = _input_set & _FORBIDDEN_METADATA
+        assert not _meta_found, (
+            f"INPUT_FEATURES contem indice de metadata (col 0 = meds): "
+            f"formato antigo 9-col detectado. Use formato 22-col com baseline "
+            f"[1,4,5,20,21]"
+        )
+
+        _missing_baseline = _BASELINE_REQUIRED - _input_set
+        assert not _missing_baseline, (
+            f"INPUT_FEATURES deve conter baseline {{1,4,5,20,21}} como subconjunto. "
+            f"Faltando: {sorted(_missing_baseline)}"
+        )
+
+        assert all(0 <= i < self.n_columns for i in self.input_features), (
+            f"INPUT_FEATURES indices devem estar no range [0, {self.n_columns}). "
+            f"Recebido: {self.input_features}"
+        )
+
+        assert self.output_targets == [2, 3], "OUTPUT_TARGETS 22-col: [2,3] (NUNCA [1,2])"
+        assert _input_set & set(self.output_targets) == set(), (
+            f"Features e targets NAO podem ter overlap. "
+            f"Overlap: {sorted(_input_set & set(self.output_targets))}"
+        )
 
         # ── Mutual exclusivity ───────────────────────────────────────
         if self.use_nstage:
-            assert not self.use_curriculum, \
-                "N-Stage e Curriculum sao mutuamente exclusivos. " \
+            assert not self.use_curriculum, (
+                "N-Stage e Curriculum sao mutuamente exclusivos. "
                 "Use use_nstage=True OU use_curriculum=True, nao ambos."
+            )
 
         # ── Ranges ───────────────────────────────────────────────────
-        assert 0.0 <= self.noise_level_max <= 1.0, \
-            f"noise_level_max deve estar em [0, 1], recebido: {self.noise_level_max}"
+        assert (
+            0.0 <= self.noise_level_max <= 1.0
+        ), f"noise_level_max deve estar em [0, 1], recebido: {self.noise_level_max}"
         assert self.batch_size > 0, "batch_size deve ser > 0"
         assert self.learning_rate > 0, "learning_rate deve ser > 0"
         assert self.epochs > 0, "epochs deve ser > 0"
-        assert len(self.noise_types) == len(self.noise_weights), \
-            "noise_types e noise_weights devem ter o mesmo tamanho"
+        assert len(self.noise_types) == len(
+            self.noise_weights
+        ), "noise_types e noise_weights devem ter o mesmo tamanho"
         assert self.train_ratio > 0, "train_ratio deve ser > 0"
         assert self.val_ratio > 0, "val_ratio deve ser > 0"
         assert self.test_ratio >= 0, "test_ratio deve ser >= 0"
-        assert self.train_ratio + self.val_ratio + self.test_ratio <= 1.0 + 1e-9, \
-            "Soma de train/val/test ratios deve ser <= 1.0"
-        assert self.eps_tf >= 1e-15, \
-            "eps_tf deve ser >= 1e-15 (Errata v5.0.15: NUNCA 1e-30 para float32)"
-        assert self.output_channels in (2, 4, 6), \
-            "output_channels deve ser 2, 4 ou 6"
+        assert (
+            self.train_ratio + self.val_ratio + self.test_ratio <= 1.0 + 1e-9
+        ), "Soma de train/val/test ratios deve ser <= 1.0"
+        assert (
+            self.eps_tf >= 1e-15
+        ), "eps_tf deve ser >= 1e-15 (Errata v5.0.15: NUNCA 1e-30 para float32)"
+        assert self.output_channels in (2, 4, 6), "output_channels deve ser 2, 4 ou 6"
+
+        # ── GradientMonitor ranges ──────────────────────────────────
+        # Validacao dos campos de monitoramento de gradientes (Fase E).
+        # gradient_monitor_freq deve ser >= 1 para evitar divisao por zero.
+        # Thresholds devem ser positivos e vanishing < explosion.
+        # Ref: Review Fase E (H2) — config validation.
+        if self.use_gradient_monitor:
+            assert (
+                self.gradient_monitor_freq >= 1
+            ), f"gradient_monitor_freq deve ser >= 1, recebido: {self.gradient_monitor_freq}"
+            assert (
+                self.gradient_explosion_threshold > 0
+            ), f"gradient_explosion_threshold deve ser > 0, recebido: {self.gradient_explosion_threshold}"
+            assert (
+                self.gradient_vanishing_threshold > 0
+            ), f"gradient_vanishing_threshold deve ser > 0, recebido: {self.gradient_vanishing_threshold}"
+            assert (
+                self.gradient_vanishing_threshold < self.gradient_explosion_threshold
+            ), (
+                f"vanishing_threshold ({self.gradient_vanishing_threshold}) "
+                f"deve ser < explosion_threshold ({self.gradient_explosion_threshold})"
+            )
 
         # ── Inference mode valido ────────────────────────────────────
         _VALID_IM = {"offline", "realtime"}
-        assert self.inference_mode in _VALID_IM, \
-            f"inference_mode '{self.inference_mode}' invalido. Validos: {_VALID_IM}"
+        assert (
+            self.inference_mode in _VALID_IM
+        ), f"inference_mode '{self.inference_mode}' invalido. Validos: {_VALID_IM}"
 
         # ── Auto-derivacao: realtime → causal ────────────────────────
         if self.inference_mode == "realtime" and not self.use_causal_mode:
             object.__setattr__(self, "use_causal_mode", True)
 
         # ── Feature view valida ──────────────────────────────────────
-        _VALID_FV = {"identity", "raw", "H1_logH2", "logH1_logH2",
-                     "IMH1_IMH2_razao", "IMH1_IMH2_lograzao"}
-        assert self.feature_view in _VALID_FV, \
-            f"feature_view '{self.feature_view}' invalido. Validos: {_VALID_FV}"
+        _VALID_FV = {
+            "identity",
+            "raw",
+            "H1_logH2",
+            "logH1_logH2",
+            "IMH1_IMH2_razao",
+            "IMH1_IMH2_lograzao",
+        }
+        assert (
+            self.feature_view in _VALID_FV
+        ), f"feature_view '{self.feature_view}' invalido. Validos: {_VALID_FV}"
 
         # ── Target scaling ──────────────────────────────────────────
         # Nota: target_scaling eh fixado em "log10" pela Errata v4.4.5
@@ -497,21 +636,72 @@ class PipelineConfig:
         # sera habilitado quando a errata for flexibilizada em versao futura.
 
         # ── Scaler type valido ───────────────────────────────────────
-        _VALID_SC = {"standard", "minmax", "robust", "maxabs",
-                     "quantile", "power", "normalizer", "none"}
-        assert self.scaler_type in _VALID_SC, \
-            f"scaler_type '{self.scaler_type}' invalido. Validos: {_VALID_SC}"
+        _VALID_SC = {
+            "standard",
+            "minmax",
+            "robust",
+            "maxabs",
+            "quantile",
+            "power",
+            "normalizer",
+            "none",
+        }
+        assert (
+            self.scaler_type in _VALID_SC
+        ), f"scaler_type '{self.scaler_type}' invalido. Validos: {_VALID_SC}"
 
         # ── Optimizer valido ─────────────────────────────────────────
         _VALID_OPT = {"adam", "adamw", "sgd", "rmsprop", "nadam", "adagrad"}
-        assert self.optimizer in _VALID_OPT, \
-            f"optimizer '{self.optimizer}' invalido. Validos: {_VALID_OPT}"
+        assert (
+            self.optimizer in _VALID_OPT
+        ), f"optimizer '{self.optimizer}' invalido. Validos: {_VALID_OPT}"
 
         # ── Smoothing type valido ────────────────────────────────────
-        _VALID_SM = {"none", "moving_average", "savitzky_golay", "gaussian",
-                     "median", "exponential", "lowess"}
-        assert self.smoothing_type in _VALID_SM, \
-            f"smoothing_type '{self.smoothing_type}' invalido. Validos: {_VALID_SM}"
+        _VALID_SM = {
+            "none",
+            "moving_average",
+            "savitzky_golay",
+            "gaussian",
+            "median",
+            "exponential",
+            "lowess",
+        }
+        assert (
+            self.smoothing_type in _VALID_SM
+        ), f"smoothing_type '{self.smoothing_type}' invalido. Validos: {_VALID_SM}"
+
+        # ── Frequencia normalizacao valida (P3) ────────────────────
+        if self.use_freq_as_feature:
+            _VALID_FN = {"log10", "khz", "raw"}
+            assert self.freq_normalization in _VALID_FN, (
+                f"freq_normalization '{self.freq_normalization}' invalido. "
+                f"Validos: {_VALID_FN}"
+            )
+
+        # ── Static injection mode valido (A/B/C) ──────────────────
+        _VALID_SIM = {"broadcast", "dual_input", "film"}
+        assert self.static_injection_mode in _VALID_SIM, (
+            f"static_injection_mode '{self.static_injection_mode}' invalido. "
+            f"Validos: {_VALID_SIM}"
+        )
+
+        # ── FiLM restrito a arquiteturas compativeis ──────────────
+        # FiLM requer injecao de modulacao (γ×h+β) nos blocos internos.
+        # Arquiteturas com blocos auto-contidos (N-BEATS, N-HiTS) ou
+        # dominio espectral (FNO) ou branch separado (DeepONet) sao
+        # incompativeis por requerer adaptacao muito complexa.
+        if self.static_injection_mode == "film":
+            _FILM_INCOMPATIBLE = {
+                "N_BEATS",
+                "N_HiTS",  # Decomposition — blocks auto-contidos
+                "FNO",  # Fourier — dominio espectral
+                "DeepONet",  # Operador — branch separado
+            }
+            assert self.model_type not in _FILM_INCOMPATIBLE, (
+                f"static_injection_mode='film' incompativel com model_type="
+                f"'{self.model_type}'. Arquiteturas incompativeis com FiLM: "
+                f"{sorted(_FILM_INCOMPATIBLE)}. Use 'dual_input' ou 'broadcast'."
+            )
 
     # ══════════════════════════════════════════════════════════════════
     # SECAO 17: PROPRIEDADES DERIVADAS
@@ -551,17 +741,42 @@ class PipelineConfig:
         return 2 * len(self.resolve_families())
 
     @property
+    def n_prefix(self) -> int:
+        """Numero de colunas prefixo (theta, freq) antes de z_obs.
+
+        Derivado automaticamente de use_theta_as_feature e use_freq_as_feature.
+        Usado por feature_views.py (n_prefix), noise (separacao protegido/EM),
+        e pipeline.py (offset para h1_cols/h2_cols).
+
+        Note:
+            Referenciado em:
+                - data/pipeline.py: DataPipeline.__init__ (offset h1/h2)
+                - data/pipeline.py: build_train_map_fn() (FV_tf n_prefix)
+                - noise/functions.py: n_protected = n_prefix + 1
+                - tests/test_config.py: TestThetaFreqFeatures
+            Valor: 0 (P1 ou dual_input/film), 1 (P2 broadcast), 2 (P2+P3 broadcast).
+            ZERO quando static_injection_mode != "broadcast" (escalares separados).
+            Layout broadcast: [theta_norm?] [f_norm?] [z_obs] [EM...] [GS...]
+            Ref: docs/physics/perspectivas.md secoes P2, P3.
+        """
+        if self.static_injection_mode != "broadcast":
+            return 0  # dual_input/film: escalares separados, nao como prefixo
+        return int(self.use_theta_as_feature) + int(self.use_freq_as_feature)
+
+    @property
     def n_features(self) -> int:
-        """Numero total de features (base + geosinais).
+        """Numero total de features (prefix + base + geosinais).
 
         Note:
             Referenciado em:
                 - tests/test_config.py: TestDerivedProperties.test_n_features_without_gs,
-                  TestDerivedProperties.test_n_features_with_gs_usd_uhr
-            Valor: 5 (baseline) ou 9 (P4 usd_uhr: 5 + 2*2).
+                  TestDerivedProperties.test_n_features_with_gs_usd_uhr,
+                  TestThetaFreqFeatures
+            Valor: 5 (P1), 6 (P2 ou P3), 7 (P2+P3), 9 (P4 usd_uhr), etc.
+            Composicao: n_prefix (0-2) + n_base_features (5+) + n_geosignal_channels (0+).
             Usado para validar shape do modelo Keras (input_shape).
         """
-        return self.n_base_features + self.n_geosignal_channels
+        return self.n_prefix + self.n_base_features + self.n_geosignal_channels
 
     @property
     def needs_onthefly_fv_gs(self) -> bool:
@@ -580,10 +795,9 @@ class PipelineConfig:
             Cadeia on-the-fly: noise → FV_tf → GS_tf → scale_tf.
             Cadeia offline: FV → GS → fit_scaler → scale (estatico).
         """
-        return (
-            self.use_noise
-            and (self.feature_view not in ("identity", "raw", None)
-                 or self.use_geosignal_features)
+        return self.use_noise and (
+            self.feature_view not in ("identity", "raw", None)
+            or self.use_geosignal_features
         )
 
     @property
@@ -903,6 +1117,7 @@ class PipelineConfig:
         """
         if namespace is None:
             import inspect
+
             frame = inspect.currentframe()
             if frame is None or frame.f_back is None:
                 raise RuntimeError(
@@ -928,10 +1143,14 @@ class PipelineConfig:
         lines.append(f"  inference_mode='{self.inference_mode}',")
         lines.append(f"  use_noise={self.use_noise}, noise_max={self.noise_level_max},")
         lines.append(f"  use_curriculum={self.use_curriculum},")
-        lines.append(f"  use_nstage={self.use_nstage}, n_stages={self.n_training_stages},")
+        lines.append(
+            f"  use_nstage={self.use_nstage}, n_stages={self.n_training_stages},"
+        )
         lines.append(f"  feature_view='{self.feature_view}',")
         lines.append(f"  use_geosignal={self.use_geosignal_features},")
-        lines.append(f"  lr={self.learning_rate}, epochs={self.epochs}, bs={self.batch_size},")
+        lines.append(
+            f"  lr={self.learning_rate}, epochs={self.epochs}, bs={self.batch_size},"
+        )
         lines.append(f"  loss='{self.loss_type}',")
         lines.append(f"  n_features={self.n_features}, output_ch={self.output_channels},")
         lines.append(f")")

@@ -117,19 +117,28 @@ _BYTES_PER_RECORD_22 = 172
 # Colunas 1-21 sao float64 nativas.
 # As 9 componentes complexas do tensor H formam pares (Re, Im) nas colunas 4-21.
 COL_MAP_22 = {
-    0: "meds",       # int32 — indice sequencial de medicao (metadata, NUNCA feature)
-    1: "zobs",       # float64 — profundidade de observacao [m] (INPUT_FEATURE idx=1)
-    2: "res_h",      # float64 — resistividade horizontal [Ohm.m] (OUTPUT_TARGET idx=2)
-    3: "res_v",      # float64 — resistividade vertical [Ohm.m] (OUTPUT_TARGET idx=3)
-    4: "re_hxx",  5: "im_hxx",   # Hxx — planar, recebe decoupling ACp
-    6: "re_hxy",  7: "im_hxy",   # Hxy — cross (off-diagonal)
-    8: "re_hxz",  9: "im_hxz",   # Hxz — cross
-    10: "re_hyx", 11: "im_hyx",  # Hyx — cross (off-diagonal)
-    12: "re_hyy", 13: "im_hyy",  # Hyy — planar, recebe decoupling ACp
-    14: "re_hyz", 15: "im_hyz",  # Hyz — cross
-    16: "re_hzx", 17: "im_hzx",  # Hzx — cross
-    18: "re_hzy", 19: "im_hzy",  # Hzy — cross
-    20: "re_hzz", 21: "im_hzz",  # Hzz — axial, recebe decoupling ACx (INPUT_FEATURE idx=20,21)
+    0: "meds",  # int32 — indice sequencial de medicao (metadata, NUNCA feature)
+    1: "zobs",  # float64 — profundidade de observacao [m] (INPUT_FEATURE idx=1)
+    2: "res_h",  # float64 — resistividade horizontal [Ohm.m] (OUTPUT_TARGET idx=2)
+    3: "res_v",  # float64 — resistividade vertical [Ohm.m] (OUTPUT_TARGET idx=3)
+    4: "re_hxx",
+    5: "im_hxx",  # Hxx — planar, recebe decoupling ACp
+    6: "re_hxy",
+    7: "im_hxy",  # Hxy — cross (off-diagonal)
+    8: "re_hxz",
+    9: "im_hxz",  # Hxz — cross
+    10: "re_hyx",
+    11: "im_hyx",  # Hyx — cross (off-diagonal)
+    12: "re_hyy",
+    13: "im_hyy",  # Hyy — planar, recebe decoupling ACp
+    14: "re_hyz",
+    15: "im_hyz",  # Hyz — cross
+    16: "re_hzx",
+    17: "im_hzx",  # Hzx — cross
+    18: "re_hzy",
+    19: "im_hzy",  # Hzy — cross
+    20: "re_hzz",
+    21: "im_hzz",  # Hzz — axial, recebe decoupling ACx (INPUT_FEATURE idx=20,21)
 }
 
 # D10: Mapeamento nome-da-componente → (indice_Re, indice_Im) no array 22-col.
@@ -141,9 +150,15 @@ COL_MAP_22 = {
 #   │ Hzx  Hzy  Hzz│
 #   └              ┘
 EM_COMPONENTS = {
-    "XX": (4, 5),   "XY": (6, 7),   "XZ": (8, 9),
-    "YX": (10, 11), "YY": (12, 13), "YZ": (14, 15),
-    "ZX": (16, 17), "ZY": (18, 19), "ZZ": (20, 21),
+    "XX": (4, 5),
+    "XY": (6, 7),
+    "XZ": (8, 9),
+    "YX": (10, 11),
+    "YY": (12, 13),
+    "YZ": (14, 15),
+    "ZX": (16, 17),
+    "ZY": (18, 19),
+    "ZZ": (20, 21),
 }
 
 
@@ -155,6 +170,7 @@ EM_COMPONENTS = {
 # Ambos sao imutaveis apos criacao (exceto campos calculados no
 # __post_init__).
 # ════════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class OutMetadata:
@@ -186,6 +202,7 @@ class OutMetadata:
         Formato .out: 4 linhas fixas geradas pelo PerfilaAnisoOmp.
         total_rows e rows_per_model sao auto-calculados no __post_init__.
     """
+
     n_angles: int
     n_freqs: int
     n_models: int
@@ -197,9 +214,7 @@ class OutMetadata:
 
     def __post_init__(self):
         if self.total_rows == 0:
-            self.rows_per_model = sum(
-                nm * self.n_freqs for nm in self.nmeds_list
-            )
+            self.rows_per_model = sum(nm * self.n_freqs for nm in self.nmeds_list)
             self.total_rows = self.n_models * self.rows_per_model
 
 
@@ -231,6 +246,7 @@ class AngleGroup:
         model_ids: usado para split por modelo geologico [P1].
         z_meters: preservado separadamente (NUNCA escalado pelo scaler).
     """
+
     theta: float
     x: np.ndarray
     y: np.ndarray
@@ -249,6 +265,7 @@ class AngleGroup:
 #   L3: f_0 ... f_{nf-1}          (frequencias em Hz)
 #   L4: nmeds_0 ... nmeds_{nt-1}  (medicoes por angulo)
 # ════════════════════════════════════════════════════════════════════════
+
 
 def parse_out_metadata(filepath: str) -> OutMetadata:
     """Extrai metadados do arquivo .out do simulador Fortran.
@@ -285,9 +302,7 @@ def parse_out_metadata(filepath: str) -> OutMetadata:
 
     lines = path.read_text().strip().split("\n")
     if len(lines) < 4:
-        raise ValueError(
-            f"Arquivo .out deve ter >= 4 linhas, encontradas: {len(lines)}"
-        )
+        raise ValueError(f"Arquivo .out deve ter >= 4 linhas, encontradas: {len(lines)}")
 
     # Linha 1: nt nf nm
     tokens = lines[0].split()
@@ -300,23 +315,17 @@ def parse_out_metadata(filepath: str) -> OutMetadata:
     # Linha 2: angulos
     theta_list = [float(x) for x in lines[1].split()]
     if len(theta_list) != n_angles:
-        raise ValueError(
-            f"Esperados {n_angles} angulos, encontrados {len(theta_list)}"
-        )
+        raise ValueError(f"Esperados {n_angles} angulos, encontrados {len(theta_list)}")
 
     # Linha 3: frequencias
     freq_list = [float(x) for x in lines[2].split()]
     if len(freq_list) != n_freqs:
-        raise ValueError(
-            f"Esperadas {n_freqs} frequencias, encontradas {len(freq_list)}"
-        )
+        raise ValueError(f"Esperadas {n_freqs} frequencias, encontradas {len(freq_list)}")
 
     # Linha 4: nmeds por angulo
     nmeds_list = [int(x) for x in lines[3].split()]
     if len(nmeds_list) != n_angles:
-        raise ValueError(
-            f"Esperados {n_angles} nmeds, encontrados {len(nmeds_list)}"
-        )
+        raise ValueError(f"Esperados {n_angles} nmeds, encontrados {len(nmeds_list)}")
 
     metadata = OutMetadata(
         n_angles=n_angles,
@@ -329,7 +338,10 @@ def parse_out_metadata(filepath: str) -> OutMetadata:
 
     logger.info(
         "Metadados .out: %d angulos, %d freqs, %d modelos, %d linhas totais",
-        n_angles, n_freqs, n_models, metadata.total_rows,
+        n_angles,
+        n_freqs,
+        n_models,
+        metadata.total_rows,
     )
     return metadata
 
@@ -342,6 +354,7 @@ def parse_out_metadata(filepath: str) -> OutMetadata:
 # Formato 12-col (legado): 12×float64 (96B) = 96B/reg.
 # A coluna 0 (meds, int32) e promovida para float64 no array de saida.
 # ════════════════════════════════════════════════════════════════════════
+
 
 def load_binary_dat(
     filepath: str,
@@ -393,8 +406,7 @@ def load_binary_dat(
 
         # dtype estruturado: 1×int32 + 21×float64
         dtype_22 = np.dtype(
-            [("meds", np.int32)]
-            + [(f"col_{i}", np.float64) for i in range(1, n_columns)]
+            [("meds", np.int32)] + [(f"col_{i}", np.float64) for i in range(1, n_columns)]
         )
         raw = np.fromfile(str(path), dtype=dtype_22)
 
@@ -412,13 +424,13 @@ def load_binary_dat(
         data = np.fromfile(str(path), dtype=np.float64).reshape(n_rows, n_columns)
 
     if expected_rows is not None and n_rows != expected_rows:
-        raise ValueError(
-            f"Esperadas {expected_rows} linhas, encontradas {n_rows}"
-        )
+        raise ValueError(f"Esperadas {expected_rows} linhas, encontradas {n_rows}")
 
     logger.info(
         "Carregado %s: shape=%s, %.1f MB",
-        path.name, data.shape, file_size / 1e6,
+        path.name,
+        data.shape,
+        file_size / 1e6,
     )
     return data
 
@@ -439,6 +451,7 @@ def load_binary_dat(
 # medem o campo na direcao perpendicular ao eixo da ferramenta.
 # ACx e positivo porque Hzz mede na direcao axial.
 # ════════════════════════════════════════════════════════════════════════
+
 
 def apply_decoupling(
     data: np.ndarray,
@@ -473,7 +486,7 @@ def apply_decoupling(
 
     result = data.copy()
     L = config.spacing_meters  # 1.0 m (errata imutavel — NUNCA 1000.0)
-    L3 = L ** 3
+    L3 = L**3
 
     # D7: Constantes de acoplamento analitico
     # ACp (planar): campo primario para componentes no plano (Hxx, Hyy)
@@ -490,7 +503,7 @@ def apply_decoupling(
         # ── Hxx planar: Re{Hxx} -= ACp (campo primario no plano Hxx).
         #    col 4 = Re{Hxx}, componente diagonal do tensor EM.
         #    ACp < 0 → subtrai valor negativo → resultado AUMENTA.
-        result[:, 4] -= ACp   # Re{Hxx} — col 4 (planar)
+        result[:, 4] -= ACp  # Re{Hxx} — col 4 (planar)
     if config.decoupling_hyy:
         # ── Hyy planar: Re{Hyy} -= ACp (simetria com Hxx).
         #    col 12 = Re{Hyy}, componente diagonal do tensor EM.
@@ -508,16 +521,22 @@ def apply_decoupling(
         # ── Full tensor: off-diagonais Hxy, Hyx recebem ACp.
         #    Componentes off-diagonal do plano tambem possuem
         #    acoplamento direto com coeficiente planar ACp.
-        result[:, 6] -= ACp   # Re{Hxy} — col 6
+        result[:, 6] -= ACp  # Re{Hxy} — col 6
         result[:, 10] -= ACp  # Re{Hyx} — col 10
 
-    n_decoupled = sum([
-        config.decoupling_hxx, config.decoupling_hyy,
-        config.decoupling_hzz, config.decoupling_full_tensor,
-    ])
+    n_decoupled = sum(
+        [
+            config.decoupling_hxx,
+            config.decoupling_hyy,
+            config.decoupling_hzz,
+            config.decoupling_full_tensor,
+        ]
+    )
     logger.info(
         "Decoupling aplicado: ACp=%.6f, ACx=%.6f (%d componentes)",
-        ACp, ACx, n_decoupled,
+        ACp,
+        ACx,
+        n_decoupled,
     )
     return result
 
@@ -537,6 +556,7 @@ def apply_decoupling(
 #
 # Cada bloco (m, k, j) vira uma sequencia no AngleGroup de theta[k].
 # ════════════════════════════════════════════════════════════════════════
+
 
 def segregate_by_angle(
     data: np.ndarray,
@@ -585,6 +605,7 @@ def segregate_by_angle(
             theta = metadata.theta_list[k]
             nmeds = metadata.nmeds_list[k]
             for _j in range(metadata.n_freqs):
+                freq = metadata.freq_list[_j]
                 block = data[row_idx : row_idx + nmeds]
                 row_idx += nmeds
 
@@ -594,6 +615,43 @@ def segregate_by_angle(
                 # Features: colunas definidas em config.input_features
                 # Default: [1, 4, 5, 20, 21] = [zobs, Re/Im Hxx, Re/Im Hzz]
                 x_seq = block[:, config.input_features].copy()
+
+                # ── P2+P3: Injetar theta e/ou freq como colunas PREFIXO ────
+                # ORDEM CANONICA: [theta_norm?, f_norm?, z_obs, EM...]
+                # Como np.concatenate([col, x_seq]) PREPEND, o ULTIMO
+                # prepended fica na posicao 0. Portanto:
+                #   1o: injetar freq (ficara pos 1 se theta tambem ativo)
+                #   2o: injetar theta (ficara pos 0 — coluna mais externa)
+                # Layout final P2+P3: [theta_norm(0), f_norm(1), z(2), EM(3:)]
+                # Noise NAO deve afetar theta/freq (parametros conhecidos).
+                # Ref: docs/physics/perspectivas.md secoes P2, P3.
+
+                # ── P2+P3: Injetar theta/freq SOMENTE em modo broadcast ──
+                # Em dual_input e film, escalares sao passados separadamente
+                # (nao como colunas no array de features).
+                _is_broadcast = config.static_injection_mode == "broadcast"
+
+                # ── P3 PRIMEIRO: freq prepended (sera col 1 se theta ativo) ──
+                # Normalizacao: log10(f) comprime faixa [2kHz, 400kHz] →
+                # [3.3, 5.6] — relacao f→skin_depth eh logaritmica.
+                # Broadcast constante ao longo de seq_len.
+                if config.use_freq_as_feature and _is_broadcast:
+                    if config.freq_normalization == "log10":
+                        f_val = np.log10(freq)  # 20kHz → 4.301
+                    elif config.freq_normalization == "khz":
+                        f_val = freq / 1000.0  # 20kHz → 20.0
+                    else:  # "raw"
+                        f_val = freq  # 20000.0 Hz
+                    freq_col = np.full((nmeds, 1), f_val, dtype=x_seq.dtype)
+                    x_seq = np.concatenate([freq_col, x_seq], axis=-1)
+
+                # ── P2 SEGUNDO: theta prepended (sera col 0 — mais externa) ──
+                # theta_norm = theta/90.0 → [0.0, 1.0] para [0°, 90°]
+                # Broadcast constante ao longo de seq_len.
+                if config.use_theta_as_feature and _is_broadcast:
+                    theta_norm = theta / 90.0
+                    theta_col = np.full((nmeds, 1), theta_norm, dtype=x_seq.dtype)
+                    x_seq = np.concatenate([theta_col, x_seq], axis=-1)
 
                 # Targets: colunas definidas em config.output_targets
                 # Default: [2, 3] = [res_h, res_v]
@@ -611,16 +669,19 @@ def segregate_by_angle(
 
         result[theta] = AngleGroup(
             theta=theta,
-            x=np.array(grp["x_seqs"], dtype=np.float64),   # (n_seq, nmeds, n_feat)
-            y=np.array(grp["y_seqs"], dtype=np.float64),   # (n_seq, nmeds, n_tgt)
+            x=np.array(grp["x_seqs"], dtype=np.float64),  # (n_seq, nmeds, n_feat)
+            y=np.array(grp["y_seqs"], dtype=np.float64),  # (n_seq, nmeds, n_tgt)
             z_meters=np.array(grp["z_seqs"], dtype=np.float64),  # (n_seq, nmeds)
             model_ids=np.array(grp["model_ids"], dtype=np.int32),  # (n_seq,)
             nmeds=nmeds,
         )
         logger.info(
             "Angulo %.1f°: %d sequencias, nmeds=%d, x=%s, y=%s",
-            theta, n_seq, nmeds,
-            result[theta].x.shape, result[theta].y.shape,
+            theta,
+            n_seq,
+            nmeds,
+            result[theta].x.shape,
+            result[theta].y.shape,
         )
 
     if row_idx != data.shape[0]:
@@ -639,6 +700,7 @@ def segregate_by_angle(
 #   .out → metadados → .dat → raw → decoupling → segregacao
 # Usado por DataPipeline.prepare() como ponto de entrada principal.
 # ════════════════════════════════════════════════════════════════════════
+
 
 def load_dataset(
     dat_path: str,

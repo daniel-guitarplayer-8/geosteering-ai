@@ -76,26 +76,28 @@ logger = logging.getLogger(__name__)
 # ── Arquiteturas incompativeis com modo causal ────────────────────────────
 # BiLSTM usa backward pass; U-Nets usam skips do encoder inteiro;
 # CNN_BiLSTM_ED usa BiLSTM bidirecional.
-_CAUSAL_INCOMPATIBLE: frozenset = frozenset({
-    "BiLSTM",
-    "CNN_BiLSTM_ED",
-    "UNet_Base",
-    "UNet_Attention",
-    "UNet_ResNet18",
-    "UNet_Attention_ResNet18",
-    "UNet_ResNet34",
-    "UNet_Attention_ResNet34",
-    "UNet_ResNet50",
-    "UNet_Attention_ResNet50",
-    "UNet_ConvNeXt",
-    "UNet_Attention_ConvNeXt",
-    "UNet_Inception",
-    "UNet_Attention_Inception",
-    "UNet_EfficientNet",
-    "UNet_Attention_EfficientNet",
-    "N_BEATS",
-    "N_HiTS",
-})
+_CAUSAL_INCOMPATIBLE: frozenset = frozenset(
+    {
+        "BiLSTM",
+        "CNN_BiLSTM_ED",
+        "UNet_Base",
+        "UNet_Attention",
+        "UNet_ResNet18",
+        "UNet_Attention_ResNet18",
+        "UNet_ResNet34",
+        "UNet_Attention_ResNet34",
+        "UNet_ResNet50",
+        "UNet_Attention_ResNet50",
+        "UNet_ConvNeXt",
+        "UNet_Attention_ConvNeXt",
+        "UNet_Inception",
+        "UNet_Attention_Inception",
+        "UNet_EfficientNet",
+        "UNet_Attention_EfficientNet",
+        "N_BEATS",
+        "N_HiTS",
+    }
+)
 
 # ── Familias das 44 arquiteturas ──────────────────────────────────────────
 _FAMILIES: Dict[str, str] = {
@@ -159,14 +161,14 @@ _FAMILIES: Dict[str, str] = {
 # Tier 2: implementado, testado, performance conhecida
 # Tier 3: experimental, pode precisar de tuning
 _TIERS: Dict[str, int] = {
-    "ResNet_18": 1,       # ★ Default validado
+    "ResNet_18": 1,  # ★ Default validado
     "ResNet_34": 1,
     "ResNet_50": 2,
     "ConvNeXt": 1,
-    "CNN_1D": 1,          # Baseline simples
+    "CNN_1D": 1,  # Baseline simples
     "InceptionNet": 2,
     "InceptionTime": 2,
-    "TCN": 1,             # Causal nativo validado
+    "TCN": 1,  # Causal nativo validado
     "TCN_Advanced": 2,
     "LSTM": 1,
     "BiLSTM": 2,
@@ -178,11 +180,11 @@ _TIERS: Dict[str, int] = {
     "PatchTST": 2,
     "Autoformer": 3,
     "iTransformer": 3,
-    "DNN": 1,             # Baseline ponto a ponto
+    "DNN": 1,  # Baseline ponto a ponto
     "FNO": 3,
     "DeepONet": 3,
     "Geophysical_Attention": 2,
-    "WaveNet": 1,         # Causal geosteering validado
+    "WaveNet": 1,  # Causal geosteering validado
     "Causal_Transformer": 2,
     "Informer": 2,
     "Mamba_S4": 3,
@@ -217,12 +219,25 @@ def _get_build_fn(model_type: str) -> Callable:
         ValueError: Se model_type nao esta no registry.
     """
     # ── CNN ───────────────────────────────────────────────────────────
-    if model_type in ("ResNet_18", "ResNet_34", "ResNet_50",
-                      "ConvNeXt", "InceptionNet", "InceptionTime", "CNN_1D"):
+    if model_type in (
+        "ResNet_18",
+        "ResNet_34",
+        "ResNet_50",
+        "ConvNeXt",
+        "InceptionNet",
+        "InceptionTime",
+        "CNN_1D",
+    ):
         from geosteering_ai.models.cnn import (
-            build_resnet18, build_resnet34, build_resnet50,
-            build_convnext, build_inceptionnet, build_inceptiontime, build_cnn1d,
+            build_cnn1d,
+            build_convnext,
+            build_inceptionnet,
+            build_inceptiontime,
+            build_resnet18,
+            build_resnet34,
+            build_resnet50,
         )
+
         _cnn = {
             "ResNet_18": build_resnet18,
             "ResNet_34": build_resnet34,
@@ -237,29 +252,42 @@ def _get_build_fn(model_type: str) -> Callable:
     # ── TCN ───────────────────────────────────────────────────────────
     if model_type in ("TCN", "TCN_Advanced"):
         from geosteering_ai.models.tcn import build_tcn, build_tcn_advanced
+
         return {"TCN": build_tcn, "TCN_Advanced": build_tcn_advanced}[model_type]
 
     # ── RNN ───────────────────────────────────────────────────────────
     if model_type in ("LSTM", "BiLSTM"):
-        from geosteering_ai.models.rnn import build_lstm, build_bilstm
+        from geosteering_ai.models.rnn import build_bilstm, build_lstm
+
         return {"LSTM": build_lstm, "BiLSTM": build_bilstm}[model_type]
 
     # ── Hybrid ────────────────────────────────────────────────────────
     if model_type in ("CNN_LSTM", "CNN_BiLSTM_ED"):
-        from geosteering_ai.models.hybrid import build_cnn_lstm, build_cnn_bilstm_ed
-        return {"CNN_LSTM": build_cnn_lstm, "CNN_BiLSTM_ED": build_cnn_bilstm_ed}[model_type]
+        from geosteering_ai.models.hybrid import build_cnn_bilstm_ed, build_cnn_lstm
+
+        return {"CNN_LSTM": build_cnn_lstm, "CNN_BiLSTM_ED": build_cnn_bilstm_ed}[
+            model_type
+        ]
 
     # ── U-Net ─────────────────────────────────────────────────────────
     if model_type.startswith("UNet"):
         from geosteering_ai.models.unet import (
-            build_unet_base, build_unet_attention,
-            build_unet_resnet18, build_unet_attention_resnet18,
-            build_unet_resnet34, build_unet_attention_resnet34,
-            build_unet_resnet50, build_unet_attention_resnet50,
-            build_unet_convnext, build_unet_attention_convnext,
-            build_unet_inception, build_unet_attention_inception,
-            build_unet_efficientnet, build_unet_attention_efficientnet,
+            build_unet_attention,
+            build_unet_attention_convnext,
+            build_unet_attention_efficientnet,
+            build_unet_attention_inception,
+            build_unet_attention_resnet18,
+            build_unet_attention_resnet34,
+            build_unet_attention_resnet50,
+            build_unet_base,
+            build_unet_convnext,
+            build_unet_efficientnet,
+            build_unet_inception,
+            build_unet_resnet18,
+            build_unet_resnet34,
+            build_unet_resnet50,
         )
+
         _unet = {
             "UNet_Base": build_unet_base,
             "UNet_Attention": build_unet_attention,
@@ -280,12 +308,23 @@ def _get_build_fn(model_type: str) -> Callable:
             return _unet[model_type]
 
     # ── Transformer ───────────────────────────────────────────────────
-    if model_type in ("Transformer", "Simple_TFT", "TFT",
-                      "PatchTST", "Autoformer", "iTransformer"):
+    if model_type in (
+        "Transformer",
+        "Simple_TFT",
+        "TFT",
+        "PatchTST",
+        "Autoformer",
+        "iTransformer",
+    ):
         from geosteering_ai.models.transformer import (
-            build_transformer, build_simple_tft, build_tft,
-            build_patchtst, build_autoformer, build_itransformer,
+            build_autoformer,
+            build_itransformer,
+            build_patchtst,
+            build_simple_tft,
+            build_tft,
+            build_transformer,
         )
+
         _tr = {
             "Transformer": build_transformer,
             "Simple_TFT": build_simple_tft,
@@ -299,13 +338,18 @@ def _get_build_fn(model_type: str) -> Callable:
     # ── Decomposition ─────────────────────────────────────────────────
     if model_type in ("N_BEATS", "N_HiTS"):
         from geosteering_ai.models.decomposition import build_nbeats, build_nhits
+
         return {"N_BEATS": build_nbeats, "N_HiTS": build_nhits}[model_type]
 
     # ── Advanced ──────────────────────────────────────────────────────
     if model_type in ("DNN", "FNO", "DeepONet", "Geophysical_Attention"):
         from geosteering_ai.models.advanced import (
-            build_dnn, build_fno, build_deeponet, build_geophysical_attention,
+            build_deeponet,
+            build_dnn,
+            build_fno,
+            build_geophysical_attention,
         )
+
         _adv = {
             "DNN": build_dnn,
             "FNO": build_fno,
@@ -315,12 +359,21 @@ def _get_build_fn(model_type: str) -> Callable:
         return _adv[model_type]
 
     # ── Geosteering ───────────────────────────────────────────────────
-    if model_type in ("WaveNet", "Causal_Transformer", "Informer",
-                      "Mamba_S4", "Encoder_Forecaster"):
+    if model_type in (
+        "WaveNet",
+        "Causal_Transformer",
+        "Informer",
+        "Mamba_S4",
+        "Encoder_Forecaster",
+    ):
         from geosteering_ai.models.geosteering import (
-            build_wavenet, build_causal_transformer, build_informer,
-            build_mamba_s4, build_encoder_forecaster,
+            build_causal_transformer,
+            build_encoder_forecaster,
+            build_informer,
+            build_mamba_s4,
+            build_wavenet,
         )
+
         _gs = {
             "WaveNet": build_wavenet,
             "Causal_Transformer": build_causal_transformer,
@@ -378,13 +431,30 @@ def build_model(config: "PipelineConfig") -> "tf.keras.Model":
         Valida: se use_causal_mode=True e model em _CAUSAL_INCOMPATIBLE
         → warning, mas ainda constroi (usuario pode querer testar).
         Ref: docs/ARCHITECTURE_v2.md secao 5.11.
+
+        3 Modos de Injecao Estatica (theta/freq → modelo):
+
+        .. code-block:: text
+
+            ┌────────────────────────────────────────────────────────────────┐
+            │  A. broadcast (default):                                       │
+            │    [θ?, f?, z, EM..., GS...] → model → output                │
+            │    n_prefix = 0-2 (colunas prepended ao tensor)               │
+            │                                                                │
+            │  B. dual_input:                                                │
+            │    [z, EM..., GS...], [θ, f] → stem(broadcast+concat) → out  │
+            │    n_prefix = 0 (theta/freq via input separado)               │
+            │                                                                │
+            │  C. film:                                                      │
+            │    [z, EM..., GS...], [θ, f] → model → FiLM(γ×h+β) → out    │
+            │    n_prefix = 0 (modulacao output-level por θ/f)              │
+            └────────────────────────────────────────────────────────────────┘
     """
     model_type = config.model_type
 
     if model_type not in _FAMILIES:
         raise ValueError(
-            f"model_type '{model_type}' invalido. "
-            f"Validos: {list_available_models()}"
+            f"model_type '{model_type}' invalido. " f"Validos: {list_available_models()}"
         )
 
     if config.use_causal_mode and not is_causal_compatible(model_type):
@@ -403,16 +473,130 @@ def build_model(config: "PipelineConfig") -> "tf.keras.Model":
         config.output_channels,
     )
 
-    build_fn = _get_build_fn(model_type)
-    model = build_fn(config)
+    # ── Construcao com wrapper para Abordagens A/B/C (P2/P3) ────────
+    _n_static_vars = int(config.use_theta_as_feature) + int(config.use_freq_as_feature)
+    _needs_wrapper = config.static_injection_mode != "broadcast" and _n_static_vars > 0
+
+    if _needs_wrapper and config.static_injection_mode == "dual_input":
+        # Abordagem B: core com shape expandida + stem dual-input
+        import dataclasses
+
+        _cfg_b = dataclasses.replace(config, static_injection_mode="broadcast")
+        model = _wrap_dual_input(
+            _get_build_fn(model_type), _cfg_b, config, _n_static_vars
+        )
+    elif _needs_wrapper and config.static_injection_mode == "film":
+        # Abordagem C: core processa EM puro, FiLM modula output
+        core_model = _get_build_fn(model_type)(config)
+        model = _wrap_film(core_model, config, _n_static_vars)
+    else:
+        # Abordagem A (broadcast): modelo single-input padrao
+        model = _get_build_fn(model_type)(config)
 
     logger.info(
-        "Modelo '%s' construido: %d parametros treinaveis",
+        "Modelo '%s' construido: %d params treinaveis, injection='%s'",
         model_type,
-        sum(int(tf_var.numpy().size) for tf_var in model.trainable_weights)
-        if hasattr(model, "trainable_weights") else -1,
+        sum(int(v.numpy().size) for v in model.trainable_weights)
+        if hasattr(model, "trainable_weights")
+        else -1,
+        config.static_injection_mode,
     )
     return model
+
+
+def _wrap_dual_input(
+    build_fn: Callable,
+    cfg_broadcast: "PipelineConfig",
+    config_original: "PipelineConfig",
+    n_static: int,
+) -> "tf.keras.Model":
+    """Abordagem B: wrapper dual-input com StaticInjectionStem.
+
+    Constroi core com shape expandida (n_em + n_static) e envolve em
+    wrapper que aceita [em_input, static_input]. O stem faz broadcast +
+    concat dos escalares com as features EM, produzindo tensor unico
+    que o core processa normalmente. Todas as 44 arquiteturas compativeis.
+
+    Args:
+        build_fn: Funcao build_* para o model_type.
+        cfg_broadcast: Config com mode="broadcast" (n_features expandido).
+        config_original: Config original do usuario.
+        n_static: Numero de variaveis estaticas (1 ou 2).
+
+    Returns:
+        tf.keras.Model: Dual-input [em_input, static_input] → output.
+
+    Note:
+        Referenciado em: build_model() (Abordagem B).
+        core construido com cfg_broadcast.n_features = n_base + n_prefix + n_gs.
+        Stem: broadcast escalares na GPU + concat com EM.
+        Ref: docs/physics/perspectivas.md secoes P2, P3.
+    """
+    import tensorflow as tf
+
+    from geosteering_ai.models.blocks import static_injection_stem
+
+    core = build_fn(cfg_broadcast)
+    n_em = config_original.n_base_features + config_original.n_geosignal_channels
+    seq_len = config_original.sequence_length
+
+    em_input = tf.keras.Input(shape=(seq_len, n_em), name="em_features")
+    static_input = tf.keras.Input(shape=(n_static,), name="static_params")
+    combined = static_injection_stem(em_input, static_input)
+    out = core(combined)
+
+    return tf.keras.Model(
+        inputs=[em_input, static_input],
+        outputs=out,
+        name=f"{core.name}_dual",
+    )
+
+
+def _wrap_film(
+    core_model: "tf.keras.Model",
+    config: "PipelineConfig",
+    n_static: int,
+) -> "tf.keras.Model":
+    """Abordagem C: wrapper FiLM (output-level modulation).
+
+    Core processa EM normalmente, depois theta/freq modulam os canais de
+    saida via gamma*h+beta (Feature-wise Linear Modulation). Modulacao
+    output-level: theta/f ajustam escala e bias das predicoes finais
+    conforme condicoes de aquisicao (fisicamente interpretavel como
+    calibracao da inversao para diferentes geometrias e frequencias).
+
+    Args:
+        core_model: Modelo single-input construido por build_fn.
+        config: PipelineConfig com output_channels.
+        n_static: Numero de variaveis estaticas (1 ou 2).
+
+    Returns:
+        tf.keras.Model: Dual-input [em_input, static_input] → output modulado.
+
+    Note:
+        Referenciado em: build_model() (Abordagem C).
+        Incompativel com: N_BEATS, N_HiTS, FNO, DeepONet (validado em config).
+        Ref: Perez et al. (2018) AAAI, adaptado para output-level modulation.
+    """
+    import tensorflow as tf
+
+    from geosteering_ai.models.blocks import film_layer
+
+    core_input_shape = core_model.input_shape
+    n_em = core_input_shape[-1]
+    seq_len = core_input_shape[-2]
+
+    em_input = tf.keras.Input(shape=(seq_len, n_em), name="em_features")
+    static_input = tf.keras.Input(shape=(n_static,), name="static_params")
+
+    core_output = core_model(em_input)
+    out = film_layer(core_output, static_input, n_channels=config.output_channels)
+
+    return tf.keras.Model(
+        inputs=[em_input, static_input],
+        outputs=out,
+        name=f"{core_model.name}_film",
+    )
 
 
 def get_model_info(model_type: str) -> Dict[str, Any]:

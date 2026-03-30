@@ -27,34 +27,39 @@ Uso tipico:
     >>> loop = TrainingLoop(config)
     >>> result = loop.run(model, loss_fn, build_metrics(config), train_ds, val_ds, cbs)
 """
-from geosteering_ai.training.loop import TrainingLoop, TrainingResult
+from geosteering_ai.training.adaptation import AdaptationResult, DomainAdapter
 from geosteering_ai.training.callbacks import (
-    UpdateNoiseLevelCallback,
-    WeightNormMonitor,
     BestEpochTracker,
-    DualValidationCallback,
-    PINNSLambdaScheduleCallback,
     CausalDegradationMonitor,
-    SlidingWindowValidation,
-    PeriodicCheckpoint,
-    MetricPlateauDetector,
-    OneCycleLR,
     CosineWarmRestarts,
     CyclicalLR,
-    MemoryMonitor,
-    LatencyBenchmark,
+    DualValidationCallback,
     EpochSummary,
+    GradientMonitor,
+    LatencyBenchmark,
+    MemoryMonitor,
+    MetricPlateauDetector,
+    OneCycleLR,
+    PeriodicCheckpoint,
+    PINNSLambdaScheduleCallback,
+    SlidingWindowValidation,
+    UpdateNoiseLevelCallback,
+    WeightNormMonitor,
+    add_gradient_monitor,
     build_callbacks,
+    make_cosine_schedule,
+    make_step_schedule,
+    make_warmup_cosine_schedule,
 )
+from geosteering_ai.training.loop import TrainingLoop, TrainingResult
 from geosteering_ai.training.metrics import (
-    R2Score,
-    PerComponentMetric,
     AnisotropyRatioError,
+    PerComponentMetric,
+    R2Score,
     build_metrics,
 )
-from geosteering_ai.training.nstage import NStageTrainer, NStageResult
+from geosteering_ai.training.nstage import NStageResult, NStageTrainer
 from geosteering_ai.training.optuna_hpo import run_hpo
-from geosteering_ai.training.adaptation import DomainAdapter, AdaptationResult
 
 __all__ = [
     # ── Loop ──────────────────────────────────────────────────────────────
@@ -66,6 +71,7 @@ __all__ = [
     # ── Callbacks (originais) ────────────────────────────────────────────
     "UpdateNoiseLevelCallback",
     "WeightNormMonitor",
+    "GradientMonitor",
     "BestEpochTracker",
     # ── Callbacks (high priority) ────────────────────────────────────────
     "DualValidationCallback",
@@ -82,8 +88,13 @@ __all__ = [
     "MemoryMonitor",
     "LatencyBenchmark",
     "EpochSummary",
+    # ── LR schedule helpers ────────────────────────────────────────────
+    "make_cosine_schedule",
+    "make_step_schedule",
+    "make_warmup_cosine_schedule",
     # ── Factory ──────────────────────────────────────────────────────────
     "build_callbacks",
+    "add_gradient_monitor",
     # ── Metrics ───────────────────────────────────────────────────────────
     "R2Score",
     "PerComponentMetric",

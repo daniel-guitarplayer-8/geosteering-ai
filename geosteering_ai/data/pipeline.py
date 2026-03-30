@@ -79,18 +79,17 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from geosteering_ai.config import PipelineConfig
-from geosteering_ai.data.loading import (
-    AngleGroup,
-    OutMetadata,
-    load_dataset,
-    parse_out_metadata,
-)
-from geosteering_ai.data.splitting import DataSplits, split_angle_group, split_model_ids, apply_split
 from geosteering_ai.data.feature_views import apply_feature_view, apply_feature_view_tf
 from geosteering_ai.data.geosignals import (
     compute_expanded_features,
     compute_geosignals,
     compute_geosignals_tf,
+)
+from geosteering_ai.data.loading import (
+    AngleGroup,
+    OutMetadata,
+    load_dataset,
+    parse_out_metadata,
 )
 from geosteering_ai.data.scaling import (
     apply_target_scaling,
@@ -99,6 +98,12 @@ from geosteering_ai.data.scaling import (
     make_tf_scaler_fn,
     transform_features,
     transform_per_group,
+)
+from geosteering_ai.data.splitting import (
+    DataSplits,
+    apply_split,
+    split_angle_group,
+    split_model_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,6 +131,7 @@ __all__ = [
 #   - scaler_em, scaler_gs: Scalers fitados em dados LIMPOS
 #   - metadata: Informacoes do .out (n_models, theta_list, etc.)
 # ════════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class PreparedData:
@@ -159,6 +165,7 @@ class PreparedData:
         Ref: docs/ARCHITECTURE_v2.md secao 4.3 (Data Container).
         Scalers sao fitados em dados LIMPOS (regra absoluta P3).
     """
+
     x_train: np.ndarray
     y_train: np.ndarray
     z_train: np.ndarray
@@ -220,6 +227,7 @@ class PreparedData:
 # └─────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
 
+
 class DataPipeline:
     """Pipeline de dados unificado — cadeia fisicamente correta.
 
@@ -245,11 +253,52 @@ class DataPipeline:
         self._expanded_features: List[int] = []
         self._n_em_features: int = config.n_base_features
 
+        # ── Pre-computar posicoes de H1 (Hxx) e H2 (Hzz) no array extraido ──
+        # Apos loading, input_features sao extraidas do .dat 22-col:
+        #   block[:, config.input_features] → array (seq_len, n_base_features)
+        # As posicoes de Hxx (cols 4,5) e Hzz (cols 20,21) no array extraido
+        # dependem de quais colunas intermediarias foram incluidas.
+        #
+        # Exemplo: input_features = [1, 4, 5, 6, 7, 20, 21]
+        #   Array extraido: [z(0), ReHxx(1), ImHxx(2), ReHxy(3), ImHxy(4), ReHzz(5), ImHzz(6)]
+        #   h1_cols = (1, 2)  →  posicoes de Hxx no array extraido
+        #   h2_cols = (5, 6)  →  posicoes de Hzz no array extraido
+        #
+        # Para baseline [1,4,5,20,21]: h1_cols=(1,2), h2_cols=(3,4) — modo posicional
+        # Ref: feature_views.py h1_cols/h2_cols, docs/physics/errata_valores.md.
+        _feats = config.input_features
+        try:
+            re_h1_pos = _feats.index(4)  # Re(Hxx) no array extraido
+            im_h1_pos = _feats.index(5)  # Im(Hxx) no array extraido
+            re_h2_pos = _feats.index(20)  # Re(Hzz) no array extraido
+            im_h2_pos = _feats.index(21)  # Im(Hzz) no array extraido
+        except ValueError as exc:
+            raise ValueError(
+                f"input_features {_feats} deve conter colunas 4,5 (Re/Im Hxx) "
+                f"e 20,21 (Re/Im Hzz). Errata v5.0.15: baseline [1,4,5,20,21] "
+                f"obrigatorio como subconjunto."
+            ) from exc
+        # Validar ordenacao: Re deve preceder Im para cada componente EM.
+        # Se invertidos, arctan2(Im, Re) produz fase com sinal trocado.
+        if re_h1_pos > im_h1_pos or re_h2_pos > im_h2_pos:
+            raise ValueError(
+                f"input_features: Re deve preceder Im para cada componente EM. "
+                f"Posicoes: Hxx=({re_h1_pos},{im_h1_pos}), Hzz=({re_h2_pos},{im_h2_pos}). "
+                f"Esperado: col 4 antes de col 5, col 20 antes de col 21."
+            )
+        # Offset por n_prefix: se P2/P3 ativos, theta/freq sao injetados
+        # como colunas PREFIXO pelo loading.py, deslocando todas as posicoes.
+        # Ex: P2+P3 → n_prefix=2 → Hxx que era pos 1 vira pos 3.
+        _offset = config.n_prefix
+        self._h1_cols = (re_h1_pos + _offset, im_h1_pos + _offset)
+        self._h2_cols = (re_h2_pos + _offset, im_h2_pos + _offset)
+
         # Pre-computar familias de geosinais se ativo
         if config.use_geosignal_features:
             self._families = config.resolve_families()
             self._expanded_features = compute_expanded_features(
-                config.input_features, self._families,
+                config.input_features,
+                self._families,
             )
 
     @property
@@ -340,7 +389,9 @@ class DataPipeline:
         self._last_prepared = data
         return data
 
-    def _apply_fv_gs(self, x: np.ndarray, raw_data_2d: Optional[np.ndarray] = None) -> np.ndarray:
+    def _apply_fv_gs(
+        self, x: np.ndarray, raw_data_2d: Optional[np.ndarray] = None
+    ) -> np.ndarray:
         """Aplica Feature View e concatena Geosinais (numpy).
 
         Feature View seleciona/transforma colunas EM relevantes.
@@ -355,7 +406,14 @@ class DataPipeline:
             Array com FV aplicado e GS concatenados.
         """
         # Feature View — seleciona/transforma colunas EM
-        x_fv = apply_feature_view(x, self.config.feature_view)
+        # h1_cols/h2_cols derivados no __init__ a partir de input_features
+        # para suportar features EM expandidas (Hxy, Hxz, etc. entre Hxx e Hzz)
+        x_fv = apply_feature_view(
+            x,
+            self.config.feature_view,
+            h1_cols=self._h1_cols,
+            h2_cols=self._h2_cols,
+        )
 
         # Geosinais — ratios e diferencas diagnosticas sobre EM
         if self.config.use_geosignal_features and self._families:
@@ -363,7 +421,9 @@ class DataPipeline:
             # GS sao computados sobre dados com colunas originais do .dat,
             # nao sobre FV-transformados (preserva relacao fisica entre componentes)
             if raw_data_2d is not None:
-                gs = compute_geosignals(raw_data_2d, self._families, self.config.n_columns)
+                gs = compute_geosignals(
+                    raw_data_2d, self._families, self.config.n_columns
+                )
                 gs_3d = gs.reshape(n_seq, seq_len, -1)
             else:
                 logger.warning(
@@ -391,9 +451,11 @@ class DataPipeline:
         Todos os splits sao processados de forma identica.
         """
         # FV em todos os splits (seleciona colunas EM relevantes)
-        x_train = apply_feature_view(splits.x_train, self.config.feature_view)
-        x_val = apply_feature_view(splits.x_val, self.config.feature_view)
-        x_test = apply_feature_view(splits.x_test, self.config.feature_view)
+        # h1_cols/h2_cols propagados para suportar features EM expandidas
+        _fv_kw = dict(h1_cols=self._h1_cols, h2_cols=self._h2_cols)
+        x_train = apply_feature_view(splits.x_train, self.config.feature_view, **_fv_kw)
+        x_val = apply_feature_view(splits.x_val, self.config.feature_view, **_fv_kw)
+        x_test = apply_feature_view(splits.x_test, self.config.feature_view, **_fv_kw)
 
         n_em = x_train.shape[-1]
 
@@ -415,13 +477,13 @@ class DataPipeline:
         return PreparedData(
             x_train=x_train.astype(np.float32),
             y_train=splits.y_train.astype(np.float32),
-            z_train=splits.z_train,                       # z em metros (NUNCA escalado)
+            z_train=splits.z_train,  # z em metros (NUNCA escalado)
             x_val=x_val.astype(np.float32),
             y_val=splits.y_val.astype(np.float32),
-            z_val=splits.z_val,                           # z em metros (NUNCA escalado)
+            z_val=splits.z_val,  # z em metros (NUNCA escalado)
             x_test=x_test.astype(np.float32),
             y_test=splits.y_test.astype(np.float32),
-            z_test=splits.z_test,                         # z em metros (NUNCA escalado)
+            z_test=splits.z_test,  # z em metros (NUNCA escalado)
             scaler_em=scaler_em,
             scaler_gs=scaler_gs,
             n_em_features=n_em,
@@ -443,7 +505,9 @@ class DataPipeline:
     # Val/test sao processados OFFLINE (sem noise).
     # ──────────────────────────────────────────────────────────────────
 
-    def _prepare_onthefly(self, splits: DataSplits, metadata: OutMetadata) -> PreparedData:
+    def _prepare_onthefly(
+        self, splits: DataSplits, metadata: OutMetadata
+    ) -> PreparedData:
         """Modo on-the-fly: train fica RAW, FV+GS no train_map_fn.
 
         Cadeia on-the-fly: noise(raw_em) → FV(noisy) → GS(noisy) → scale
@@ -452,7 +516,10 @@ class DataPipeline:
         """
         # Fit scaler em CLEAN train (FV+GS aplicados temporariamente)
         # Estes dados temporarios so existem para capturar mu/sigma do scaler
-        x_train_clean_fv = apply_feature_view(splits.x_train, self.config.feature_view)
+        _fv_kw = dict(h1_cols=self._h1_cols, h2_cols=self._h2_cols)
+        x_train_clean_fv = apply_feature_view(
+            splits.x_train, self.config.feature_view, **_fv_kw
+        )
         n_em = x_train_clean_fv.shape[-1]
 
         # Se GS ativo, computar GS em clean para fitar scaler_gs
@@ -460,7 +527,9 @@ class DataPipeline:
         if self.config.use_per_group_scalers and self._families:
             x_train_clean_full = self._apply_fv_gs(splits.x_train)
             scaler_em, scaler_gs = fit_per_group_scalers(
-                x_train_clean_full, self.config, n_em,
+                x_train_clean_full,
+                self.config,
+                n_em,
             )
             del x_train_clean_full  # temporario — descartado apos fit
         else:
@@ -468,8 +537,17 @@ class DataPipeline:
         del x_train_clean_fv  # temporario — scaler ja capturou estatisticas
 
         # Val/Test: FV+GS+scale OFFLINE (sem noise)
-        x_val_fv = self._apply_fv_gs(splits.x_val) if self._families else apply_feature_view(splits.x_val, self.config.feature_view)
-        x_test_fv = self._apply_fv_gs(splits.x_test) if self._families else apply_feature_view(splits.x_test, self.config.feature_view)
+        # _apply_fv_gs ja propaga h1_cols/h2_cols internamente
+        x_val_fv = (
+            self._apply_fv_gs(splits.x_val)
+            if self._families
+            else apply_feature_view(splits.x_val, self.config.feature_view, **_fv_kw)
+        )
+        x_test_fv = (
+            self._apply_fv_gs(splits.x_test)
+            if self._families
+            else apply_feature_view(splits.x_test, self.config.feature_view, **_fv_kw)
+        )
 
         if scaler_gs is not None:
             x_val_fv = transform_per_group(x_val_fv, scaler_em, scaler_gs, n_em)
@@ -482,13 +560,13 @@ class DataPipeline:
         return PreparedData(
             x_train=splits.x_train.astype(np.float32),  # RAW! Processado on-the-fly
             y_train=splits.y_train.astype(np.float32),
-            z_train=splits.z_train,                       # z em metros (NUNCA escalado)
+            z_train=splits.z_train,  # z em metros (NUNCA escalado)
             x_val=x_val_fv.astype(np.float32),
             y_val=splits.y_val.astype(np.float32),
-            z_val=splits.z_val,                           # z em metros (NUNCA escalado)
+            z_val=splits.z_val,  # z em metros (NUNCA escalado)
             x_test=x_test_fv.astype(np.float32),
             y_test=splits.y_test.astype(np.float32),
-            z_test=splits.z_test,                         # z em metros (NUNCA escalado)
+            z_test=splits.z_test,  # z em metros (NUNCA escalado)
             scaler_em=scaler_em,
             scaler_gs=scaler_gs,
             n_em_features=n_em,
@@ -546,6 +624,9 @@ class DataPipeline:
         config = self.config
         families = self._families
         expanded_features = self._expanded_features
+        h1_cols = self._h1_cols
+        h2_cols = self._h2_cols
+        n_protected = config.n_prefix + 1  # theta? + freq? + z_obs
 
         # Scalers devem ter sido fitados em prepare()
         if not hasattr(self, "_last_prepared"):
@@ -585,14 +666,20 @@ class DataPipeline:
             # Ruido gaussiano aditivo simula incerteza de medicao LWD.
             # Intensidade controlada por noise_level_var (curriculum).
             if config.use_noise:
+                # ── Separar colunas protegidas (theta?, freq?, z_obs) de EM ──
+                # n_protected = n_prefix + 1: theta/freq/z NUNCA recebem noise
+                # (sao parametros conhecidos, nao medidos pelo sensor EM).
+                # Somente componentes EM (Re/Im de Hxx, Hzz, etc.) recebem noise.
+                protected = x[:, :n_protected]  # (seq_len, n_prot) — intacto
+                em_raw = x[:, n_protected:]  # (seq_len, n_em) — ruidoso
                 noise = tf.random.normal(
-                    shape=tf.shape(x),
+                    shape=tf.shape(em_raw),
                     mean=0.0,
                     stddev=noise_level_var,
                     dtype=tf.float32,
                 )
                 # Noise aditivo sobre componentes EM raw (A/m)
-                x = x + noise
+                x = tf.concat([protected, em_raw + noise], axis=-1)
 
             # ── Step 2: Feature View (noisy Re/Im → FV channels) ────────────
             # Saida: [prefix, z, FV_chan0, FV_chan1, FV_chan2, FV_chan3]
@@ -600,7 +687,11 @@ class DataPipeline:
             # (noise aplicado sobre dados raw, FV ve dados ruidosos)
             if config.feature_view not in ("identity", "raw"):
                 x = apply_feature_view_tf(
-                    x, view=config.feature_view, eps=config.eps_tf,
+                    x,
+                    view=config.feature_view,
+                    eps=config.eps_tf,
+                    h1_cols=h1_cols,
+                    h2_cols=h2_cols,
                 )
 
             # ── Step 3: Geosignals (noisy EM → att + phase por familia) ──────
@@ -609,7 +700,10 @@ class DataPipeline:
             # (attenuation e phase difference calculados sobre sinal ruidoso)
             if config.use_geosignal_features and families:
                 gs = compute_geosignals_tf(
-                    x, families, expanded_features, eps=config.eps_tf,
+                    x,
+                    families,
+                    expanded_features,
+                    eps=config.eps_tf,
                 )
                 x = tf.concat([x, gs], axis=-1)
 
@@ -617,11 +711,12 @@ class DataPipeline:
             # Usa scaler fitado em dados LIMPOS (regra absoluta)
             # Aplica normalizacao usando estatisticas de dados LIMPOS.
             # Particiona EM e GS para per-group scaling [P3].
-            x_em = x[:, :, :n_em]
+            # Nota: x eh 2D (seq_len, n_feat) dentro de tf.data.map (unbatched)
+            x_em = x[:, :n_em]
             x_em = scale_em_fn(x_em)
 
-            if config.use_geosignal_features and x.shape[-1] > n_em:
-                x_gs = x[:, :, n_em:]
+            if config.use_geosignal_features and tf.shape(x)[-1] > n_em:
+                x_gs = x[:, n_em:]
                 x_gs = scale_gs_fn(x_gs)
                 x = tf.concat([x_em, x_gs], axis=-1)
             else:
@@ -630,6 +725,174 @@ class DataPipeline:
             return x, y
 
         return train_map_fn
+
+    # ──────────────────────────────────────────────────────────────────
+    # BUILD TF DATASET — Construcao otimizada de tf.data.Dataset
+    #
+    # Converte arrays NumPy (PreparedData) em tf.data.Dataset otimizado
+    # com shuffle, batch, map, cache e prefetch configurados por split.
+    # Train: shuffle → batch → map (noise+FV+GS+scale) → prefetch.
+    # Val/Test: batch → cache → prefetch (sem noise, dados offline).
+    #
+    # Otimizacoes tf.data aplicadas:
+    #   - AUTOTUNE para num_parallel_calls e prefetch (paralelismo I/O)
+    #   - cache() em val/test (dados imutaveis, cabe na RAM)
+    #   - shuffle com buffer limitado (min(N, 10000) para RAM finita)
+    #   - Ordem: shuffle ANTES de batch (randomizacao inter-batch)
+    # ──────────────────────────────────────────────────────────────────
+
+    def build_tf_dataset(
+        self,
+        prepared: PreparedData,
+        split: str = "train",
+        noise_level_var: Optional[Any] = None,
+    ) -> Any:
+        """Constroi tf.data.Dataset otimizado a partir de PreparedData.
+
+        Converte arrays NumPy em pipeline tf.data com operacoes de
+        shuffle, batch, map, cache e prefetch configurados para cada
+        split (train, val, test). Aplica boas praticas de performance
+        do tf.data (paralelismo, prefetch, caching).
+
+        Pipeline por split:
+
+        .. code-block:: text
+
+            ┌──────────────────────────────────────────────────────────────┐
+            │  TRAIN:                                                      │
+            │    from_tensor_slices(x_train, y_train)                     │
+            │      ↓                                                       │
+            │    .shuffle(min(N, 10000))   ← randomizacao inter-batch     │
+            │      ↓                                                       │
+            │    .batch(batch_size)                                        │
+            │      ↓                                                       │
+            │    .map(train_map_fn, AUTOTUNE)  ← noise→FV→GS→scale       │
+            │      ↓                            (se noise_level_var)       │
+            │    .prefetch(AUTOTUNE)           ← sobreposicao CPU/GPU     │
+            │                                                              │
+            ├──────────────────────────────────────────────────────────────┤
+            │  VAL / TEST:                                                 │
+            │    from_tensor_slices(x_val/test, y_val/test)               │
+            │      ↓                                                       │
+            │    .batch(batch_size)                                        │
+            │      ↓                                                       │
+            │    .cache()                ← dados imutaveis, cabe na RAM   │
+            │      ↓                                                       │
+            │    .prefetch(AUTOTUNE)     ← sobreposicao CPU/GPU           │
+            └──────────────────────────────────────────────────────────────┘
+
+        Args:
+            prepared: PreparedData retornado por self.prepare(). Contem
+                arrays x/y/z para cada split, scalers fitados em dados
+                limpos, e metadados. z_meters NAO e incluido no dataset
+                (preservado separadamente para reconstrucao de perfis).
+            split: Split a construir. Opcoes: "train", "val", "test".
+                Determina qual par (x, y) usar e quais otimizacoes
+                aplicar (shuffle apenas para train, cache para val/test).
+            noise_level_var: tf.Variable compartilhado com o curriculum
+                callback (UpdateNoiseLevelCallback). Se fornecido E
+                split="train", aplica build_train_map_fn() no pipeline
+                (cadeia noise→FV→GS→scale on-the-fly). Se None, nenhum
+                map e aplicado (dados ja processados offline).
+
+        Returns:
+            tf.data.Dataset: Dataset pronto para model.fit(). Shape dos
+            elementos: ((batch, seq_len, n_features), (batch, seq_len, n_targets)).
+
+        Raises:
+            ValueError: Se split nao for "train", "val" ou "test".
+
+        Example:
+            >>> pipeline = DataPipeline(config)
+            >>> prepared = pipeline.prepare("/data/dataset")
+            >>> noise_var = tf.Variable(0.0, dtype=tf.float32)
+            >>> train_ds = pipeline.build_tf_dataset(prepared, "train", noise_var)
+            >>> val_ds = pipeline.build_tf_dataset(prepared, "val")
+            >>> model.fit(train_ds, validation_data=val_ds)
+
+        Note:
+            Referenciado em:
+                - training/loop.py: TrainingLoop.run() consome o dataset
+                - data/pipeline.py: build_train_map_fn() (map fn para train)
+                - noise/curriculum.py: UpdateNoiseLevelCallback controla noise_var
+            Ref: docs/ARCHITECTURE_v2.md secao 4.3-4.4 (tf.data optimization).
+            Ref: tf.data best practices (https://www.tensorflow.org/guide/data_performance).
+            shuffle ANTES de batch garante randomizacao inter-batch (amostras
+            de modelos geologicos distintos no mesmo batch). Buffer limitado
+            a 10000 para nao estourar RAM em datasets grandes (>100k amostras).
+            cache() seguro para val/test (dados imutaveis entre epocas).
+            NUNCA usar cache() em train com noise on-the-fly (noise deve
+            variar a cada epoca para curriculum learning funcionar).
+        """
+        import tensorflow as tf  # lazy import
+
+        # ── Selecionar arrays por split ────────────────────────────────
+        # Cada split usa seu par (x, y) do PreparedData.
+        # z_meters NAO incluido no dataset (reservado para plots/avaliacao).
+        if split == "train":
+            x, y = prepared.x_train, prepared.y_train
+        elif split == "val":
+            x, y = prepared.x_val, prepared.y_val
+        elif split == "test":
+            x, y = prepared.x_test, prepared.y_test
+        else:
+            raise ValueError(f"Split '{split}' invalido. Opcoes: 'train', 'val', 'test'.")
+
+        # ── Construir dataset base ─────────────────────────────────────
+        # from_tensor_slices cria um elemento por amostra (modelo geologico).
+        # Dados copiados para TF como tensores constantes na primeira chamada.
+        ds = tf.data.Dataset.from_tensor_slices((x, y))
+
+        n_samples = len(x)
+        logger.info(
+            "build_tf_dataset: split=%s, n_samples=%d, batch_size=%d",
+            split,
+            n_samples,
+            self.config.batch_size,
+        )
+
+        if split == "train":
+            # ── Train: shuffle → batch → map → prefetch ───────────────
+            # Shuffle ANTES de batch: randomiza ordem das amostras para
+            # que cada batch contenha modelos geologicos diversos.
+            # Buffer = min(N, 10000) para RAM finita em datasets grandes.
+            buffer_size = min(n_samples, 10000)
+            ds = ds.shuffle(
+                buffer_size=buffer_size,
+                seed=self.config.global_seed,
+            )
+
+            # Batch ANTES de map: map_fn processa tensores batched
+            # (shape [batch, seq_len, features]), consistente com
+            # build_train_map_fn() que opera sobre batches.
+            ds = ds.batch(self.config.batch_size)
+
+            # Map: cadeia on-the-fly noise → FV → GS → scale (se ativo)
+            # noise_level_var controla intensidade via curriculum callback.
+            # AUTOTUNE paraleliza map across CPU cores.
+            if noise_level_var is not None:
+                map_fn = self.build_train_map_fn(noise_level_var)
+                ds = ds.map(map_fn, num_parallel_calls=tf.data.AUTOTUNE)
+
+            # Prefetch: sobrepoe preprocessing do proximo batch com
+            # treinamento GPU do batch atual (pipeline CPU/GPU).
+            ds = ds.prefetch(tf.data.AUTOTUNE)
+
+        else:
+            # ── Val/Test: batch → cache → prefetch ─────────────────────
+            # Sem shuffle (avaliacao deve ser deterministica).
+            # Sem map (FV+GS+scale ja aplicados offline em prepare()).
+            ds = ds.batch(self.config.batch_size)
+
+            # Cache: armazena batches processados na RAM apos primeira
+            # iteracao. Seguro para val/test (dados imutaveis entre epocas).
+            # Economia: evita re-batching a cada epoca de validacao.
+            ds = ds.cache()
+
+            # Prefetch: sobreposicao CPU/GPU para avaliacao rapida.
+            ds = ds.prefetch(tf.data.AUTOTUNE)
+
+        return ds
 
     # ──────────────────────────────────────────────────────────────────
     # VAL NOISE MAP FN — Noise para dual validation [P2]

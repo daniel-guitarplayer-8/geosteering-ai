@@ -64,8 +64,14 @@ EPS = 1e-12
 # IMH1_IMH2_razao: partes imaginarias + razao linear |H1|/|H2|.
 # IMH1_IMH2_lograzao: partes imaginarias + log10 da razao |H1|/|H2|.
 # Ref: docs/physics/perspectivas.md secao Feature Views.
-VALID_VIEWS = {"identity", "raw", "H1_logH2", "logH1_logH2",
-               "IMH1_IMH2_razao", "IMH1_IMH2_lograzao"}
+VALID_VIEWS = {
+    "identity",
+    "raw",
+    "H1_logH2",
+    "logH1_logH2",
+    "IMH1_IMH2_razao",
+    "IMH1_IMH2_lograzao",
+}
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -77,9 +83,10 @@ VALID_VIEWS = {"identity", "raw", "H1_logH2", "logH1_logH2",
 # Magnitude complexa: sqrt(Re^2 + Im^2 + eps) para estabilidade.
 # ──────────────────────────────────────────────────────────────────────────
 
+
 def _magnitude(re: np.ndarray, im: np.ndarray) -> np.ndarray:
     """Magnitude complexa: sqrt(re^2 + im^2 + eps)."""
-    return np.sqrt(re ** 2 + im ** 2 + EPS)
+    return np.sqrt(re**2 + im**2 + EPS)
 
 
 def _phase(re: np.ndarray, im: np.ndarray) -> np.ndarray:
@@ -117,37 +124,73 @@ def _safe_log10(x: np.ndarray) -> np.ndarray:
 #   └──────────────────────────────────────────────────────────────────────────┘
 # ──────────────────────────────────────────────────────────────────────────
 
+
 def apply_feature_view(
     x: np.ndarray,
     view: str = "identity",
     n_prefix: int = 0,
+    *,
+    h1_cols: "tuple[int, int] | None" = None,
+    h2_cols: "tuple[int, int] | None" = None,
 ) -> np.ndarray:
     """Aplica Feature View sobre componentes EM (numpy).
 
-    Layout esperado nas ultimas 4 colunas (apos prefix + z):
-        [...prefix, z, Re(H1), Im(H1), Re(H2), Im(H2)]
+    Suporta dois modos de operacao:
 
-    H1 = Hxx (planar), H2 = Hzz (axial).
+    1. **Modo posicional (legado, default):** Assume layout contiguous
+       [...prefix, z, Re(H1), Im(H1), Re(H2), Im(H2), ...extras].
+       H1 e H2 sao identificados pelas 4 colunas imediatamente apos
+       prefix + z_obs. Compativel com pipeline P1 baseline.
 
-    Saida: mesmo shape que entrada, 4 canais EM substituidos.
+    2. **Modo explicito (features expandidas):** h1_cols e h2_cols
+       especificam as posicoes exatas de (Re, Im) de cada componente
+       no array de features extraido. Permite features EM extras
+       (Hxy, Hxz, etc.) entre H1 e H2 sem afetar a transformacao.
+
+    H1 = Hxx (planar), H2 = Hzz (axial) no pipeline default.
+
+    As Feature Views transformam APENAS os 4 canais H1/H2 especificados.
+    Todas as demais colunas (z_obs, prefix, colunas EM extras, GS) sao
+    preservadas intactas.
 
     Args:
         x: Array 2D (n_rows, n_feat) ou 3D (n_seq, seq_len, n_feat).
-        view: Nome da Feature View.
+        view: Nome da Feature View. Deve estar em VALID_VIEWS.
         n_prefix: Colunas prefixo (theta, f_norm) antes de z.
+            Usado apenas no modo posicional (quando h1_cols/h2_cols=None).
+        h1_cols: Tupla (re_idx, im_idx) com posicoes de Re(H1) e Im(H1)
+            no array de features. Se None, usa modo posicional:
+            re_h1 = n_prefix+1, im_h1 = n_prefix+2.
+        h2_cols: Tupla (re_idx, im_idx) com posicoes de Re(H2) e Im(H2)
+            no array de features. Se None, usa modo posicional:
+            re_h2 = n_prefix+3, im_h2 = n_prefix+4.
 
     Returns:
-        Array com mesma shape, canais EM transformados.
+        np.ndarray: Array com mesma shape, canais H1/H2 transformados
+            conforme a Feature View selecionada. Demais colunas intactas.
+
+    Raises:
+        ValueError: Se view nao esta em VALID_VIEWS.
+        ValueError: Se array tem colunas insuficientes para as posicoes.
+
+    Example:
+        >>> # Modo posicional (P1 baseline, 5 features):
+        >>> result = apply_feature_view(x, "logH1_logH2")
+        >>> # Modo explicito (7 features com Hxy entre Hxx e Hzz):
+        >>> result = apply_feature_view(x, "logH1_logH2",
+        ...     h1_cols=(1, 2), h2_cols=(5, 6))
 
     Note:
         Referenciado em:
             - data/pipeline.py: DataPipeline._apply_fv_gs() (modo offline)
             - data/pipeline.py: build_train_map_fn() (modo on-the-fly, Step 2)
-            - tests/test_data_pipeline.py: TestFeatureViews (9 test cases)
+            - tests/test_data_pipeline.py: TestFeatureViews,
+              TestFeatureViewsExpanded
         Ref: docs/ARCHITECTURE_v2.md secao 4.3, docs/physics/perspectivas.md.
         Bug fix v2.0: Legado (C22) usava ln (numpy) vs log10 (TF).
             Agora ambos usam log10 consistentemente.
         Guard numerico: EPS = 1e-12 (NUNCA 1e-30 em float32).
+        v2.0.1: Adicionado h1_cols/h2_cols para features EM expandidas.
     """
     # ── identity/raw: retorna copia sem transformacao (passthrough) ──
     if view in ("identity", "raw"):
@@ -166,68 +209,110 @@ def apply_feature_view(
     elif result.ndim != 2:
         raise ValueError(f"x deve ter 2D ou 3D, shape recebido: {x.shape}")
 
-    # ── Indices das 4 componentes EM (ultimas 4 colunas antes de GS) ──
-    # Layout: [prefix...] [z] [Re(H1)] [Im(H1)] [Re(H2)] [Im(H2)] [GS...]
-    # em_start aponta para Re(H1), pulando prefix + z_obs
-    em_start = n_prefix + 1  # pula prefix + z
-    if result.shape[-1] < em_start + 4:
+    # ── Resolucao das posicoes de H1 e H2 ──────────────────────────
+    # Dois modos de operacao:
+    #
+    #   1. Modo posicional (h1_cols=None, h2_cols=None):
+    #      Layout contiguous: [prefix..., z, Re(H1), Im(H1), Re(H2), Im(H2), ...]
+    #      em_start = n_prefix + 1 (pula prefix + z_obs)
+    #      H1 nas posicoes em_start, em_start+1
+    #      H2 nas posicoes em_start+2, em_start+3
+    #
+    #   2. Modo explicito (h1_cols=(re,im), h2_cols=(re,im)):
+    #      H1 e H2 em posicoes arbitrarias no array de features.
+    #      Permite features EM extras (Hxy, Hxz) entre H1 e H2.
+    #      Colunas nao-H1/H2 sao preservadas intactas.
+    #
+    # Ref: docs/physics/perspectivas.md, PipelineConfig.input_features.
+    # ──────────────────────────────────────────────────────────────────
+    if (h1_cols is None) != (h2_cols is None):
         raise ValueError(
-            f"Array tem {result.shape[-1]} colunas mas em_start={em_start} "
-            f"requer pelo menos {em_start + 4} (n_prefix={n_prefix}, z=1, 4 EM)"
+            "h1_cols e h2_cols devem ser ambos None ou ambos especificados. "
+            f"Recebido h1_cols={h1_cols}, h2_cols={h2_cols}"
         )
-    re_h1 = result[:, em_start]      # Re(Hxx) — componente planar real
-    im_h1 = result[:, em_start + 1]  # Im(Hxx) — componente planar imaginaria
-    re_h2 = result[:, em_start + 2]  # Re(Hzz) — componente axial real
-    im_h2 = result[:, em_start + 3]  # Im(Hzz) — componente axial imaginaria
 
-    # ── Calculo de magnitude e fase para ambas componentes ──
-    mag_h1 = _magnitude(re_h1, im_h1)  # |Hxx| — magnitude planar
-    mag_h2 = _magnitude(re_h2, im_h2)  # |Hzz| — magnitude axial
-    phi_h1 = _phase(re_h1, im_h1)      # arg(Hxx) — fase planar [rad]
-    phi_h2 = _phase(re_h2, im_h2)      # arg(Hzz) — fase axial [rad]
+    if h1_cols is not None and h2_cols is not None:
+        # ── Modo explicito: posicoes arbitrarias de H1/H2 ─────────
+        re_h1_idx, im_h1_idx = h1_cols
+        re_h2_idx, im_h2_idx = h2_cols
+        _max_idx = max(re_h1_idx, im_h1_idx, re_h2_idx, im_h2_idx)
+        if result.shape[-1] <= _max_idx:
+            raise ValueError(
+                f"Array tem {result.shape[-1]} colunas mas h1_cols={h1_cols}, "
+                f"h2_cols={h2_cols} requerem pelo menos {_max_idx + 1}"
+            )
+    else:
+        # ── Modo posicional (legado): layout contiguous ────────────
+        # Layout: [prefix...] [z] [Re(H1)] [Im(H1)] [Re(H2)] [Im(H2)] [GS...]
+        em_start = n_prefix + 1  # pula prefix + z
+        if result.shape[-1] < em_start + 4:
+            raise ValueError(
+                f"Array tem {result.shape[-1]} colunas mas em_start={em_start} "
+                f"requer pelo menos {em_start + 4} (n_prefix={n_prefix}, z=1, 4 EM)"
+            )
+        re_h1_idx = em_start
+        im_h1_idx = em_start + 1
+        re_h2_idx = em_start + 2
+        im_h2_idx = em_start + 3
+
+    # ── Extracao dos 4 canais H1/H2 por indice ────────────────────
+    re_h1 = result[:, re_h1_idx]  # Re(H1) — componente planar real
+    im_h1 = result[:, im_h1_idx]  # Im(H1) — componente planar imaginaria
+    re_h2 = result[:, re_h2_idx]  # Re(H2) — componente axial real
+    im_h2 = result[:, im_h2_idx]  # Im(H2) — componente axial imaginaria
+
+    # ── Calculo de magnitude e fase para ambas componentes ─────────
+    mag_h1 = _magnitude(re_h1, im_h1)  # |H1| — magnitude planar
+    mag_h2 = _magnitude(re_h2, im_h2)  # |H2| — magnitude axial
+    phi_h1 = _phase(re_h1, im_h1)  # arg(H1) — fase planar [rad]
+    phi_h2 = _phase(re_h2, im_h2)  # arg(H2) — fase axial [rad]
 
     if view == "H1_logH2":
         # ── H1_logH2: H1 cru preserva SNR em alta atenuacao,
         #    H2 log10-transformado comprime faixa dinamica larga de Hzz.
-        #    Saida: [Re(H1), Im(H1), log10|H2|, phi(H2)]
+        #    Saida nos canais H2: [log10|H2|, phi(H2)]
+        #    Canais H1 preservados. Colunas extras intactas.
         #    Motivacao fisica: Hzz varia 4+ ordens de magnitude entre
         #    camadas de alta e baixa resistividade. Log10 estabiliza
         #    gradientes e melhora convergencia durante treinamento.
-        result[:, em_start + 2] = _safe_log10(mag_h2)
-        result[:, em_start + 3] = phi_h2
+        result[:, re_h2_idx] = _safe_log10(mag_h2)
+        result[:, im_h2_idx] = phi_h2
 
     elif view == "logH1_logH2":
         # ── logH1_logH2: Ambos H1 e H2 em escala logaritmica.
-        #    Saida: [log10|H1|, phi(H1), log10|H2|, phi(H2)]
+        #    Saida: H1→[log10|H1|, phi(H1)], H2→[log10|H2|, phi(H2)]
+        #    Colunas extras intactas.
         #    Motivacao fisica: Magnitude + fase capturam toda informacao
         #    do sinal complexo. Log10 comprime faixa dinamica, tornando
         #    ambas componentes comparaveis em escala para o modelo.
-        result[:, em_start]     = _safe_log10(mag_h1)
-        result[:, em_start + 1] = phi_h1
-        result[:, em_start + 2] = _safe_log10(mag_h2)
-        result[:, em_start + 3] = phi_h2
+        result[:, re_h1_idx] = _safe_log10(mag_h1)
+        result[:, im_h1_idx] = phi_h1
+        result[:, re_h2_idx] = _safe_log10(mag_h2)
+        result[:, im_h2_idx] = phi_h2
 
     elif view == "IMH1_IMH2_razao":
         # ── IMH1_IMH2_razao: Partes imaginarias + razao de magnitudes.
-        #    Saida: [Im(H1), Im(H2), |H1|/|H2|, phi(H1)-phi(H2)]
-        #    Motivacao fisica: Im(H) é mais sensivel a contraste de
+        #    Saida: H1→[Im(H1), Im(H2)], H2→[|H1|/|H2|, phi(H1)-phi(H2)]
+        #    Colunas extras intactas.
+        #    Motivacao fisica: Im(H) eh mais sensivel a contraste de
         #    resistividade em fronteiras. Razao |H1|/|H2| indica anisotropia
         #    (TIV). Diferenca de fase detecta fronteiras de camada.
-        result[:, em_start] = im_h1
-        result[:, em_start + 1] = im_h2
-        result[:, em_start + 2] = mag_h1 / (mag_h2 + EPS)
-        result[:, em_start + 3] = phi_h1 - phi_h2
+        result[:, re_h1_idx] = im_h1
+        result[:, im_h1_idx] = im_h2
+        result[:, re_h2_idx] = mag_h1 / (mag_h2 + EPS)
+        result[:, im_h2_idx] = phi_h1 - phi_h2
 
     elif view == "IMH1_IMH2_lograzao":
         # ── IMH1_IMH2_lograzao: Como razao, mas com log10 da razao.
-        #    Saida: [Im(H1), Im(H2), log10(|H1|/|H2|), phi(H1)-phi(H2)]
+        #    Saida: H1→[Im(H1), Im(H2)], H2→[log10(|H1|/|H2|), phi(H1)-phi(H2)]
+        #    Colunas extras intactas.
         #    Motivacao fisica: Log-razao estabiliza variacao quando
-        #    contraste de resistividade é muito alto (>100:1).
+        #    contraste de resistividade eh muito alto (>100:1).
         #    Preferido para cenarios com camadas de sal ou carbonato.
-        result[:, em_start] = im_h1
-        result[:, em_start + 1] = im_h2
-        result[:, em_start + 2] = _safe_log10(mag_h1 / (mag_h2 + EPS))
-        result[:, em_start + 3] = phi_h1 - phi_h2
+        result[:, re_h1_idx] = im_h1
+        result[:, im_h1_idx] = im_h2
+        result[:, re_h2_idx] = _safe_log10(mag_h1 / (mag_h2 + EPS))
+        result[:, im_h2_idx] = phi_h1 - phi_h2
 
     # ── Restaura shape 3D se entrada era 3D ──
     if result.ndim == 2 and x.ndim == 3:
@@ -246,34 +331,49 @@ def apply_feature_view(
 # Ref: docs/ARCHITECTURE_v2.md secao 4.3 — cadeia de dados on-the-fly.
 # ──────────────────────────────────────────────────────────────────────────
 
+
 def apply_feature_view_tf(
     x: "tf.Tensor",
     view: str = "identity",
     n_prefix: int = 0,
     eps: float = EPS,
+    *,
+    h1_cols: "tuple[int, int] | None" = None,
+    h2_cols: "tuple[int, int] | None" = None,
 ) -> "tf.Tensor":
     """Aplica Feature View sobre componentes EM (TensorFlow).
 
     Semantica IDENTICA a versao numpy: mesmos canais, mesma base log10.
+    Suporta modo posicional (legado) e modo explicito (h1_cols/h2_cols).
+
+    No modo explicito, os 4 canais H1/H2 sao substituidos via
+    construcao de lista de colunas, preservando colunas extras
+    (Hxy, Hxz, etc.) intactas.
 
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         view: Nome da Feature View.
-        n_prefix: Colunas prefixo antes de z.
+        n_prefix: Colunas prefixo antes de z (modo posicional).
         eps: Epsilon para estabilidade numerica.
+        h1_cols: Tupla (re_idx, im_idx) posicoes de H1 no tensor.
+            Se None, usa modo posicional.
+        h2_cols: Tupla (re_idx, im_idx) posicoes de H2 no tensor.
+            Se None, usa modo posicional.
 
     Returns:
-        Tensor com mesma shape, canais EM transformados.
+        Tensor com mesma shape, canais H1/H2 transformados.
 
     Note:
         Referenciado em:
             - data/pipeline.py: DataPipeline._apply_fv_gs() (modo offline)
             - data/pipeline.py: build_train_map_fn() (modo on-the-fly, Step 2)
-            - tests/test_data_pipeline.py: TestFeatureViews (9 test cases)
+            - tests/test_data_pipeline.py: TestFeatureViews,
+              TestFeatureViewsExpanded
         Ref: docs/ARCHITECTURE_v2.md secao 4.3, docs/physics/perspectivas.md.
         Bug fix v2.0: Legado (C22) usava ln (numpy) vs log10 (TF).
             Agora ambos usam log10 consistentemente.
         Guard numerico: EPS = 1e-12 (NUNCA 1e-30 em float32).
+        v2.0.1: Adicionado h1_cols/h2_cols para features EM expandidas.
     """
     import tensorflow as tf
 
@@ -281,25 +381,38 @@ def apply_feature_view_tf(
     if view in ("identity", "raw"):
         return x
 
-    # ── Fatiamento das componentes EM do tensor de entrada ──
-    # em_start aponta para Re(H1), pulando prefix + z_obs
-    em_start = n_prefix + 1
-    tf.debugging.assert_greater_equal(
-        tf.shape(x)[-1], em_start + 4,
-        message=f"Tensor precisa de >= {em_start + 4} colunas para FV"
-    )
-    prefix_and_z = x[:, :, :em_start]         # colunas antes das componentes EM
-    re_h1 = x[:, :, em_start]                 # Re(Hxx) — componente planar real
-    im_h1 = x[:, :, em_start + 1]             # Im(Hxx) — componente planar imaginaria
-    re_h2 = x[:, :, em_start + 2]             # Re(Hzz) — componente axial real
-    im_h2 = x[:, :, em_start + 3]             # Im(Hzz) — componente axial imaginaria
-    tail = x[:, :, em_start + 4:]             # canais GS posteriores (se existirem)
+    # ── Validacao parcial h1/h2 ────────────────────────────────────
+    if (h1_cols is None) != (h2_cols is None):
+        raise ValueError("h1_cols e h2_cols devem ser ambos None ou ambos especificados.")
+
+    # ── Resolucao das posicoes H1/H2 ──────────────────────────────
+    _use_explicit = h1_cols is not None and h2_cols is not None
+    if _use_explicit:
+        re_h1_idx, im_h1_idx = h1_cols
+        re_h2_idx, im_h2_idx = h2_cols
+    else:
+        em_start = n_prefix + 1
+        tf.debugging.assert_greater_equal(
+            tf.shape(x)[-1],
+            em_start + 4,
+            message=f"Tensor precisa de >= {em_start + 4} colunas para FV",
+        )
+        re_h1_idx = em_start
+        im_h1_idx = em_start + 1
+        re_h2_idx = em_start + 2
+        im_h2_idx = em_start + 3
+
+    # ── Extracao dos 4 canais H1/H2 ───────────────────────────────
+    re_h1 = x[:, :, re_h1_idx]  # Re(H1) — componente planar real
+    im_h1 = x[:, :, im_h1_idx]  # Im(H1) — componente planar imaginaria
+    re_h2 = x[:, :, re_h2_idx]  # Re(H2) — componente axial real
+    im_h2 = x[:, :, im_h2_idx]  # Im(H2) — componente axial imaginaria
 
     # ── Calculo de magnitude e fase (TF ops, autodiff-compativel) ──
-    mag_h1 = tf.sqrt(re_h1 ** 2 + im_h1 ** 2 + eps)  # |Hxx| — magnitude planar
-    mag_h2 = tf.sqrt(re_h2 ** 2 + im_h2 ** 2 + eps)  # |Hzz| — magnitude axial
-    phi_h1 = tf.math.atan2(im_h1, re_h1)              # arg(Hxx) — fase planar [rad]
-    phi_h2 = tf.math.atan2(im_h2, re_h2)              # arg(Hzz) — fase axial [rad]
+    mag_h1 = tf.sqrt(re_h1**2 + im_h1**2 + eps)  # |H1| — magnitude planar
+    mag_h2 = tf.sqrt(re_h2**2 + im_h2**2 + eps)  # |H2| — magnitude axial
+    phi_h1 = tf.math.atan2(im_h1, re_h1)  # arg(H1) — fase planar [rad]
+    phi_h2 = tf.math.atan2(im_h2, re_h2)  # arg(H2) — fase axial [rad]
 
     # ── Fator de conversao ln→log10 (constante, nao recomputada por amostra) ──
     log10 = tf.math.log(10.0)
@@ -308,51 +421,75 @@ def apply_feature_view_tf(
         """Log10 seguro via mudanca de base: log10(x) = ln(x) / ln(10)."""
         return tf.math.log(tf.maximum(tf.abs(val), eps)) / log10
 
+    # ── Computa os 4 canais transformados para cada FV ─────────────
     if view == "H1_logH2":
         # ── H1_logH2: H1 cru preserva SNR em alta atenuacao,
         #    H2 log10-transformado comprime faixa dinamica larga de Hzz.
-        #    Saida: [Re(H1), Im(H1), log10|H2|, phi(H2)]
         #    Motivacao fisica: Hzz varia 4+ ordens de magnitude entre
-        #    camadas de alta e baixa resistividade. Log10 estabiliza
-        #    gradientes e melhora convergencia durante treinamento.
-        em = tf.stack([re_h1, im_h1, _safe_log10_tf(mag_h2), phi_h2], axis=-1)
+        #    camadas de alta e baixa resistividade.
+        t_re_h1 = re_h1
+        t_im_h1 = im_h1
+        t_re_h2 = _safe_log10_tf(mag_h2)
+        t_im_h2 = phi_h2
 
     elif view == "logH1_logH2":
         # ── logH1_logH2: Ambos H1 e H2 em escala logaritmica.
-        #    Saida: [log10|H1|, phi(H1), log10|H2|, phi(H2)]
         #    Motivacao fisica: Magnitude + fase capturam toda informacao
-        #    do sinal complexo. Log10 comprime faixa dinamica, tornando
-        #    ambas componentes comparaveis em escala para o modelo.
-        em = tf.stack([
-            _safe_log10_tf(mag_h1), phi_h1,
-            _safe_log10_tf(mag_h2), phi_h2,
-        ], axis=-1)
+        #    do sinal complexo. Log10 comprime faixa dinamica.
+        t_re_h1 = _safe_log10_tf(mag_h1)
+        t_im_h1 = phi_h1
+        t_re_h2 = _safe_log10_tf(mag_h2)
+        t_im_h2 = phi_h2
 
     elif view == "IMH1_IMH2_razao":
         # ── IMH1_IMH2_razao: Partes imaginarias + razao de magnitudes.
-        #    Saida: [Im(H1), Im(H2), |H1|/|H2|, phi(H1)-phi(H2)]
-        #    Motivacao fisica: Im(H) é mais sensivel a contraste de
-        #    resistividade em fronteiras. Razao |H1|/|H2| indica anisotropia
-        #    (TIV). Diferenca de fase detecta fronteiras de camada.
+        #    Motivacao fisica: Im(H) eh mais sensivel a contraste de
+        #    resistividade em fronteiras.
         ratio = mag_h1 / (mag_h2 + eps)
-        em = tf.stack([im_h1, im_h2, ratio, phi_h1 - phi_h2], axis=-1)
+        t_re_h1 = im_h1
+        t_im_h1 = im_h2
+        t_re_h2 = ratio
+        t_im_h2 = phi_h1 - phi_h2
 
     elif view == "IMH1_IMH2_lograzao":
         # ── IMH1_IMH2_lograzao: Como razao, mas com log10 da razao.
-        #    Saida: [Im(H1), Im(H2), log10(|H1|/|H2|), phi(H1)-phi(H2)]
         #    Motivacao fisica: Log-razao estabiliza variacao quando
-        #    contraste de resistividade é muito alto (>100:1).
-        #    Preferido para cenarios com camadas de sal ou carbonato.
+        #    contraste de resistividade eh muito alto (>100:1).
         ratio = mag_h1 / (mag_h2 + eps)
-        em = tf.stack([
-            im_h1, im_h2, _safe_log10_tf(ratio), phi_h1 - phi_h2,
-        ], axis=-1)
+        t_re_h1 = im_h1
+        t_im_h1 = im_h2
+        t_re_h2 = _safe_log10_tf(ratio)
+        t_im_h2 = phi_h1 - phi_h2
 
     else:
         raise ValueError(f"Feature View '{view}' invalida. Validas: {VALID_VIEWS}")
 
-    # ── Reconstroi tensor: [prefix+z | EM transformado | tail GS] ──
-    return tf.concat([prefix_and_z, em, tail], axis=-1)
+    # ── Reconstrucao do tensor com canais transformados ─────────────
+    # Modo explicito: substitui canais individuais no tensor completo,
+    # preservando todas as colunas extras (Hxy, Hxz, etc.) intactas.
+    # Modo posicional: reconstroi via concat [prefix+z | EM | tail].
+    if _use_explicit:
+        # ── Listar colunas, substituindo apenas H1/H2 ─────────────
+        n_feat = x.shape[-1] or tf.shape(x)[-1]
+        _replace = {
+            re_h1_idx: t_re_h1,
+            im_h1_idx: t_im_h1,
+            re_h2_idx: t_re_h2,
+            im_h2_idx: t_im_h2,
+        }
+        cols = []
+        for i in range(n_feat if isinstance(n_feat, int) else n_feat.numpy()):
+            if i in _replace:
+                cols.append(tf.expand_dims(_replace[i], axis=-1))
+            else:
+                cols.append(x[:, :, i : i + 1])
+        return tf.concat(cols, axis=-1)
+    else:
+        # ── Modo posicional: concat [prefix+z | EM 4 | tail] ──────
+        prefix_and_z = x[:, :, :re_h1_idx]
+        tail = x[:, :, im_h2_idx + 1 :]
+        em = tf.stack([t_re_h1, t_im_h1, t_re_h2, t_im_h2], axis=-1)
+        return tf.concat([prefix_and_z, em, tail], axis=-1)
 
 
 # ════════════════════════════════════════════════════════════════════════════

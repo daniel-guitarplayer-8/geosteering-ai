@@ -8,7 +8,7 @@
 # ║                                                                            ║
 # ║  Modulos: blocks, cnn, tcn, rnn, hybrid, unet, transformer,              ║
 # ║           decomposition, advanced, geosteering, registry                  ║
-# ║  Exports: ~14 simbolos publicos principais — ver __all__                  ║
+# ║  Exports: ~16 simbolos publicos principais — ver __all__                  ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 5                                    ║
 # ║                                                                            ║
 # ║  Historico:                                                                ║
@@ -36,6 +36,21 @@ Note:
     Ref: docs/ARCHITECTURE_v2.md secao 5.
 """
 
+# ── Blocos utilitarios (importavel sem TF — funcoes com lazy TF inside) ───
+from geosteering_ai.models.blocks import (
+    bottleneck_block_1d,
+    conv_next_block,
+    dilated_causal_block,
+    feedforward_block,
+    film_layer,
+    normalization_block,
+    output_projection,
+    residual_block_1d,
+    se_block,
+    skip_connection_block,
+    static_injection_stem,
+)
+
 # ── Registry (API principal — imports lazy internamente) ──────────────────
 from geosteering_ai.models.registry import (
     ModelRegistry,
@@ -43,19 +58,6 @@ from geosteering_ai.models.registry import (
     get_model_info,
     is_causal_compatible,
     list_available_models,
-)
-
-# ── Blocos utilitarios (importavel sem TF — funcoes com lazy TF inside) ───
-from geosteering_ai.models.blocks import (
-    residual_block_1d,
-    bottleneck_block_1d,
-    conv_next_block,
-    se_block,
-    dilated_causal_block,
-    output_projection,
-    normalization_block,
-    skip_connection_block,
-    feedforward_block,
 )
 
 # ── D8: Exports publicos ─────────────────────────────────────────────────
@@ -76,4 +78,7 @@ __all__ = [
     "normalization_block",
     "skip_connection_block",
     "feedforward_block",
+    # ── Static Injection (Abordagens B/C — P2/P3) ────────────────────
+    "static_injection_stem",
+    "film_layer",
 ]

@@ -100,6 +100,7 @@ __all__ = [
 # └──────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
 
+
 class InferencePipeline:
     """Cadeia completa de inferencia: FV + GS + scalers + model.predict.
 
@@ -193,18 +194,27 @@ class InferencePipeline:
         self,
         raw_data: np.ndarray,
         *,
+        theta: Optional[float] = None,
+        freq: Optional[float] = None,
         return_uncertainty: bool = False,
         mc_samples: int = 30,
     ) -> np.ndarray | Tuple[np.ndarray, np.ndarray]:
         """Executa inferencia sobre dados brutos 22-colunas.
 
-        Cadeia: raw → FV_transform → GS_transform → scale → model.predict
-        → inverse_target_scaling. Retorna predicoes em Ohm.m (dominio
-        original, nao log10).
+        Cadeia: raw → [inject theta/freq] → FV_transform → GS_transform
+        → scale → model.predict → inverse_target_scaling.
+        Retorna predicoes em Ohm.m (dominio original, nao log10).
 
         Args:
             raw_data: np.ndarray de shape (n_samples, sequence_length, 22)
                 contendo dados brutos no formato 22-colunas padrao.
+            theta: Angulo de inclinacao em graus (0-90). Obrigatorio quando
+                config.use_theta_as_feature=True. Normalizado internamente
+                como theta/90.0. Ref: Perspectiva P2.
+            freq: Frequencia EM em Hz (ex: 20000.0). Obrigatorio quando
+                config.use_freq_as_feature=True. Normalizado conforme
+                config.freq_normalization ("log10", "khz", "raw").
+                Ref: Perspectiva P3.
             return_uncertainty: Se True, estima incerteza via MC Dropout
                 (multiplas forward passes com dropout ativo) e retorna
                 tuple (mean_predictions, std_predictions).
@@ -247,16 +257,62 @@ class InferencePipeline:
             )
 
         # ── Passo 1: Extrair features de entrada (INPUT_FEATURES) ──
-        # Seleciona as 5 colunas base [1, 4, 5, 20, 21] do formato 22-col.
-        x = raw_data[:, :, self.config.input_features].astype(np.float32)
+        # Seleciona colunas base do formato 22-col.
+        # Default: [1, 4, 5, 20, 21] (z + Hxx + Hzz).
+        # Expandido: [1, 4, 5, 6, 7, ..., 20, 21] (z + N componentes EM).
+        _feats = self.config.input_features
+        x = raw_data[:, :, _feats].astype(np.float32)
+
+        # ── Passo 1B: Injetar theta/freq como prefixo (P2/P3) ─────
+        # theta e freq NAO existem no .dat 22-col — sao parametros
+        # conhecidos do cabecalho (.out) injetados como colunas constantes.
+        # Layout: [theta_norm?, f_norm?, z_obs, EM...]
+        # Ordem: freq prepended primeiro, theta prepended segundo
+        # (ultimo prepend fica na posicao 0 = theta).
+        if self.config.use_freq_as_feature:
+            if self.config.freq_normalization == "log10":
+                f_val = np.log10(freq) if freq is not None else 4.301
+            elif self.config.freq_normalization == "khz":
+                f_val = (freq / 1000.0) if freq is not None else 20.0
+            else:
+                f_val = freq if freq is not None else 20000.0
+            n_seq, seq_len, _ = x.shape
+            freq_col = np.full((n_seq, seq_len, 1), f_val, dtype=np.float32)
+            x = np.concatenate([freq_col, x], axis=-1)
+
+        if self.config.use_theta_as_feature:
+            theta_norm = (theta / 90.0) if theta is not None else 0.0
+            n_seq, seq_len, _ = x.shape
+            theta_col = np.full((n_seq, seq_len, 1), theta_norm, dtype=np.float32)
+            x = np.concatenate([theta_col, x], axis=-1)
 
         # ── Passo 2: Feature View — transforma componentes EM ──
-        # Aplica a mesma transformacao usada no treinamento (identity, log, etc.)
+        # h1_cols/h2_cols com offset n_prefix para pular theta/freq.
+        # Bug fix v2.0.1: Legado passava config (objeto) em vez de view (str).
         from geosteering_ai.data.feature_views import apply_feature_view
-        x = apply_feature_view(x, self.config)
+
+        _offset = self.config.n_prefix
+        try:
+            _h1_cols = (_feats.index(4) + _offset, _feats.index(5) + _offset)
+            _h2_cols = (_feats.index(20) + _offset, _feats.index(21) + _offset)
+        except ValueError as exc:
+            raise ValueError(
+                f"input_features {_feats} deve conter colunas 4,5 (Re/Im Hxx) "
+                f"e 20,21 (Re/Im Hzz). Errata v5.0.15: baseline obrigatorio."
+            ) from exc
+        x = apply_feature_view(
+            x,
+            self.config.feature_view,
+            h1_cols=_h1_cols,
+            h2_cols=_h2_cols,
+        )
 
         # ── Passo 3: Geosinais — features derivadas do tensor EM ──
         # Se GS ativos, computa geosinais e concatena com features EM.
+        # NOTA: expanded_features e usado SOMENTE para GS (nao para FV).
+        # FV opera sobre h1/h2 cols (Hxx, Hzz) que ja estao em x via
+        # input_features. GS precisa de componentes off-diagonal (Hxy,
+        # Hxz, Hyz, etc.) que NAO estao em input_features baseline.
         if self.config.use_geosignal_features:
             from geosteering_ai.data.geosignals import compute_geosignals
 
@@ -267,18 +323,14 @@ class InferencePipeline:
             else:
                 x_expanded = x
 
-            gs_channels = compute_geosignals(
-                x_expanded, self.config
-            )
+            gs_channels = compute_geosignals(x_expanded, self.config)
             x = np.concatenate([x, gs_channels], axis=-1)
 
         # ── Passo 4: Scaling — normaliza features com scaler treinado ──
         # Usa o mesmo scaler fitado em dados LIMPOS durante treinamento (P3).
         scaler_em = self.scaler_params.get("scaler_em")
         scaler_gs = self.scaler_params.get("scaler_gs")
-        n_em = self.scaler_params.get(
-            "n_em_features", self.config.n_base_features
-        )
+        n_em = self.scaler_params.get("n_em_features", self.config.n_base_features)
 
         if scaler_em is not None:
             original_shape = x.shape
@@ -302,9 +354,7 @@ class InferencePipeline:
             predictions_list = []
             for _ in range(mc_samples):
                 # training=True ativa dropout layers durante inferencia
-                pred = self.model(
-                    tf.constant(x, dtype=tf.float32), training=True
-                )
+                pred = self.model(tf.constant(x, dtype=tf.float32), training=True)
                 predictions_list.append(pred.numpy())
 
             predictions_stack = np.stack(predictions_list, axis=0)
@@ -314,9 +364,7 @@ class InferencePipeline:
             # ── Passo 6: Inverse target scaling → Ohm.m ──
             from geosteering_ai.data.scaling import inverse_target_scaling
 
-            y_mean_ohm = inverse_target_scaling(
-                y_mean, method=self.config.target_scaling
-            )
+            y_mean_ohm = inverse_target_scaling(y_mean, method=self.config.target_scaling)
             # std em log10 decades — NAO aplicar inverse scaling
             # (10^std e fisicamente errado para desvio-padrao).
             # y_std ja esta em unidades interpretaveis: 0.1 = ~0.1 decada log10.
@@ -325,7 +373,9 @@ class InferencePipeline:
             logger.info(
                 "Inferencia MC Dropout concluida — %d amostras, "
                 "%d forward passes, shape=%s",
-                x.shape[0], mc_samples, y_mean_ohm.shape,
+                x.shape[0],
+                mc_samples,
+                y_mean_ohm.shape,
             )
             return y_mean_ohm, y_std_ohm
 
@@ -336,13 +386,12 @@ class InferencePipeline:
         # Converte de log10 para Ohm.m: y = 10^y' (para target_scaling="log10")
         from geosteering_ai.data.scaling import inverse_target_scaling
 
-        y_pred_ohm = inverse_target_scaling(
-            y_pred, method=self.config.target_scaling
-        )
+        y_pred_ohm = inverse_target_scaling(y_pred, method=self.config.target_scaling)
 
         logger.info(
             "Inferencia concluida — %d amostras, shape=%s",
-            x.shape[0], y_pred_ohm.shape,
+            x.shape[0],
+            y_pred_ohm.shape,
         )
         return y_pred_ohm
 
@@ -376,6 +425,12 @@ class InferencePipeline:
 
         if self.model is None:
             raise RuntimeError("Modelo nao definido — nada para salvar.")
+
+        if not self.scaler_params:
+            logger.warning(
+                "scaler_params vazio — scalers.joblib sera salvo vazio. "
+                "predict() pode falhar ao carregar este pipeline."
+            )
 
         os.makedirs(path, exist_ok=True)
 
@@ -426,8 +481,8 @@ class InferencePipeline:
             Config reconstruido via PipelineConfig.from_yaml().
             Validacao fail-fast no PipelineConfig.__post_init__().
         """
-        import tensorflow as tf
         import joblib
+        import tensorflow as tf
 
         from geosteering_ai.config import PipelineConfig
 
@@ -446,14 +501,27 @@ class InferencePipeline:
         # Carregar scalers via joblib
         scalers_path = os.path.join(path, "scalers.joblib")
         if not os.path.exists(scalers_path):
-            raise FileNotFoundError(
-                f"scalers.joblib nao encontrado em {path}"
-            )
+            raise FileNotFoundError(f"scalers.joblib nao encontrado em {path}")
         scaler_params = joblib.load(scalers_path)
+
+        # ── Validar compatibilidade shape config ↔ modelo (warning) ──
+        # Dual-input models tem tuple de tuples (2 inputs) — so validar
+        # single-input models onde input_shape e uma tupla simples.
+        _inp = getattr(model, "input_shape", None)
+        if isinstance(_inp, tuple) and not isinstance(_inp[0], tuple):
+            actual_feat = _inp[-1]
+            if actual_feat is not None and actual_feat != config.n_features:
+                logger.warning(
+                    "Model input_shape[-1]=%d != config.n_features=%d. "
+                    "Verifique compatibilidade config <-> modelo.",
+                    actual_feat,
+                    config.n_features,
+                )
 
         logger.info(
             "InferencePipeline carregado de %s — model_type=%s",
-            path, config.model_type,
+            path,
+            config.model_type,
         )
         return cls(config=config, model=model, scaler_params=scaler_params)
 

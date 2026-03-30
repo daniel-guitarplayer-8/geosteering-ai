@@ -6,6 +6,7 @@ e propriedades derivadas.
 
 import os
 import sys
+
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -187,7 +188,9 @@ class TestValidation:
 
     def test_noise_types_weights_length(self):
         with pytest.raises(AssertionError):
-            PipelineConfig(noise_types=["gaussian", "multiplicative"], noise_weights=[1.0])
+            PipelineConfig(
+                noise_types=["gaussian", "multiplicative"], noise_weights=[1.0]
+            )
 
     def test_feature_view_valid(self):
         with pytest.raises(AssertionError, match="invalido"):
@@ -293,7 +296,9 @@ class TestLossConfigFields:
 
     def test_yaml_roundtrip_new_fields(self):
         """Novos campos devem sobreviver YAML roundtrip."""
-        import tempfile, os
+        import os
+        import tempfile
+
         config = PipelineConfig(
             penalty_warmup_epochs=20,
             high_rho_threshold=500.0,
@@ -311,3 +316,273 @@ class TestLossConfigFields:
             assert loaded.sobolev_lambda == 0.05
         finally:
             os.unlink(path)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTS — Flexible Input Features (suporte a features EM expandidas)
+# ════════════════════════════════════════════════════════════════════════
+
+
+class TestFlexibleInputFeatures:
+    """Validacao semantica de input_features — baseline obrigatorio, extensoes permitidas."""
+
+    def test_default_baseline_accepted(self):
+        """Default [1,4,5,20,21] deve continuar funcionando."""
+        config = PipelineConfig()
+        assert config.input_features == [1, 4, 5, 20, 21]
+
+    def test_old_format_9col_rejected(self):
+        """Formato antigo [0,3,4,7,8] do legado 9-col DEVE ser rejeitado.
+
+        Col 0 (meds) eh metadata proibida. Col 3 overlap com targets.
+        Baseline {1,4,5,20,21} faltando. Multiplas validacoes pegam.
+        """
+        with pytest.raises(AssertionError, match="metadata"):
+            PipelineConfig(input_features=[0, 3, 4, 7, 8])
+
+    def test_old_format_partial_rejected(self):
+        """Mesmo 1 indice de metadata (col 0) misturado DEVE ser rejeitado."""
+        with pytest.raises(AssertionError, match="metadata"):
+            PipelineConfig(input_features=[0, 1, 4, 5, 20, 21])
+
+    def test_baseline_subset_missing_hxx_rejected(self):
+        """Remover Hxx (cols 4,5) do baseline DEVE ser rejeitado."""
+        with pytest.raises(AssertionError, match="baseline"):
+            PipelineConfig(input_features=[1, 20, 21])
+
+    def test_baseline_subset_missing_hzz_rejected(self):
+        """Remover Hzz (cols 20,21) do baseline DEVE ser rejeitado."""
+        with pytest.raises(AssertionError, match="baseline"):
+            PipelineConfig(input_features=[1, 4, 5])
+
+    def test_baseline_plus_hxy_accepted(self):
+        """Baseline + Hxy (cols 6,7) deve ser aceito."""
+        config = PipelineConfig(input_features=[1, 4, 5, 6, 7, 20, 21])
+        assert config.input_features == [1, 4, 5, 6, 7, 20, 21]
+        assert config.n_base_features == 7
+
+    def test_baseline_plus_hxz_accepted(self):
+        """Baseline + Hxz (cols 8,9) deve ser aceito."""
+        config = PipelineConfig(input_features=[1, 4, 5, 8, 9, 20, 21])
+        assert config.input_features == [1, 4, 5, 8, 9, 20, 21]
+        assert config.n_base_features == 7
+
+    def test_full_tensor_accepted(self):
+        """Tensor completo 3x3 (z + 18 EM) deve ser aceito."""
+        full = [1] + list(range(4, 22))
+        config = PipelineConfig(input_features=full)
+        assert config.n_base_features == 19
+
+    def test_out_of_range_index_rejected(self):
+        """Indices fora de [0, n_columns) devem ser rejeitados."""
+        with pytest.raises(AssertionError, match="range"):
+            PipelineConfig(input_features=[1, 4, 5, 20, 21, 25])
+
+    def test_negative_index_rejected(self):
+        """Indices negativos devem ser rejeitados."""
+        with pytest.raises(AssertionError, match="range"):
+            PipelineConfig(input_features=[-1, 1, 4, 5, 20, 21])
+
+    def test_overlap_with_targets_rejected(self):
+        """Features que incluem targets (cols 2,3) devem ser rejeitadas."""
+        with pytest.raises(AssertionError, match="overlap"):
+            PipelineConfig(input_features=[1, 2, 4, 5, 20, 21])
+
+    def test_n_features_dynamic_with_extra_em(self):
+        """n_features deve refletir features extras."""
+        config = PipelineConfig(input_features=[1, 4, 5, 6, 7, 20, 21])
+        assert config.n_features == 7  # sem GS
+
+    def test_n_features_dynamic_with_extra_em_and_gs(self):
+        """n_features deve somar features extras + geosignais."""
+        config = PipelineConfig(
+            input_features=[1, 4, 5, 6, 7, 20, 21],
+            use_geosignal_features=True,
+            geosignal_set="usd_uhr",
+        )
+        # 7 base + 4 GS (2 familias x 2 canais)
+        assert config.n_features == 11
+
+    def test_yaml_roundtrip_extended_features(self, tmp_path):
+        """Features estendidas devem sobreviver YAML roundtrip."""
+        config = PipelineConfig(input_features=[1, 4, 5, 6, 7, 20, 21])
+        path = str(tmp_path / "flex_config.yaml")
+        config.to_yaml(path)
+        loaded = PipelineConfig.from_yaml(path)
+        assert loaded.input_features == [1, 4, 5, 6, 7, 20, 21]
+
+    def test_copy_preserves_extended_features(self):
+        """copy() deve preservar features estendidas."""
+        config = PipelineConfig(input_features=[1, 4, 5, 8, 9, 20, 21])
+        config2 = config.copy(learning_rate=3e-4)
+        assert config2.input_features == [1, 4, 5, 8, 9, 20, 21]
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTS — Perspectivas P2 (theta) e P3 (frequencia) como features
+# ════════════════════════════════════════════════════════════════════════
+
+
+class TestThetaFreqFeatures:
+    """Perspectivas P2 (theta) e P3 (freq) como features de entrada."""
+
+    def test_p1_n_prefix_zero(self):
+        """P1 baseline: n_prefix = 0 (sem theta, sem freq)."""
+        config = PipelineConfig()
+        assert config.n_prefix == 0
+
+    def test_p2_n_prefix_one(self):
+        """P2 theta: n_prefix = 1."""
+        config = PipelineConfig(use_theta_as_feature=True)
+        assert config.n_prefix == 1
+
+    def test_p3_n_prefix_one(self):
+        """P3 freq: n_prefix = 1."""
+        config = PipelineConfig(use_freq_as_feature=True)
+        assert config.n_prefix == 1
+
+    def test_p2p3_n_prefix_two(self):
+        """P2+P3: n_prefix = 2."""
+        config = PipelineConfig(
+            use_theta_as_feature=True,
+            use_freq_as_feature=True,
+        )
+        assert config.n_prefix == 2
+
+    def test_n_features_with_theta(self):
+        """n_features com theta: n_base + 1 (theta) + 0 (GS)."""
+        config = PipelineConfig(use_theta_as_feature=True)
+        assert config.n_features == 6  # 5 base + 1 theta
+
+    def test_n_features_with_freq(self):
+        """n_features com freq: n_base + 1 (freq) + 0 (GS)."""
+        config = PipelineConfig(use_freq_as_feature=True)
+        assert config.n_features == 6  # 5 base + 1 freq
+
+    def test_n_features_with_theta_freq(self):
+        """n_features com theta+freq: n_base + 2."""
+        config = PipelineConfig(
+            use_theta_as_feature=True,
+            use_freq_as_feature=True,
+        )
+        assert config.n_features == 7  # 5 base + 2
+
+    def test_n_features_with_theta_freq_gs(self):
+        """n_features com theta+freq+GS: n_base + 2 + 4 GS."""
+        config = PipelineConfig(
+            use_theta_as_feature=True,
+            use_freq_as_feature=True,
+            use_geosignal_features=True,
+            geosignal_set="usd_uhr",
+        )
+        assert config.n_features == 11  # 5 base + 2 prefix + 4 GS
+
+    def test_freq_normalization_valid(self):
+        """freq_normalization deve aceitar log10, khz, raw."""
+        for norm in ("log10", "khz", "raw"):
+            config = PipelineConfig(
+                use_freq_as_feature=True,
+                freq_normalization=norm,
+            )
+            assert config.freq_normalization == norm
+
+    def test_freq_normalization_invalid(self):
+        """freq_normalization invalido deve falhar."""
+        with pytest.raises(AssertionError, match="freq_normalization"):
+            PipelineConfig(
+                use_freq_as_feature=True,
+                freq_normalization="invalid",
+            )
+
+    def test_yaml_roundtrip_p2p3(self, tmp_path):
+        """P2+P3 devem sobreviver YAML roundtrip."""
+        config = PipelineConfig(
+            use_theta_as_feature=True,
+            use_freq_as_feature=True,
+            freq_normalization="log10",
+        )
+        path = str(tmp_path / "p2p3.yaml")
+        config.to_yaml(path)
+        loaded = PipelineConfig.from_yaml(path)
+        assert loaded.use_theta_as_feature is True
+        assert loaded.use_freq_as_feature is True
+        assert loaded.freq_normalization == "log10"
+        assert loaded.n_prefix == 2
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTS — static_injection_mode (Abordagens A/B/C)
+# ════════════════════════════════════════════════════════════════════════
+
+
+class TestStaticInjectionMode:
+    """Abordagens A (broadcast), B (dual_input), C (film)."""
+
+    def test_default_is_broadcast(self):
+        """Default: Abordagem A (broadcast)."""
+        config = PipelineConfig()
+        assert config.static_injection_mode == "broadcast"
+
+    def test_dual_input_accepted(self):
+        """Abordagem B: dual_input."""
+        config = PipelineConfig(
+            use_theta_as_feature=True,
+            static_injection_mode="dual_input",
+        )
+        assert config.static_injection_mode == "dual_input"
+
+    def test_film_accepted(self):
+        """Abordagem C: film."""
+        config = PipelineConfig(
+            use_theta_as_feature=True,
+            static_injection_mode="film",
+        )
+        assert config.static_injection_mode == "film"
+
+    def test_invalid_mode_rejected(self):
+        """Modo invalido deve falhar."""
+        with pytest.raises(AssertionError, match="static_injection_mode"):
+            PipelineConfig(static_injection_mode="invalid")
+
+    def test_film_restricted_to_compatible_archs(self):
+        """FiLM so deve ser permitido para arquiteturas compativeis."""
+        # ResNet_18 eh compativel com FiLM
+        config = PipelineConfig(
+            use_theta_as_feature=True,
+            static_injection_mode="film",
+            model_type="ResNet_18",
+        )
+        assert config.static_injection_mode == "film"
+
+    def test_film_incompatible_arch_rejected(self):
+        """FiLM com arquitetura incompativel deve falhar."""
+        with pytest.raises(AssertionError, match="film"):
+            PipelineConfig(
+                use_theta_as_feature=True,
+                static_injection_mode="film",
+                model_type="N_BEATS",
+            )
+
+    def test_dual_input_all_archs_accepted(self):
+        """dual_input deve funcionar com qualquer arquitetura."""
+        for mt in ("ResNet_18", "LSTM", "TFT", "N_BEATS", "FNO", "WaveNet"):
+            config = PipelineConfig(
+                use_theta_as_feature=True,
+                static_injection_mode="dual_input",
+                model_type=mt,
+            )
+            assert config.static_injection_mode == "dual_input"
+
+    def test_broadcast_without_theta_freq_ok(self):
+        """broadcast sem theta/freq ativo: sem prefixo."""
+        config = PipelineConfig(static_injection_mode="broadcast")
+        assert config.n_prefix == 0
+
+    def test_dual_input_n_prefix_zero(self):
+        """dual_input: n_prefix=0 (escalares separados, nao no array)."""
+        config = PipelineConfig(
+            use_theta_as_feature=True,
+            static_injection_mode="dual_input",
+        )
+        # Em dual_input, theta/freq NAO sao injetados como prefixo
+        assert config.n_prefix == 0

@@ -32,28 +32,6 @@
 # Agrupados semanticamente por submodulo de origem.
 # ──────────────────────────────────────────────────────────────────────────
 
-# ── Logging (utils/logger.py) ─────────────────────────────────────────────
-from geosteering_ai.utils.logger import (
-    C,
-    ColoredFormatter,
-    get_logger,
-    setup_logger,
-)
-
-# ── Tempo (utils/timer.py) ────────────────────────────────────────────────
-from geosteering_ai.utils.timer import (
-    ProgressTracker,
-    elapsed_since,
-    format_time,
-    timer_decorator,
-)
-
-# ── Validacao (utils/validation.py) ───────────────────────────────────────
-from geosteering_ai.utils.validation import (
-    ValidationTracker,
-    validate_shape,
-)
-
 # ── Formatacao (utils/formatting.py) ──────────────────────────────────────
 from geosteering_ai.utils.formatting import (
     colorize_flag_value,
@@ -64,6 +42,12 @@ from geosteering_ai.utils.formatting import (
     log_header,
     log_section,
 )
+
+# ── I/O (utils/io.py) ────────────────────────────────────────────────────
+from geosteering_ai.utils.io import NumpyEncoder, safe_json_dump, safe_json_load
+
+# ── Logging (utils/logger.py) ─────────────────────────────────────────────
+from geosteering_ai.utils.logger import C, ColoredFormatter, get_logger, setup_logger
 
 # ── Sistema (utils/system.py) ─────────────────────────────────────────────
 from geosteering_ai.utils.system import (
@@ -80,15 +64,19 @@ from geosteering_ai.utils.system import (
     memory_usage,
     safe_mkdir,
     set_all_seeds,
+    setup_gpu,
 )
 
-# ── I/O (utils/io.py) ────────────────────────────────────────────────────
-from geosteering_ai.utils.io import (
-    NumpyEncoder,
-    safe_json_dump,
-    safe_json_load,
+# ── Tempo (utils/timer.py) ────────────────────────────────────────────────
+from geosteering_ai.utils.timer import (
+    ProgressTracker,
+    elapsed_since,
+    format_time,
+    timer_decorator,
 )
 
+# ── Validacao (utils/validation.py) ───────────────────────────────────────
+from geosteering_ai.utils.validation import ValidationTracker, validate_shape
 
 # ════════════════════════════════════════════════════════════════════════════
 # EXPORTS
@@ -133,6 +121,7 @@ __all__ = [
     "gpu_memory_info",
     "clear_memory",
     "set_all_seeds",
+    "setup_gpu",
     # ── I/O ───────────────────────────────────────────────────────────
     "NumpyEncoder",
     "safe_json_dump",

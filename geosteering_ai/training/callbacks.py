@@ -126,8 +126,8 @@ Note:
 from __future__ import annotations
 
 import logging
-import os
 import math
+import os
 import time
 from typing import TYPE_CHECKING, Any, List, Optional
 
@@ -143,6 +143,7 @@ __all__ = [
     # --- Custom Keras callbacks (originais) ---
     "UpdateNoiseLevelCallback",
     "WeightNormMonitor",
+    "GradientMonitor",
     "BestEpochTracker",
     # --- High priority callbacks ---
     "DualValidationCallback",
@@ -159,9 +160,61 @@ __all__ = [
     "MemoryMonitor",
     "LatencyBenchmark",
     "EpochSummary",
-    # --- Factory function ---
+    # --- LR schedule helpers ---
+    "make_cosine_schedule",
+    "make_step_schedule",
+    "make_warmup_cosine_schedule",
+    # --- Factory functions ---
     "build_callbacks",
+    "add_gradient_monitor",
 ]
+
+
+# ════════════════════════════════════════════════════════════════════════
+# HELPER: _ensure_keras_callback_base — Heranca lazy de Callback
+# ════════════════════════════════════════════════════════════════════════
+# Cria subclasse dinamica com heranca explicita de tf.keras.callbacks.Callback.
+# Substitui o pattern fragil `cls.__bases__ = (Callback,)` (BUG-M2 v2.0.1)
+# por `type()` que cria nova classe com heranca correta.
+# A referencia global e atualizada na primeira instanciacao — chamadas
+# subsequentes retornam a classe ja resolvida (fast path via issubclass).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _ensure_keras_callback_base(cls: type) -> type:
+    """Garante que cls herda de tf.keras.callbacks.Callback (lazy import).
+
+    Na primeira chamada, cria subclasse dinamica via type() com heranca
+    explicita (NUNCA modifica cls.__bases__ diretamente). Atualiza
+    referencia no modulo para que chamadas futuras usem a classe resolvida.
+
+    Args:
+        cls: Classe callback que precisa herdar de Callback.
+
+    Returns:
+        type: Classe com heranca de tf.keras.callbacks.Callback resolvida.
+
+    Note:
+        Bug fix v2.0.1: Substituiu `cls.__bases__ = (Callback,)` que
+        era fragil (quebra isinstance, confunde mypy, incompativel com
+        futuras versoes TF). Agora usa type() para criar heranca limpa.
+    """
+    import tensorflow as tf
+
+    if issubclass(cls, tf.keras.callbacks.Callback):
+        return cls
+
+    # Cria nova classe com heranca explicita (sem mutar __bases__)
+    new_cls = type(
+        cls.__name__,
+        (cls, tf.keras.callbacks.Callback),
+        dict(cls.__dict__),
+    )
+    new_cls.__module__ = cls.__module__
+    new_cls.__qualname__ = cls.__qualname__
+    # Atualiza referencia global para fast-path em instancias futuras
+    globals()[cls.__name__] = new_cls
+    return new_cls
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -179,6 +232,7 @@ __all__ = [
 #
 # Referencia: C40 legado (UpdateNoiseLevelCallback), S17/S18/S19.
 # ════════════════════════════════════════════════════════════════════════
+
 
 class UpdateNoiseLevelCallback:
     """Curriculum noise scheduler — 3-phase: clean → ramp → stable.
@@ -233,16 +287,17 @@ class UpdateNoiseLevelCallback:
             framework no import-time do modulo.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        # Injeta heranca de tf.keras.callbacks.Callback dinamicamente
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
-    def __init__(self, noise_level_var: Any, config: PipelineConfig) -> None:
+    def __init__(
+        self,
+        noise_level_var: Any,
+        config: "PipelineConfig",
+        *,
+        base_epoch: int = 0,
+    ) -> None:
         """Inicializa o scheduler de curriculum noise.
 
         Args:
@@ -253,6 +308,12 @@ class UpdateNoiseLevelCallback:
                 epochs_no_noise (int): Epocas de treino limpo (Fase 1).
                 noise_ramp_epochs (int): Epocas de rampa linear (Fase 2).
                 noise_level_max (float): Sigma maximo (Fase 3 plateau).
+            base_epoch: Offset para N-Stage training. Keras chama
+                on_epoch_begin(epoch) com o indice absoluto — se
+                model.fit(initial_epoch=50), epoch comeca em 50.
+                base_epoch=50 garante que effective_epoch = epoch - 50
+                comece do zero para o scheduler. Default: 0 (sem offset,
+                comportamento identico ao original).
 
         Note:
             Referenciado em:
@@ -260,12 +321,16 @@ class UpdateNoiseLevelCallback:
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
             O noise_level_var DEVE ser criado externamente (tf.Variable).
             Valor inicial = 0.0 (Fase 1 comeca limpa).
+            Bug fix v2.0.1: Adicionado base_epoch para N-Stage training.
+            Sem base_epoch, initial_epoch>0 fazia o scheduler pular
+            diretamente para Fase 3 (stable) em vez de Fase 1 (clean).
         """
         import tensorflow as tf
 
         super().__init__()
         self.noise_level_var = noise_level_var
         self.config = config
+        self._base_epoch: int = base_epoch
 
         # Cache dos campos de config para performance (evita getattr por epoca)
         self._epochs_no_noise: int = config.epochs_no_noise
@@ -274,41 +339,49 @@ class UpdateNoiseLevelCallback:
 
         logger.info(
             "UpdateNoiseLevelCallback inicializado: "
-            "clean=%d ep, ramp=%d ep, max=%.4f",
+            "clean=%d ep, ramp=%d ep, max=%.4f, base_epoch=%d",
             self._epochs_no_noise,
             self._noise_ramp_epochs,
             self._noise_level_max,
+            self._base_epoch,
         )
 
     def on_epoch_begin(self, epoch: int, logs: Optional[dict] = None) -> None:
         """Atualiza noise_level_var no inicio de cada epoca.
 
-        Implementa o scheduler 3-phase:
-          - Fase 1 (Clean): epoch < epochs_no_noise → noise = 0.0
-          - Fase 2 (Ramp): epochs_no_noise <= epoch < end_ramp → linear
-          - Fase 3 (Stable): epoch >= end_ramp → noise = max
+        Implementa o scheduler 3-phase com suporte a base_epoch offset:
+          - Fase 1 (Clean): effective < epochs_no_noise → noise = 0.0
+          - Fase 2 (Ramp): epochs_no_noise <= effective < end_ramp → linear
+          - Fase 3 (Stable): effective >= end_ramp → noise = max
 
         Args:
-            epoch: Indice da epoca atual (0-based).
+            epoch: Indice da epoca atual (0-based, absoluto do Keras).
             logs: Dict de metricas (nao utilizado).
 
         Note:
             Referenciado em:
                 - Keras training loop (chamado automaticamente)
             Ref: CLAUDE.md diagrama curriculum noise.
-            Rampa linear: noise = max * (epoch - clean) / ramp.
+            Rampa linear: noise = max * (effective - clean) / ramp.
             Fase 1 garante convergencia limpa antes de injetar ruido.
+            Bug fix v2.0.1: Usa effective_epoch = epoch - base_epoch
+            para suportar N-Stage com initial_epoch > 0.
         """
-        # ── Fase 1: Clean (epochs 0..epochs_no_noise-1) ───────────
+        # ── Offset para N-Stage: epoch absoluto → relativo ──────
+        # Keras passa epoch como indice absoluto (initial_epoch=50 → epoch=50).
+        # base_epoch corrige para que o scheduler comece do zero.
+        effective = epoch - self._base_epoch
+
+        # ── Fase 1: Clean (effective 0..epochs_no_noise-1) ───────
         # Modelo converge em dados limpos — base solida
-        if epoch < self._epochs_no_noise:
+        if effective < self._epochs_no_noise:
             new_level = 0.0
             phase = "clean"
 
         # ── Fase 2: Ramp (linear 0 → noise_level_max) ─────────────
         # Ruido cresce gradualmente — modelo adapta incrementalmente
-        elif epoch < self._epochs_no_noise + self._noise_ramp_epochs:
-            ramp_progress = (epoch - self._epochs_no_noise) / max(
+        elif effective < self._epochs_no_noise + self._noise_ramp_epochs:
+            ramp_progress = (effective - self._epochs_no_noise) / max(
                 self._noise_ramp_epochs, 1
             )
             new_level = self._noise_level_max * ramp_progress
@@ -346,6 +419,7 @@ class UpdateNoiseLevelCallback:
 #
 # Referencia: C40 legado (GradientMonitor callback — renomeado).
 # ════════════════════════════════════════════════════════════════════════
+
 
 class WeightNormMonitor:
     """Monitors weight norm statistics per epoch.
@@ -389,12 +463,8 @@ class WeightNormMonitor:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, model: Any) -> None:
@@ -468,6 +538,303 @@ class WeightNormMonitor:
 
 
 # ════════════════════════════════════════════════════════════════════════
+# CALLBACK 2B: GradientMonitor — Monitoramento de normas de gradientes REAIS
+#
+# Computa normas de gradiente REAIS via tf.GradientTape em um batch de
+# amostra ao final de cada N epocas (gradient_monitor_freq).
+#
+# Diagnostica:
+#   - Gradient explosion: norma media > gradient_explosion_threshold (100.0)
+#   - Gradient vanishing: norma media < gradient_vanishing_threshold (1e-7)
+#   - Distribuicao por camada: media e maximo de ||∂L/∂w_i||_2
+#
+# DIFERENCA de WeightNormMonitor:
+#   WeightNormMonitor   → ||w_i||_2  (norma dos PESOS — estado atual)
+#   GradientMonitor     → ||∂L/∂w_i||_2 (norma dos GRADIENTES — taxa de mudanca)
+#
+# Usa tf.GradientTape com um batch de amostra fixo fornecido na criacao.
+# O batch de amostra deve ser (x_sample, y_sample) — nao alterado durante
+# o treinamento.
+#
+# Overhead: ~1 forward+backward extra a cada gradient_monitor_freq epocas.
+# Manter freq >= 5 para uso em producao.
+#
+# Referencia: Goodfellow et al. (2016) Deep Learning — secao 8.2.5.
+#             GAP 7 da Fase E do roadmap v2.0.
+# ════════════════════════════════════════════════════════════════════════
+
+
+class GradientMonitor:
+    """Monitora normas de gradiente reais via tf.GradientTape.
+
+    Computa normas L2 de gradientes (∂L/∂w_i) para cada variavel
+    treinavel do modelo, usando um batch de amostra fixo. Util para
+    diagnosticar gradient explosion/vanishing durante o treinamento.
+
+    Diferenca fundamental em relacao a WeightNormMonitor:
+      WeightNormMonitor → normas de PESOS ||w_i||_2 (estado estatico)
+      GradientMonitor   → normas de GRADIENTES ||∂L/∂w_i||_2 (dinamico)
+
+    Os gradientes refletem a taxa de mudanca dos pesos para o batch
+    de amostra — proxy do comportamento de treinamento atual.
+
+    Estrutura de diagnostico:
+      ┌─────────────────────────────────────────────────────────────────┐
+      │  grad_norm_mean > explosion_threshold (100.0)?                 │
+      │    └─ WARNING: gradient explosion detectado                    │
+      │  grad_norm_mean < vanishing_threshold (1e-7)?                  │
+      │    └─ WARNING: gradient vanishing detectado                    │
+      │  grad_norm_mean normal?                                        │
+      │    └─ DEBUG: estatisticas por camada logadas                   │
+      └─────────────────────────────────────────────────────────────────┘
+
+    Herda de tf.keras.callbacks.Callback (lazy import).
+
+    Attributes:
+        _model_ref: Referencia ao modelo Keras sendo monitorado.
+        _loss_fn: Funcao de perda callable(y_true, y_pred) -> scalar.
+        _sample_x: Tensor de entrada de amostra (batch, seq, n_feat).
+        _sample_y: Tensor de saida de amostra (batch, seq, out_ch).
+        _freq: Frequencia de amostragem (a cada N epocas).
+        _explosion_threshold: Limite para explosion warning.
+        _vanishing_threshold: Limite para vanishing warning.
+
+    Example:
+        >>> import tensorflow as tf
+        >>> import numpy as np
+        >>> config = PipelineConfig()
+        >>> config.use_gradient_monitor = True
+        >>> model = tf.keras.Sequential([tf.keras.layers.Dense(2)])
+        >>> x = np.random.randn(8, 600, 5).astype('float32')
+        >>> y = np.random.randn(8, 600, 2).astype('float32')
+        >>> loss_fn = tf.keras.losses.MeanSquaredError()
+        >>> cb = GradientMonitor(model, loss_fn, (x, y), config)
+
+    Note:
+        Referenciado em:
+            - training/callbacks.py: build_callbacks() (slot 11, opt-in)
+        Ref: docs/ARCHITECTURE_v2.md secao 6.2.
+        Ref: Goodfellow et al. (2016) Deep Learning — secao 8.2.5.
+        Freq padrao = 5 (gradient_monitor_freq) — overhead ~1 forward/
+        backward por N epocas. Em Colab Pro+ GPU: <50ms por amostragem.
+        Nao altera pesos — GradientTape em modo watch-only (tape.stop_recording).
+    """
+
+    def __new__(cls, model: Any, loss_fn: Any, sample_batch: Any, config: Any):
+        """Cria instancia herdando de tf.keras.callbacks.Callback (lazy).
+
+        Args:
+            model: Modelo Keras cujos gradientes serao monitorados.
+            loss_fn: Funcao de perda (callable).
+            sample_batch: Tupla (x_sample, y_sample) — batch fixo de amostra.
+            config: PipelineConfig com campos gradient_monitor_*.
+
+        Returns:
+            Instancia de GradientMonitor herdando de tf.keras.callbacks.Callback.
+
+        Note:
+            Lazy import de TensorFlow.
+            Ref: CLAUDE.md (lazy TF import pattern).
+        """
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
+        return instance
+
+    def __init__(
+        self,
+        model: Any,
+        loss_fn: Any,
+        sample_batch: Any,
+        config: "PipelineConfig",
+    ) -> None:
+        """Inicializa o monitor de gradientes reais.
+
+        Args:
+            model: Modelo tf.keras.Model cujos gradientes serao monitorados.
+                Deve ter ao menos uma variavel treinavel.
+            loss_fn: Funcao de perda callable(y_true, y_pred) -> scalar tf.Tensor.
+                Compativel com tf.keras.losses (reducao 'none' ou 'mean').
+            sample_batch: Tupla (x_sample, y_sample) com tensores float32.
+                x_sample shape: (batch, seq_len, n_features).
+                y_sample shape: (batch, seq_len, output_channels).
+                Batch pequeno (8-32 amostras) e suficiente para diagnostico.
+            config: PipelineConfig. Atributos usados:
+                - config.gradient_monitor_freq (int): amostragem a cada N ep.
+                - config.gradient_explosion_threshold (float): limite explosion.
+                - config.gradient_vanishing_threshold (float): limite vanishing.
+                - config.verbose (bool): logging detalhado por camada.
+
+        Raises:
+            ValueError: Se sample_batch nao e tupla (x, y).
+
+        Note:
+            Referenciado em:
+                - training/callbacks.py: build_callbacks() (slot 11)
+            Ref: docs/ARCHITECTURE_v2.md secao 6.2.
+            O batch de amostra e convertido para tf.constant no __init__
+            para evitar re-alocacao a cada chamada de on_epoch_end.
+        """
+        import tensorflow as tf
+
+        super().__init__()
+
+        if not isinstance(sample_batch, (tuple, list)) or len(sample_batch) != 2:
+            raise ValueError(
+                "sample_batch deve ser tupla (x_sample, y_sample). "
+                f"Recebido: {type(sample_batch)}"
+            )
+
+        self._model_ref = model
+        self._loss_fn = loss_fn
+        # Converte para tf.constant para evitar re-alocacao a cada epoca
+        self._sample_x = tf.constant(sample_batch[0], dtype=tf.float32)
+        self._sample_y = tf.constant(sample_batch[1], dtype=tf.float32)
+        self._freq = max(1, config.gradient_monitor_freq)
+        self._explosion_threshold = config.gradient_explosion_threshold
+        self._vanishing_threshold = config.gradient_vanishing_threshold
+        self._verbose = config.verbose
+
+        logger.info(
+            "GradientMonitor inicializado: %d variaveis, freq=%d, "
+            "explosion_thresh=%.1f, vanishing_thresh=%.2e",
+            len(model.trainable_variables),
+            self._freq,
+            self._explosion_threshold,
+            self._vanishing_threshold,
+        )
+
+    def on_epoch_end(self, epoch: int, logs: Optional[dict] = None) -> None:
+        """Computa e loga normas de gradiente ao final de cada N epocas.
+
+        Usa tf.GradientTape para computar ∂L/∂w_i para cada variavel
+        treinavel, usando o batch de amostra fixo fornecido no __init__.
+        Detecta gradient explosion/vanishing e loga estatisticas.
+
+        Args:
+            epoch: Indice da epoca atual (0-based).
+            logs: Dict de metricas Keras. Recebe as chaves adicionadas:
+                - grad_norm_mean: Media das normas L2 por variavel.
+                - grad_norm_max: Maximo das normas L2 por variavel.
+                - grad_norm_min: Minimo das normas L2 por variavel.
+
+        Note:
+            Referenciado em:
+                - Keras training loop (chamado automaticamente)
+            Ref: docs/ARCHITECTURE_v2.md secao 6.2.
+            Amostra apenas a cada self._freq epocas para minimizar overhead.
+            GradientTape em modo persistente=False (single-use, mais eficiente).
+            Gradientes None (de variaveis nao usadas no forward) sao ignorados.
+        """
+        import tensorflow as tf
+
+        # Amostra apenas a cada freq epocas
+        if (epoch + 1) % self._freq != 0:
+            return
+
+        model = self._model_ref
+
+        if not model.trainable_variables:
+            return
+
+        # ── Forward + Backward via GradientTape ──────────────────────
+        # Modo training=False para NAO corromper estatisticas de
+        # BatchNorm (running mean/variance) com o batch de amostra.
+        # Os gradientes em training=False sao suficientemente
+        # representativos para diagnostico de explosion/vanishing.
+        # Ref: Review Fase E (H4) — BN corruption prevention.
+        try:
+            with tf.GradientTape() as tape:
+                y_pred = model(self._sample_x, training=False)
+                loss_val = self._loss_fn(self._sample_y, y_pred)
+                # ── Guard: normaliza loss para scalar se reduction='none' ──
+                # Quando a loss retorna tensor (batch, seq, ch) em vez de
+                # scalar, tape.gradient computa gradiente da SOMA de todos
+                # os elementos, inflando as normas por batch*seq*ch.
+                # reduce_mean normaliza para comparabilidade com thresholds.
+                # Ref: Review Fase E (H1) — non-scalar loss guard.
+                if loss_val.shape.rank and loss_val.shape.rank > 0:
+                    loss_val = tf.reduce_mean(loss_val)
+
+            gradients = tape.gradient(loss_val, model.trainable_variables)
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "GradientMonitor: erro ao computar gradientes na epoca %d: %s",
+                epoch,
+                exc,
+            )
+            return
+
+        # ── Coleta normas L2 de gradientes (ignora None) ──────────────
+        # Gradientes None ocorrem para variaveis que nao participaram
+        # do forward pass (ex: variaveis de embedding nao utilizadas).
+        grad_norms: list[float] = []
+        for grad, var in zip(gradients, model.trainable_variables):
+            if grad is None:
+                continue
+            norm = float(tf.norm(grad, ord=2).numpy())
+            grad_norms.append(norm)
+
+            if self._verbose:
+                logger.debug(
+                    "  Epoch %d | %s | grad_norm=%.6f",
+                    epoch,
+                    var.name[:50],
+                    norm,
+                )
+
+        if not grad_norms:
+            logger.warning(
+                "GradientMonitor: nenhum gradiente valido na epoca %d. "
+                "Verificar se o modelo e o loss_fn sao compativeis.",
+                epoch,
+            )
+            return
+
+        # ── Estatisticas agregadas ──────────────────────────────────────
+        mean_norm = float(sum(grad_norms) / len(grad_norms))
+        max_norm = float(max(grad_norms))
+        min_norm = float(min(grad_norms))
+
+        # Atualiza logs dict para TensorBoard/CSVLogger
+        if logs is not None:
+            logs["grad_norm_mean"] = mean_norm
+            logs["grad_norm_max"] = max_norm
+            logs["grad_norm_min"] = min_norm
+
+        # ── Diagnostico: explosion / vanishing / normal ─────────────────
+        if mean_norm > self._explosion_threshold:
+            logger.warning(
+                "GRADIENT EXPLOSION detectado na epoca %d! "
+                "grad_norm_mean=%.4f (threshold=%.1f). "
+                "Considere reduzir LR ou habilitar gradient clipping.",
+                epoch,
+                mean_norm,
+                self._explosion_threshold,
+            )
+        elif mean_norm < self._vanishing_threshold:
+            logger.warning(
+                "GRADIENT VANISHING detectado na epoca %d! "
+                "grad_norm_mean=%.2e (threshold=%.2e). "
+                "Considere usar skip connections, batch norm ou LR maior.",
+                epoch,
+                mean_norm,
+                self._vanishing_threshold,
+            )
+        else:
+            logger.debug(
+                "Epoch %d | grad_norm_mean=%.6f, max=%.6f, min=%.6f "
+                "(%d variaveis, freq=%d)",
+                epoch,
+                mean_norm,
+                max_norm,
+                min_norm,
+                len(grad_norms),
+                self._freq,
+            )
+
+
+# ════════════════════════════════════════════════════════════════════════
 # CALLBACK 3: BestEpochTracker — Rastreamento de melhor epoca
 #
 # Rastreia a melhor epoca e o melhor valor de uma metrica monitorada
@@ -478,6 +845,7 @@ class WeightNormMonitor:
 #
 # Referencia: C40 legado (BestEpochTracker callback).
 # ════════════════════════════════════════════════════════════════════════
+
 
 class BestEpochTracker:
     """Rastreia a melhor epoca e valor de uma metrica monitorada.
@@ -523,12 +891,8 @@ class BestEpochTracker:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, monitor: str = "val_loss", mode: str = "min") -> None:
@@ -556,9 +920,7 @@ class BestEpochTracker:
         super().__init__()
 
         if mode not in ("min", "max"):
-            raise ValueError(
-                f"mode deve ser 'min' ou 'max', recebido: '{mode}'"
-            )
+            raise ValueError(f"mode deve ser 'min' ou 'max', recebido: '{mode}'")
 
         self.monitor: str = monitor
         self.mode: str = mode
@@ -657,6 +1019,7 @@ class BestEpochTracker:
 # Referencia: P2 (dual validation), C25 legado, S19 analise.
 # ════════════════════════════════════════════════════════════════════════
 
+
 class DualValidationCallback:
     """Valida modelo em datasets clean e noisy separadamente (P2).
 
@@ -710,12 +1073,8 @@ class DualValidationCallback:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(
@@ -768,11 +1127,15 @@ class DualValidationCallback:
 
         # Avalia em dataset limpo (baseline)
         clean_results = model.evaluate(self._val_clean_ds, verbose=0)
-        clean_loss = clean_results if isinstance(clean_results, float) else clean_results[0]
+        clean_loss = (
+            clean_results if isinstance(clean_results, float) else clean_results[0]
+        )
 
         # Avalia em dataset ruidoso (robustez)
         noisy_results = model.evaluate(self._val_noisy_ds, verbose=0)
-        noisy_loss = noisy_results if isinstance(noisy_results, float) else noisy_results[0]
+        noisy_loss = (
+            noisy_results if isinstance(noisy_results, float) else noisy_results[0]
+        )
 
         # Gap: diferenca entre noisy e clean (positivo = noisy mais dificil)
         gap = noisy_loss - clean_loss
@@ -814,6 +1177,7 @@ class DualValidationCallback:
 #
 # Referencia: C41 legado (penalty_warmup_epochs), S20 analise.
 # ════════════════════════════════════════════════════════════════════════
+
 
 class PINNSLambdaScheduleCallback:
     """Annealing linear do peso lambda PINNs ao longo do warmup.
@@ -859,12 +1223,8 @@ class PINNSLambdaScheduleCallback:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, pinns_lambda_var: Any, config: PipelineConfig) -> None:
@@ -949,6 +1309,7 @@ class PINNSLambdaScheduleCallback:
 # Referencia: C40 legado (CausalDegradationMonitor), geosteering mode.
 # ════════════════════════════════════════════════════════════════════════
 
+
 class CausalDegradationMonitor:
     """Monitora degradacao causada pela restricao causal.
 
@@ -992,12 +1353,8 @@ class CausalDegradationMonitor:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, model: Any, val_ds: Any, config: PipelineConfig) -> None:
@@ -1070,6 +1427,7 @@ class CausalDegradationMonitor:
 # Referencia: C40 legado (SlidingWindowValidation), geosteering mode.
 # ════════════════════════════════════════════════════════════════════════
 
+
 class SlidingWindowValidation:
     """Valida modelo em janelas deslizantes para detectar edge effects.
 
@@ -1112,17 +1470,11 @@ class SlidingWindowValidation:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
-    def __init__(
-        self, model: Any, val_data: Any, config: PipelineConfig
-    ) -> None:
+    def __init__(self, model: Any, val_data: Any, config: PipelineConfig) -> None:
         """Inicializa a validacao por janelas deslizantes.
 
         Args:
@@ -1196,6 +1548,7 @@ class SlidingWindowValidation:
 # Referencia: C40 legado (PeriodicCheckpoint callback).
 # ════════════════════════════════════════════════════════════════════════
 
+
 class PeriodicCheckpoint:
     """Salva modelo a cada N epocas em experiment_dir/checkpoints/.
 
@@ -1233,12 +1586,8 @@ class PeriodicCheckpoint:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, config: PipelineConfig, *, period: int = 10) -> None:
@@ -1262,9 +1611,7 @@ class PeriodicCheckpoint:
         self._period: int = period
 
         if config.experiment_dir:
-            self._checkpoint_dir = os.path.join(
-                config.experiment_dir, "checkpoints"
-            )
+            self._checkpoint_dir = os.path.join(config.experiment_dir, "checkpoints")
             os.makedirs(self._checkpoint_dir, exist_ok=True)
         else:
             self._checkpoint_dir = ""
@@ -1303,9 +1650,7 @@ class PeriodicCheckpoint:
                 self.model.save(filepath)
                 logger.info("Checkpoint salvo: %s", filepath)
             except Exception as exc:
-                logger.warning(
-                    "Falha ao salvar checkpoint epoch %d: %s", epoch + 1, exc
-                )
+                logger.warning("Falha ao salvar checkpoint epoch %d: %s", epoch + 1, exc)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1320,6 +1665,7 @@ class PeriodicCheckpoint:
 #
 # Referencia: C40 legado (PlateauDetector callback).
 # ════════════════════════════════════════════════════════════════════════
+
 
 class MetricPlateauDetector:
     """Detecta plateaus persistentes em uma metrica monitorada.
@@ -1368,12 +1714,8 @@ class MetricPlateauDetector:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(
@@ -1472,6 +1814,7 @@ class MetricPlateauDetector:
 # C40 legado (OneCycleLR callback grupo D).
 # ════════════════════════════════════════════════════════════════════════
 
+
 class OneCycleLR:
     """One Cycle LR schedule para super-convergencia (Smith 2018).
 
@@ -1522,12 +1865,8 @@ class OneCycleLR:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(
@@ -1563,8 +1902,7 @@ class OneCycleLR:
         self._pct_start: float = pct_start
 
         logger.info(
-            "OneCycleLR inicializado: max_lr=%.6f, total=%d, "
-            "div=%.1f, pct_start=%.2f",
+            "OneCycleLR inicializado: max_lr=%.6f, total=%d, " "div=%.1f, pct_start=%.2f",
             max_lr,
             total_epochs,
             div_factor,
@@ -1604,17 +1942,13 @@ class OneCycleLR:
             new_lr = initial_lr + (self._max_lr - initial_lr) * phase_pct
         else:
             # Phase 2: Cosine annealing — max_lr → final_lr
-            phase_pct = (pct - self._pct_start) / max(
-                1.0 - self._pct_start, 1e-8
-            )
+            phase_pct = (pct - self._pct_start) / max(1.0 - self._pct_start, 1e-8)
             new_lr = final_lr + (self._max_lr - final_lr) * 0.5 * (
                 1.0 + math.cos(math.pi * phase_pct)
             )
 
         # Atualiza LR do otimizador via backend Keras
-        tf.keras.backend.set_value(
-            self.model.optimizer.learning_rate, new_lr
-        )
+        tf.keras.backend.set_value(self.model.optimizer.learning_rate, new_lr)
 
         logger.debug(
             "Epoch %d: OneCycleLR lr=%.8f (pct=%.3f)",
@@ -1637,6 +1971,7 @@ class OneCycleLR:
 # Referencia: Loshchilov & Hutter, "SGDR: Stochastic Gradient Descent
 # with Warm Restarts" (ICLR 2017). C40 legado (grupo D).
 # ════════════════════════════════════════════════════════════════════════
+
 
 class CosineWarmRestarts:
     """SGDR: Cosine annealing com warm restarts (Loshchilov & Hutter 2017).
@@ -1686,12 +2021,8 @@ class CosineWarmRestarts:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(
@@ -1753,13 +2084,13 @@ class CosineWarmRestarts:
         import tensorflow as tf
 
         # Cosine annealing dentro do ciclo atual
-        new_lr = self._initial_lr * 0.5 * (
-            1.0 + math.cos(math.pi * self._T_cur / max(self._T_i, 1))
+        new_lr = (
+            self._initial_lr
+            * 0.5
+            * (1.0 + math.cos(math.pi * self._T_cur / max(self._T_i, 1)))
         )
 
-        tf.keras.backend.set_value(
-            self.model.optimizer.learning_rate, new_lr
-        )
+        tf.keras.backend.set_value(self.model.optimizer.learning_rate, new_lr)
 
         logger.debug(
             "Epoch %d: CosineWarmRestarts lr=%.8f (T_cur=%d, T_i=%d)",
@@ -1794,6 +2125,7 @@ class CosineWarmRestarts:
 # Referencia: Smith, L.N. "Cyclical Learning Rates for Training Neural
 # Networks" (WACV 2017). C40 legado (CyclicalLR callback grupo D).
 # ════════════════════════════════════════════════════════════════════════
+
 
 class CyclicalLR:
     """Cyclical LR: triangular ou triangular2 (Smith 2017).
@@ -1844,12 +2176,8 @@ class CyclicalLR:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(
@@ -1932,13 +2260,11 @@ class CyclicalLR:
             # triangular2: amplitude halved a cada ciclo
             scale = 1.0 / (2.0 ** (cycle - 1))
 
-        new_lr = self._base_lr + (self._max_lr - self._base_lr) * max(
-            0.0, 1.0 - x
-        ) * scale
-
-        tf.keras.backend.set_value(
-            self.model.optimizer.learning_rate, new_lr
+        new_lr = (
+            self._base_lr + (self._max_lr - self._base_lr) * max(0.0, 1.0 - x) * scale
         )
+
+        tf.keras.backend.set_value(self.model.optimizer.learning_rate, new_lr)
 
         logger.debug(
             "Epoch %d: CyclicalLR lr=%.8f (cycle=%d, mode='%s')",
@@ -1961,6 +2287,7 @@ class CyclicalLR:
 #
 # Referencia: C40 legado (MemoryMonitor callback grupo B).
 # ════════════════════════════════════════════════════════════════════════
+
 
 class MemoryMonitor:
     """Monitora uso de memoria GPU/CPU por epoca.
@@ -1994,12 +2321,8 @@ class MemoryMonitor:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(self) -> None:
@@ -2040,9 +2363,7 @@ class MemoryMonitor:
                 gpu_mb = mem_info.get("peak", 0) / (1024 * 1024)
                 if logs is not None:
                     logs["gpu_memory_mb"] = gpu_mb
-                logger.debug(
-                    "Epoch %d: GPU peak memory=%.1f MB", epoch, gpu_mb
-                )
+                logger.debug("Epoch %d: GPU peak memory=%.1f MB", epoch, gpu_mb)
         except Exception:
             # GPU memory info nao disponivel (CPU-only ou API nao suportada)
             pass
@@ -2062,9 +2383,7 @@ class MemoryMonitor:
                 cpu_mb = rusage.ru_maxrss / 1024
             if logs is not None:
                 logs["cpu_memory_mb"] = cpu_mb
-            logger.debug(
-                "Epoch %d: CPU peak memory=%.1f MB", epoch, cpu_mb
-            )
+            logger.debug("Epoch %d: CPU peak memory=%.1f MB", epoch, cpu_mb)
         except ImportError:
             pass
 
@@ -2078,6 +2397,7 @@ class MemoryMonitor:
 #
 # Referencia: C40 legado (futuro), requisito de geosteering realtime.
 # ════════════════════════════════════════════════════════════════════════
+
 
 class LatencyBenchmark:
     """Mede latencia de inferencia single-sample a cada 10 epocas.
@@ -2120,12 +2440,8 @@ class LatencyBenchmark:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, model: Any, sample_input: Any) -> None:
@@ -2205,6 +2521,7 @@ class LatencyBenchmark:
 # Referencia: C40 legado (diagnostico pos-epoca).
 # ════════════════════════════════════════════════════════════════════════
 
+
 class EpochSummary:
     """Loga resumo one-line com metricas-chave ao final de cada epoca.
 
@@ -2235,12 +2552,8 @@ class EpochSummary:
             Lazy import de TensorFlow.
             Ref: CLAUDE.md (lazy TF import pattern).
         """
-        import tensorflow as tf
-
-        if not issubclass(cls, tf.keras.callbacks.Callback):
-            cls.__bases__ = (tf.keras.callbacks.Callback,)
-
-        instance = super().__new__(cls)
+        resolved_cls = _ensure_keras_callback_base(cls)
+        instance = super().__new__(resolved_cls)
         return instance
 
     def __init__(self) -> None:
@@ -2286,9 +2599,7 @@ class EpochSummary:
 
         # Learning rate atual (se disponivel via modelo)
         try:
-            lr = tf.keras.backend.get_value(
-                self.model.optimizer.learning_rate
-            )
+            lr = tf.keras.backend.get_value(self.model.optimizer.learning_rate)
             parts.append(f"lr={lr:.2e}")
         except Exception:
             pass
@@ -2317,6 +2628,7 @@ class EpochSummary:
 #
 # Referencia: C40 legado (build_callbacks), docs/ARCHITECTURE_v2.md 6.2.
 # ════════════════════════════════════════════════════════════════════════
+
 
 def build_callbacks(
     config: PipelineConfig,
@@ -2481,11 +2793,13 @@ def build_callbacks(
     # ── 7. DualValidationCallback (CONDICIONAL — P2) ──────────────
     # Ativa dual validation se use_dual_validation=True e ambos
     # datasets (clean + noisy) fornecidos junto com o modelo.
-    if config.use_dual_validation and val_clean_ds is not None and val_noisy_ds is not None:
+    if (
+        config.use_dual_validation
+        and val_clean_ds is not None
+        and val_noisy_ds is not None
+    ):
         if model is not None:
-            dual_cb = DualValidationCallback(
-                val_clean_ds, val_noisy_ds, model, config
-            )
+            dual_cb = DualValidationCallback(val_clean_ds, val_noisy_ds, model, config)
             callbacks.append(dual_cb)
             logger.info("DualValidationCallback: P2 dual val ativo")
         else:
@@ -2543,6 +2857,79 @@ def build_callbacks(
     return callbacks
 
 
+def add_gradient_monitor(
+    callbacks: List[Any],
+    model: Any,
+    loss_fn: Any,
+    sample_batch: Any,
+    config: "PipelineConfig",
+) -> List[Any]:
+    """Adiciona GradientMonitor a uma lista de callbacks existente.
+
+    Funcao auxiliar para inserir o GradientMonitor apos build_callbacks().
+    O GradientMonitor requer sample_batch e loss_fn, que nao estao
+    disponiveis no momento da chamada de build_callbacks(), portanto
+    e adicionado separadamente pelo TrainingLoop.
+
+    Fluxo recomendado:
+      ┌────────────────────────────────────────────────────────────────┐
+      │  callbacks = build_callbacks(config, model, ...)              │
+      │  if config.use_gradient_monitor:                              │
+      │      callbacks = add_gradient_monitor(                        │
+      │          callbacks, model, loss_fn, sample_batch, config)     │
+      └────────────────────────────────────────────────────────────────┘
+
+    Args:
+        callbacks: Lista existente de callbacks Keras.
+        model: Modelo tf.keras.Model.
+        loss_fn: Funcao de perda callable(y_true, y_pred).
+        sample_batch: Tupla (x_sample, y_sample) float32.
+            Batch pequeno (8-32 amostras) e suficiente.
+        config: PipelineConfig com campos gradient_monitor_*.
+
+    Returns:
+        Lista de callbacks com GradientMonitor adicionado no final
+        (apenas se config.use_gradient_monitor=True).
+
+    Note:
+        Referenciado em:
+            - training/loop.py: TrainingLoop.run() (pos-build_callbacks)
+        Ref: docs/ARCHITECTURE_v2.md secao 6.2.
+        Se config.use_gradient_monitor=False, retorna a lista inalterada.
+    """
+    if not config.use_gradient_monitor:
+        return callbacks
+
+    if model is None:
+        logger.warning(
+            "add_gradient_monitor: model=None. " "GradientMonitor NAO sera adicionado."
+        )
+        return callbacks
+
+    if sample_batch is None:
+        logger.warning(
+            "add_gradient_monitor: sample_batch=None. "
+            "GradientMonitor NAO sera adicionado."
+        )
+        return callbacks
+
+    if loss_fn is None:
+        logger.warning(
+            "add_gradient_monitor: loss_fn=None. " "GradientMonitor NAO sera adicionado."
+        )
+        return callbacks
+
+    grad_cb = GradientMonitor(model, loss_fn, sample_batch, config)
+    callbacks.append(grad_cb)
+    logger.info(
+        "GradientMonitor adicionado: freq=%d, explosion=%.1f, vanishing=%.2e",
+        config.gradient_monitor_freq,
+        config.gradient_explosion_threshold,
+        config.gradient_vanishing_threshold,
+    )
+    return callbacks
+
+
 # ════════════════════════════════════════════════════════════════════════
 # HELPERS INTERNOS — Resolucao de paths para logs
 #
@@ -2550,6 +2937,7 @@ def build_callbacks(
 # a partir de experiment_dir (se disponivel) ou fallback para ./logs/.
 # Cria diretorios automaticamente se nao existirem.
 # ════════════════════════════════════════════════════════════════════════
+
 
 def _resolve_log_dir(config: PipelineConfig, subdir: str) -> str:
     """Resolve diretorio de log para TensorBoard.
@@ -2607,3 +2995,389 @@ def _resolve_csv_path(config: PipelineConfig) -> str:
 
     os.makedirs(csv_dir, exist_ok=True)
     return csv_path
+
+
+# ════════════════════════════════════════════════════════════════════════
+# LR SCHEDULE HELPERS
+#
+# Funcoes puras (Python stdlib, sem TensorFlow) que retornam callables
+# epoch → learning_rate para uso com tf.keras.callbacks.LearningRateScheduler.
+#
+# Cada helper encapsula uma formula classica de schedule:
+#   • make_cosine_schedule      — Cosine annealing (Loshchilov & Hutter 2016)
+#   • make_step_schedule        — Step decay (fator constante a cada N epocas)
+#   • make_warmup_cosine_schedule — Warmup linear + cosine (Vaswani 2017)
+#
+# Nota: Estas funcoes NAO criam callbacks Keras — retornam callables.
+#       O caller deve envolve-las em LearningRateScheduler:
+#         schedule_fn = make_cosine_schedule(1e-4, 1e-7, 200)
+#         cb = tf.keras.callbacks.LearningRateScheduler(schedule_fn)
+#
+# Ref: docs/ARCHITECTURE_v2.md secao 6.2 (LR scheduling)
+# ════════════════════════════════════════════════════════════════════════
+
+
+# ── make_cosine_schedule ───────────────────────────────────────────────
+# Cosine annealing decai o LR suavemente de lr_initial ate lr_min
+# seguindo meio-periodo de cosseno. Isso evita quedas abruptas de LR
+# que podem desestabilizar o otimizador, e permite ao modelo refinar
+# pesos gradualmente nas ultimas epocas (LR proximo de lr_min).
+# Ref: Loshchilov & Hutter, "SGDR: Stochastic Gradient Descent with
+#      Warm Restarts" (ICLR 2017) — Eq. 5 (cosine annealing sem restart).
+# ───────────────────────────────────────────────────────────────────────
+
+
+def make_cosine_schedule(
+    lr_initial: float,
+    lr_min: float,
+    total_epochs: int,
+) -> "Callable[[int], float]":
+    """Cria schedule de cosine annealing para learning rate.
+
+    Formula:
+        LR(t) = lr_min + 0.5 * (lr_0 - lr_min) * (1 + cos(pi * t / T))
+
+    Onde:
+        - lr_0 = lr_initial (LR no inicio do treinamento)
+        - lr_min = LR minimo no final do treinamento
+        - T = total_epochs (numero total de epocas)
+        - t = epoca atual (0-indexed)
+
+    Curva LR (cosine annealing):
+
+    .. code-block:: text
+
+        LR
+        lr_0 ──┐
+               │╲
+               │  ╲
+               │    ╲
+               │      ╲
+        lr_min │────────╲──────
+               0    T/2    T   epoch
+
+        O decaimento segue cos(pi * t / T), partindo de lr_0
+        e decrescendo suavemente ate lr_min em T epocas.
+        A taxa de decaimento e mais lenta no inicio e no final
+        (derivada do cosseno e zero nos extremos), e mais rapida
+        no meio do treinamento — ideal para convergencia gradual.
+
+    Args:
+        lr_initial: Learning rate inicial (pico). Para inversao 1D de
+            resistividade, valores tipicos sao 1e-4 (E-Robusto) ou
+            1e-3 (baseline). Deve ser > lr_min.
+        lr_min: Learning rate minimo no final do schedule. Tipicamente
+            1e-7 a 1e-6. Garante que o otimizador nunca para
+            completamente de atualizar pesos (evita estagnacao).
+        total_epochs: Numero total de epocas de treinamento (T).
+            O schedule cobre exatamente [0, total_epochs-1].
+            Apos total_epochs, retorna lr_min (saturacao).
+
+    Returns:
+        Callable[[int], float]: Funcao epoch → learning_rate compativel
+            com tf.keras.callbacks.LearningRateScheduler.
+
+    Example:
+        >>> schedule = make_cosine_schedule(1e-4, 1e-7, 200)
+        >>> schedule(0)    # epoca 0 → lr_initial
+        0.0001
+        >>> schedule(100)  # epoca 100 (metade) → ~lr_initial/2
+        5.0005e-05
+        >>> schedule(200)  # epoca 200 (final) → lr_min
+        1e-07
+
+    Note:
+        Referenciado em:
+            - training/callbacks.py: build_callbacks() (schedule helpers)
+            - config.py: PipelineConfig.lr_scheduler_type == "cosine"
+        Ref: Loshchilov & Hutter, "SGDR: Stochastic Gradient Descent
+             with Warm Restarts" (ICLR 2017) — Eq. 5, cosine annealing
+             sem warm restarts. O decaimento suave evita instabilidade
+             causada por step decay abrupto em redes profundas.
+        Ref: docs/ARCHITECTURE_v2.md secao 6.2.
+        Funcao pura (stdlib math) — sem dependencia de TensorFlow.
+    """
+    # ── Validacao de argumentos ────────────────────────────────────────
+    # lr_initial deve ser estritamente maior que lr_min para que o
+    # schedule tenha amplitude nao-nula. total_epochs deve ser >= 1.
+    if lr_initial <= lr_min:
+        raise ValueError(f"lr_initial ({lr_initial}) deve ser > lr_min ({lr_min})")
+    if total_epochs < 1:
+        raise ValueError(f"total_epochs ({total_epochs}) deve ser >= 1")
+
+    def _schedule(epoch: int) -> float:
+        # ── Saturacao apos total_epochs ────────────────────────────
+        # Se epoch >= total_epochs, retorna lr_min (nao extrapola).
+        if epoch >= total_epochs:
+            return lr_min
+        # ── Cosine annealing: meio-periodo de cos ─────────────────
+        # cos(0) = 1.0 → LR = lr_initial
+        # cos(pi) = -1.0 → LR = lr_min
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * epoch / total_epochs))
+        return lr_min + (lr_initial - lr_min) * cosine_decay
+
+    logger.debug(
+        "Cosine schedule criado: lr_initial=%.2e, lr_min=%.2e, T=%d",
+        lr_initial,
+        lr_min,
+        total_epochs,
+    )
+    return _schedule
+
+
+# ── make_step_schedule ─────────────────────────────────────────────────
+# Step decay reduz o LR por um fator fixo a cada step_size epocas.
+# E o schedule mais simples e amplamente usado como baseline.
+# Cada degrau multiplica o LR por `factor` (tipicamente 0.1),
+# resultando em reducoes de ordem de magnitude a intervalos regulares.
+# O lr_min impede que o LR caia abaixo de um limiar minimo.
+# ───────────────────────────────────────────────────────────────────────
+
+
+def make_step_schedule(
+    lr_initial: float,
+    factor: float = 0.1,
+    step_size: int = 50,
+    lr_min: float = 1e-7,
+) -> "Callable[[int], float]":
+    """Cria schedule de step decay para learning rate.
+
+    Formula:
+        LR(t) = max(lr_min, lr_0 * factor ^ (t // step_size))
+
+    Onde:
+        - lr_0 = lr_initial (LR no inicio do treinamento)
+        - factor = fator multiplicativo por step (tipicamente 0.1)
+        - step_size = intervalo em epocas entre reducoes
+        - t = epoca atual (0-indexed)
+
+    Curva LR (step decay):
+
+    .. code-block:: text
+
+        LR
+        lr_0  ─────────┐
+                        │
+        lr_0*f ─────────┼─────────┐
+                        │         │
+        lr_0*f² ────────┼─────────┼─────────┐
+                        │         │         │
+        lr_min  ────────┼─────────┼─────────┼────── (piso)
+                        step    2*step   3*step    epoch
+
+        Cada degrau reduz LR por fator `factor`.
+        O parametro lr_min atua como piso absoluto,
+        impedindo LR de cair para valores numericamente
+        insignificantes (previne estagnacao do otimizador).
+
+    Args:
+        lr_initial: Learning rate inicial. Para inversao 1D de
+            resistividade, valores tipicos sao 1e-3 (baseline)
+            ou 1e-4 (E-Robusto). Deve ser > lr_min.
+        factor: Fator multiplicativo aplicado a cada step.
+            Default: 0.1 (reducao de 10x por step).
+            Valores tipicos: 0.1 (agressivo), 0.5 (suave).
+            Deve estar em (0, 1).
+        step_size: Numero de epocas entre reducoes consecutivas.
+            Default: 50. Define a frequencia dos degraus.
+            Valor menor = decaimento mais rapido.
+            Deve ser >= 1.
+        lr_min: Piso minimo do learning rate. Default: 1e-7.
+            Impede que LR caia para valores numericamente nulos
+            apos muitos steps (ex: 1e-3 * 0.1^5 = 1e-8 < lr_min).
+
+    Returns:
+        Callable[[int], float]: Funcao epoch → learning_rate compativel
+            com tf.keras.callbacks.LearningRateScheduler.
+
+    Example:
+        >>> schedule = make_step_schedule(1e-3, factor=0.1, step_size=50)
+        >>> schedule(0)    # epoca 0 → lr_initial
+        0.001
+        >>> schedule(49)   # epoca 49 (antes do 1o step) → lr_initial
+        0.001
+        >>> schedule(50)   # epoca 50 (1o step) → lr_initial * 0.1
+        0.0001
+        >>> schedule(100)  # epoca 100 (2o step) → lr_initial * 0.01
+        1e-05
+
+    Note:
+        Referenciado em:
+            - training/callbacks.py: build_callbacks() (schedule helpers)
+            - config.py: PipelineConfig.lr_scheduler_type == "step"
+        Ref: He et al., "Deep Residual Learning for Image Recognition"
+             (CVPR 2015) — step decay com factor=0.1 a cada 30 epocas,
+             amplamente adotado em treinamento de redes residuais.
+        Ref: docs/ARCHITECTURE_v2.md secao 6.2.
+        Funcao pura (stdlib math) — sem dependencia de TensorFlow.
+    """
+    # ── Validacao de argumentos ────────────────────────────────────────
+    # factor deve estar em (0, 1) para que o LR decaia monotonicamente.
+    # step_size deve ser >= 1 para evitar divisao por zero.
+    if lr_initial <= lr_min:
+        raise ValueError(f"lr_initial ({lr_initial}) deve ser > lr_min ({lr_min})")
+    if not (0.0 < factor < 1.0):
+        raise ValueError(f"factor ({factor}) deve estar em (0, 1)")
+    if step_size < 1:
+        raise ValueError(f"step_size ({step_size}) deve ser >= 1")
+
+    def _schedule(epoch: int) -> float:
+        # ── Step decay: reducao por fator a cada step_size epocas ──
+        # n_steps = numero de reducoes ja aplicadas
+        n_steps = epoch // step_size
+        lr = lr_initial * (factor**n_steps)
+        # ── Piso minimo: impede LR numericamente nulo ─────────────
+        return max(lr_min, lr)
+
+    logger.debug(
+        "Step schedule criado: lr_initial=%.2e, factor=%.2f, "
+        "step_size=%d, lr_min=%.2e",
+        lr_initial,
+        factor,
+        step_size,
+        lr_min,
+    )
+    return _schedule
+
+
+# ── make_warmup_cosine_schedule ────────────────────────────────────────
+# Warmup linear seguido de cosine decay e o schedule padrao para
+# Transformers e modelos grandes. A fase de warmup permite que as
+# estatisticas de BatchNorm e os momentos do otimizador (Adam m/v)
+# se estabilizem antes de aplicar LR alto. Apos o warmup, o cosine
+# decay suaviza a convergencia final — identico ao make_cosine_schedule.
+# Ref: Vaswani et al., "Attention Is All You Need" (NeurIPS 2017)
+#      — warmup linear de 4000 steps.
+# Ref: Goyal et al., "Accurate, Large Minibatch SGD" (2017)
+#      — warmup linear para treinamento com large batch sizes.
+# ───────────────────────────────────────────────────────────────────────
+
+
+def make_warmup_cosine_schedule(
+    lr_initial: float,
+    lr_min: float,
+    total_epochs: int,
+    warmup_epochs: int = 10,
+) -> "Callable[[int], float]":
+    """Cria schedule de warmup linear + cosine decay para learning rate.
+
+    Duas fases:
+        Fase 1 — Warmup (epoch 0..warmup_epochs-1):
+            LR cresce linearmente de lr_min ate lr_initial.
+            Formula: LR(t) = lr_min + (lr_initial - lr_min) * t / warmup_epochs
+
+        Fase 2 — Cosine decay (epoch warmup_epochs..total_epochs):
+            LR decai via cosine de lr_initial ate lr_min.
+            Formula: LR(t) = lr_min + 0.5 * (lr_initial - lr_min)
+                     * (1 + cos(pi * (t - warmup) / (T - warmup)))
+
+    Curva LR (warmup + cosine):
+
+    .. code-block:: text
+
+        LR
+        lr_0 ──────┬──┐
+                  ╱    ╲
+                 ╱      ╲
+                ╱        ╲
+        lr_min ╱──────────╲────
+               0  warmup  T    epoch
+
+        Fase 1 (warmup): crescimento LINEAR de lr_min → lr_initial.
+            Permite que momentos do otimizador Adam (m e v) se
+            estabilizem com LR baixo antes do pico.
+        Fase 2 (cosine): decaimento COSINE de lr_initial → lr_min.
+            Identico a make_cosine_schedule, aplicado ao intervalo
+            [warmup_epochs, total_epochs].
+
+    Args:
+        lr_initial: Learning rate de pico (atingido ao final do warmup).
+            Para inversao 1D com Transformers, tipicamente 1e-4.
+            Para CNNs/ResNets, tipicamente 1e-3 a 3e-4.
+            Deve ser > lr_min.
+        lr_min: Learning rate minimo (inicio do warmup e final do
+            cosine decay). Tipicamente 1e-7 a 1e-6. Garante
+            atualizacao minima de pesos em todas as fases.
+        total_epochs: Numero total de epocas de treinamento (T).
+            Deve ser > warmup_epochs para que a fase cosine exista.
+        warmup_epochs: Numero de epocas de warmup linear. Default: 10.
+            Para inversao 1D com Adam, 5-10 epocas sao suficientes
+            para estabilizar momentos m/v. Valores maiores (20-30)
+            sao recomendados para large batch ou SGD.
+            Deve ser >= 1 e < total_epochs.
+
+    Returns:
+        Callable[[int], float]: Funcao epoch → learning_rate compativel
+            com tf.keras.callbacks.LearningRateScheduler.
+
+    Example:
+        >>> schedule = make_warmup_cosine_schedule(1e-4, 1e-7, 200, warmup_epochs=10)
+        >>> schedule(0)    # epoca 0 → lr_min (inicio warmup)
+        1e-07
+        >>> schedule(5)    # epoca 5 → metade do warmup
+        5.0005e-05
+        >>> schedule(10)   # epoca 10 → lr_initial (pico)
+        0.0001
+        >>> schedule(200)  # epoca 200 → lr_min (final cosine)
+        1e-07
+
+    Note:
+        Referenciado em:
+            - training/callbacks.py: build_callbacks() (schedule helpers)
+            - config.py: PipelineConfig.lr_scheduler_type == "warmup_cosine"
+        Ref: Vaswani et al., "Attention Is All You Need" (NeurIPS 2017)
+             — warmup linear de 4000 steps para estabilizar Transformers.
+             Adaptado de steps para epocas (warmup_epochs).
+        Ref: Goyal et al., "Accurate, Large Minibatch SGD: Training
+             ImageNet in 1 Hour" (2017) — warmup linear para large batch
+             evita divergencia nos primeiros updates.
+        Ref: Loshchilov & Hutter, "SGDR" (ICLR 2017) — fase cosine
+             apos warmup segue Eq. 5 (cosine annealing).
+        Ref: docs/ARCHITECTURE_v2.md secao 6.2.
+        Funcao pura (stdlib math) — sem dependencia de TensorFlow.
+    """
+    # ── Validacao de argumentos ────────────────────────────────────────
+    # warmup_epochs deve ser < total_epochs para que a fase cosine
+    # tenha pelo menos 1 epoca. lr_initial deve ser > lr_min.
+    if lr_initial <= lr_min:
+        raise ValueError(f"lr_initial ({lr_initial}) deve ser > lr_min ({lr_min})")
+    if total_epochs < 1:
+        raise ValueError(f"total_epochs ({total_epochs}) deve ser >= 1")
+    if warmup_epochs < 1:
+        raise ValueError(f"warmup_epochs ({warmup_epochs}) deve ser >= 1")
+    if warmup_epochs >= total_epochs:
+        raise ValueError(
+            f"warmup_epochs ({warmup_epochs}) deve ser < "
+            f"total_epochs ({total_epochs})"
+        )
+
+    # ── Numero de epocas na fase cosine (apos warmup) ─────────────────
+    cosine_epochs = total_epochs - warmup_epochs
+
+    def _schedule(epoch: int) -> float:
+        # ── Fase 1: Warmup linear (0 → warmup_epochs) ─────────────
+        # LR cresce linearmente de lr_min ate lr_initial.
+        # Motivacao: momentos de Adam (m e v) precisam de updates
+        # iniciais com LR baixo para convergir antes do pico.
+        if epoch < warmup_epochs:
+            return lr_min + (lr_initial - lr_min) * epoch / warmup_epochs
+
+        # ── Fase 2: Cosine decay (warmup_epochs → total_epochs) ───
+        # Identico a make_cosine_schedule no intervalo deslocado.
+        # t_cosine marca a progressao dentro da fase cosine [0, 1].
+        if epoch >= total_epochs:
+            return lr_min
+        t_cosine = epoch - warmup_epochs
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * t_cosine / cosine_epochs))
+        return lr_min + (lr_initial - lr_min) * cosine_decay
+
+    logger.debug(
+        "Warmup+cosine schedule criado: lr_initial=%.2e, lr_min=%.2e, "
+        "T=%d, warmup=%d, cosine=%d",
+        lr_initial,
+        lr_min,
+        total_epochs,
+        warmup_epochs,
+        cosine_epochs,
+    )
+    return _schedule

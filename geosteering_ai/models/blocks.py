@@ -104,6 +104,7 @@ def _get_regularizer(l1: float = 0.0, l2: float = 0.0):
             None se ambos zero, L1L2 caso contrario.
     """
     import tensorflow as tf
+
     if l1 == 0.0 and l2 == 0.0:
         return None
     return tf.keras.regularizers.L1L2(l1=l1, l2=l2)
@@ -173,8 +174,11 @@ def residual_block_1d(
 
     # ── Branch principal ──────────────────────────────────────────────
     y = tf.keras.layers.Conv1D(
-        filters, kernel_size, padding=pad,
-        kernel_regularizer=reg, use_bias=not use_bn,
+        filters,
+        kernel_size,
+        padding=pad,
+        kernel_regularizer=reg,
+        use_bias=not use_bn,
     )(x)
     if use_bn:
         y = tf.keras.layers.BatchNormalization()(y)
@@ -183,8 +187,11 @@ def residual_block_1d(
         y = tf.keras.layers.Dropout(dropout_rate)(y)
 
     y = tf.keras.layers.Conv1D(
-        filters, kernel_size, padding=pad,
-        kernel_regularizer=reg, use_bias=not use_bn,
+        filters,
+        kernel_size,
+        padding=pad,
+        kernel_regularizer=reg,
+        use_bias=not use_bn,
     )(y)
     if use_bn:
         y = tf.keras.layers.BatchNormalization()(y)
@@ -192,7 +199,10 @@ def residual_block_1d(
     # ── Skip connection (projecao 1x1 se canais mudaram) ─────────────
     if n_ch != filters:
         x = tf.keras.layers.Conv1D(
-            filters, 1, padding="same", kernel_regularizer=reg,
+            filters,
+            1,
+            padding="same",
+            kernel_regularizer=reg,
         )(x)
 
     # ── Fusao add + ativacao ─────────────────────────────────────────
@@ -251,8 +261,11 @@ def bottleneck_block_1d(
 
     # ── 1x1 compress ─────────────────────────────────────────────────
     y = tf.keras.layers.Conv1D(
-        filters, 1, padding="same",
-        kernel_regularizer=reg, use_bias=not use_bn,
+        filters,
+        1,
+        padding="same",
+        kernel_regularizer=reg,
+        use_bias=not use_bn,
     )(x)
     if use_bn:
         y = tf.keras.layers.BatchNormalization()(y)
@@ -260,8 +273,11 @@ def bottleneck_block_1d(
 
     # ── kxk transform ────────────────────────────────────────────────
     y = tf.keras.layers.Conv1D(
-        filters, kernel_size, padding=pad,
-        kernel_regularizer=reg, use_bias=not use_bn,
+        filters,
+        kernel_size,
+        padding=pad,
+        kernel_regularizer=reg,
+        use_bias=not use_bn,
     )(y)
     if use_bn:
         y = tf.keras.layers.BatchNormalization()(y)
@@ -269,8 +285,11 @@ def bottleneck_block_1d(
 
     # ── 1x1 expand ───────────────────────────────────────────────────
     y = tf.keras.layers.Conv1D(
-        out_ch, 1, padding="same",
-        kernel_regularizer=reg, use_bias=not use_bn,
+        out_ch,
+        1,
+        padding="same",
+        kernel_regularizer=reg,
+        use_bias=not use_bn,
     )(y)
     if use_bn:
         y = tf.keras.layers.BatchNormalization()(y)
@@ -278,7 +297,10 @@ def bottleneck_block_1d(
     # ── Skip ─────────────────────────────────────────────────────────
     if n_ch != out_ch:
         x = tf.keras.layers.Conv1D(
-            out_ch, 1, padding="same", kernel_regularizer=reg,
+            out_ch,
+            1,
+            padding="same",
+            kernel_regularizer=reg,
         )(x)
 
     out = tf.keras.layers.Add()([x, y])
@@ -333,14 +355,17 @@ def conv_next_block(
 
     # ── Depthwise conv (per-channel spatial mixing) ───────────────────
     y = tf.keras.layers.DepthwiseConv1D(
-        kernel_size, padding=pad,
-        depthwise_regularizer=reg, use_bias=True,
+        kernel_size,
+        padding=pad,
+        depthwise_regularizer=reg,
+        use_bias=True,
     )(x)
     y = tf.keras.layers.LayerNormalization()(y)
 
     # ── Pointwise MLP (channel mixing): expand → GELU → compress ─────
     y = tf.keras.layers.Dense(
-        filters * expansion, kernel_regularizer=reg,
+        filters * expansion,
+        kernel_regularizer=reg,
     )(y)
     y = tf.keras.layers.Activation("gelu")(y)
     if dropout_rate > 0.0:
@@ -382,6 +407,12 @@ def se_block(
     import tensorflow as tf
 
     n_ch = x.shape[-1]
+    if n_ch is None:
+        raise ValueError(
+            "se_block requer shape[-1] estaticamente conhecida "
+            "(n_channels deve ser definido no build do modelo). "
+            "Use tf.ensure_shape() antes de chamar se_block()."
+        )
     bottleneck = max(1, n_ch // reduction)
 
     # ── Squeeze: global average pooling (batch, ch) ──────────────────
@@ -445,16 +476,24 @@ def dilated_causal_block(
     n_ch = x.shape[-1]
 
     y = tf.keras.layers.Conv1D(
-        filters, kernel_size, dilation_rate=dilation_rate,
-        padding=pad, kernel_regularizer=reg, use_bias=True,
+        filters,
+        kernel_size,
+        dilation_rate=dilation_rate,
+        padding=pad,
+        kernel_regularizer=reg,
+        use_bias=True,
     )(x)
     y = tf.keras.layers.Activation(activation)(y)
     if dropout_rate > 0.0:
         y = tf.keras.layers.SpatialDropout1D(dropout_rate)(y)
 
     y = tf.keras.layers.Conv1D(
-        filters, kernel_size, dilation_rate=dilation_rate,
-        padding=pad, kernel_regularizer=reg, use_bias=True,
+        filters,
+        kernel_size,
+        dilation_rate=dilation_rate,
+        padding=pad,
+        kernel_regularizer=reg,
+        use_bias=True,
     )(y)
     y = tf.keras.layers.Activation(activation)(y)
     if dropout_rate > 0.0:
@@ -526,17 +565,26 @@ def inception_module(
     # ── Ramo MaxPool + Conv 1x1 (conserva detalhes pontuais) ─────────
     mp = tf.keras.layers.MaxPool1D(3, strides=1, padding="same")(x)
     mp = tf.keras.layers.Conv1D(
-        filters, 1, padding="same", kernel_regularizer=reg,
+        filters,
+        1,
+        padding="same",
+        kernel_regularizer=reg,
     )(mp)
 
     # ── 3 ramos conv multi-escala ─────────────────────────────────────
     branches = [mp]
     for k in kernel_sizes:
         b = tf.keras.layers.Conv1D(
-            bottleneck_size, 1, padding="same", kernel_regularizer=reg,
+            bottleneck_size,
+            1,
+            padding="same",
+            kernel_regularizer=reg,
         )(x)
         b = tf.keras.layers.Conv1D(
-            filters, k, padding=pad, kernel_regularizer=reg,
+            filters,
+            k,
+            padding=pad,
+            kernel_regularizer=reg,
         )(b)
         branches.append(b)
 
@@ -596,14 +644,20 @@ def mbconv_block(
 
     # ── Expansao 1x1 ──────────────────────────────────────────────────
     y = tf.keras.layers.Conv1D(
-        mid_ch, 1, padding="same", use_bias=False, kernel_regularizer=reg,
+        mid_ch,
+        1,
+        padding="same",
+        use_bias=False,
+        kernel_regularizer=reg,
     )(x)
     y = tf.keras.layers.BatchNormalization()(y)
     y = tf.keras.layers.Activation("swish")(y)
 
     # ── Depthwise conv ────────────────────────────────────────────────
     y = tf.keras.layers.DepthwiseConv1D(
-        kernel_size, padding=pad, use_bias=False,
+        kernel_size,
+        padding=pad,
+        use_bias=False,
         depthwise_regularizer=reg,
     )(y)
     y = tf.keras.layers.BatchNormalization()(y)
@@ -615,7 +669,11 @@ def mbconv_block(
 
     # ── Projecao 1x1 ─────────────────────────────────────────────────
     y = tf.keras.layers.Conv1D(
-        filters, 1, padding="same", use_bias=False, kernel_regularizer=reg,
+        filters,
+        1,
+        padding="same",
+        use_bias=False,
+        kernel_regularizer=reg,
     )(y)
     y = tf.keras.layers.BatchNormalization()(y)
 
@@ -679,19 +737,16 @@ def gated_activation_block(
 
     # ── Convolucao causal 2× filtros para split ───────────────────────
     conv = tf.keras.layers.Conv1D(
-        2 * filters, kernel_size,
+        2 * filters,
+        kernel_size,
         padding="causal",
         dilation_rate=dilation_rate,
         kernel_regularizer=reg,
     )(x)
 
     # ── Split: primeiros filters = tanh, ultimos = sigmoid ───────────
-    t = tf.keras.layers.Lambda(
-        lambda z: z[..., :filters]
-    )(conv)
-    g = tf.keras.layers.Lambda(
-        lambda z: z[..., filters:]
-    )(conv)
+    t = tf.keras.layers.Lambda(lambda z: z[..., :filters])(conv)
+    g = tf.keras.layers.Lambda(lambda z: z[..., filters:])(conv)
 
     t = tf.keras.layers.Activation("tanh")(t)
     g = tf.keras.layers.Activation("sigmoid")(g)
@@ -744,7 +799,8 @@ def tcn_residual_block(
     n_ch = x.shape[-1]
 
     y = tf.keras.layers.Conv1D(
-        filters, kernel_size,
+        filters,
+        kernel_size,
         dilation_rate=dilation_rate,
         padding="causal",
         kernel_regularizer=reg,
@@ -754,7 +810,8 @@ def tcn_residual_block(
         y = tf.keras.layers.SpatialDropout1D(dropout_rate)(y)
 
     y = tf.keras.layers.Conv1D(
-        filters, kernel_size,
+        filters,
+        kernel_size,
         dilation_rate=dilation_rate,
         padding="causal",
         kernel_regularizer=reg,
@@ -895,19 +952,27 @@ def autocorr_block(
     x: "tf.Tensor",
     num_heads: int = 8,
     factor: int = 3,
+    kernel_size: int = 25,
 ) -> "tf.Tensor":
-    """Bloco AutoCorrelacao (Autoformer) — aproximacao via top-k delays.
+    """Bloco AutoCorrelacao (Autoformer) — aproximacao via conv periodica.
 
-    Substitui a atencao softmax por autocorrelacao no dominio do tempo,
-    implementada como top-k FFT correlations. Complexidade O(L log L).
+    Substitui a atencao softmax por autocorrelacao no dominio do tempo.
+    Esta implementacao usa convolucao depthwise como proxy para capturar
+    correlacoes locais — a versao completa (FFT-based, Wu et al. 2021)
+    requer operacoes de roll e top-k no loop de treino.
 
     Esquema (simplificada):
-        x → Q,K,V projecoes → FFT correlation(Q,K) → top-k delays → roll(V) → sum
+        x → Q,K,V projecoes → DepthwiseConv(Q) → Softmax(axis=tempo) → Multiply(V) → Dense → Residual+LN
 
     Args:
         x: Tensor de entrada (batch, seq_len, dim).
-        num_heads: Numero de cabecas. Default: 8.
-        factor: Multiplicador para k = factor * log(seq_len). Default: 3.
+        num_heads: Numero de cabecas (reservado para implementacao FFT
+            futura — nao utilizado na versao simplificada). Default: 8.
+        factor: Multiplicador para k = factor * log(seq_len) (reservado
+            para implementacao FFT futura). Default: 3.
+        kernel_size: Tamanho do kernel da convolucao depthwise que captura
+            correlacoes temporais locais. kernel_size=25 corresponde a
+            ~25m de campo receptivo (SPACING_METERS=1.0). Default: 25.
 
     Returns:
         tf.Tensor: Output (batch, seq_len, dim) — shape inalterada.
@@ -917,13 +982,16 @@ def autocorr_block(
             - models/transformer.py: build_autoformer (blocos encoder)
             - tests/test_models.py: TestBlocks.test_autocorr_block
         Ref: Wu et al. (2021) NeurIPS — Autoformer.
-        Implementacao simplificada com correlacao via convolucao periodica.
-        Para producao completa, usar implementacao FFT nativa.
+        SIMPLIFICACAO: Usa DepthwiseConv1D + Softmax(axis=1) como proxy
+        para autocorrelacao. Softmax normaliza pesos de atencao sobre o
+        eixo temporal (axis=1), NAO como ativacao do conv.
+        Bug fix v2.0.1: Softmax era aplicado como activation do Conv
+        (semanticamente errado — normalizava sobre canais, nao tempo).
+        Para producao completa, implementar FFT-based autocorrelation.
     """
     import tensorflow as tf
 
     dim = x.shape[-1]
-    seq_len = tf.shape(x)[1]
 
     # ── Projecoes Q, K, V ─────────────────────────────────────────────
     q = tf.keras.layers.Dense(dim)(x)
@@ -931,13 +999,21 @@ def autocorr_block(
     v = tf.keras.layers.Dense(dim)(x)
 
     # ── AutoCorrelacao simplificada: correlacao via conv ──────────────
-    # Aproximacao: usa depthwise conv para capturar correlacoes locais
-    # A implementacao completa requer FFT no loop de treino
+    # Aproximacao: depthwise conv captura correlacoes locais. kernel_size
+    # controla alcance temporal. A implementacao completa (Wu et al. 2021)
+    # requer FFT no loop — esta versao usa conv como proxy.
+    # NOTA: num_heads e factor reservados para implementacao FFT futura.
     corr = tf.keras.layers.DepthwiseConv1D(
-        kernel_size=min(25, 25),
+        kernel_size=kernel_size,
         padding="same",
-        activation="softmax",
     )(q)
+
+    # ── Softmax sobre eixo temporal — pesos de atencao normalizados ──
+    # axis=1 normaliza ao longo de seq_len (nao canais). Cada posicao
+    # temporal recebe um peso proporcional a sua correlacao com Q.
+    # Bug fix v2.0.1: Anteriormente era activation="softmax" no Conv,
+    # que normalizava sobre canais (axis=-1) — semanticamente errado.
+    corr = tf.keras.layers.Softmax(axis=1)(corr)
 
     # ── Weighted sum com V ────────────────────────────────────────────
     out = tf.keras.layers.Multiply()([corr, v])
@@ -995,7 +1071,10 @@ def patch_embedding_block(
 
     # ── Extracao de patches via Conv1D com stride ─────────────────────
     patches = tf.keras.layers.Conv1D(
-        d_model, patch_len, strides=stride, padding="valid",
+        d_model,
+        patch_len,
+        strides=stride,
+        padding="valid",
     )(x)
     return patches
 
@@ -1044,10 +1123,12 @@ def grn_block(
     # ── Branch principal ──────────────────────────────────────────────
     if context is not None:
         ctx = tf.keras.layers.Dense(d_model)(context)
-        h = tf.keras.layers.Add()([
-            tf.keras.layers.Dense(d_model)(x),
-            ctx,
-        ])
+        h = tf.keras.layers.Add()(
+            [
+                tf.keras.layers.Dense(d_model)(x),
+                ctx,
+            ]
+        )
     else:
         h = tf.keras.layers.Dense(d_model)(x)
 
@@ -1100,9 +1181,9 @@ def vsn_block(
     # ── Pesos de selecao via GRN sobre toda a entrada ─────────────────
     weights = grn_block(x, d_model=n_variables, dropout_rate=dropout_rate)
     weights = tf.keras.layers.Dense(n_variables, activation="softmax")(weights)
-    weights = tf.keras.layers.Lambda(
-        lambda w: tf.expand_dims(w, axis=-1)
-    )(weights)  # (batch, ..., n_var, 1)
+    weights = tf.keras.layers.Lambda(lambda w: tf.expand_dims(w, axis=-1))(
+        weights
+    )  # (batch, ..., n_var, 1)
 
     # ── Reshape entrada para (batch, ..., n_var, d_model) ─────────────
     x_reshaped = tf.keras.layers.Dense(n_variables * d_model)(x)
@@ -1153,9 +1234,7 @@ def ita_block(
     dim = x.shape[-1]
 
     # ── Transpose: (batch, seq, var) → (batch, var, seq) ─────────────
-    y = tf.keras.layers.Lambda(
-        lambda z: tf.transpose(z, perm=[0, 2, 1])
-    )(x)
+    y = tf.keras.layers.Lambda(lambda z: tf.transpose(z, perm=[0, 2, 1]))(x)
 
     # ── Atencao sobre variaveis (nao sobre time steps) ────────────────
     y = transformer_encoder_block(
@@ -1168,9 +1247,7 @@ def ita_block(
     )
 
     # ── Transpose de volta: (batch, var, seq) → (batch, seq, var) ────
-    y = tf.keras.layers.Lambda(
-        lambda z: tf.transpose(z, perm=[0, 2, 1])
-    )(y)
+    y = tf.keras.layers.Lambda(lambda z: tf.transpose(z, perm=[0, 2, 1]))(y)
 
     return tf.keras.layers.Add()([x, y])
 
@@ -1277,7 +1354,10 @@ def output_projection(
     reg = _get_regularizer(l1, l2)
 
     out = tf.keras.layers.Conv1D(
-        output_channels, 1, padding="same", kernel_regularizer=reg,
+        output_channels,
+        1,
+        padding="same",
+        kernel_regularizer=reg,
     )(x)
 
     if constraint_activation is not None:
@@ -1451,7 +1531,10 @@ def inception_time_block(
         skip = x
         if n_ch != out_ch:
             skip = tf.keras.layers.Conv1D(
-                out_ch, 1, padding="same", kernel_regularizer=reg,
+                out_ch,
+                1,
+                padding="same",
+                kernel_regularizer=reg,
             )(x)
             skip = tf.keras.layers.BatchNormalization()(skip)
         y = tf.keras.layers.Add()([y, skip])
@@ -1511,6 +1594,126 @@ def attention_block(
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# SECAO: STATIC INJECTION — Blocos para Abordagens B e C (P2/P3)
+# ════════════════════════════════════════════════════════════════════════════
+# Blocos para injetar variaveis estaticas (theta, freq) em modelos de DL.
+# static_injection_stem: Abordagem B — broadcast escalares + concat com EM.
+# film_layer: Abordagem C — Feature-wise Linear Modulation (γ×h+β).
+# Ambos recebem EM sequenciais + escalares estaticos como inputs separados.
+# Ref: Perez et al. (2018) "FiLM: Visual Reasoning with Conditioning"
+#      docs/physics/perspectivas.md secoes P2, P3.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def static_injection_stem(em_tensor, static_tensor):
+    """Broadcast escalares estaticos + concatena com features EM.
+
+    Abordagem B: converte (batch, n_static) → (batch, seq_len, n_static)
+    via RepeatVector e concatena com o tensor EM sequencial.
+    Resultado: tensor unico (batch, seq_len, n_em + n_static) compativel
+    com todas as camadas downstream (Conv1D, LSTM, Attention, etc.).
+
+    O stem eh o primeiro bloco do modelo — converte dual-input em
+    single-tensor para que NENHUMA camada posterior precise mudar.
+
+    Args:
+        em_tensor: Tensor 3D (batch, seq_len, n_em) — features EM sequenciais.
+        static_tensor: Tensor 2D (batch, n_static) — [theta_norm, f_norm].
+
+    Returns:
+        tf.Tensor: (batch, seq_len, n_em + n_static) — features combinadas.
+
+    Example:
+        >>> em = tf.random.normal((2, 600, 5))
+        >>> static = tf.constant([[0.33, 4.3], [0.5, 4.3]])
+        >>> combined = static_injection_stem(em, static)
+        >>> combined.shape  # (2, 600, 7)
+
+    Note:
+        Referenciado em:
+            - models/registry.py: wrap_with_static() (Abordagem B)
+            - tests/test_models.py: TestStaticInjectionBlocks
+        Ref: docs/physics/perspectivas.md secoes P2, P3.
+        Todas as 44 arquiteturas sao compativeis com este stem.
+        Memory: broadcast acontece na GPU (nao no dataset em RAM).
+    """
+    import tensorflow as tf
+
+    # ── Broadcast: (batch, n_static) → (batch, seq_len, n_static) ──
+    seq_len = tf.shape(em_tensor)[1]
+    static_expanded = tf.repeat(
+        tf.expand_dims(static_tensor, axis=1),
+        repeats=seq_len,
+        axis=1,
+    )
+    # ── Concat: EM (batch, seq, n_em) + static (batch, seq, n_static) ──
+    return tf.concat([em_tensor, static_expanded], axis=-1)
+
+
+def film_layer(hidden, static_tensor, n_channels):
+    """Feature-wise Linear Modulation — modulacao γ×h+β.
+
+    Abordagem C: variaveis estaticas (theta, freq) MODULAM as
+    ativacoes internas da rede em vez de serem concatenadas.
+    Cada canal recebe escala (γ) e bias (β) aprendidos de θ/f.
+
+    Formulacao:
+        γ = Dense(n_channels, sigmoid)(static_features)
+        β = Dense(n_channels)(static_features)
+        h_out = γ × h_in + β
+
+    A funcao sigmoid em γ limita a escala a [0, 1], evitando
+    amplificacao descontrolada. β eh livre (sem ativacao).
+
+    Analogia fisica:
+        γ(θ, f) funciona como um filtro adaptativo que ajusta a
+        sensibilidade de cada canal conforme as condicoes de aquisicao.
+        θ alto → γ amplifica canais sensiveis a look-ahead.
+        f baixa → γ atenua canais de alta resolucao (irrelevantes).
+
+    Args:
+        hidden: Tensor 3D (batch, seq_len, n_channels) — ativacoes internas.
+        static_tensor: Tensor 2D (batch, n_static) — [theta_norm, f_norm].
+        n_channels: Numero de canais do hidden (deve coincidir com hidden.shape[-1]).
+
+    Returns:
+        tf.Tensor: (batch, seq_len, n_channels) — ativacoes moduladas.
+
+    Example:
+        >>> h = tf.random.normal((2, 600, 64))
+        >>> static = tf.constant([[0.33, 4.3], [0.5, 4.3]])
+        >>> h_mod = film_layer(h, static, n_channels=64)
+        >>> h_mod.shape  # (2, 600, 64) — mesma shape, valores modulados
+
+    Note:
+        Referenciado em:
+            - models/registry.py: wrap_with_static() (Abordagem C)
+            - tests/test_models.py: TestStaticInjectionBlocks
+        Ref: Perez et al. (2018) AAAI — FiLM: Visual Reasoning.
+        Compativel com: CNN, TCN, Transformer, Geosteering, Hybrid, RNN.
+        Incompativel com: N-BEATS, N-HiTS, FNO, DeepONet (blocos auto-contidos).
+    """
+    import tensorflow as tf
+
+    # ── γ (escala por canal) — sigmoid → [0, 1] ───────────────────
+    gamma = tf.keras.layers.Dense(n_channels, activation="sigmoid", name="film_gamma")(
+        static_tensor
+    )  # (batch, n_channels)
+
+    # ── β (bias por canal) — linear (sem ativacao) ────────────────
+    beta = tf.keras.layers.Dense(n_channels, name="film_beta")(
+        static_tensor
+    )  # (batch, n_channels)
+
+    # ── Broadcast: (batch, n_ch) → (batch, 1, n_ch) para multiplicacao ─
+    gamma = tf.expand_dims(gamma, axis=1)  # (batch, 1, n_channels)
+    beta = tf.expand_dims(beta, axis=1)  # (batch, 1, n_channels)
+
+    # ── Modulacao: h_out = γ × h_in + β ───────────────────────────
+    return gamma * hidden + beta
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # EXPORTS
 # ════════════════════════════════════════════════════════════════════════════
 # Inventario completo de simbolos exportados por este modulo.
@@ -1548,4 +1751,7 @@ __all__ = [
     "feedforward_block",
     "inception_time_block",
     "attention_block",
+    # ── Grupo 8: Static injection (Abordagens B/C, P2/P3) ───────────
+    "static_injection_stem",
+    "film_layer",
 ]

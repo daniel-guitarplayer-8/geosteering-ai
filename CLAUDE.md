@@ -120,9 +120,9 @@ Val/test transformados offline. Train permanece raw para on-the-fly.
 
 ---
 
-## Padroes de Documentacao (D1-D10)
+## Padroes de Documentacao (D1-D14)
 
-Todo codigo em `geosteering_ai/` DEVE seguir os padroes D1-D10 definidos na
+Todo codigo em `geosteering_ai/` DEVE seguir os padroes D1-D14 definidos na
 skill `geosteering-v2` (secao 15). Resumo:
 
 | Padrao | Requisito | Onde |
@@ -143,6 +143,95 @@ skill `geosteering-v2` (secao 15). Resumo:
 | **D14** | Diagrama noise × FV × GS | pipeline.py |
 
 Referencia completa: `/geosteering-v2` secao 15.
+
+### Nivel de Riqueza Documental (padrao C28 legado)
+
+O codigo v2.0 DEVE ter a mesma profundidade de documentacao do legado C28.
+O codigo e um **documento de referencia executavel** — lido como tutorial tecnico.
+Cada funcao publica DEVE incluir:
+
+**1. Diagramas ASCII de arquitetura dentro de docstrings (OBRIGATORIO)**
+```python
+def build_resnet18(input_shape, output_channels, use_causal, **kwargs):
+    """Constroi modelo ResNet-18 para inversao 1D de resistividade.
+
+    Estrutura do modelo:
+      ┌──────────────────────────────────────────────────────────┐
+      │  Input (batch, None, N_FEATURES)                        │
+      │    ↓                                                    │
+      │  Stem: Conv1D(64, 7) → BN → ReLU → Dropout            │
+      │    ↓                                                    │
+      │  Stage 1: 2× ResidualBlock(64)  + SE opcional          │
+      │  Stage 2: 2× ResidualBlock(128) + SE opcional          │
+      │  ...                                                    │
+      │  Output: Dense(output_channels, 'linear')               │
+      └──────────────────────────────────────────────────────────┘
+    """
+```
+
+**2. Significado fisico de CADA parametro (OBRIGATORIO)**
+```python
+    Args:
+        input_shape: Shape (None, N_FEATURES). None permite sequencia
+            de comprimento variavel (multi-angulo). Default: (None, 5)
+            para P1 baseline [z_obs, Re(Hxx), Im(Hxx), Re(Hzz), Im(Hzz)].
+        kernel_size: Tamanho do kernel Conv1D. Default: 3.
+            Kernel 3 corresponde a ~3 metros de campo receptivo por camada
+            (SPACING_METERS=1.0). Kernels maiores (7, 11) capturam
+            dependencias de longo alcance em modelos com camadas espessas.
+```
+
+**3. Referencias bibliograficas com contribuicao explicita (OBRIGATORIO)**
+```python
+    Note:
+        Ref: He et al. "Deep Residual Learning for Image Recognition"
+        (CVPR 2016) — skip connections estabilizam gradientes em redes
+        profundas, permitindo treinar 4 estagios sem degradacao.
+```
+
+**4. Explicacao dual-mode (offline vs causal) quando aplicavel**
+```python
+    Dual-mode:
+      ┌────────────────────────────────────────────────────────┐
+      │  "same"   →  Offline (acausal, batch completo)        │
+      │  "causal" →  Realtime (causal, sliding window)        │
+      └────────────────────────────────────────────────────────┘
+```
+
+**5. Blocos de comentario com 4+ linhas antes de cada operacao significativa**
+```python
+    # ── Stem: Conv1D(64, 7) → BN → Act ────────────────────────
+    # Convolution inicial de campo receptivo maior (7×1) para capturar
+    # features EM de baixa frequencia. strides=1 preserva N_MEDIDAS.
+    # Kernel 7 cobre ~7m de profundidade no perfil de poco,
+    # ideal para detectar contrastes de camada espessa.
+    x = Conv1D(64, 7, padding=_padding, strides=1, ...)(x)
+```
+
+**6. Tabelas ASCII em modulos que implementam catalogos**
+```python
+    #   ┌──────────────────────┬────────────┬────────────────────────┐
+    #   │  Modelo              │  Blocos    │  Tipo                  │
+    #   ├──────────────────────┼────────────┼────────────────────────┤
+    #   │  ResNet_18 (★)       │  8         │  ResidualBlock         │
+    #   │  ResNet_34           │  16        │  ResidualBlock         │
+    #   │  ...                 │            │                        │
+    #   └──────────────────────┴────────────┴────────────────────────┘
+```
+
+**7. Branch comments com layout de saida em transformacoes**
+```python
+    if view == "H1_logH2":
+        # ── H1_logH2: H1 cru preserva SNR em alta atenuacao,
+        #    H2 log10-transformado comprime faixa dinamica larga de Hzz.
+        #    Saida: [Re(H1), Im(H1), log10|H2|, φ(H2)]
+        #    Motivacao fisica: Hzz varia 4+ ordens de magnitude.
+```
+
+**Regra:** Se o codigo legado C28 documentava uma operacao com N linhas
+de contexto, a versao v2.0 DEVE ter pelo menos N linhas equivalentes.
+O codigo e lido por geofisicos e engenheiros de poco — nao apenas
+por desenvolvedores de software.
 
 ---
 

@@ -68,68 +68,29 @@ Referencia: docs/ARCHITECTURE_v2.md secao 8.
 """
 
 # ──────────────────────────────────────────────────────────────────────
-# Imports: metrics.py — metricas de avaliacao pos-treinamento
+# Imports: advanced.py — metricas avancadas (C50-C55)
 # ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.evaluation.metrics import (
-    MetricsReport,
-    compute_all_metrics,
-    evaluate_predictions,
+from geosteering_ai.evaluation.advanced import (
+    CoherenceReport,
+    InterfaceReport,
+    StabilityReport,
+    error_by_anisotropy,
+    error_by_resistivity_band,
+    interface_metrics,
+    physical_coherence_check,
+    spatial_error_profile,
+    stability_analysis,
 )
 
 # ──────────────────────────────────────────────────────────────────────
 # Imports: comparison.py — comparacao e ranking de modelos
 # ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.evaluation.comparison import (
-    ComparisonResult,
-    compare_models,
-)
+from geosteering_ai.evaluation.comparison import ComparisonResult, compare_models
 
 # ──────────────────────────────────────────────────────────────────────
-# Imports: advanced.py — metricas avancadas (C50-C55)
+# Imports: config_report.py — relatorio pre-treinamento (C42A adaptado)
 # ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.evaluation.advanced import (
-    InterfaceReport,
-    CoherenceReport,
-    StabilityReport,
-    interface_metrics,
-    error_by_resistivity_band,
-    error_by_anisotropy,
-    spatial_error_profile,
-    physical_coherence_check,
-    stability_analysis,
-)
-
-# ──────────────────────────────────────────────────────────────────────
-# Imports: predict.py — predicoes com scaling inverso
-# ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.evaluation.predict import (
-    PredictionResult,
-    predict_test,
-)
-
-# ──────────────────────────────────────────────────────────────────────
-# Imports: manifest.py — manifesto JSON do experimento (C64)
-# ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.evaluation.manifest import (
-    create_manifest,
-    save_manifest,
-    load_manifest,
-)
-
-# ──────────────────────────────────────────────────────────────────────
-# Imports: report.py — relatorio Markdown automatizado (C65)
-# ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.evaluation.report import (
-    generate_report,
-)
-
-# ──────────────────────────────────────────────────────────────────────
-# Imports: realtime_comparison.py — comparacao offline vs realtime (C70)
-# ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.evaluation.realtime_comparison import (
-    ModeComparisonResult,
-    compare_modes,
-)
+from geosteering_ai.evaluation.config_report import generate_config_report
 
 # ──────────────────────────────────────────────────────────────────────
 # Imports: geosteering_metrics.py — metricas especificas geosteering (C71)
@@ -142,9 +103,43 @@ from geosteering_ai.evaluation.geosteering_metrics import (
 # ──────────────────────────────────────────────────────────────────────
 # Imports: geosteering_report.py — relatorio Markdown geosteering (C73)
 # ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.evaluation.geosteering_report import (
-    generate_geosteering_report,
+from geosteering_ai.evaluation.geosteering_report import generate_geosteering_report
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: manifest.py — manifesto JSON do experimento (C64)
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.evaluation.manifest import (
+    create_manifest,
+    load_manifest,
+    save_manifest,
 )
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: metrics.py — metricas de avaliacao pos-treinamento
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.evaluation.metrics import (
+    MetricsReport,
+    compute_all_metrics,
+    evaluate_predictions,
+)
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: predict.py — predicoes com scaling inverso
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.evaluation.predict import PredictionResult, predict_test
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: realtime_comparison.py — comparacao offline vs realtime (C70)
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.evaluation.realtime_comparison import (
+    ModeComparisonResult,
+    compare_modes,
+)
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: report.py — relatorio Markdown automatizado (C65)
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.evaluation.report import generate_report
 
 # ──────────────────────────────────────────────────────────────────────
 # D8: Exports publicos — agrupados semanticamente por modulo
@@ -184,4 +179,6 @@ __all__ = [
     "compute_geosteering_metrics",
     # --- geosteering_report.py: relatorio geosteering (C73) ---
     "generate_geosteering_report",
+    # --- config_report.py: relatorio pre-treinamento (C42A adaptado) ---
+    "generate_config_report",
 ]

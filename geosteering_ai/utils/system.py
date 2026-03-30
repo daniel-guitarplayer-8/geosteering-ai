@@ -11,14 +11,14 @@
 # ║                                                                            ║
 # ║  Proposito:                                                                ║
 # ║    • Deteccao de ambiente (Colab, Kaggle, Jupyter, local)                 ║
-# ║    • Deteccao de GPU e hardware de borda                                  ║
+# ║    • Deteccao de GPU e configuracao de memory growth                      ║
 # ║    • Gerenciamento de diretorios (safe_mkdir, ensure_dirs)                ║
 # ║    • Monitoramento de memoria (RAM e GPU)                                 ║
 # ║    • Limpeza de memoria (gc + Keras backend)                              ║
 # ║    • Seeding reprodutivel (random, numpy, tensorflow)                     ║
 # ║                                                                            ║
 # ║  Dependencias: os, sys, gc, platform, logging (stdlib)                    ║
-# ║  Exports: ~10 simbolos — ver __all__                                      ║
+# ║  Exports: ~11 simbolos — ver __all__                                      ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 9 (utils/)                           ║
 # ║                                                                            ║
 # ║  Historico:                                                                ║
@@ -92,6 +92,7 @@ def is_jupyter() -> bool:
     """
     try:
         from IPython import get_ipython  # type: ignore[import-untyped]
+
         shell = get_ipython()
         if shell is None:
             return False
@@ -120,6 +121,7 @@ def has_gpu() -> bool:
     """
     try:
         import tensorflow as tf  # type: ignore[import-untyped]
+
         return len(tf.config.list_physical_devices("GPU")) > 0
     except (ImportError, RuntimeError):
         return False
@@ -288,11 +290,12 @@ def memory_usage() -> Dict[str, Any]:
     # ── Estrategia 1: psutil (preferido) ──────────────────────────────
     try:
         import psutil  # type: ignore[import-untyped]
+
         proc = psutil.Process(os.getpid())
         rss_bytes = proc.memory_info().rss
         return {
             "available": True,
-            "rss_mb": rss_bytes / (1024 ** 2),
+            "rss_mb": rss_bytes / (1024**2),
             "method": "psutil",
         }
     except ImportError:
@@ -340,6 +343,7 @@ def gpu_memory_info() -> Dict[str, Any]:
     """
     try:
         import tensorflow as tf  # type: ignore[import-untyped]
+
         gpus = tf.config.list_physical_devices("GPU")
         if not gpus:
             return {"available": False, "device_count": 0, "devices": []}
@@ -351,17 +355,21 @@ def gpu_memory_info() -> Dict[str, Any]:
                 # espera "GPU:0". Remover prefixo "/physical_device:".
                 device_id = gpu.name.replace("/physical_device:", "")
                 mem = tf.config.experimental.get_memory_info(device_id)
-                devices.append({
-                    "name": gpu.name,
-                    "current_mb": mem.get("current", 0) / (1024 ** 2),
-                    "peak_mb": mem.get("peak", 0) / (1024 ** 2),
-                })
+                devices.append(
+                    {
+                        "name": gpu.name,
+                        "current_mb": mem.get("current", 0) / (1024**2),
+                        "peak_mb": mem.get("peak", 0) / (1024**2),
+                    }
+                )
             except (RuntimeError, ValueError):
-                devices.append({
-                    "name": gpu.name,
-                    "current_mb": 0.0,
-                    "peak_mb": 0.0,
-                })
+                devices.append(
+                    {
+                        "name": gpu.name,
+                        "current_mb": 0.0,
+                        "peak_mb": 0.0,
+                    }
+                )
 
         return {
             "available": True,
@@ -390,6 +398,7 @@ def clear_memory() -> None:
     gc.collect()
     try:
         import tensorflow as tf  # type: ignore[import-untyped]
+
         tf.keras.backend.clear_session()
     except ImportError:
         pass
@@ -460,6 +469,7 @@ def set_all_seeds(
     # ── NumPy seed ────────────────────────────────────────────────────
     try:
         import numpy as np  # type: ignore[import-untyped]
+
         np.random.seed(seed)
         result["numpy_ok"] = True
     except ImportError:
@@ -468,6 +478,7 @@ def set_all_seeds(
     # ── TensorFlow seed ───────────────────────────────────────────────
     try:
         import tensorflow as tf  # type: ignore[import-untyped]
+
         tf.random.set_seed(seed)
         if deterministic:
             tf.config.experimental.enable_op_determinism()
@@ -476,11 +487,192 @@ def set_all_seeds(
         pass
 
     logger.info(
-        "Seeds configurados: seed=%d, deterministic=%s, "
-        "python=%s, numpy=%s, tf=%s",
-        seed, deterministic,
-        result["python_ok"], result["numpy_ok"], result["tf_ok"],
+        "Seeds configurados: seed=%d, deterministic=%s, " "python=%s, numpy=%s, tf=%s",
+        seed,
+        deterministic,
+        result["python_ok"],
+        result["numpy_ok"],
+        result["tf_ok"],
     )
+
+    return result
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECAO: CONFIGURACAO DE GPU — Memory Growth e Deteccao
+# ════════════════════════════════════════════════════════════════════════════
+# Configura GPUs TensorFlow para alocacao DINAMICA de VRAM.
+# Sem memory_growth, TF aloca TODA a VRAM disponivel no startup,
+# impedindo sessoes concorrentes e causando OOM em Colab Pro+.
+# Com memory_growth=True, VRAM eh alocada sob demanda (as needed).
+#
+# Comportamento por ambiente:
+#
+#   ┌───────────────────────────────────────────────────────────────────────┐
+#   │  SEM memory_growth (default TF):                                     │
+#   │    Startup → aloca 100% VRAM → OOM se outra sessao usa GPU          │
+#   │    Problema em Colab Pro+: kernel crash com modelos grandes          │
+#   │                                                                       │
+#   │  COM memory_growth=True (esta funcao):                               │
+#   │    Startup → aloca ~0 VRAM → cresce conforme necessidade → libera   │
+#   │    Beneficio: multiplas sessoes podem compartilhar GPU               │
+#   │    Trade-off: fragmentacao minima de VRAM (<1% overhead)             │
+#   │                                                                       │
+#   │  IMPORTANTE: memory_growth DEVE ser configurado ANTES de qualquer   │
+#   │  operacao TF que inicialize a GPU (tf.data, model.build, etc.).     │
+#   │  Chamar APOS inicializacao gera RuntimeError (silenciado aqui).     │
+#   └───────────────────────────────────────────────────────────────────────┘
+#
+# Ref: tf.config.experimental.set_memory_growth() (TF docs).
+# Ref: Colab Pro+ GPU sharing best practices (Google, 2024).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def setup_gpu(
+    memory_growth: bool = True,
+) -> Dict[str, Any]:
+    """Configura GPUs TensorFlow com alocacao dinamica de VRAM.
+
+    Detecta GPUs fisicas disponiveis e habilita memory_growth para
+    cada uma. Memory growth evita que TF pre-aloque toda a VRAM,
+    permitindo sessoes concorrentes e reduzindo risco de OOM.
+
+    Fluxo de configuracao:
+
+    .. code-block:: text
+
+        ┌───────────────────────────────────────────────────────────────────┐
+        │  1. Detecta GPUs fisicas via tf.config.list_physical_devices()   │
+        │     │                                                             │
+        │     ├─ 0 GPUs → retorna {gpu_count: 0, memory_growth_set: False} │
+        │     │                                                             │
+        │     └─ N GPUs → para cada GPU:                                   │
+        │        │                                                          │
+        │        ├─ memory_growth=True?                                    │
+        │        │  ├─ SIM → set_memory_growth(gpu, True)                 │
+        │        │  │        Aloca VRAM sob demanda (evita OOM)           │
+        │        │  └─ NAO → pula (TF usa alocacao total, default)        │
+        │        │                                                          │
+        │        └─ RuntimeError? (GPU ja inicializada)                   │
+        │           └─ Silencia com warning (nao fatal)                    │
+        │                                                                   │
+        │  2. Retorna metadata: gpu_count, memory_growth_set, devices      │
+        └───────────────────────────────────────────────────────────────────┘
+
+    Args:
+        memory_growth: Se True (default), habilita alocacao dinamica
+            de VRAM para todas as GPUs detectadas. Cada GPU recebe
+            memory_growth=True individualmente. Isso evita que TF
+            pre-aloque toda a memoria de video no startup, permitindo:
+            - Sessoes concorrentes no Colab Pro+ (multiplos notebooks)
+            - Modelos grandes sem OOM (VRAM alocada sob demanda)
+            - Melhor coexistencia com outros processos GPU
+            Se False, TF usa comportamento default (aloca tudo).
+
+    Returns:
+        dict[str, Any]: Metadata da configuracao GPU:
+            - gpu_count (int): Numero de GPUs fisicas detectadas
+            - memory_growth_set (bool): Se memory_growth foi configurado
+              com sucesso em pelo menos 1 GPU
+            - devices (list[str]): Nomes das GPUs detectadas (ex:
+              ["/physical_device:GPU:0", "/physical_device:GPU:1"])
+
+    Example:
+        >>> from geosteering_ai.utils.system import setup_gpu
+        >>> info = setup_gpu()
+        >>> info["gpu_count"]
+        1
+        >>> info["memory_growth_set"]
+        True
+        >>> info["devices"]
+        ['/physical_device:GPU:0']
+
+    Note:
+        Referenciado em:
+            - training/loop.py: run() pode chamar setup_gpu() no inicio
+            - notebooks Colab: celula de setup (antes de qualquer TF op)
+            - tests/test_training.py: TestSetupGpu
+        Ref: docs/ARCHITECTURE_v2.md secao 6 (Training / GPU).
+        Ref: tf.config.experimental.set_memory_growth (TensorFlow docs) —
+            habilita alocacao sob demanda, evita reserva total de VRAM.
+        Ref: Colab Pro+ best practices — multiplas sessoes compartilhando
+            GPU requerem memory_growth=True para evitar OOM.
+        DEVE ser chamado ANTES de qualquer operacao TF que inicialize GPU.
+        Chamar apos inicializacao gera RuntimeError no set_memory_growth()
+        (silenciado com warning — nao fatal). Chamadas subsequentes NAO
+        detectam que memory_growth ja esta habilitado — TF detecta que a
+        GPU ja foi inicializada e rejeita reconfiguracoes. O silenciamento
+        via except RuntimeError garante que chamadas repetidas nao levantam
+        excecao (safe to call multiple times), mas memory_growth_set pode
+        retornar False na segunda chamada se a GPU ja foi inicializada.
+    """
+    result: Dict[str, Any] = {
+        "gpu_count": 0,
+        "memory_growth_set": False,
+        "devices": [],
+    }
+
+    try:
+        import tensorflow as tf  # type: ignore[import-untyped]
+    except ImportError:
+        logger.warning("TensorFlow nao instalado — setup_gpu() ignorado.")
+        return result
+
+    # ── Detectar GPUs fisicas ──────────────────────────────────────────
+    # list_physical_devices("GPU") retorna lista de PhysicalDevice.
+    # Vazia se nenhuma GPU CUDA/ROCm disponivel.
+    gpus = tf.config.list_physical_devices("GPU")
+    result["gpu_count"] = len(gpus)
+    result["devices"] = [gpu.name for gpu in gpus]
+
+    if not gpus:
+        logger.info("Nenhuma GPU detectada — treinamento em CPU.")
+        return result
+
+    logger.info("%d GPU(s) detectada(s): %s", len(gpus), result["devices"])
+
+    if not memory_growth:
+        logger.info(
+            "memory_growth=False — TF usara alocacao total de VRAM "
+            "(comportamento default)."
+        )
+        return result
+
+    # ── Habilitar memory_growth para cada GPU ──────────────────────────
+    # set_memory_growth(gpu, True) faz TF alocar VRAM sob demanda.
+    # RuntimeError ocorre se GPU ja foi inicializada (ex: tf.data ja
+    # criou tensores na GPU). Nesse caso, silenciamos com warning
+    # porque a GPU ja esta em uso e nao podemos reconfigurar.
+    growth_count = 0
+    for gpu in gpus:
+        try:
+            tf.config.experimental.set_memory_growth(gpu, True)
+            growth_count += 1
+            logger.debug("memory_growth=True para %s", gpu.name)
+        except RuntimeError as e:
+            # GPU ja inicializada — nao fatal, apenas warning
+            logger.warning(
+                "Nao foi possivel setar memory_growth em %s: %s. "
+                "GPU ja inicializada? Chamar setup_gpu() antes de "
+                "qualquer operacao TF.",
+                gpu.name,
+                e,
+            )
+
+    result["memory_growth_set"] = growth_count > 0
+
+    if growth_count > 0:
+        logger.info(
+            "memory_growth habilitado em %d/%d GPU(s). "
+            "VRAM sera alocada sob demanda (evita OOM).",
+            growth_count,
+            len(gpus),
+        )
+    else:
+        logger.warning(
+            "memory_growth NAO pôde ser habilitado em nenhuma GPU. "
+            "GPUs ja foram inicializadas antes de setup_gpu()."
+        )
 
     return result
 
@@ -511,4 +703,6 @@ __all__ = [
     "clear_memory",
     # ── Seeding ───────────────────────────────────────────────────────
     "set_all_seeds",
+    # ── GPU ──────────────────────────────────────────────────────────
+    "setup_gpu",
 ]

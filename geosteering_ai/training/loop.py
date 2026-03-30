@@ -14,6 +14,7 @@
 # ║    • TrainingResult: dataclass com historico, tempo, metricas finais       ║
 # ║    • Optimizer factory: adam, adamw, sgd, rmsprop, nadam, adagrad          ║
 # ║    • Mixed precision support (opt-in via config.use_mixed_precision)       ║
+# ║    • XLA/jit_compile support (opt-in via config.use_xla)                  ║
 # ║    • History merging para multi-stage training (N-Stage S21+)             ║
 # ║    • Causal finetuning: refina modelo acausal para inferencia causal      ║
 # ║                                                                            ║
@@ -45,7 +46,8 @@ Fluxo de decisao:
     │     │  ├─ "nadam"  → tf.keras.optimizers.Nadam                      │
     │     │  └─ "adagrad"→ tf.keras.optimizers.Adagrad                    │
     │     ├─ gradient_clipping (clip_norm se habilitado)                   │
-    │     └─ mixed precision (LossScaleOptimizer se habilitado)           │
+    │     ├─ mixed precision (LossScaleOptimizer se habilitado)           │
+    │     └─ XLA/jit_compile (fusao de ops se config.use_xla=True)       │
     │                                                                      │
     │  2. fit(model, train_ds, val_ds, callbacks)                         │
     │     ├─ model.fit(epochs, callbacks, verbose)                        │
@@ -189,6 +191,7 @@ _CAUSAL_FINETUNE_EPOCHS: int = 10
 # Todas as decisoes sao derivadas de PipelineConfig:
 #   - optimizer: tipo, LR, weight_decay, gradient clipping
 #   - mixed precision: LossScaleOptimizer (opt-in)
+#   - XLA/jit_compile: fusao de ops em kernels GPU (opt-in)
 #   - causal finetuning: ativado por config.use_causal_mode
 #   - verbose: nivel de logging durante model.fit()
 #
@@ -382,12 +385,116 @@ class TrainingLoop:
         return optimizer
 
     # ──────────────────────────────────────────────────────────────────
+    # SECAO: MIXED PRECISION — Configuracao de politica global
+    # ──────────────────────────────────────────────────────────────────
+    # Configura a politica de mixed precision ANTES de build_model().
+    # mixed_float16: operacoes de compute em float16, master weights em
+    # float32. Reduz consumo de VRAM ~50% e acelera 2-3x em GPUs com
+    # Tensor Cores (V100, A100, T4). LossScaleOptimizer (em compile())
+    # complementa escalando gradientes para evitar underflow em fp16.
+    #
+    # Fluxo de dados com mixed precision:
+    #
+    #   ┌───────────────────────────────────────────────────────────────┐
+    #   │  SEM mixed precision (float32):                              │
+    #   │    Input fp32 → Conv fp32 → BN fp32 → Dense fp32 → Loss fp32│
+    #   │                                                               │
+    #   │  COM mixed precision (mixed_float16):                        │
+    #   │    Input fp32 → Cast fp16 → Conv fp16 → BN fp32 → Dense fp16│
+    #   │      → Cast fp32 → Loss fp32                                 │
+    #   │      │                                                        │
+    #   │    Master weights mantidos em fp32 (optimizer)               │
+    #   │    Gradientes escalados via LossScaleOptimizer               │
+    #   │                                                               │
+    #   │  Regra: Camadas de normalizacao (BN, LN) SEMPRE em fp32     │
+    #   │         (Keras faz isso automaticamente com mixed_float16)   │
+    #   └───────────────────────────────────────────────────────────────┘
+    #
+    # IMPORTANTE: Deve ser chamado ANTES de build_model() para que
+    # as camadas Keras sejam criadas com o dtype correto (fp16/fp32).
+    # Chamado no inicio de run() como primeiro passo.
+    # ──────────────────────────────────────────────────────────────────
+
+    def _setup_mixed_precision(self) -> None:
+        """Configura politica global de mixed precision do Keras.
+
+        Define a policy global (mixed_float16 ou float32) que afeta
+        TODAS as camadas Keras criadas apos esta chamada. Deve ser
+        invocado ANTES de build_model() para que as camadas sejam
+        instanciadas com o dtype correto.
+
+        Fluxo de decisao:
+
+        .. code-block:: text
+
+            ┌─────────────────────────────────────────────────────────────┐
+            │  config.use_mixed_precision?                               │
+            │    │                                                        │
+            │    ├─ True  → set_global_policy("mixed_float16")           │
+            │    │          ├─ Compute em fp16 (Conv, Dense, Attention)  │
+            │    │          ├─ Master weights em fp32 (optimizer)        │
+            │    │          ├─ BN/LN automaticamente em fp32 (Keras)    │
+            │    │          └─ Requer LossScaleOptimizer em compile()   │
+            │    │                                                        │
+            │    └─ False → set_global_policy("float32")                 │
+            │               └─ Reset defensivo (caso policy anterior)    │
+            └─────────────────────────────────────────────────────────────┘
+
+        Beneficios de mixed_float16:
+            - Reducao de ~50%% no consumo de VRAM (tensores fp16)
+            - Aceleracao de 2-3x em GPUs com Tensor Cores (V100, A100, T4)
+            - Convergencia equivalente a fp32 com LossScaleOptimizer
+            - Camadas de normalizacao (BN, LN) mantidas em fp32 pelo Keras
+
+        Note:
+            Referenciado em:
+                - training/loop.py: run() (passo 0, antes de compile)
+                - training/loop.py: compile() (LossScaleOptimizer complementa)
+                - models/registry.py: build() cria camadas com dtype da policy
+            Ref: docs/ARCHITECTURE_v2.md secao 6 (Training / Mixed Precision).
+            Ref: Micikevicius et al. "Mixed Precision Training" (ICLR 2018) —
+                demonstra que fp16 compute com fp32 master weights preserva
+                convergencia em redes profundas (ResNets, Transformers).
+            Ref: tf.keras.mixed_precision guide (Keras docs).
+            Policy global afeta TODAS as camadas subsequentes — nao apenas
+            o modelo deste pipeline. Reset defensivo em use_mixed_precision=False
+            garante que testes unitarios nao herdem policy de testes anteriores.
+        """
+        import tensorflow as tf  # lazy import
+
+        if self.config.use_mixed_precision:
+            # ── Ativar mixed_float16 ───────────────────────────────────
+            # Compute em fp16, master weights em fp32.
+            # Camadas de normalizacao (BatchNorm, LayerNorm) sao
+            # automaticamente mantidas em fp32 pelo Keras.
+            # Requer GPU com Tensor Cores para aceleracao real.
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
+            logger.info(
+                "Mixed precision ATIVADO: policy='mixed_float16'. "
+                "Compute em fp16, master weights em fp32. "
+                "GPU com Tensor Cores recomendada para aceleracao."
+            )
+        else:
+            # ── Reset defensivo para float32 ───────────────────────────
+            # Garante que nenhuma policy anterior (de testes ou runs
+            # anteriores) contamine este treinamento.
+            # Necessario porque set_global_policy() e global e persistente.
+            tf.keras.mixed_precision.set_global_policy("float32")
+            logger.info(
+                "Mixed precision DESATIVADO: policy='float32'. "
+                "Todas as operacoes em precisao completa (32 bits)."
+            )
+
+    # ──────────────────────────────────────────────────────────────────
     # SECAO: COMPILE — Compilacao do modelo Keras
     # ──────────────────────────────────────────────────────────────────
     # Reune optimizer + loss + metrics e compila o modelo Keras.
     # Mixed precision (opt-in): wrapa optimizer com LossScaleOptimizer
     # para treinar em float16 com escalamento automatico de gradientes.
     # Evita underflow em mixed precision mantendo master weights em fp32.
+    # XLA (opt-in): jit_compile=True funde operacoes elementares
+    # (Conv+BN+ReLU) em kernels GPU otimizados, reduzindo overhead de
+    # kernel launch e alocacoes intermediarias. Ganho: 20-40% throughput.
     # ──────────────────────────────────────────────────────────────────
 
     def compile(
@@ -426,10 +533,16 @@ class TrainingLoop:
             Referenciado em:
                 - training/loop.py: run() (passo 1)
                 - training/loop.py: _causal_finetune() (recompila com LR baixo)
+                - tests/test_training.py: TestCompileJitCompile
             Ref: docs/ARCHITECTURE_v2.md secao 6 (Training).
             Mixed precision via tf.keras.mixed_precision.LossScaleOptimizer.
             Ativado quando config.use_mixed_precision=True.
             Policy global deve ser setada ANTES de build_model() (nao aqui).
+            XLA via jit_compile=config.use_xla no model.compile().
+            Ativado quando config.use_xla=True (opt-in, default False).
+            Ref: Sabne (2020) "XLA: Compiling ML for Peak Performance" —
+                fusao de ops elimina alocacoes intermediarias e reduz
+                overhead de kernel launch em 20-40% para ResNets/Transformers.
         """
         import tensorflow as tf  # lazy import
 
@@ -448,24 +561,60 @@ class TrainingLoop:
             )
 
         # ── Compilar modelo ──────────────────────────────────────────
+        # jit_compile (XLA): Funde operacoes elementares em kernels GPU
+        # unicos, eliminando alocacoes intermediarias e kernel launches.
+        # Ganho tipico: 20-40% em throughput para ResNets/Transformers
+        # em GPUs com Tensor Cores (V100, A100, T4).
+        # Controlado por config.use_xla (default False, opt-in).
+        # Em CPU ou quando XLA nao esta disponivel, jit_compile=True
+        # pode ser silenciosamente ignorado pelo TF (sem erro).
+        # Ref: Sabne (2020) "XLA: Compiling ML for Peak Performance".
+        # Ref: tf.keras.Model.compile(jit_compile=True) (TF docs).
         if metrics_list is None:
             metrics_list = []
+
+        _jit = self.config.use_xla
+
+        # ── Guard: XLA + Mixed Precision ──────────────────────────────
+        # LossScaleOptimizer usa tf.Variable.assign() dentro do step
+        # para escalar gradientes dinamicamente. XLA (jit_compile) requer
+        # ops estaticas e pode gerar conflitos em TF < 2.12 quando
+        # combinado com LossScaleOptimizer. Emitir warning explicito
+        # para que o usuario valide resultados ou desative uma opcao.
+        # Ref: TF issue #55834 — dynamic loss scale + XLA instabilidade.
+        if _jit and self.config.use_mixed_precision:
+            logger.warning(
+                "use_xla=True + use_mixed_precision=True: "
+                "LossScaleOptimizer com jit_compile pode gerar "
+                "comportamento indefinido em TF < 2.12. "
+                "Validar resultado ou desativar uma das opcoes."
+            )
 
         model.compile(
             optimizer=optimizer,
             loss=loss_fn,
             metrics=metrics_list,
+            jit_compile=_jit,
         )
 
         # ── Logging de confirmacao ───────────────────────────────────
         n_params = model.count_params() if hasattr(model, "count_params") else "?"
         logger.info(
-            "Modelo compilado: %s params, loss=%s, %d metricas, optimizer=%s",
+            "Modelo compilado: %s params, loss=%s, %d metricas, "
+            "optimizer=%s, jit_compile(XLA)=%s",
             f"{n_params:,}" if isinstance(n_params, int) else n_params,
             getattr(loss_fn, "__name__", str(loss_fn)),
             len(metrics_list),
             self.config.optimizer,
+            _jit,
         )
+        if _jit:
+            logger.info(
+                "XLA ATIVADO: operacoes serao fundidas em kernels "
+                "otimizados. Primeira epoca pode ser mais lenta "
+                "(compilacao JIT). Epocas subsequentes serao 20-40%% "
+                "mais rapidas em GPUs com Tensor Cores."
+            )
 
     # ──────────────────────────────────────────────────────────────────
     # SECAO: FIT — Execucao do treinamento
@@ -537,8 +686,7 @@ class TrainingLoop:
         verbose_level = 1 if self.config.verbose else 0
 
         logger.info(
-            "Iniciando fit: epochs=%d (initial_epoch=%d), batch_size=%d, "
-            "callbacks=%d",
+            "Iniciando fit: epochs=%d (initial_epoch=%d), batch_size=%d, " "callbacks=%d",
             n_epochs,
             initial_epoch,
             self.config.batch_size,
@@ -657,8 +805,7 @@ class TrainingLoop:
         finetune_epochs = initial_epoch + _CAUSAL_FINETUNE_EPOCHS
 
         logger.info(
-            "Causal finetuning: LR=%.2e (decay=%.2f), epochs=%d, "
-            "initial_epoch=%d",
+            "Causal finetuning: LR=%.2e (decay=%.2f), epochs=%d, " "initial_epoch=%d",
             finetune_lr,
             _CAUSAL_FINETUNE_LR_DECAY,
             _CAUSAL_FINETUNE_EPOCHS,
@@ -747,14 +894,30 @@ class TrainingLoop:
         """
         logger.info(
             "TrainingLoop.run(): model_type=%s, optimizer=%s, LR=%.2e, "
-            "epochs=%d, mixed_precision=%s, causal=%s",
+            "epochs=%d, mixed_precision=%s, xla=%s, causal=%s",
             self.config.model_type,
             self.config.optimizer,
             self.config.learning_rate,
             self.config.epochs,
             self.config.use_mixed_precision,
+            self.config.use_xla,
             self.config.use_causal_mode,
         )
+
+        # ── Passo 0: Mixed precision (ANTES de compile/build_model) ──
+        # Policy global deve ser configurada ANTES de criar/compilar o
+        # modelo para que as camadas Keras usem o dtype correto (fp16).
+        # Ref: Micikevicius et al. (ICLR 2018) — policy ANTES de build.
+        # NOTA: o modelo passado para run() DEVE ter sido construido APOS
+        # set_global_policy() para que as camadas sejam fp16. Se construido
+        # antes, usar build_tf_dataset + ModelRegistry.build() dentro de run().
+        self._setup_mixed_precision()
+        if self.config.use_mixed_precision:
+            logger.warning(
+                "use_mixed_precision=True: o modelo passado para run() deve "
+                "ter sido construido APOS set_global_policy('mixed_float16'). "
+                "Se construido antes, as camadas nao serao fp16."
+            )
 
         # ── Passo 1: Compile ─────────────────────────────────────────
         self.compile(model, loss_fn, metrics_list)

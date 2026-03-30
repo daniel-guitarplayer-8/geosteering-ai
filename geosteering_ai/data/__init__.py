@@ -39,54 +39,59 @@ Referencia: docs/ARCHITECTURE_v2.md secao 4.3.
 """
 
 # ──────────────────────────────────────────────────────────────────────
-# Imports: loading.py — parsing de arquivos .out/.dat e decoupling EM
-# ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.data.loading import (
-    AngleGroup,
-    OutMetadata,
-    load_binary_dat,
-    load_dataset,
-    parse_out_metadata,
-    apply_decoupling,
-    segregate_by_angle,
-    COL_MAP_22,
-    EM_COMPONENTS,
-)
-
-# ──────────────────────────────────────────────────────────────────────
-# Imports: splitting.py — split por modelo geologico (P1)
-# ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.data.splitting import DataSplits, split_model_ids, apply_split
-
-# ──────────────────────────────────────────────────────────────────────
 # Imports: feature_views.py — 6 transformacoes de Feature View
 # ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.data.feature_views import apply_feature_view, VALID_VIEWS
+from geosteering_ai.data.feature_views import VALID_VIEWS, apply_feature_view
 
 # ──────────────────────────────────────────────────────────────────────
 # Imports: geosignals.py — geosinais derivados (USD, UHR, etc.)
 # ──────────────────────────────────────────────────────────────────────
 from geosteering_ai.data.geosignals import (
+    FAMILY_DEPS,
     compute_expanded_features,
     compute_geosignals,
-    FAMILY_DEPS,
 )
 
 # ──────────────────────────────────────────────────────────────────────
-# Imports: scaling.py — target scaling e scaler fit/transform
+# Imports: inspection.py — inspecao de dados pre-treinamento (C26A adaptado)
 # ──────────────────────────────────────────────────────────────────────
-from geosteering_ai.data.scaling import (
-    apply_target_scaling,
-    inverse_target_scaling,
-    create_scaler,
-    fit_scaler,
-    transform_features,
+from geosteering_ai.data.inspection import export_inspection_csv, inspect_data_splits
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: loading.py — parsing de arquivos .out/.dat e decoupling EM
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.data.loading import (
+    COL_MAP_22,
+    EM_COMPONENTS,
+    AngleGroup,
+    OutMetadata,
+    apply_decoupling,
+    load_binary_dat,
+    load_dataset,
+    parse_out_metadata,
+    segregate_by_angle,
 )
 
 # ──────────────────────────────────────────────────────────────────────
 # Imports: pipeline.py — orquestrador DataPipeline + PreparedData
 # ──────────────────────────────────────────────────────────────────────
 from geosteering_ai.data.pipeline import DataPipeline, PreparedData
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: scaling.py — target scaling e scaler fit/transform
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.data.scaling import (
+    apply_target_scaling,
+    create_scaler,
+    fit_scaler,
+    inverse_target_scaling,
+    transform_features,
+)
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: splitting.py — split por modelo geologico (P1)
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.data.splitting import DataSplits, apply_split, split_model_ids
 
 # ──────────────────────────────────────────────────────────────────────
 # D8: Exports publicos — agrupados semanticamente por modulo
@@ -116,6 +121,9 @@ __all__ = [
     "compute_expanded_features",
     "compute_geosignals",
     "FAMILY_DEPS",
+    # --- inspection.py: inspecao de dados (C26A adaptado) ---
+    "inspect_data_splits",
+    "export_inspection_csv",
     # --- scaling.py: target scaling e scaler ---
     "apply_target_scaling",
     "inverse_target_scaling",
