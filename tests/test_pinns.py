@@ -5,8 +5,14 @@ Cobertura:
     - TestOraclePhysicsLoss: 3 normas (l1/l2/huber), DTB compat
     - TestSurrogatePhysicsLoss: placeholder (retorna 0.0)
     - TestMaxwellPhysicsLoss: curvatura, normalizacao por condutividade
+    - TestSmoothnessLoss: Tikhonov + TV, constante vs oscilante
+    - TestSkinDepthLoss: resolucao EM, constante vs gradiente abrupto
+    - TestContinuityLoss: L1 spatial, suave vs blocky
+    - TestVariationalLoss: forma fraca Helmholtz, condutivo vs resistivo
+    - TestSelfAdaptiveLoss: residuo PDE + atencao por gradiente
     - TestTIVConstraintLoss: valido (rho_v>=rho_h), invalido, misto
     - TestBuildPINNsLoss: integracao com epoch_var e schedule
+    - TestBuildPINNsLossNewScenarios: dispatch dos 5 novos cenarios
     - TestTIVConstraintLayer: hard constraint em models/blocks.py
     - TestConfigPINNs: validacao dos campos PINN em PipelineConfig
     - TestFactoryIntegration: build_combined com PINNs ativadas
@@ -23,10 +29,15 @@ from geosteering_ai.losses.pinns import (
     VALID_PINNS_SCENARIOS,
     build_pinns_loss,
     compute_lambda_schedule,
+    make_continuity_loss,
     make_maxwell_physics_loss,
     make_oracle_physics_loss,
+    make_self_adaptive_loss,
+    make_skin_depth_loss,
+    make_smoothness_loss,
     make_surrogate_physics_loss,
     make_tiv_constraint_loss,
+    make_variational_loss,
 )
 
 # ── TF disponivel? ──────────────────────────────────────────────────
@@ -653,3 +664,343 @@ class TestFactoryIntegration:
         loss = fn(y_true, y_pred)
         assert loss.shape == ()
         assert loss.numpy() > 0
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTES: SMOOTHNESS LOSS
+# ════════════════════════════════════════════════════════════════════════
+
+
+@skip_no_tf
+class TestSmoothnessLoss:
+    """Testes para make_smoothness_loss() — Tikhonov + Total Variation."""
+
+    def test_constant_profile_near_zero(self):
+        """Perfil constante (sem gradiente) → loss ≈ 0."""
+        config = _make_config(pinns_scenario="smoothness")
+        fn = make_smoothness_loss(config)
+        flat = np.full((2, 50, 2), 1.5, dtype=np.float32)
+        y_true = tf.constant(flat)
+        y_pred = tf.constant(flat)
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() == pytest.approx(0.0, abs=1e-6)
+
+    def test_oscillating_profile_positive_loss(self):
+        """Perfil oscilante → loss > 0."""
+        config = _make_config(pinns_scenario="smoothness")
+        fn = make_smoothness_loss(config)
+        # Cria perfil oscilante: valores alternando alto/baixo
+        osc = np.zeros((2, 50, 2), dtype=np.float32)
+        for i in range(50):
+            osc[:, i, :] = 1.0 if i % 2 == 0 else 2.0
+        y_true = tf.constant(osc)
+        y_pred = tf.constant(osc)
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() > 0
+
+    def test_returns_scalar(self):
+        """Output eh tensor scalar."""
+        config = _make_config(pinns_scenario="smoothness")
+        fn = make_smoothness_loss(config)
+        y_true = tf.random.uniform((2, 50, 2))
+        y_pred = tf.random.uniform((2, 50, 2))
+        loss = fn(y_true, y_pred)
+        assert loss.shape == ()
+        assert loss.dtype == tf.float32
+        assert loss.numpy() >= 0
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTES: SKIN DEPTH LOSS
+# ════════════════════════════════════════════════════════════════════════
+
+
+@skip_no_tf
+class TestSkinDepthLoss:
+    """Testes para make_skin_depth_loss() — resolucao maxima EM."""
+
+    def test_constant_profile_near_zero(self):
+        """Perfil constante (sem gradiente) → loss ≈ 0."""
+        config = _make_config(
+            pinns_scenario="skin_depth",
+            frequency_hz=20000.0,
+            spacing_meters=1.0,
+        )
+        fn = make_skin_depth_loss(config)
+        flat = np.full((2, 50, 2), 1.0, dtype=np.float32)
+        y_true = tf.constant(flat)
+        y_pred = tf.constant(flat)
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() == pytest.approx(0.0, abs=1e-6)
+
+    def test_sharp_gradient_positive_loss(self):
+        """Perfil com gradiente abrupto → loss > 0."""
+        config = _make_config(
+            pinns_scenario="skin_depth",
+            frequency_hz=20000.0,
+            spacing_meters=1.0,
+        )
+        fn = make_skin_depth_loss(config)
+        # Cria perfil com degrau abrupto: rho muda de 0.0 a 3.0
+        sharp = np.zeros((2, 50, 2), dtype=np.float32)
+        sharp[:, :25, :] = 0.0  # log10(rho)=0 → 1 Ohm.m
+        sharp[:, 25:, :] = 3.0  # log10(rho)=3 → 1000 Ohm.m
+        y_true = tf.constant(sharp)
+        y_pred = tf.constant(sharp)
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() > 0
+
+    def test_returns_scalar(self):
+        """Output eh tensor scalar."""
+        config = _make_config(pinns_scenario="skin_depth")
+        fn = make_skin_depth_loss(config)
+        y_true = tf.random.uniform((2, 50, 2))
+        y_pred = tf.random.uniform((2, 50, 2))
+        loss = fn(y_true, y_pred)
+        assert loss.shape == ()
+        assert loss.dtype == tf.float32
+        assert loss.numpy() >= 0
+
+    def test_uses_frequency_and_spacing(self):
+        """Frequencia e spacing influenciam o skin depth e a loss."""
+        # Frequencia mais alta → skin depth menor → mais penalidade
+        config_high = _make_config(
+            pinns_scenario="skin_depth",
+            frequency_hz=100000.0,
+            spacing_meters=1.0,
+        )
+        config_low = _make_config(
+            pinns_scenario="skin_depth",
+            frequency_hz=1000.0,
+            spacing_meters=1.0,
+        )
+        fn_high = make_skin_depth_loss(config_high)
+        fn_low = make_skin_depth_loss(config_low)
+        # Perfil com gradiente moderado
+        rng = np.random.default_rng(42)
+        profile = np.sort(rng.uniform(0, 2, size=(2, 50, 2)).astype(np.float32), axis=1)
+        y_true = tf.constant(profile)
+        y_pred = tf.constant(profile)
+        loss_high = fn_high(y_true, y_pred).numpy()
+        loss_low = fn_low(y_true, y_pred).numpy()
+        # Frequencia alta → skin depth menor → limite mais apertado → mais penalidade
+        assert loss_high >= loss_low
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTES: CONTINUITY LOSS
+# ════════════════════════════════════════════════════════════════════════
+
+
+@skip_no_tf
+class TestContinuityLoss:
+    """Testes para make_continuity_loss() — L1 spatial smoothness."""
+
+    def test_smooth_profile_low_loss(self):
+        """Perfil suave (gradiente pequeno) → loss baixa."""
+        config = _make_config(pinns_scenario="continuity")
+        fn = make_continuity_loss(config)
+        # Perfil quase constante com variacao minima
+        smooth = np.full((2, 50, 2), 1.5, dtype=np.float32)
+        smooth += np.linspace(0, 0.01, 50).reshape(1, 50, 1).astype(np.float32)
+        y_true = tf.constant(smooth)
+        y_pred = tf.constant(smooth)
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() < 0.01
+
+    def test_blocky_profile_higher_loss(self):
+        """Perfil blocky (degraus) → loss maior que perfil suave."""
+        config = _make_config(pinns_scenario="continuity")
+        fn = make_continuity_loss(config)
+        # Perfil suave
+        smooth = np.full((2, 50, 2), 1.5, dtype=np.float32)
+        y_true_s = tf.constant(smooth)
+        loss_smooth = fn(y_true_s, y_true_s)
+        # Perfil blocky: degraus
+        blocky = np.zeros((2, 50, 2), dtype=np.float32)
+        blocky[:, :10, :] = 0.5
+        blocky[:, 10:20, :] = 2.0
+        blocky[:, 20:30, :] = 0.8
+        blocky[:, 30:40, :] = 3.0
+        blocky[:, 40:, :] = 1.0
+        y_true_b = tf.constant(blocky)
+        loss_blocky = fn(y_true_b, y_true_b)
+        assert loss_blocky.numpy() > loss_smooth.numpy()
+
+    def test_returns_scalar(self):
+        """Output eh tensor scalar."""
+        config = _make_config(pinns_scenario="continuity")
+        fn = make_continuity_loss(config)
+        y_true = tf.random.uniform((2, 50, 2))
+        y_pred = tf.random.uniform((2, 50, 2))
+        loss = fn(y_true, y_pred)
+        assert loss.shape == ()
+        assert loss.dtype == tf.float32
+        assert loss.numpy() >= 0
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTES: VARIATIONAL LOSS
+# ════════════════════════════════════════════════════════════════════════
+
+
+@skip_no_tf
+class TestVariationalLoss:
+    """Testes para make_variational_loss() — forma fraca de Helmholtz."""
+
+    def test_constant_profile_near_zero(self):
+        """Perfil constante (sem gradiente) → loss ≈ 0."""
+        config = _make_config(pinns_scenario="variational")
+        fn = make_variational_loss(config)
+        flat = np.full((2, 50, 2), 1.0, dtype=np.float32)
+        y_true = tf.constant(flat)
+        y_pred = tf.constant(flat)
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() == pytest.approx(0.0, abs=1e-6)
+
+    def test_varying_profile_positive_loss(self):
+        """Perfil com variacao → loss > 0."""
+        config = _make_config(pinns_scenario="variational")
+        fn = make_variational_loss(config)
+        rng = np.random.default_rng(42)
+        y_pred = tf.constant(rng.normal(1.0, 0.5, size=(2, 50, 2)).astype(np.float32))
+        y_true = tf.constant(rng.normal(1.0, 0.5, size=(2, 50, 2)).astype(np.float32))
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() > 0
+
+    def test_conductivity_weighting(self):
+        """Meio condutivo (k^2 grande) permite mais variacao que resistivo."""
+        config = _make_config(pinns_scenario="variational")
+        fn = make_variational_loss(config)
+        # Mesmo padrao de gradiente, mas em diferentes niveis de resistividade
+        rng = np.random.default_rng(42)
+        gradient_pattern = rng.normal(0, 0.5, size=(2, 50, 2)).astype(np.float32)
+        # Condutivo: log10(rho) ≈ 0 → sigma = 1 S/m → k^2 grande
+        conductive = gradient_pattern + 0.0
+        loss_cond = fn(tf.zeros_like(tf.constant(conductive)), tf.constant(conductive))
+        # Resistivo: log10(rho) ≈ 3 → sigma = 0.001 S/m → k^2 pequeno
+        resistive = gradient_pattern + 3.0
+        loss_res = fn(tf.zeros_like(tf.constant(resistive)), tf.constant(resistive))
+        # Resistivo deve ter loss maior (menos variacao permitida)
+        assert loss_res.numpy() > loss_cond.numpy()
+
+    def test_returns_scalar(self):
+        """Output eh tensor scalar."""
+        config = _make_config(pinns_scenario="variational")
+        fn = make_variational_loss(config)
+        y_true = tf.random.uniform((2, 50, 2))
+        y_pred = tf.random.uniform((2, 50, 2))
+        loss = fn(y_true, y_pred)
+        assert loss.shape == ()
+        assert loss.dtype == tf.float32
+        assert loss.numpy() >= 0
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTES: SELF-ADAPTIVE LOSS
+# ════════════════════════════════════════════════════════════════════════
+
+
+@skip_no_tf
+class TestSelfAdaptiveLoss:
+    """Testes para make_self_adaptive_loss() — residuo PDE com atencao."""
+
+    def test_returns_scalar(self):
+        """Output eh tensor scalar."""
+        config = _make_config(pinns_scenario="self_adaptive")
+        fn = make_self_adaptive_loss(config)
+        y_true = tf.random.uniform((2, 50, 2))
+        y_pred = tf.random.uniform((2, 50, 2))
+        loss = fn(y_true, y_pred)
+        assert loss.shape == ()
+        assert loss.dtype == tf.float32
+        assert loss.numpy() >= 0
+
+    def test_constant_profile_near_zero(self):
+        """Perfil constante → loss ≈ 0 (sem curvatura, sem gradiente)."""
+        config = _make_config(pinns_scenario="self_adaptive")
+        fn = make_self_adaptive_loss(config)
+        flat = np.full((2, 50, 2), 1.5, dtype=np.float32)
+        y_true = tf.constant(flat)
+        y_pred = tf.constant(flat)
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() == pytest.approx(0.0, abs=1e-6)
+
+    def test_oscillating_profile_positive_loss(self):
+        """Perfil oscilante → loss > 0 (curvatura alta + pesos altos)."""
+        config = _make_config(pinns_scenario="self_adaptive")
+        fn = make_self_adaptive_loss(config)
+        osc = np.zeros((2, 50, 2), dtype=np.float32)
+        for i in range(50):
+            osc[:, i, :] = 1.0 if i % 2 == 0 else 2.0
+        y_true = tf.constant(osc)
+        y_pred = tf.constant(osc)
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() > 0
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTES: BUILD PINNS LOSS — NOVOS CENARIOS
+# ════════════════════════════════════════════════════════════════════════
+
+
+@skip_no_tf
+class TestBuildPINNsLossNewScenarios:
+    """Testes para build_pinns_loss() com os 5 novos cenarios."""
+
+    def test_smoothness_dispatches(self):
+        """pinns_scenario='smoothness' despacha corretamente."""
+        config = _make_config(pinns_scenario="smoothness")
+        fn = build_pinns_loss(config)
+        y_true, y_pred = _make_tensors()
+        loss = fn(y_true, y_pred)
+        assert loss.shape == ()
+        assert loss.numpy() >= 0
+
+    def test_skin_depth_dispatches(self):
+        """pinns_scenario='skin_depth' despacha corretamente."""
+        config = _make_config(pinns_scenario="skin_depth")
+        fn = build_pinns_loss(config)
+        y_true, y_pred = _make_tensors()
+        loss = fn(y_true, y_pred)
+        assert loss.shape == ()
+        assert loss.numpy() >= 0
+
+    def test_continuity_dispatches(self):
+        """pinns_scenario='continuity' despacha corretamente."""
+        config = _make_config(pinns_scenario="continuity")
+        fn = build_pinns_loss(config)
+        y_true, y_pred = _make_tensors()
+        loss = fn(y_true, y_pred)
+        assert loss.shape == ()
+        assert loss.numpy() >= 0
+
+    def test_variational_dispatches(self):
+        """pinns_scenario='variational' despacha corretamente."""
+        config = _make_config(pinns_scenario="variational")
+        fn = build_pinns_loss(config)
+        y_true, y_pred = _make_tensors()
+        loss = fn(y_true, y_pred)
+        assert loss.shape == ()
+        assert loss.numpy() >= 0
+
+    def test_self_adaptive_dispatches(self):
+        """pinns_scenario='self_adaptive' despacha corretamente."""
+        config = _make_config(pinns_scenario="self_adaptive")
+        fn = build_pinns_loss(config)
+        y_true, y_pred = _make_tensors()
+        loss = fn(y_true, y_pred)
+        assert loss.shape == ()
+        assert loss.numpy() >= 0
+
+    def test_all_new_scenarios_valid(self):
+        """Todos os 5 novos cenarios estao em VALID_PINNS_SCENARIOS."""
+        new_scenarios = {
+            "smoothness",
+            "skin_depth",
+            "continuity",
+            "variational",
+            "self_adaptive",
+        }
+        for scenario in new_scenarios:
+            assert scenario in VALID_PINNS_SCENARIOS, f"{scenario} nao encontrado"

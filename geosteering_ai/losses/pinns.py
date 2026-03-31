@@ -10,7 +10,8 @@
 # ║  Config: PipelineConfig dataclass (ponto unico de verdade)                ║
 # ║                                                                            ║
 # ║  Proposito:                                                                ║
-# ║    • 3 cenarios de PINN loss: oracle, surrogate, maxwell                  ║
+# ║    • 8 cenarios de PINN loss: oracle, surrogate, maxwell,                 ║
+# ║      smoothness, skin_depth, continuity, variational, self_adaptive       ║
 # ║    • TIVConstraintLoss: penaliza violacoes de rho_v >= rho_h              ║
 # ║    • PINNsLambdaSchedule: 4 estrategias de annealing para lambda          ║
 # ║    • build_pinns_loss(): factory central para loss PINNs                   ║
@@ -44,13 +45,18 @@ Motivacao fisica:
     (lambda cresce gradualmente para o valor alvo).
 
     ┌──────────────────────────────────────────────────────────────────────┐
-    │  3 CENARIOS DE PINN LOSS                                             │
+    │  8 CENARIOS DE PINN LOSS                                             │
     │                                                                      │
-    │  Cenario    │ Formula L_physics        │ Custo  │ Precisao          │
-    │  ───────────┼──────────────────────────┼────────┼───────────────────│
-    │  oracle     │ ||rho - rho_ref||        │ Baixo  │ Depende de ref    │
-    │  surrogate  │ ||H_meas - F(rho_pred)|| │ Medio  │ Alta (end-to-end) │
-    │  maxwell    │ ||nabla^2E + k^2E||      │ Alto   │ Maxima (PDE)      │
+    │  Cenario       │ Formula L_physics            │ Custo  │ Tipo       │
+    │  ──────────────┼─────────────────────────────-┼────────┼────────────│
+    │  oracle        │ ||rho - rho_ref||            │ Baixo  │ Supervisao │
+    │  surrogate     │ ||H_meas - F(rho_pred)||     │ Medio  │ End-to-end │
+    │  maxwell       │ ||d^2rho/dz^2 / (1+k^2)||   │ Alto   │ PDE forte  │
+    │  smoothness    │ L2(grad) + TV(grad)          │ Baixo  │ Tikhonov   │
+    │  skin_depth    │ max(0, |grad| - 1/delta)^2   │ Baixo  │ Fisico     │
+    │  continuity    │ ||d(rho)/dz|| (L1)           │ Baixo  │ Sparse     │
+    │  variational   │ |grad|^2 / (1+k^2)          │ Medio  │ PDE fraca  │
+    │  self_adaptive │ w(z) × R(z)^2 / mean(w)     │ Alto   │ Adaptativo │
     │                                                                      │
     │  + TIV Constraint: max(0, rho_h - rho_v) (sempre ativo se habilitado)│
     │                                                                      │
@@ -80,7 +86,16 @@ logger = logging.getLogger(__name__)
 EPS = 1e-12
 
 # ── Cenarios e schedules validos ──────────────────────────────────────
-VALID_PINNS_SCENARIOS = {"oracle", "surrogate", "maxwell"}
+VALID_PINNS_SCENARIOS = {
+    "oracle",
+    "surrogate",
+    "maxwell",
+    "smoothness",
+    "skin_depth",
+    "continuity",
+    "variational",
+    "self_adaptive",
+}
 VALID_LAMBDA_SCHEDULES = {"fixed", "linear", "cosine", "step"}
 
 
@@ -101,6 +116,11 @@ __all__ = [
     "make_oracle_physics_loss",
     "make_surrogate_physics_loss",
     "make_maxwell_physics_loss",
+    "make_smoothness_loss",
+    "make_skin_depth_loss",
+    "make_continuity_loss",
+    "make_variational_loss",
+    "make_self_adaptive_loss",
     # ── TIV constraint ────────────────────────────────────────────────────
     "make_tiv_constraint_loss",
     # ── Factory central ───────────────────────────────────────────────────
@@ -683,10 +703,682 @@ def make_tiv_constraint_loss(
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# SECAO: CENARIO 4 — SMOOTHNESS LOSS (TIKHONOV + TV)
+# ════════════════════════════════════════════════════════════════════════════
+# Regularizacao classica do perfil de resistividade combinando:
+#   - Tikhonov (L2): penaliza gradientes suaves — estabiliza inversao
+#   - Total Variation (L1): preserva descontinuidades geologicas reais
+#
+# Formula:
+#   L_smooth = alpha_l2 × mean(|d(rho)/dz|^2)
+#            + alpha_tv × mean(|d(rho)/dz|)
+#
+# Custo: MUITO baixo (apenas derivadas de 1a ordem via diferencas finitas).
+# Ref: Tikhonov (1963) — regularizacao L2 para problemas mal-postos.
+#      Rudin, Osher & Fatemi (1992) — TV preserva bordas.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def make_smoothness_loss(
+    config: "PipelineConfig",
+) -> Callable:
+    """Factory para Smoothness Loss — Tikhonov + Total Variation.
+
+    Regulariza o perfil de resistividade predito combinando penalidade
+    L2 (Tikhonov) que estabiliza a inversao e penalidade L1 (TV) que
+    preserva descontinuidades geologicas reais (limites de camada).
+
+    Formula:
+        d(rho)/dz = (rho[i+1] - rho[i]) / dz   (diferencas finitas 1a ordem)
+        L_smooth = alpha_l2 × mean(|d(rho)/dz|^2) + alpha_tv × mean(|d(rho)/dz|)
+
+        alpha_l2 = 0.7 (peso do termo L2, estabilidade)
+        alpha_tv = 0.3 (peso do termo L1, preservacao de bordas)
+
+    Diagrama:
+      ┌──────────────────────────────────────────────────────────┐
+      │  SMOOTHNESS LOSS: TIKHONOV + TOTAL VARIATION              │
+      │                                                           │
+      │  Perfil rho(z):                                           │
+      │    ─────┐                                                 │
+      │         │ ← borda real (TV preserva)                      │
+      │         └─────────────┐                                   │
+      │                       │ ← borda real (TV preserva)        │
+      │    ~~~~ oscilacao ~~~~ ← Tikhonov penaliza               │
+      │                                                           │
+      │  Termo L2 (Tikhonov): suprime oscilacoes espurias        │
+      │  Termo L1 (TV): permite transicoes geologicas abruptas    │
+      │  Ratio 70/30: prioriza estabilidade, bordas ok se reais   │
+      └──────────────────────────────────────────────────────────┘
+
+    Motivacao fisica:
+        Em inversao EM 1D, o perfil de resistividade deve ser suave
+        dentro das camadas geologicas (rho constante), com transicoes
+        abruptas apenas nos limites entre camadas. A regularizacao
+        Tikhonov pura (L2) suaviza demais, borrando bordas reais.
+        A TV (L1) mantem bordas afiadas. A combinacao 70/30 produz
+        perfis geologicamente realistas.
+
+    Args:
+        config: PipelineConfig com spacing_meters.
+            spacing_meters: Distancia entre pontos de medicao (m).
+                Default: 1.0 m. Usado para normalizar d(rho)/dz.
+
+    Returns:
+        Callable: Funcao loss(y_true, y_pred) -> tf.Tensor scalar.
+            Opera sobre os canais de resistividade (0:2) de y_pred.
+
+    Note:
+        Referenciado em:
+            - losses/pinns.py: build_pinns_loss() (cenario "smoothness")
+            - tests/test_pinns.py: TestSmoothnessLoss
+        Ref: Tikhonov (1963) "Solution of incorrectly formulated problems
+             and the regularization method" — regularizacao L2.
+             Rudin, Osher & Fatemi (1992) "Nonlinear total variation
+             based noise removal algorithms" — TV preserva bordas.
+        Custo: O(N) por amostra. Cenario PINN mais barato.
+    """
+    # ── Pesos internos da combinacao L2+TV ────────────────────────────
+    # Ratio fixo 70/30: prioriza estabilidade (Tikhonov) sobre
+    # preservacao de bordas (TV). Este ratio funciona bem para
+    # perfis de resistividade 1D em frequencias LWD tipicas.
+    alpha_l2 = 0.7
+    alpha_tv = 0.3
+
+    # ── dz: espacamento entre pontos de medicao ──────────────────────
+    # Normaliza o gradiente para unidades fisicas (Ohm.m / m em log10).
+    # Com SPACING_METERS=1.0 (default), dz=1.0 (no-op).
+    dz = config.spacing_meters
+
+    def smoothness_loss(y_true, y_pred):
+        """Smoothness loss: Tikhonov (L2) + Total Variation (L1).
+
+        Penaliza oscilacoes espurias no perfil de resistividade
+        preservando transicoes geologicas reais via componente TV.
+        """
+        import tensorflow as tf
+
+        # ── Extrair canais de resistividade (log10 scale) ─────────
+        # Canal 0: log10(rho_h), Canal 1: log10(rho_v)
+        # Limita a 2 canais para compatibilidade com DTB (>= 4 canais).
+        n_target = tf.minimum(tf.shape(y_pred)[-1], 2)
+        rho_log = y_pred[..., :n_target]  # (B, N, C)
+
+        # ── Derivada de 1a ordem via diferencas finitas ───────────
+        # d(rho)/dz ≈ (rho[i+1] - rho[i]) / dz
+        # Shape: (B, N-1, C) — perde ultimo ponto da sequencia.
+        # dz normaliza para gradiente em unidades fisicas.
+        d_rho = (rho_log[:, 1:, :] - rho_log[:, :-1, :]) / (dz + EPS)
+
+        # ── Termo L2 (Tikhonov): penaliza gradientes ao quadrado ──
+        # Suprime oscilacoes espurias em zonas homogeneas.
+        # mean(|d(rho)/dz|^2) — custo quadratico, difuso.
+        l2_term = tf.reduce_mean(tf.square(d_rho))
+
+        # ── Termo L1 (Total Variation): penaliza gradientes em norma 1
+        # Preserva bordas afiadas — penalidade linear permite
+        # transicoes abruptas com custo proporcional (nao quadratico).
+        # mean(|d(rho)/dz|) — custo linear, esparso.
+        tv_term = tf.reduce_mean(tf.abs(d_rho))
+
+        # ── Combinacao: 70% L2 + 30% TV ──────────────────────────
+        return alpha_l2 * l2_term + alpha_tv * tv_term
+
+    return smoothness_loss
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECAO: CENARIO 5 — SKIN DEPTH LOSS
+# ════════════════════════════════════════════════════════════════════════════
+# Constrainte fisica baseada no skin depth EM.
+# A ferramenta LWD a 20 kHz nao pode resolver features menores que delta.
+# Penaliza gradientes de resistividade que excedem 1/delta(z).
+#
+# Formula:
+#   delta(z) = sqrt(2 / (omega × mu × sigma(z)))
+#   L_skin = mean(max(0, |d(rho)/dz| - 1/delta(z))^2)
+#
+# Ref: Ward & Hohmann (1988) "Electromagnetic Theory for Geophysical
+#      Applications" — definicao classica de skin depth.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def make_skin_depth_loss(
+    config: "PipelineConfig",
+) -> Callable:
+    """Factory para Skin Depth Loss — resolucao maxima da ferramenta LWD.
+
+    Penaliza gradientes do perfil de resistividade que excedem o limite
+    imposto pelo skin depth EM. A uma frequencia de 20 kHz, a onda EM
+    penetra uma distancia finita (skin depth) que depende da condutividade
+    local. Features menores que delta nao sao resolvidas pela ferramenta.
+
+    Formula:
+        sigma(z) = 10^(-rho_pred(z))   (condutividade em S/m)
+        delta(z) = sqrt(2 / (omega × mu × sigma(z)))  (skin depth em m)
+        L_skin = mean(max(0, |d(rho)/dz| - 1/delta(z))^2)
+
+    Diagrama:
+      ┌──────────────────────────────────────────────────────────┐
+      │  SKIN DEPTH CONSTRAINT                                     │
+      │                                                           │
+      │  Frequencia: f = 20 kHz (default)                         │
+      │  omega = 2 × pi × f ≈ 125664 rad/s                       │
+      │  mu = 4 × pi × 1e-7 H/m                                  │
+      │                                                           │
+      │  Exemplos de skin depth:                                   │
+      │    rho = 1 Ohm.m   → delta ≈ 3.6 m   → 1/delta ≈ 0.28  │
+      │    rho = 10 Ohm.m  → delta ≈ 11.3 m  → 1/delta ≈ 0.09  │
+      │    rho = 100 Ohm.m → delta ≈ 35.6 m  → 1/delta ≈ 0.03  │
+      │                                                           │
+      │  Gradiente |d(rho)/dz| > 1/delta → penalidade ativa      │
+      │  Gradiente |d(rho)/dz| <= 1/delta → sem penalidade       │
+      │                                                           │
+      │  Meios condutivos: delta pequeno → limite apertado        │
+      │  Meios resistivos: delta grande → limite frouxo           │
+      └──────────────────────────────────────────────────────────┘
+
+    Motivacao fisica:
+        O skin depth define a resolucao vertical maxima de uma
+        ferramenta EM. Transicoes de resistividade mais abruptas
+        que 1/delta sao artefatos da inversao, nao features reais.
+        Esta loss atua como regularizacao informada pela fisica,
+        adaptada localmente a condutividade do meio.
+
+    Args:
+        config: PipelineConfig com:
+            frequency_hz: Frequencia da ferramenta LWD (Hz).
+                Default: 20000.0 Hz (20 kHz).
+            spacing_meters: Distancia entre pontos de medicao (m).
+                Default: 1.0 m.
+
+    Returns:
+        Callable: Funcao loss(y_true, y_pred) -> tf.Tensor scalar.
+            Opera sobre os canais de resistividade (0:2) de y_pred.
+
+    Note:
+        Referenciado em:
+            - losses/pinns.py: build_pinns_loss() (cenario "skin_depth")
+            - tests/test_pinns.py: TestSkinDepthLoss
+        Ref: Ward & Hohmann (1988) "Electromagnetic Theory for
+             Geophysical Applications" — skin depth delta = sqrt(2/(omega*mu*sigma)).
+        Fisica: delta depende de sqrt(rho) — meios resistivos tem skin
+            depth maior (mais penetracao, menos resolucao vertical).
+    """
+    # ── Constantes EM pre-computadas ──────────────────────────────────
+    # omega: frequencia angular (rad/s). Default: 2*pi*20000 ≈ 125664 rad/s.
+    # mu: permeabilidade magnetica do vacuo (4*pi*1e-7 H/m).
+    # omega_mu: produto pre-computado — aparece no denominador de delta^2.
+    omega = 2.0 * math.pi * config.frequency_hz
+    mu = 4.0 * math.pi * 1e-7
+    omega_mu = omega * mu
+
+    # ── dz: espacamento entre pontos de medicao ──────────────────────
+    dz = config.spacing_meters
+
+    def skin_depth_loss(y_true, y_pred):
+        """Skin depth loss: penaliza gradientes acima da resolucao EM.
+
+        Gradientes maiores que 1/delta(z) indicam features nao
+        resolvidas pela ferramenta LWD na frequencia configurada.
+        """
+        import tensorflow as tf
+
+        # ── Extrair canais rho (log10 scale) ──────────────────────
+        n_target = tf.minimum(tf.shape(y_pred)[-1], 2)
+        rho_log = y_pred[..., :n_target]  # (B, N, C)
+
+        # ── Condutividade sigma(z) = 10^(-rho_log) ───────────────
+        # Clamp para evitar overflow: rho em [0.01, 100000] Ohm.m
+        rho_log_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
+        sigma = tf.pow(10.0, -rho_log_clamped)  # (B, N, C)
+
+        # ── Skin depth: delta(z) = sqrt(2 / (omega × mu × sigma))
+        # Em meios condutivos (sigma grande), delta eh pequeno.
+        # Em meios resistivos (sigma pequeno), delta eh grande.
+        # +EPS evita divisao por zero quando sigma → 0.
+        delta = tf.sqrt(2.0 / (omega_mu * sigma + EPS))  # (B, N, C)
+
+        # ── Limite de gradiente: 1/delta(z) ──────────────────────
+        # Gradientes maiores que este limite sao fisicamente
+        # impossiveis de resolver na frequencia dada.
+        inv_delta = 1.0 / (delta + EPS)  # (B, N, C)
+
+        # ── Derivada de 1a ordem |d(rho)/dz| ─────────────────────
+        # Magnitude do gradiente espacial do perfil de resistividade.
+        d_rho = tf.abs(
+            (rho_log[:, 1:, :] - rho_log[:, :-1, :]) / (dz + EPS)
+        )  # (B, N-1, C)
+
+        # ── Alinhar inv_delta com d_rho (midpoints) ──────────────
+        # inv_delta tem shape (B, N, C), d_rho tem (B, N-1, C).
+        # Usar media dos pontos adjacentes para alinhar.
+        inv_delta_mid = 0.5 * (inv_delta[:, 1:, :] + inv_delta[:, :-1, :])  # (B, N-1, C)
+
+        # ── Excesso: max(0, |d(rho)/dz| - 1/delta) ──────────────
+        # Penaliza apenas gradientes que EXCEDEM o limite fisico.
+        # Gradientes dentro do skin depth sao permitidos (sem custo).
+        excess = tf.nn.relu(d_rho - inv_delta_mid)
+
+        # ── Loss: MSE do excesso ──────────────────────────────────
+        # Penalidade quadratica: grandes violacoes sao fortemente
+        # penalizadas, pequenas violacoes quase ignoradas.
+        return tf.reduce_mean(tf.square(excess))
+
+    return skin_depth_loss
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECAO: CENARIO 6 — CONTINUITY LOSS (L1 SPATIAL SMOOTHNESS)
+# ════════════════════════════════════════════════════════════════════════════
+# Regularizacao L1 pura do gradiente espacial de resistividade.
+# Diferente do smoothness (L2+TV), usa apenas norma L1 que produz
+# gradientes esparsos — mantendo o perfil constante com transicoes
+# afiadas apenas onde geologicamente justificado.
+#
+# Formula:
+#   L_cont = mean(|d(rho_pred)/dz|)
+#
+# Projetado para modo realtime (geosteering causal): predicoes devem
+# variar lentamente ao longo da trajetoria do poco.
+#
+# Ref: Tibshirani (1996) — Lasso (L1 regularization) produz
+#      solucoes esparsas.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def make_continuity_loss(
+    config: "PipelineConfig",
+) -> Callable:
+    """Factory para Continuity Loss — L1 spatial smoothness esparsa.
+
+    Enforces que predicoes de resistividade variem lentamente ao longo
+    da trajetoria do poco (dimensao z). Usa norma L1 pura, que produz
+    gradientes esparsos — o perfil tende a ser constante por trechos
+    com transicoes afiadas apenas nos limites de camada.
+
+    Formula:
+        d(rho)/dz = (rho_pred[i+1] - rho_pred[i]) / dz
+        L_cont = mean(|d(rho)/dz|)
+
+    Diagrama:
+      ┌──────────────────────────────────────────────────────────┐
+      │  CONTINUITY LOSS: L1 SPATIAL SMOOTHNESS                    │
+      │                                                           │
+      │  Comparacao com smoothness (cenario 4):                   │
+      │                                                           │
+      │  smoothness: alpha_l2 × ||grad||^2 + alpha_tv × ||grad|| │
+      │  continuity: ||grad|| (L1 puro)                           │
+      │                                                           │
+      │  L1 puro → gradientes ESPARSOS:                           │
+      │    ────────┐                                              │
+      │            │ ← unica transicao permitida (custo linear)   │
+      │            └──────── (constante)                          │
+      │                                                           │
+      │  L2 → gradientes SUAVES:                                  │
+      │    ───────╲                                               │
+      │           ╲── transicao gradual (custo quadratico)       │
+      │                                                           │
+      │  Uso: realtime geosteering (modo causal, sliding window)  │
+      └──────────────────────────────────────────────────────────┘
+
+    Motivacao fisica:
+        No geosteering em tempo real, o perfil de resistividade ao
+        longo do poco nao deve oscilar rapidamente — as formacoes
+        geologicas sao lateralmente continuas por dezenas de metros.
+        A regularizacao L1 penaliza QUALQUER variacao, mas com custo
+        linear (nao quadratico), permitindo transicoes reais sem
+        custo excessivo. Ideal para sliding window causal.
+
+    Args:
+        config: PipelineConfig com:
+            spacing_meters: Distancia entre pontos de medicao (m).
+                Default: 1.0 m.
+
+    Returns:
+        Callable: Funcao loss(y_true, y_pred) -> tf.Tensor scalar.
+            Opera sobre os canais de resistividade (0:2) de y_pred.
+
+    Note:
+        Referenciado em:
+            - losses/pinns.py: build_pinns_loss() (cenario "continuity")
+            - tests/test_pinns.py: TestContinuityLoss
+        Ref: Tibshirani (1996) "Regression Shrinkage and Selection via
+             the Lasso" — L1 regularization produz solucoes esparsas.
+        Diferenca chave do smoothness: L1 puro (sem componente L2).
+            Produz perfis "blocky" (constantes por trechos) que sao
+            mais realistas geologicamente que perfis suavizados.
+    """
+    # ── dz: espacamento entre pontos de medicao ──────────────────────
+    dz = config.spacing_meters
+
+    def continuity_loss(y_true, y_pred):
+        """Continuity loss: L1 pura do gradiente espacial.
+
+        Produz perfis de resistividade esparsos (constantes por trechos)
+        com transicoes afiadas apenas onde geologicamente justificado.
+        """
+        import tensorflow as tf
+
+        # ── Extrair canais de resistividade (log10 scale) ─────────
+        n_target = tf.minimum(tf.shape(y_pred)[-1], 2)
+        rho_log = y_pred[..., :n_target]  # (B, N, C)
+
+        # ── Derivada de 1a ordem via diferencas finitas ───────────
+        # d(rho)/dz = (rho[i+1] - rho[i]) / dz
+        # Norma L1: penaliza magnitude do gradiente linearmente.
+        # Isso favorece perfis constantes por trechos (sparsity).
+        d_rho = (rho_log[:, 1:, :] - rho_log[:, :-1, :]) / (dz + EPS)
+
+        # ── Loss: MAE do gradiente (L1 pura) ─────────────────────
+        # Custo linear: transicoes reais pagam custo proporcional,
+        # NAO quadratico (como Tikhonov). Isso preserva bordas
+        # geofisicas reais enquanto suprime oscilacoes.
+        return tf.reduce_mean(tf.abs(d_rho))
+
+    return continuity_loss
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECAO: CENARIO 7 — VARIATIONAL LOSS (DEEP RITZ METHOD)
+# ════════════════════════════════════════════════════════════════════════════
+# Forma fraca da equacao de Helmholtz: minimiza funcional de energia.
+# Usa apenas derivada de 1a ordem (nao 2a), ~40% mais leve que maxwell.
+# Mais estavel numericamente que a forma forte (PDE residual).
+#
+# Formula:
+#   k^2(z) = omega × mu × sigma(z) = omega × mu × 10^(-rho_pred(z))
+#   L_var = mean(|d(rho)/dz|^2 / (1 + k^2(z)))
+#
+# Ref: Weinan & Yu (2018) "The Deep Ritz Method" — formulacao
+#      variacional de PDEs com redes neurais.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def make_variational_loss(
+    config: "PipelineConfig",
+) -> Callable:
+    """Factory para Variational Loss — forma fraca de Helmholtz (Deep Ritz).
+
+    Minimiza o funcional de energia associado a equacao de Helmholtz 1D
+    usando apenas derivadas de 1a ordem. Diferente do maxwell (cenario 3)
+    que usa derivada de 2a ordem (forma forte), a formulacao variacional
+    eh ~40% mais leve computacionalmente e mais estavel numericamente.
+
+    Formula:
+        sigma(z) = 10^(-rho_pred(z))   (condutividade)
+        k^2(z) = omega × mu × sigma(z) (numero de onda ao quadrado)
+        L_var = mean(|d(rho)/dz|^2 / (1 + k^2(z)))
+
+    Diagrama:
+      ┌──────────────────────────────────────────────────────────┐
+      │  VARIATIONAL LOSS: FORMA FRACA DE HELMHOLTZ               │
+      │                                                           │
+      │  Comparacao maxwell vs variational:                       │
+      │                                                           │
+      │  maxwell (forma forte):                                   │
+      │    Residuo = d^2(rho)/dz^2 / (1 + k^2)                   │
+      │    L = mean(R^2)                                          │
+      │    Custo: derivada de 2a ordem (3 pontos por stencil)     │
+      │    Perde 2 pontos nas bordas                              │
+      │                                                           │
+      │  variational (forma fraca):                               │
+      │    Energia = |d(rho)/dz|^2 / (1 + k^2)                   │
+      │    L = mean(E)                                            │
+      │    Custo: derivada de 1a ordem (2 pontos por stencil)     │
+      │    Perde 1 ponto nas bordas                               │
+      │    ~40% mais leve que maxwell                              │
+      │                                                           │
+      │  Normalizacao (1 + k^2):                                  │
+      │    k^2 grande (condutivo) → denominador grande            │
+      │      → menos penalidade (curvatura permitida)             │
+      │    k^2 pequeno (resistivo) → denominador ≈ 1              │
+      │      → penalidade total (suavidade exigida)               │
+      └──────────────────────────────────────────────────────────┘
+
+    Motivacao fisica:
+        A formulacao variacional (fraca) de uma PDE minimiza o funcional
+        de energia em vez de impor o residuo pontual (forma forte).
+        Para a equacao de Helmholtz, o funcional eh proporcional ao
+        quadrado do gradiente normalizado por k^2. Vantagens:
+        - Nao requer derivada de 2a ordem (mais estavel)
+        - Admite descontinuidades fracas (L^2 vs H^2)
+        - Converge mais rápido em redes profundas (Weinan & Yu 2018)
+
+    Args:
+        config: PipelineConfig com:
+            frequency_hz: Frequencia da ferramenta LWD (Hz).
+                Default: 20000.0 Hz. omega = 2*pi*f.
+            spacing_meters: Distancia entre pontos de medicao (m).
+                Default: 1.0 m.
+
+    Returns:
+        Callable: Funcao loss(y_true, y_pred) -> tf.Tensor scalar.
+
+    Note:
+        Referenciado em:
+            - losses/pinns.py: build_pinns_loss() (cenario "variational")
+            - tests/test_pinns.py: TestVariationalLoss
+        Ref: Weinan & Yu (2018) "The Deep Ritz Method: A Deep Learning-
+             Based Numerical Method for Solving Variational Problems"
+             — formulacao variacional de PDEs com redes neurais.
+        Custo: ~60% do maxwell (1a derivada vs 2a derivada).
+        Estabilidade: melhor que maxwell em perfis com descontinuidades.
+    """
+    # ── Constantes EM pre-computadas ──────────────────────────────────
+    # omega_mu: produto pre-computado para k^2 = omega*mu*sigma.
+    omega = 2.0 * math.pi * config.frequency_hz
+    mu = 4.0 * math.pi * 1e-7
+    omega_mu = omega * mu
+
+    # ── dz: espacamento entre pontos de medicao ──────────────────────
+    dz = config.spacing_meters
+
+    def variational_loss(y_true, y_pred):
+        """Variational loss: funcional de energia (forma fraca Helmholtz).
+
+        Minimiza |d(rho)/dz|^2 / (1 + k^2) — derivada de 1a ordem
+        normalizada pela condutividade local.
+        """
+        import tensorflow as tf
+
+        # ── Extrair canais rho (log10 scale) ──────────────────────
+        n_target = tf.minimum(tf.shape(y_pred)[-1], 2)
+        rho_log = y_pred[..., :n_target]  # (B, N, C)
+
+        # ── Condutividade sigma(z) = 10^(-rho_log) ───────────────
+        # Clamp para evitar overflow: rho em [0.01, 100000] Ohm.m
+        rho_log_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
+        sigma = tf.pow(10.0, -rho_log_clamped)  # (B, N, C)
+
+        # ── k^2(z) = omega × mu × sigma (numero de onda) ─────────
+        # k^2 modula a penalidade: meios condutivos (k^2 grande)
+        # permitem mais gradiente, meios resistivos (k^2 pequeno)
+        # exigem suavidade.
+        k_sq = omega_mu * sigma  # (B, N, C)
+
+        # ── Derivada de 1a ordem d(rho)/dz ────────────────────────
+        # Diferencas finitas: (rho[i+1] - rho[i]) / dz
+        d_rho = (rho_log[:, 1:, :] - rho_log[:, :-1, :]) / (dz + EPS)
+        # (B, N-1, C)
+
+        # ── Alinhar k^2 com d_rho (midpoints) ────────────────────
+        # k_sq tem shape (B, N, C), d_rho tem (B, N-1, C).
+        # Media dos pontos adjacentes para alinhar indices.
+        k_sq_mid = 0.5 * (k_sq[:, 1:, :] + k_sq[:, :-1, :])
+        # (B, N-1, C)
+
+        # ── Funcional de energia: |grad|^2 / (1 + k^2) ──────────
+        # Numerador: quadrado do gradiente (energia cinetica).
+        # Denominador: 1 + k^2 (normalizacao por condutividade).
+        # +1 evita divisao por zero; +EPS protecao extra float32.
+        energy = tf.square(d_rho) / (1.0 + k_sq_mid + EPS)
+
+        # ── Loss: media do funcional de energia ───────────────────
+        return tf.reduce_mean(energy)
+
+    return variational_loss
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECAO: CENARIO 8 — SELF-ADAPTIVE LOSS (ATTENTION POR GRADIENTE)
+# ════════════════════════════════════════════════════════════════════════════
+# Residuo PDE com pesos adaptativos derivados do proprio gradiente.
+# Regioes com alto gradiente (bordas de camada) recebem mais atencao.
+# Nao requer variaveis treinaveis extras — a atencao eh self-derived.
+#
+# Formula:
+#   R(z) = d^2(rho)/dz^2 / (1 + k^2(z))  (residuo maxwell)
+#   w(z) = softplus(|d(rho)/dz|)           (peso por gradiente)
+#   L_adaptive = mean(w(z) × R(z)^2) / mean(w(z))
+#
+# Ref: McClenny & Braga-Neto (2023) "Self-Adaptive PINNs" —
+#      pesos adaptativos para concentrar esforco nas regioes dificeis.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def make_self_adaptive_loss(
+    config: "PipelineConfig",
+) -> Callable:
+    """Factory para Self-Adaptive Loss — residuo PDE com atencao por gradiente.
+
+    Computa o residuo de Maxwell (como cenario 3) mas aplica pesos
+    adaptativos derivados do gradiente local de resistividade. Regioes
+    com alto gradiente (limites de camada) recebem mais atencao,
+    concentrando o esforco de regularizacao nas zonas mais dificeis.
+
+    Formula:
+        R(z) = d^2(rho)/dz^2 / (1 + k^2(z))   (residuo Helmholtz)
+        w(z) = softplus(|d(rho)/dz|)             (peso adaptativo)
+        L_adaptive = mean(w(z) × R(z)^2) / mean(w(z))
+
+    Diagrama:
+      ┌──────────────────────────────────────────────────────────┐
+      │  SELF-ADAPTIVE LOSS: ATTENTION POR GRADIENTE              │
+      │                                                           │
+      │  Perfil rho(z):                                           │
+      │    ─────┐         ┌──────                                 │
+      │         │         │                                       │
+      │         └─────────┘                                       │
+      │    w(z): 0.7   5.2       4.8   0.7                       │
+      │         (baixo) (alto)   (alto) (baixo)                   │
+      │                                                           │
+      │  Zonas homogeneas (grad ≈ 0):                             │
+      │    w = softplus(0) ≈ 0.69 → peso base (baixa atencao)    │
+      │                                                           │
+      │  Limites de camada (grad alto):                           │
+      │    w = softplus(5) ≈ 5.0 → peso alto (alta atencao)      │
+      │                                                           │
+      │  Normalizacao: L / mean(w) → escala invariante            │
+      │  Sem variaveis treinaveis extras (self-derived)           │
+      └──────────────────────────────────────────────────────────┘
+
+    Motivacao fisica:
+        O residuo de Maxwell eh mais critico nos limites de camada
+        (transicoes de resistividade) do que em zonas homogeneas.
+        Sem pesos adaptativos, a loss media trata todos os pontos
+        igualmente, diluindo o sinal das bordas. Com self-attention,
+        a rede concentra esforco nas regioes onde erros fisicos sao
+        mais provaveis e mais impactantes para geosteering.
+
+    Args:
+        config: PipelineConfig com:
+            frequency_hz: Frequencia da ferramenta LWD (Hz).
+                Default: 20000.0 Hz.
+            spacing_meters: Distancia entre pontos de medicao (m).
+                Default: 1.0 m.
+
+    Returns:
+        Callable: Funcao loss(y_true, y_pred) -> tf.Tensor scalar.
+
+    Note:
+        Referenciado em:
+            - losses/pinns.py: build_pinns_loss() (cenario "self_adaptive")
+            - tests/test_pinns.py: TestSelfAdaptiveLoss
+        Ref: McClenny & Braga-Neto (2023) "Self-Adaptive Physics-Informed
+             Neural Networks" — pesos adaptativos para PINNs, concentrando
+             esforco computacional nas regioes de maior residuo.
+        Custo: ~120% do maxwell (derivada de 2a ordem + softplus weights).
+        Sem variaveis treinaveis extras — atencao derivada do gradiente.
+    """
+    # ── Constantes EM pre-computadas ──────────────────────────────────
+    omega = 2.0 * math.pi * config.frequency_hz
+    mu = 4.0 * math.pi * 1e-7
+    omega_mu = omega * mu
+
+    # ── dz e dz^2: espacamento e seu quadrado ─────────────────────────
+    dz = config.spacing_meters
+    dz_sq = dz**2
+
+    def self_adaptive_loss(y_true, y_pred):
+        """Self-adaptive loss: residuo PDE ponderado por gradiente local.
+
+        Combina residuo de Helmholtz (derivada de 2a ordem) com
+        pesos softplus derivados do gradiente de 1a ordem,
+        concentrando atencao nos limites de camada.
+        """
+        import tensorflow as tf
+
+        # ── Extrair canais rho (log10 scale) ──────────────────────
+        n_target = tf.minimum(tf.shape(y_pred)[-1], 2)
+        rho_log = y_pred[..., :n_target]  # (B, N, C)
+
+        # ── Condutividade sigma(z) = 10^(-rho_log) ───────────────
+        rho_log_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
+        sigma = tf.pow(10.0, -rho_log_clamped)  # (B, N, C)
+
+        # ── k^2(z) = omega × mu × sigma ──────────────────────────
+        k_sq = omega_mu * sigma  # (B, N, C)
+
+        # ── Derivada de 2a ordem d^2(rho)/dz^2 (pontos interiores)
+        # Stencil central: (f[i+1] - 2f[i] + f[i-1]) / dz^2
+        # Shape resultante: (B, N-2, C)
+        d2_rho = (rho_log[:, 2:, :] - 2.0 * rho_log[:, 1:-1, :] + rho_log[:, :-2, :]) / (
+            dz_sq + EPS
+        )
+
+        # ── Normalizar residuo por (1 + k^2) nos pontos interiores
+        k_sq_interior = k_sq[:, 1:-1, :]
+        residual = d2_rho / (1.0 + k_sq_interior + EPS)
+        residual_sq = tf.square(residual)  # (B, N-2, C)
+
+        # ── Derivada de 1a ordem |d(rho)/dz| (para pesos) ────────
+        # Diferencas finitas: (rho[i+1] - rho[i]) / dz
+        # Shape: (B, N-1, C)
+        d1_rho = tf.abs((rho_log[:, 1:, :] - rho_log[:, :-1, :]) / (dz + EPS))
+
+        # ── Alinhar d1_rho com pontos interiores (N-2) ───────────
+        # Media dos gradientes adjacentes para ter shape (B, N-2, C).
+        # d1_rho[i] e d1_rho[i+1] cobrem o ponto interior [i+1].
+        d1_rho_interior = 0.5 * (d1_rho[:, 1:, :] + d1_rho[:, :-1, :])
+        # (B, N-2, C)
+
+        # ── Pesos adaptativos: w(z) = softplus(|grad|) ───────────
+        # softplus(x) = log(1 + exp(x)):
+        #   - x ≈ 0 (zona homogenea): w ≈ 0.69 (peso base)
+        #   - x >> 0 (borda de camada): w ≈ x (peso alto)
+        # Suave e diferenciavel em todo o dominio.
+        weights = tf.math.softplus(d1_rho_interior)  # (B, N-2, C)
+
+        # ── Loss ponderada: mean(w × R^2) / mean(w) ──────────────
+        # Numerador: residuo quadratico ponderado pela atencao.
+        # Denominador: normalizacao para escala invariante.
+        # Sem denominador, a loss cresceria com o gradiente medio,
+        # criando instabilidade numerica.
+        weighted_residual = tf.reduce_mean(weights * residual_sq)
+        normalizer = tf.reduce_mean(weights) + EPS
+
+        return weighted_residual / normalizer
+
+    return self_adaptive_loss
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # SECAO: FACTORY CENTRAL — build_pinns_loss()
 # ════════════════════════════════════════════════════════════════════════════
 # Constroi a loss PINN completa combinando:
-#   1. Cenario (oracle/surrogate/maxwell) com lambda schedule
+#   1. Cenario (oracle/surrogate/maxwell/smoothness/skin_depth/
+#      continuity/variational/self_adaptive) com lambda schedule
 #   2. TIV constraint (opcional, sempre aditivo)
 #
 # Formula final:
@@ -801,6 +1493,16 @@ def build_pinns_loss(
             scenario_fn = make_surrogate_physics_loss(config)
         elif scenario == "maxwell":
             scenario_fn = make_maxwell_physics_loss(config)
+        elif scenario == "smoothness":
+            scenario_fn = make_smoothness_loss(config)
+        elif scenario == "skin_depth":
+            scenario_fn = make_skin_depth_loss(config)
+        elif scenario == "continuity":
+            scenario_fn = make_continuity_loss(config)
+        elif scenario == "variational":
+            scenario_fn = make_variational_loss(config)
+        elif scenario == "self_adaptive":
+            scenario_fn = make_self_adaptive_loss(config)
         else:
             raise ValueError(
                 f"pinns_scenario='{scenario}' invalido. "

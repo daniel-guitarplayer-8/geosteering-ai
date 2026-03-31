@@ -738,7 +738,16 @@ class PipelineConfig:
         # ── PINNs validation ─────────────────────────────────────────
         # Valida cenario, schedule, norma e constraintes para PINNs.
         # Ref: docs/ARCHITECTURE_v2.md secao 18 (PINNs).
-        _VALID_PINNS_SCENARIOS = {"oracle", "surrogate", "maxwell"}
+        _VALID_PINNS_SCENARIOS = {
+            "oracle",
+            "surrogate",
+            "maxwell",
+            "smoothness",
+            "skin_depth",
+            "continuity",
+            "variational",
+            "self_adaptive",
+        }
         _VALID_LAMBDA_SCHEDULES = {"fixed", "linear", "cosine", "step"}
         _VALID_PHYSICS_NORMS = {"l1", "l2", "huber"}
         assert self.pinns_scenario in _VALID_PINNS_SCENARIOS, (
