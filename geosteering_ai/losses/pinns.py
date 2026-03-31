@@ -85,6 +85,11 @@ logger = logging.getLogger(__name__)
 # ── Epsilon float32-safe (NUNCA 1e-30) ────────────────────────────────
 EPS = 1e-12
 
+# ── ln(10) pre-computado para conversao log10 → linear ──────────────
+# Usado em skin_depth_loss para converter 1/delta para log10 space:
+#   d(log10 rho)/dz = (d rho/dz) / (rho × ln(10))
+_LN10 = math.log(10.0)  # ≈ 2.302585
+
 # ── Cenarios e schedules validos ──────────────────────────────────────
 VALID_PINNS_SCENARIOS = {
     "oracle",
@@ -322,9 +327,9 @@ def make_oracle_physics_loss(
         # ── Canais de resistividade (rho_h, rho_v) ──────────────
         # Em modo DTB (output_channels >= 4), opera apenas nos canais rho.
         # y_true ja contem rho_ref; y_pred contem rho_pred.
-        n_target = tf.minimum(tf.shape(y_true)[-1], 2)
-        y_t = y_true[..., :n_target]
-        y_p = y_pred[..., :n_target]
+        # Fix CR#2: slice estatico [:2] preserva shape em tf.function.
+        y_t = y_true[..., :2]
+        y_p = y_pred[..., :2]
 
         if norm == "l2":
             # ── MSE: penaliza grandes erros quadraticamente ──────
@@ -437,8 +442,8 @@ def make_surrogate_physics_loss(
         # Quando o surrogate nao esta disponivel, retorna 0.0
         # para nao afetar o treinamento. Lambda schedule cuidara
         # de desativar o termo PINNs automaticamente (lambda=0).
+        # Fix CR#3: sem logger.debug dentro de closure traced — side effect.
         if _surrogate_model is None:
-            logger.debug("Surrogate nao disponivel — L_surrogate = 0.0")
             return tf.constant(0.0, dtype=tf.float32)
 
         # ── Forward pass pelo surrogate ───────────────────────────
@@ -570,6 +575,13 @@ def make_maxwell_physics_loss(
         # Canal 0: log10(rho_h), Canal 1: log10(rho_v)
         rho_log = y_pred[..., :2]  # (B, N, 2)
 
+        # ── Fix CR#4: guard para seq_len < 3 (d2 requer 3+ pontos) ─
+        seq_len = tf.shape(rho_log)[1]
+        if_short = tf.less(seq_len, 3)
+        if tf.executing_eagerly():
+            if if_short:
+                return tf.constant(0.0, dtype=tf.float32)
+
         # ── Condutividade (S/m) a partir de log10(rho) ───────────
         # sigma = 1/rho = 10^(-log10(rho))
         # Clamp para evitar overflow: log10(rho) em [-2, 5]
@@ -585,8 +597,11 @@ def make_maxwell_physics_loss(
         # d^2f/dz^2 ≈ (f[i+1] - 2*f[i] + f[i-1]) / dz^2
         # Interior: indices [1:-1] para ter vizinhos em ambos os lados.
         # dz_sq normaliza pela distancia real entre pontos de medicao.
+        # Fix CR#5: usar rho_log_clamped para consistencia com k_sq.
         d2_rho = (
-            rho_log[:, 2:, :] - 2.0 * rho_log[:, 1:-1, :] + rho_log[:, :-2, :]
+            rho_log_clamped[:, 2:, :]
+            - 2.0 * rho_log_clamped[:, 1:-1, :]
+            + rho_log_clamped[:, :-2, :]
         ) / dz_sq  # (B, N-2, 2)
 
         # ── Normalizacao pela condutividade local ─────────────────
@@ -800,9 +815,8 @@ def make_smoothness_loss(
 
         # ── Extrair canais de resistividade (log10 scale) ─────────
         # Canal 0: log10(rho_h), Canal 1: log10(rho_v)
-        # Limita a 2 canais para compatibilidade com DTB (>= 4 canais).
-        n_target = tf.minimum(tf.shape(y_pred)[-1], 2)
-        rho_log = y_pred[..., :n_target]  # (B, N, C)
+        # Fix CR#2: slice estatico [:2] preserva shape em tf.function.
+        rho_log = y_pred[..., :2]  # (B, N, 2) — shape estatica
 
         # ── Derivada de 1a ordem via diferencas finitas ───────────
         # d(rho)/dz ≈ (rho[i+1] - rho[i]) / dz
@@ -925,39 +939,49 @@ def make_skin_depth_loss(
         import tensorflow as tf
 
         # ── Extrair canais rho (log10 scale) ──────────────────────
-        n_target = tf.minimum(tf.shape(y_pred)[-1], 2)
-        rho_log = y_pred[..., :n_target]  # (B, N, C)
+        # Fix CR#2: slice estatico [:2] preserva shape em tf.function.
+        rho_log = y_pred[..., :2]  # (B, N, 2) — shape estatica
+
+        # ── Clamp para evitar overflow: rho em [0.01, 100000] Ohm.m
+        # Fix CR#5: usar rho_log_clamped tanto para sigma quanto para
+        # o gradiente, garantindo consistencia numerica.
+        rho_log_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
 
         # ── Condutividade sigma(z) = 10^(-rho_log) ───────────────
-        # Clamp para evitar overflow: rho em [0.01, 100000] Ohm.m
-        rho_log_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
-        sigma = tf.pow(10.0, -rho_log_clamped)  # (B, N, C)
+        sigma = tf.pow(10.0, -rho_log_clamped)  # (B, N, 2)
 
         # ── Skin depth: delta(z) = sqrt(2 / (omega × mu × sigma))
         # Em meios condutivos (sigma grande), delta eh pequeno.
         # Em meios resistivos (sigma pequeno), delta eh grande.
         # +EPS evita divisao por zero quando sigma → 0.
-        delta = tf.sqrt(2.0 / (omega_mu * sigma + EPS))  # (B, N, C)
+        delta = tf.sqrt(2.0 / (omega_mu * sigma + EPS))  # (B, N, 2)
 
-        # ── Limite de gradiente: 1/delta(z) ──────────────────────
-        # Gradientes maiores que este limite sao fisicamente
-        # impossiveis de resolver na frequencia dada.
-        inv_delta = 1.0 / (delta + EPS)  # (B, N, C)
+        # ── Limite de gradiente em log10 space ───────────────────
+        # Fix CR#1: o gradiente d_rho esta em log10(Ohm.m)/m.
+        # Converter 1/delta para log10 space:
+        #   d(log10 rho)/dz = (d rho/dz) / (rho × ln(10))
+        # Portanto o limiar em log10 space eh:
+        #   inv_delta_log = 1 / (delta × rho × ln(10))
+        inv_delta = 1.0 / (delta + EPS)  # (B, N, 2)
+        rho_linear = tf.pow(10.0, rho_log_clamped)  # rho em Ohm.m
+        inv_delta_log = inv_delta / (rho_linear * _LN10 + EPS)  # (B, N, 2)
 
-        # ── Derivada de 1a ordem |d(rho)/dz| ─────────────────────
-        # Magnitude do gradiente espacial do perfil de resistividade.
+        # ── Derivada de 1a ordem |d(log10 rho)/dz| ───────────────
+        # Fix CR#5: usar rho_log_clamped para consistencia.
         d_rho = tf.abs(
-            (rho_log[:, 1:, :] - rho_log[:, :-1, :]) / (dz + EPS)
-        )  # (B, N-1, C)
+            (rho_log_clamped[:, 1:, :] - rho_log_clamped[:, :-1, :]) / (dz + EPS)
+        )  # (B, N-1, 2)
 
-        # ── Alinhar inv_delta com d_rho (midpoints) ──────────────
-        # inv_delta tem shape (B, N, C), d_rho tem (B, N-1, C).
-        # Usar media dos pontos adjacentes para alinhar.
-        inv_delta_mid = 0.5 * (inv_delta[:, 1:, :] + inv_delta[:, :-1, :])  # (B, N-1, C)
+        # ── Alinhar inv_delta_log com d_rho (midpoints) ──────────
+        # inv_delta_log tem shape (B, N, 2), d_rho tem (B, N-1, 2).
+        inv_delta_mid = 0.5 * (
+            inv_delta_log[:, 1:, :] + inv_delta_log[:, :-1, :]
+        )  # (B, N-1, 2)
 
-        # ── Excesso: max(0, |d(rho)/dz| - 1/delta) ──────────────
-        # Penaliza apenas gradientes que EXCEDEM o limite fisico.
-        # Gradientes dentro do skin depth sao permitidos (sem custo).
+        # ── Excesso: max(0, |d(log10 rho)/dz| - limiar_log) ─────
+        # Penaliza apenas gradientes que EXCEDEM o limite fisico
+        # em log10 space. Gradientes dentro do skin depth sao
+        # permitidos (sem custo).
         excess = tf.nn.relu(d_rho - inv_delta_mid)
 
         # ── Loss: MSE do excesso ──────────────────────────────────
@@ -1061,8 +1085,8 @@ def make_continuity_loss(
         import tensorflow as tf
 
         # ── Extrair canais de resistividade (log10 scale) ─────────
-        n_target = tf.minimum(tf.shape(y_pred)[-1], 2)
-        rho_log = y_pred[..., :n_target]  # (B, N, C)
+        # Fix CR#2: slice estatico [:2] preserva shape em tf.function.
+        rho_log = y_pred[..., :2]  # (B, N, 2) — shape estatica
 
         # ── Derivada de 1a ordem via diferencas finitas ───────────
         # d(rho)/dz = (rho[i+1] - rho[i]) / dz
@@ -1183,8 +1207,8 @@ def make_variational_loss(
         import tensorflow as tf
 
         # ── Extrair canais rho (log10 scale) ──────────────────────
-        n_target = tf.minimum(tf.shape(y_pred)[-1], 2)
-        rho_log = y_pred[..., :n_target]  # (B, N, C)
+        # Fix CR#2: slice estatico [:2] preserva shape em tf.function.
+        rho_log = y_pred[..., :2]  # (B, N, 2) — shape estatica
 
         # ── Condutividade sigma(z) = 10^(-rho_log) ───────────────
         # Clamp para evitar overflow: rho em [0.01, 100000] Ohm.m
@@ -1198,8 +1222,8 @@ def make_variational_loss(
         k_sq = omega_mu * sigma  # (B, N, C)
 
         # ── Derivada de 1a ordem d(rho)/dz ────────────────────────
-        # Diferencas finitas: (rho[i+1] - rho[i]) / dz
-        d_rho = (rho_log[:, 1:, :] - rho_log[:, :-1, :]) / (dz + EPS)
+        # Fix CR#5: usar rho_log_clamped para consistencia com k_sq.
+        d_rho = (rho_log_clamped[:, 1:, :] - rho_log_clamped[:, :-1, :]) / (dz + EPS)
         # (B, N-1, C)
 
         # ── Alinhar k^2 com d_rho (midpoints) ────────────────────
@@ -1320,8 +1344,15 @@ def make_self_adaptive_loss(
         import tensorflow as tf
 
         # ── Extrair canais rho (log10 scale) ──────────────────────
-        n_target = tf.minimum(tf.shape(y_pred)[-1], 2)
-        rho_log = y_pred[..., :n_target]  # (B, N, C)
+        # Fix CR#2: slice estatico [:2] preserva shape em tf.function.
+        rho_log = y_pred[..., :2]  # (B, N, 2) — shape estatica
+
+        # ── Fix CR#4: guard para seq_len < 3 (d2 requer 3+ pontos) ─
+        seq_len = tf.shape(rho_log)[1]
+        if_short = tf.less(seq_len, 3)
+        if tf.executing_eagerly():
+            if if_short:
+                return tf.constant(0.0, dtype=tf.float32)
 
         # ── Condutividade sigma(z) = 10^(-rho_log) ───────────────
         rho_log_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
@@ -1331,11 +1362,14 @@ def make_self_adaptive_loss(
         k_sq = omega_mu * sigma  # (B, N, C)
 
         # ── Derivada de 2a ordem d^2(rho)/dz^2 (pontos interiores)
+        # Fix CR#5: usar rho_log_clamped para consistencia com k_sq.
         # Stencil central: (f[i+1] - 2f[i] + f[i-1]) / dz^2
         # Shape resultante: (B, N-2, C)
-        d2_rho = (rho_log[:, 2:, :] - 2.0 * rho_log[:, 1:-1, :] + rho_log[:, :-2, :]) / (
-            dz_sq + EPS
-        )
+        d2_rho = (
+            rho_log_clamped[:, 2:, :]
+            - 2.0 * rho_log_clamped[:, 1:-1, :]
+            + rho_log_clamped[:, :-2, :]
+        ) / (dz_sq + EPS)
 
         # ── Normalizar residuo por (1 + k^2) nos pontos interiores
         k_sq_interior = k_sq[:, 1:-1, :]
@@ -1343,9 +1377,10 @@ def make_self_adaptive_loss(
         residual_sq = tf.square(residual)  # (B, N-2, C)
 
         # ── Derivada de 1a ordem |d(rho)/dz| (para pesos) ────────
-        # Diferencas finitas: (rho[i+1] - rho[i]) / dz
-        # Shape: (B, N-1, C)
-        d1_rho = tf.abs((rho_log[:, 1:, :] - rho_log[:, :-1, :]) / (dz + EPS))
+        # Fix CR#5: usar rho_log_clamped para consistencia.
+        d1_rho = tf.abs(
+            (rho_log_clamped[:, 1:, :] - rho_log_clamped[:, :-1, :]) / (dz + EPS)
+        )
 
         # ── Alinhar d1_rho com pontos interiores (N-2) ───────────
         # Media dos gradientes adjacentes para ter shape (B, N-2, C).
