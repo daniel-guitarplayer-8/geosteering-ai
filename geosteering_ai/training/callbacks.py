@@ -16,8 +16,8 @@
 # ║    • BestEpochTracker: rastreia melhor epoca e metrica                    ║
 # ║    • DualValidationCallback: valida em clean + noisy (P2)               ║
 # ║    • PINNSLambdaScheduleCallback: annealing de lambda PINNs            ║
-# ║    • CausalDegradationMonitor: gap causal vs acausal                    ║
-# ║    • SlidingWindowValidation: valida em janelas deslizantes             ║
+# ║    • CausalDegradationMonitor: monitora val_loss em modo causal         ║
+# ║    • SlidingWindowValidation: validacao periodica em modo causal        ║
 # ║    • PeriodicCheckpoint: salva modelo a cada N epocas                   ║
 # ║    • MetricPlateauDetector: detecta plateaus persistentes               ║
 # ║    • OneCycleLR: super-convergencia (Smith 2018)                        ║
@@ -173,48 +173,59 @@ __all__ = [
 # ════════════════════════════════════════════════════════════════════════
 # HELPER: _ensure_keras_callback_base — Heranca lazy de Callback
 # ════════════════════════════════════════════════════════════════════════
-# Cria subclasse dinamica com heranca explicita de tf.keras.callbacks.Callback.
-# Substitui o pattern fragil `cls.__bases__ = (Callback,)` (BUG-M2 v2.0.1)
-# por `type()` que cria nova classe com heranca correta.
-# A referencia global e atualizada na primeira instanciacao — chamadas
-# subsequentes retornam a classe ja resolvida (fast path via issubclass).
+# Garante que a classe herda de tf.keras.callbacks.Callback via lazy
+# import. Se a classe ja herda (TF disponivel no momento da definicao),
+# retorna como esta. Caso contrario, cria subclasse com heranca
+# explicita via type() — sem mutar globals() do modulo.
 # ────────────────────────────────────────────────────────────────────────
 
 
 def _ensure_keras_callback_base(cls: type) -> type:
-    """Garante que cls herda de tf.keras.callbacks.Callback (lazy import).
+    """Garante que cls herda de tf.keras.callbacks.Callback.
 
-    Na primeira chamada, cria subclasse dinamica via type() com heranca
-    explicita (NUNCA modifica cls.__bases__ diretamente). Atualiza
-    referencia no modulo para que chamadas futuras usem a classe resolvida.
+    Padrao lazy-import: Se a classe ja herda de Callback (TF disponivel
+    no momento da definicao), retorna como esta. Caso contrario, injeta
+    Callback como base class via type().
+
+    Abordagem simplificada v2.0.1: em vez de criar classes dinamicas com
+    type() e mutar globals(), verifica heranca diretamente e usa
+    Callback como mixin se necessario. NUNCA muta globals() do modulo —
+    os chamadores (cada callback __new__) ja tratam a classe retornada.
 
     Args:
-        cls: Classe callback que precisa herdar de Callback.
+        cls: Classe de callback a verificar/resolver.
 
     Returns:
-        type: Classe com heranca de tf.keras.callbacks.Callback resolvida.
+        Classe com tf.keras.callbacks.Callback como base.
 
     Note:
-        Bug fix v2.0.1: Substituiu `cls.__bases__ = (Callback,)` que
-        era fragil (quebra isinstance, confunde mypy, incompativel com
-        futuras versoes TF). Agora usa type() para criar heranca limpa.
+        Bug fix v2.0.1: Removida mutacao de globals()[cls.__name__] que
+        era fragil (dependia de estado global, race conditions em
+        multithread, efeitos colaterais ocultos). Agora retorna a
+        classe resolvida diretamente — o chamador usa via retorno.
+        Bug fix v2.0.2: Removida mutacao de globals() completamente.
+        A funcao apenas RETORNA a classe — nunca modifica o modulo.
     """
-    import tensorflow as tf
+    try:
+        import tensorflow as tf
 
-    if issubclass(cls, tf.keras.callbacks.Callback):
+        if issubclass(cls, tf.keras.callbacks.Callback):
+            return cls
+
+        # ── Cria subclasse com heranca explicita — sem mutar globals ──
+        # type() cria nova classe que herda de ambas (cls + Callback).
+        # A referencia e retornada ao chamador (__new__) que a usa
+        # diretamente via super().__new__(resolved_cls).
+        new_cls = type(
+            cls.__name__,
+            (cls, tf.keras.callbacks.Callback),
+            dict(cls.__dict__),
+        )
+        new_cls.__module__ = cls.__module__
+        new_cls.__qualname__ = cls.__qualname__
+        return new_cls
+    except ImportError:
         return cls
-
-    # Cria nova classe com heranca explicita (sem mutar __bases__)
-    new_cls = type(
-        cls.__name__,
-        (cls, tf.keras.callbacks.Callback),
-        dict(cls.__dict__),
-    )
-    new_cls.__module__ = cls.__module__
-    new_cls.__qualname__ = cls.__qualname__
-    # Atualiza referencia global para fast-path em instancias futuras
-    globals()[cls.__name__] = new_cls
-    return new_cls
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1206,6 +1217,8 @@ class PINNSLambdaScheduleCallback:
             - losses/: combined_loss_fn usa pinns_lambda_var
         Ref: docs/ARCHITECTURE_v2.md secao 6.2 (PINNs warmup).
         Schedule linear: lambda = target * min(epoch / warmup, 1.0).
+        Epoch 0 sempre tem lambda=0.0 (inicio do warmup). Para lambda
+        ativo desde epoch 0, usar warmup_epochs=0.
         warmup=0 → lambda constante desde epoca 0 (sem rampa).
     """
 
@@ -1295,26 +1308,32 @@ class PINNSLambdaScheduleCallback:
 
 
 # ════════════════════════════════════════════════════════════════════════
-# CALLBACK 6: CausalDegradationMonitor — Gap causal vs acausal
+# CALLBACK 6: CausalDegradationMonitor — Monitoramento de val_loss causal
 #
-# Compara a performance do modelo em modos causal vs acausal para
-# detectar degradacao causada pela restricao de causalidade.
+# Monitora val_loss periodicamente para diagnostico de degradacao causal.
 # Apenas ativo quando config.use_causal_mode=True.
 #
-# Em cada epoca (a cada 5 epocas para evitar overhead), avalia o
-# modelo no val_ds e computa o causal_gap = |loss_causal - loss_full|.
-# Gap crescente indica que a mascara causal esta limitando excessivamente
-# a capacidade do modelo.
+# A cada 5 epocas, avalia o modelo no val_ds e loga como causal_val_loss.
+# Util para rastrear a evolucao da performance em modo causal ao longo
+# do treinamento e detectar degradacao tardia.
+#
+# NOTA: nao computa gap causal vs acausal (requereria dois modelos ou
+# duas avaliacoes com padding diferente). Apenas avalia no modo atual.
 #
 # Referencia: C40 legado (CausalDegradationMonitor), geosteering mode.
 # ════════════════════════════════════════════════════════════════════════
 
 
 class CausalDegradationMonitor:
-    """Monitora degradacao causada pela restricao causal.
+    """Monitora val_loss periodicamente para diagnostico de degradacao causal.
 
-    Avalia modelo em val_ds e loga causal_gap a cada 5 epocas.
-    Apenas ativo quando config.use_causal_mode=True.
+    Avalia modelo no dataset de validacao a cada 5 epocas e loga como
+    causal_val_loss. Apenas ativo quando config.use_causal_mode=True.
+
+    NOTA: implementacao atual avalia o modelo no modo ativo (causal).
+    Nao computa gap causal vs acausal, pois isso requereria duas copias
+    do modelo ou duas avaliacoes com mascaras diferentes. O valor logado
+    e a val_loss no modo causal — util para rastrear degradacao tardia.
 
     Herda de tf.keras.callbacks.Callback (lazy import).
 
@@ -1333,9 +1352,8 @@ class CausalDegradationMonitor:
         Referenciado em:
             - training/callbacks.py: build_callbacks() (se use_causal_mode)
         Ref: docs/ARCHITECTURE_v2.md secao 6.2 (geosteering mode).
-        causal_gap = |val_loss_com_mascara - val_loss_sem_mascara|.
-        Gap alto indica que causalidade impoe custo significativo.
-        Avaliacao a cada 5 epocas para minimizar overhead.
+        Avalia a cada 5 epocas para minimizar overhead.
+        causal_val_loss logado no dict logs para TensorBoard/CSVLogger.
     """
 
     def __new__(cls, model: Any, val_ds: Any, config: PipelineConfig):
@@ -1358,7 +1376,7 @@ class CausalDegradationMonitor:
         return instance
 
     def __init__(self, model: Any, val_ds: Any, config: PipelineConfig) -> None:
-        """Inicializa o monitor de degradacao causal.
+        """Inicializa o monitor de validacao causal.
 
         Args:
             model: Modelo tf.keras.Model sendo monitorado.
@@ -1381,18 +1399,21 @@ class CausalDegradationMonitor:
         logger.info("CausalDegradationMonitor inicializado (causal mode)")
 
     def on_epoch_end(self, epoch: int, logs: Optional[dict] = None) -> None:
-        """Avalia gap causal a cada 5 epocas.
+        """Avalia val_loss em modo causal a cada 5 epocas.
+
+        Monitora val_loss periodicamente para diagnostico de degradacao
+        causal. Loga como causal_val_loss no dict logs.
 
         Args:
             epoch: Indice da epoca atual (0-based).
-            logs: Dict de metricas (causal_gap adicionado).
+            logs: Dict de metricas (causal_val_loss adicionado).
 
         Note:
             Referenciado em:
                 - Keras training loop (chamado automaticamente)
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
             Avalia a cada 5 epocas para minimizar overhead.
-            Loga causal_gap no logs dict para TensorBoard/CSVLogger.
+            Loga causal_val_loss no logs dict para TensorBoard/CSVLogger.
         """
         # Avalia apenas a cada 5 epocas para evitar overhead
         if epoch % 5 != 0:
@@ -1415,21 +1436,24 @@ class CausalDegradationMonitor:
 
 
 # ════════════════════════════════════════════════════════════════════════
-# CALLBACK 7: SlidingWindowValidation — Validacao em janelas deslizantes
+# CALLBACK 7: SlidingWindowValidation — Validacao periodica em modo causal
 #
-# Testa o modelo em janelas deslizantes de tamanho sequence_length para
-# detectar efeitos de borda (edge effects) nos limites das janelas.
+# Avalia o modelo no dataset de validacao periodicamente (a cada 10 epocas)
+# para monitorar performance em modo causal.
 # Apenas ativo em modo causal (geosteering realtime).
 #
-# Compara performance no centro da janela vs bordas para garantir
-# que a predicao e uniforme ao longo da sequencia.
+# NOTA: implementacao atual avalia o dataset completo; segmentacao por
+# janela deslizante (centro vs bordas) sera adicionada em versao futura.
 #
 # Referencia: C40 legado (SlidingWindowValidation), geosteering mode.
 # ════════════════════════════════════════════════════════════════════════
 
 
 class SlidingWindowValidation:
-    """Valida modelo em janelas deslizantes para detectar edge effects.
+    """Validacao periodica em subconjuntos do dataset de validacao.
+
+    NOTA: implementacao atual avalia o dataset completo; segmentacao
+    por janela deslizante sera adicionada em versao futura.
 
     Apenas ativo quando config.use_causal_mode=True. Avalia a cada
     10 epocas para minimizar overhead.
@@ -1452,7 +1476,8 @@ class SlidingWindowValidation:
             - training/callbacks.py: build_callbacks() (futuro, se causal)
         Ref: docs/ARCHITECTURE_v2.md secao 6.2 (geosteering mode).
         Janela = config.sequence_length (600 medidas).
-        Compara perda no centro vs bordas da janela.
+        TODO: implementar segmentacao por janela deslizante para
+        comparar perda no centro vs bordas da janela (edge effects).
     """
 
     def __new__(cls, model: Any, val_data: Any, config: PipelineConfig):
@@ -1520,7 +1545,10 @@ class SlidingWindowValidation:
 
         model = self._model_ref
 
-        # Avalia modelo no dataset de validacao (janela unica = dataset completo)
+        # TODO: implementar segmentacao por janela deslizante — particionar
+        # val_data em sub-janelas de tamanho sequence_length e comparar
+        # perda no centro vs bordas para detectar edge effects.
+        # Atualmente avalia o dataset completo como janela unica.
         results = model.evaluate(self._val_data, verbose=0)
         sw_loss = results if isinstance(results, float) else results[0]
 
@@ -1679,11 +1707,13 @@ class MetricPlateauDetector:
         _monitor: Nome da metrica monitorada.
         _patience: Numero de epocas sem melhoria antes do alerta.
         _threshold: Variacao minima para considerar como melhoria.
+        _mode: Direcao de melhoria ("min" ou "max").
         _best: Melhor valor observado ate agora.
         _wait: Contador de epocas sem melhoria.
 
     Example:
         >>> cb = MetricPlateauDetector(monitor='val_loss', patience=20)
+        >>> cb_acc = MetricPlateauDetector(monitor='val_r2', patience=15, mode='max')
 
     Note:
         Referenciado em:
@@ -1691,6 +1721,8 @@ class MetricPlateauDetector:
         Ref: docs/ARCHITECTURE_v2.md secao 6.2.
         Diferente de EarlyStopping: NAO para o treinamento.
         threshold=1e-4: variacao menor que isso e considerada plateau.
+        mode="min": para losses (menor=melhor). mode="max": para metricas
+        como accuracy ou R2 (maior=melhor).
     """
 
     def __new__(
@@ -1699,6 +1731,7 @@ class MetricPlateauDetector:
         *,
         patience: int = 20,
         threshold: float = 1e-4,
+        mode: str = "min",
     ):
         """Cria instancia herdando de tf.keras.callbacks.Callback (lazy).
 
@@ -1706,6 +1739,8 @@ class MetricPlateauDetector:
             monitor: Nome da metrica a monitorar.
             patience: Epocas sem melhoria antes do alerta.
             threshold: Variacao minima considerada melhoria.
+            mode: Direcao de melhoria — "min" (loss: menor=melhor)
+                ou "max" (accuracy: maior=melhor). Default: "min".
 
         Returns:
             Instancia de MetricPlateauDetector.
@@ -1724,6 +1759,7 @@ class MetricPlateauDetector:
         *,
         patience: int = 20,
         threshold: float = 1e-4,
+        mode: str = "min",
     ) -> None:
         """Inicializa o detector de plateau.
 
@@ -1735,6 +1771,10 @@ class MetricPlateauDetector:
             threshold: Variacao minima absoluta para considerar como
                 melhoria real (evita falsos positivos por ruido numerico).
                 Default: 1e-4.
+            mode: Direcao de melhoria — "min" (loss: menor valor=melhor)
+                ou "max" (accuracy/R2: maior valor=melhor). Determina
+                como _best e inicializado e como melhoria e calculada.
+                Default: "min".
 
         Note:
             Referenciado em:
@@ -1742,6 +1782,8 @@ class MetricPlateauDetector:
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
             Plateau detectado quando |current - best| < threshold
             por patience epocas consecutivas.
+            mode="min": _best=inf, melhoria = best - current > threshold.
+            mode="max": _best=-inf, melhoria = current - best > threshold.
         """
         import tensorflow as tf
 
@@ -1749,15 +1791,19 @@ class MetricPlateauDetector:
         self._monitor: str = monitor
         self._patience: int = patience
         self._threshold: float = threshold
-        self._best: float = float("inf")
+        self._mode: str = mode
+
+        # Inicializa _best com base no mode
+        self._best: float = float("inf") if mode == "min" else float("-inf")
         self._wait: int = 0
 
         logger.info(
             "MetricPlateauDetector inicializado: monitor='%s', "
-            "patience=%d, threshold=%.6f",
+            "patience=%d, threshold=%.6f, mode='%s'",
             monitor,
             patience,
             threshold,
+            mode,
         )
 
     def on_epoch_end(self, epoch: int, logs: Optional[dict] = None) -> None:
@@ -1780,8 +1826,13 @@ class MetricPlateauDetector:
         if current is None:
             return
 
-        # Verifica se houve melhoria significativa
-        if self._best - current > self._threshold:
+        # Verifica se houve melhoria significativa (mode-aware)
+        if self._mode == "min":
+            improved = self._best - current > self._threshold
+        else:
+            improved = current - self._best > self._threshold
+
+        if improved:
             self._best = current
             self._wait = 0
         else:

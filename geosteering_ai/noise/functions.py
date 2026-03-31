@@ -55,12 +55,16 @@ logger = logging.getLogger(__name__)
 #   │                                                                          │
 #   │  σ = noise_level_var (tf.Variable, controlado pelo curriculum)          │
 #   │  Aplicado ANTES de FV e GS (fidelidade LWD)                            │
-#   │  z_obs (col 0) NUNCA recebe noise                                       │
+#   │  Colunas protegidas (0:n_protected) NUNCA recebem noise:                 │
+#   │    P1: n_protected=1 → [z_obs]                                          │
+#   │    P2: n_protected=2 → [theta_norm, z_obs]                              │
+#   │    P3: n_protected=2 → [f_norm, z_obs]                                  │
+#   │    P2+P3: n_protected=3 → [theta_norm, f_norm, z_obs]                   │
 #   └──────────────────────────────────────────────────────────────────────────┘
 
 # Tipo callable para funcoes de noise TF.
-# Assinatura: (x: tf.Tensor, noise_level: tf.Variable) -> tf.Tensor
-NoiseFnType = Callable  # tf.Tensor, tf.Variable -> tf.Tensor
+# Assinatura: (x: tf.Tensor, noise_level: tf.Variable, n_protected: int) -> tf.Tensor
+NoiseFnType = Callable  # tf.Tensor, tf.Variable, int -> tf.Tensor
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -68,46 +72,50 @@ NoiseFnType = Callable  # tf.Tensor, tf.Variable -> tf.Tensor
 # ════════════════════════════════════════════════════════════════════════════
 # Cada funcao recebe um tensor 3D (batch, seq_len, n_feat) e um
 # tf.Variable com o nivel de ruido atual (controlado pelo curriculum).
-# O noise eh aplicado APENAS nas colunas EM (indices 1: em diante),
-# preservando z_obs (indice 0) intacto.
+# O noise eh aplicado APENAS nas colunas EM (indices n_protected: em diante),
+# preservando as primeiras n_protected colunas intactas (theta?, freq?, z_obs).
+# n_protected = config.n_prefix + 1 (default 1 para P1 baseline).
 # Ref: Cadeia on-the-fly: raw → noise → FV → GS → scale → modelo.
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _add_gaussian_noise_tf(x, noise_level):
+def _add_gaussian_noise_tf(x, noise_level, n_protected=1):
     """Noise gaussiano aditivo: x + N(0, sigma^2).
 
     Modela ruido eletronico aditivo do receptor LWD. Tipo mais
     comum e fisicamente motivado para medidas EM.
 
     Args:
-        x: Tensor 3D (batch, seq_len, n_feat). Layout:
+        x: Tensor 3D (batch, seq_len, n_feat). Layout P1:
             [z_obs, Re(Hxx), Im(Hxx), Re(Hzz), Im(Hzz), ...GS].
+            Layout P2+P3: [theta_norm?, f_norm?, z_obs, Re(Hxx), ...].
         noise_level: tf.Variable escalar com sigma atual.
+        n_protected: Colunas iniciais protegidas (parametros conhecidos
+            + z_obs). Default 1 (P1). P2: 2, P3: 2, P2+P3: 3.
+            Calculado como config.n_prefix + 1.
 
     Returns:
-        tf.Tensor: x com noise gaussiano nas colunas EM (indices 1:).
+        tf.Tensor: x com noise gaussiano nas colunas EM.
 
     Note:
         Referenciado em: NOISE_FN_MAP["gaussian"].
-        z_obs (col 0) preservado. GS columns tambem recebem noise
-        (correto — GS sao derivados dos EM ruidosos).
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    # ── Separar z_obs (col 0) das features EM (cols 1:) ──────────────
-    z_obs = x[:, :, :1]  # (batch, seq, 1) — NUNCA noise
-    em_feats = x[:, :, 1:]  # (batch, seq, n_feat-1) — recebe noise
+    # ── Separar colunas protegidas das features EM ────────────────────
+    protected = x[:, :, :n_protected]  # (batch, seq, n_prot) — NUNCA noise
+    em_feats = x[:, :, n_protected:]  # (batch, seq, n_em) — recebe noise
     noise = tf.random.normal(
         shape=tf.shape(em_feats),
         mean=0.0,
         stddev=noise_level,
         dtype=tf.float32,
     )
-    return tf.concat([z_obs, em_feats + noise], axis=-1)
+    return tf.concat([protected, em_feats + noise], axis=-1)
 
 
-def _add_multiplicative_noise_tf(x, noise_level):
+def _add_multiplicative_noise_tf(x, noise_level, n_protected=1):
     """Noise multiplicativo (speckle): x * (1 + N(0, sigma^2)).
 
     Modela erros de ganho do amplificador LWD e variacao de
@@ -116,6 +124,7 @@ def _add_multiplicative_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com noise multiplicativo nas colunas EM.
@@ -123,21 +132,22 @@ def _add_multiplicative_noise_tf(x, noise_level):
     Note:
         Referenciado em: NOISE_FN_MAP["multiplicative"].
         Ref: Noise tipo "speckle" no catalogo C12 legado.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     noise = tf.random.normal(
         shape=tf.shape(em_feats),
         mean=0.0,
         stddev=noise_level,
         dtype=tf.float32,
     )
-    return tf.concat([z_obs, em_feats * (1.0 + noise)], axis=-1)
+    return tf.concat([protected, em_feats * (1.0 + noise)], axis=-1)
 
 
-def _add_uniform_noise_tf(x, noise_level):
+def _add_uniform_noise_tf(x, noise_level, n_protected=1):
     """Noise uniforme: x + U(-sigma, sigma).
 
     Modela erro de quantizacao ADC (resolucao finita do conversor
@@ -146,27 +156,29 @@ def _add_uniform_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com noise uniforme nas colunas EM.
 
     Note:
         Referenciado em: NOISE_FN_MAP["uniform"].
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     noise = tf.random.uniform(
         shape=tf.shape(em_feats),
         minval=-noise_level,
         maxval=noise_level,
         dtype=tf.float32,
     )
-    return tf.concat([z_obs, em_feats + noise], axis=-1)
+    return tf.concat([protected, em_feats + noise], axis=-1)
 
 
-def _add_dropout_noise_tf(x, noise_level):
+def _add_dropout_noise_tf(x, noise_level, n_protected=1):
     """Noise dropout: mascara aleatoria de canais/amostras.
 
     Modela perda de dados por falha de telemetria ou dropout de
@@ -176,6 +188,7 @@ def _add_dropout_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar (probabilidade de dropout).
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com dropout nas colunas EM.
@@ -184,11 +197,12 @@ def _add_dropout_noise_tf(x, noise_level):
         Referenciado em: NOISE_FN_MAP["dropout"].
         Inverted dropout: divide por (1-p) para manter escala.
         Se noise_level >= 1.0, retorna zeros (protecao).
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     # ── Inverted dropout: mask * x / (1-p) ────────────────────────────
     keep_prob = tf.maximum(1.0 - noise_level, 1e-6)
     mask = tf.cast(
@@ -196,7 +210,7 @@ def _add_dropout_noise_tf(x, noise_level):
         dtype=tf.float32,
     )
     em_dropped = em_feats * mask / keep_prob
-    return tf.concat([z_obs, em_dropped], axis=-1)
+    return tf.concat([protected, em_dropped], axis=-1)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -224,7 +238,7 @@ def _add_dropout_noise_tf(x, noise_level):
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _add_drift_noise_tf(x, noise_level):
+def _add_drift_noise_tf(x, noise_level, n_protected=1):
     """Noise de deriva termica: cumsum de incrementos aleatorios.
 
     Modela a deriva lenta da eletronica do receptor LWD causada por
@@ -241,6 +255,7 @@ def _add_drift_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar com sigma base.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com drift acumulado nas colunas EM.
@@ -250,11 +265,12 @@ def _add_drift_noise_tf(x, noise_level):
         Ref: noise_catalog.md tipo #5 (drift), legado C12 phi=0.95.
         O drift eh um random walk escalado — amplitude cresce com
         sqrt(seq_len). Fator φ=0.95 reduz em 5% a amplitude total.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     # ── Incrementos aleatorios (random walk steps) ───────────────────
     increments = tf.random.normal(
         shape=tf.shape(em_feats),
@@ -266,10 +282,10 @@ def _add_drift_noise_tf(x, noise_level):
     # Produz tendencia temporalmente correlacionada (drift).
     # Fator de decaimento phi evita crescimento ilimitado.
     drift = tf.cumsum(increments, axis=1) * 0.95
-    return tf.concat([z_obs, em_feats + drift], axis=-1)
+    return tf.concat([protected, em_feats + drift], axis=-1)
 
 
-def _add_depth_dependent_noise_tf(x, noise_level):
+def _add_depth_dependent_noise_tf(x, noise_level, n_protected=1):
     """Noise dependente de profundidade: sigma cresce com indice temporal.
 
     Modela a atenuacao EM com profundidade (skin depth): quanto mais
@@ -282,6 +298,7 @@ def _add_depth_dependent_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar com sigma base.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com noise crescente em profundidade.
@@ -290,11 +307,12 @@ def _add_depth_dependent_noise_tf(x, noise_level):
         Referenciado em: NOISE_FN_MAP["depth_dependent"].
         Ref: noise_catalog.md tipo #8, Errata skin depth secao 4.6.
         alpha=1.0: no fundo do perfil, sigma = 2 × sigma_base.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     seq_len = tf.cast(tf.shape(em_feats)[1], tf.float32)
     # ── Fator de escala: cresce linearmente de 1.0 a 2.0 ────────────
     # shape: (1, seq_len, 1) — broadcasta em batch e features
@@ -307,10 +325,10 @@ def _add_depth_dependent_noise_tf(x, noise_level):
         stddev=noise_level,
         dtype=tf.float32,
     )
-    return tf.concat([z_obs, em_feats + noise * scale], axis=-1)
+    return tf.concat([protected, em_feats + noise * scale], axis=-1)
 
 
-def _add_spikes_noise_tf(x, noise_level):
+def _add_spikes_noise_tf(x, noise_level, n_protected=1):
     """Noise de spikes: outliers transitorios por interferencia EM.
 
     Modela picos impulsivos causados por descargas eletrostaticas,
@@ -322,6 +340,7 @@ def _add_spikes_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar com sigma base.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com spikes esporadicos nas colunas EM.
@@ -330,11 +349,12 @@ def _add_spikes_noise_tf(x, noise_level):
         Referenciado em: NOISE_FN_MAP["spikes"].
         Ref: noise_catalog.md tipo #21 (spikes).
         Probabilidade 0.001 e magnitude 5σ sao defaults do legado C12.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     # ── Mascara de Bernoulli: p=0.001 de spike ──────────────────────
     mask = tf.cast(
         tf.random.uniform(shape=tf.shape(em_feats)) < 0.001,
@@ -347,10 +367,10 @@ def _add_spikes_noise_tf(x, noise_level):
         stddev=noise_level * 5.0,
         dtype=tf.float32,
     )
-    return tf.concat([z_obs, em_feats + mask * spike_values], axis=-1)
+    return tf.concat([protected, em_feats + mask * spike_values], axis=-1)
 
 
-def _add_pink_noise_tf(x, noise_level):
+def _add_pink_noise_tf(x, noise_level, n_protected=1):
     """Noise rosa (1/f): espectro decai como 1/frequencia.
 
     Modela flicker noise eletronico presente em todos os receptores
@@ -364,6 +384,7 @@ def _add_pink_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar com sigma base.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com noise 1/f nas colunas EM.
@@ -373,11 +394,12 @@ def _add_pink_noise_tf(x, noise_level):
         Ref: noise_catalog.md tipo #9 (pink).
         Aproximacao temporal: ruido branco filtrado por media movel
         ponderada (eficiente para tf.data.map, sem tf.signal.fft).
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     # ── Ruido branco base ────────────────────────────────────────────
     white = tf.random.normal(
         shape=tf.shape(em_feats),
@@ -394,7 +416,7 @@ def _add_pink_noise_tf(x, noise_level):
     brownian_norm = brownian / std_b * noise_level
     # Mix 50/50 branco + browniano ≈ espectro 1/f
     pink = 0.5 * white + 0.5 * brownian_norm
-    return tf.concat([z_obs, em_feats + pink], axis=-1)
+    return tf.concat([protected, em_feats + pink], axis=-1)
 
 
 def _saturation_clip(em_feats, noise_level):
@@ -410,7 +432,7 @@ def _saturation_clip(em_feats, noise_level):
     return tf.clip_by_value(em_feats, lo, hi)
 
 
-def _add_saturation_noise_tf(x, noise_level):
+def _add_saturation_noise_tf(x, noise_level, n_protected=1):
     """Noise de saturacao: clipping em percentil do ADC.
 
     Modela a sobrecarga do receptor quando o sinal EM excede a
@@ -423,6 +445,7 @@ def _add_saturation_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar (controla clipping).
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com valores extremos clipados.
@@ -431,11 +454,12 @@ def _add_saturation_noise_tf(x, noise_level):
         Referenciado em: NOISE_FN_MAP["saturation"].
         Ref: noise_catalog.md tipo #7 (saturation).
         noise_level=0.05 → clip no percentil 97.5/2.5.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     # ── Guard: noise_level=0 → retorna x inalterado ─────────────────
     # Saturation sempre clipa; sem guard, seria ativo na fase clean
     # do curriculum quando noise_level_var=0.0.
@@ -444,7 +468,7 @@ def _add_saturation_noise_tf(x, noise_level):
         lambda: em_feats,
         lambda: _saturation_clip(em_feats, noise_level),
     )
-    return tf.concat([z_obs, em_clipped], axis=-1)
+    return tf.concat([protected, em_clipped], axis=-1)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -476,7 +500,7 @@ def _add_saturation_noise_tf(x, noise_level):
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _add_shoulder_bed_noise_tf(x, noise_level):
+def _add_shoulder_bed_noise_tf(x, noise_level, n_protected=1):
     """R1 — Shoulder bed effect: leakage H de camadas adjacentes.
 
     Em camadas finas (<1 metro), a medida EM sofre influencia das
@@ -489,6 +513,7 @@ def _add_shoulder_bed_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com suavizacao shoulder bed + noise.
@@ -497,11 +522,12 @@ def _add_shoulder_bed_noise_tf(x, noise_level):
         Referenciado em: NOISE_FN_MAP["shoulder_bed"].
         Ref: noise_catalog.md R1. Wang et al. (2018).
         Kernel 3 ≈ 3 medicoes ≈ 3 metros de resolucao vertical.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     # ── Media movel kernel=3 (resolucao vertical da ferramenta) ──────
     # Simula resposta da ferramenta que integra sobre ~3 metros.
     # Pad com replicate nas bordas para preservar shape.
@@ -515,10 +541,10 @@ def _add_shoulder_bed_noise_tf(x, noise_level):
         stddev=noise_level * 0.5,
         dtype=tf.float32,
     )
-    return tf.concat([z_obs, blend + noise], axis=-1)
+    return tf.concat([protected, blend + noise], axis=-1)
 
 
-def _add_borehole_effect_noise_tf(x, noise_level):
+def _add_borehole_effect_noise_tf(x, noise_level, n_protected=1):
     """R2 — Borehole effect: distorcao pelo fluido e rugosidade do poco.
 
     A rugosidade do poco (washout) e o fluido de perfuracao (lama)
@@ -531,6 +557,7 @@ def _add_borehole_effect_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com efeito borehole combinado.
@@ -539,11 +566,12 @@ def _add_borehole_effect_noise_tf(x, noise_level):
         Referenciado em: NOISE_FN_MAP["borehole_effect"].
         Ref: noise_catalog.md R2. Constable et al. (2016).
         Combina efeito multiplicativo (ganho) + aditivo (offset).
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     # ── Efeito multiplicativo (variacao de ganho) ────────────────────
     gain_noise = tf.random.normal(
         shape=tf.shape(em_feats),
@@ -559,10 +587,10 @@ def _add_borehole_effect_noise_tf(x, noise_level):
         dtype=tf.float32,
     )
     result = em_feats * (1.0 + gain_noise) + offset_noise
-    return tf.concat([z_obs, result], axis=-1)
+    return tf.concat([protected, result], axis=-1)
 
 
-def _add_mud_invasion_noise_tf(x, noise_level):
+def _add_mud_invasion_noise_tf(x, noise_level, n_protected=1):
     """R3 — Mud invasion: filtrado de lama altera resistividade aparente.
 
     O filtrado de lama invade a formacao proxima ao poco, criando
@@ -575,6 +603,7 @@ def _add_mud_invasion_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com atenuacao por invasao.
@@ -583,11 +612,12 @@ def _add_mud_invasion_noise_tf(x, noise_level):
         Referenciado em: NOISE_FN_MAP["mud_invasion"].
         Ref: noise_catalog.md R3. Fator default 0.8 no legado.
         noise_level=0.05 → atenuacao de 0-5% (conservador).
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     # ── Fator de atenuacao uniforme por amostra ─────────────────────
     # Cada posicao temporal tem atenuacao ligeiramente diferente
     # (invasao nao eh uniforme ao longo do poco).
@@ -597,10 +627,10 @@ def _add_mud_invasion_noise_tf(x, noise_level):
         maxval=1.0,
         dtype=tf.float32,
     )
-    return tf.concat([z_obs, em_feats * attenuation], axis=-1)
+    return tf.concat([protected, em_feats * attenuation], axis=-1)
 
 
-def _add_anisotropy_misalignment_noise_tf(x, noise_level):
+def _add_anisotropy_misalignment_noise_tf(x, noise_level, n_protected=1):
     """R4 — Anisotropy misalignment: eixo da ferramenta ≠ eixo TIV.
 
     Quando a ferramenta nao esta perfeitamente alinhada com o eixo
@@ -613,6 +643,7 @@ def _add_anisotropy_misalignment_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com mistura cruzada Hxx↔Hzz.
@@ -621,11 +652,12 @@ def _add_anisotropy_misalignment_noise_tf(x, noise_level):
         Referenciado em: NOISE_FN_MAP["anisotropy_misalignment"].
         Ref: noise_catalog.md R4. delta_deg=2° no legado.
         noise_level=0.05 → ~3° de desalinhamento.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     # ── Mistura cruzada: cada coluna recebe epsilon de vizinhas ──────
     # Aproximacao linearizada de rotacao: col_i += δ × col_((i+2)%n)
     # Para 4 EM cols: Re(Hxx)↔Re(Hzz), Im(Hxx)↔Im(Hzz)
@@ -645,10 +677,10 @@ def _add_anisotropy_misalignment_noise_tf(x, noise_level):
             dtype=tf.float32,
         ),
     )
-    return tf.concat([z_obs, mixed], axis=-1)
+    return tf.concat([protected, mixed], axis=-1)
 
 
-def _add_formation_heterogeneity_noise_tf(x, noise_level):
+def _add_formation_heterogeneity_noise_tf(x, noise_level, n_protected=1):
     """R5 — Formation heterogeneity: variabilidade intra-camada.
 
     Modela a variabilidade natural de resistividade dentro de uma
@@ -666,6 +698,7 @@ def _add_formation_heterogeneity_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com variabilidade de formacao nas colunas EM.
@@ -674,11 +707,12 @@ def _add_formation_heterogeneity_noise_tf(x, noise_level):
         Referenciado em: NOISE_FN_MAP["formation_heterogeneity"].
         Ref: noise_catalog.md R5.
         ATENCAO: aqui opera APENAS em features EM.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     # ── Variacao multiplicativa com autocorrelacao ───────────────────
     # Ruido branco → cumsum → normalizar → fator multiplicativo
     white = tf.random.normal(
@@ -694,10 +728,10 @@ def _add_formation_heterogeneity_noise_tf(x, noise_level):
     smooth_norm = smooth / std_s * noise_level
     # Fator multiplicativo: 1 + variacao
     factor = 1.0 + smooth_norm
-    return tf.concat([z_obs, em_feats * factor], axis=-1)
+    return tf.concat([protected, em_feats * factor], axis=-1)
 
 
-def _add_telemetry_noise_tf(x, noise_level):
+def _add_telemetry_noise_tf(x, noise_level, n_protected=1):
     """R6 — Telemetry noise: erros de transmissao MWD/LWD.
 
     O sistema de telemetria mud-pulse transmite dados do fundo do
@@ -710,6 +744,7 @@ def _add_telemetry_noise_tf(x, noise_level):
     Args:
         x: Tensor 3D (batch, seq_len, n_feat).
         noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
 
     Returns:
         tf.Tensor: x com erros de telemetria.
@@ -718,11 +753,12 @@ def _add_telemetry_noise_tf(x, noise_level):
         Referenciado em: NOISE_FN_MAP["telemetry"].
         Ref: noise_catalog.md R6.
         Dropout 0.1% + BER 1e-4 sao valores tipicos LWD.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
     """
     import tensorflow as tf
 
-    z_obs = x[:, :, :1]
-    em_feats = x[:, :, 1:]
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
     # ── Dropout de telemetria: pacotes inteiros zerados ──────────────
     # Probabilidade de perda proporcional a noise_level
     drop_prob = noise_level * 0.02
@@ -739,7 +775,7 @@ def _add_telemetry_noise_tf(x, noise_level):
         stddev=noise_level * 0.1,
         dtype=tf.float32,
     )
-    return tf.concat([z_obs, em_dropped + bit_noise], axis=-1)
+    return tf.concat([protected, em_dropped + bit_noise], axis=-1)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -844,23 +880,30 @@ def apply_noise_tf(
     noise_level_var: "tf.Variable",
     noise_types: List[str],
     noise_weights: List[float],
+    n_protected: int = 1,
 ) -> "tf.Tensor":
-    """Aplica mix de noise types no tensor de features.
+    """Aplica composicao sequencial de noise types no tensor de features.
 
     Dispatcher que resolve cada tipo contra NOISE_FN_MAP e aplica
-    com pesos normalizados. Se noise_level_var == 0 (fase clean),
-    retorna x inalterado (otimizacao).
+    sequencialmente (cada tipo opera sobre o resultado do anterior).
+    Pesos controlam o noise_level efetivo de cada tipo.
+    Se noise_level_var == 0 (fase clean), retorna x inalterado.
 
     Args:
-        x: Tensor 3D (batch, seq_len, n_feat). Layout:
+        x: Tensor 3D (batch, seq_len, n_feat). Layout P1:
             [z_obs, Re(Hxx), Im(Hxx), Re(Hzz), Im(Hzz), ...].
+            Layout P2+P3: [theta_norm?, f_norm?, z_obs, Re(Hxx), ...].
         noise_level_var: tf.Variable escalar com sigma atual.
         noise_types: Lista de tipos. Ex: ["gaussian", "multiplicative"].
         noise_weights: Pesos correspondentes. Ex: [0.8, 0.2].
-            Normalizados internamente para somar 1.0.
+            Pesos controlam noise_level efetivo de cada tipo:
+            noise_level_efetivo = noise_level × (w_i / w_max).
+        n_protected: Colunas iniciais protegidas (parametros conhecidos
+            + z_obs). Default 1 (P1). P2: 2, P3: 2, P2+P3: 3.
+            Calculado como config.n_prefix + 1.
 
     Returns:
-        tf.Tensor: x com noise mixto aplicado.
+        tf.Tensor: x com noise composto aplicado sequencialmente.
 
     Raises:
         ValueError: Se algum tipo nao esta em NOISE_FN_MAP.
@@ -869,11 +912,14 @@ def apply_noise_tf(
         >>> from geosteering_ai.noise import apply_noise_tf, create_noise_level_var
         >>> noise_var = create_noise_level_var(0.05)
         >>> x_noisy = apply_noise_tf(x, noise_var, ["gaussian"], [1.0])
+        >>> # P2+P3: proteger 3 colunas (theta, freq, z)
+        >>> x_noisy = apply_noise_tf(x, noise_var, ["gaussian"], [1.0], n_protected=3)
 
     Note:
         Referenciado em:
             - data/pipeline.py: build_train_map_fn() (Step 1 do map_fn)
-        Pesos normalizados: [0.6, 0.4] → [0.6, 0.4] (ja normalizado).
+        Composicao sequencial: gaussiano + multiplicativo = primeiro
+        adiciona, depois escala. Fisicamente correto vs media ponderada.
         Fase clean: noise_level_var=0.0 → todas funcoes produzem x+0 ≈ x.
     """
     import tensorflow as tf
@@ -888,15 +934,20 @@ def apply_noise_tf(
 
     # ── Tipo unico (otimizacao — evita loop e concat) ────────────────
     if len(noise_types) == 1:
-        return NOISE_FN_MAP[noise_types[0]](x, noise_level_var)
+        return NOISE_FN_MAP[noise_types[0]](x, noise_level_var, n_protected)
 
-    # ── Mix de N tipos com pesos normalizados ─────────────────────────
-    w_sum = sum(noise_weights)
-    result = tf.zeros_like(x)
+    # ── Composicao sequencial de N tipos ──────────────────────────────
+    # Fisicamente correto: cada noise type opera sobre o resultado do
+    # anterior. Pesos controlam noise_level efetivo de cada tipo:
+    #   noise_level_efetivo = noise_level × (w_i / w_max)
+    # Composicao sequencial preserva semantica de cada tipo:
+    #   gaussiano + multiplicativo = primeiro adiciona, depois escala.
+    w_max = max(noise_weights)
+    result = x
     for nt, w in zip(noise_types, noise_weights):
-        w_norm = tf.constant(w / w_sum, dtype=tf.float32)
-        noisy = NOISE_FN_MAP[nt](x, noise_level_var)
-        result = result + w_norm * noisy
+        # Escalar noise_level pelo peso normalizado relativo ao maximo
+        scaled_level = noise_level_var * tf.constant(w / w_max, dtype=tf.float32)
+        result = NOISE_FN_MAP[nt](result, scaled_level, n_protected)
 
     return result
 

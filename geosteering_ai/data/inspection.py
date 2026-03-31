@@ -221,6 +221,29 @@ def inspect_data_splits(
 # ──────────────────────────────────────────────────────────────────────────
 
 
+def _safe_fmt(val: float, fmt: str = ".6f") -> str:
+    """Formata valor numerico para CSV, tratando NaN/Inf como 'N/A'.
+
+    Valores NaN ou Inf ocorrem quando uma coluna inteira contem apenas
+    NaN (np.nanmin retorna NaN) ou quando dados corrompidos geram Inf.
+    Parsers CSV downstream podem falhar com strings "nan"/"inf", entao
+    exportamos como "N/A" para compatibilidade.
+
+    Args:
+        val: Valor numerico (float) a formatar.
+        fmt: Formato f-string (default: ".6f" — 6 casas decimais).
+
+    Returns:
+        str: Valor formatado ou "N/A" se NaN/Inf.
+
+    Note:
+        Ref: CR-7 LOW — export_inspection_csv nao tratava NaN/Inf.
+    """
+    if np.isnan(val) or np.isinf(val):
+        return "N/A"
+    return f"{val:{fmt}}"
+
+
 def export_inspection_csv(
     summary: Dict,
     save_dir: str,
@@ -237,6 +260,8 @@ def export_inspection_csv(
         Path: Caminho absoluto do CSV criado.
 
     Note:
+        Valores NaN/Inf nas estatisticas sao exportados como "N/A"
+        para compatibilidade com parsers CSV downstream.
         Referenciado em: tests/test_legacy_integration.py.
         Ref: Legado C26A PARTE 4.
     """
@@ -264,10 +289,10 @@ def export_inspection_csv(
                     [
                         split_name,
                         feat["name"],
-                        f"{feat['min']:.6f}",
-                        f"{feat['max']:.6f}",
-                        f"{feat['mean']:.6f}",
-                        f"{feat['std']:.6f}",
+                        _safe_fmt(feat["min"]),
+                        _safe_fmt(feat["max"]),
+                        _safe_fmt(feat["mean"]),
+                        _safe_fmt(feat["std"]),
                         stats["has_nan"],
                         stats["has_inf"],
                     ]
