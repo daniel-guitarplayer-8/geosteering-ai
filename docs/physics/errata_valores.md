@@ -8,13 +8,13 @@
 
 | Variável | Valor CORRETO | Valor ERRADO (histórico) | Assertion obrigatória |
 |:---------|:------------:|:------------------------:|:---------------------|
-| FREQUENCY_HZ | **20000.0** | ~~2.0~~ | `assert FREQUENCY_HZ == 20000.0` |
-| SPACING_METERS | **1.0** | ~~1000.0~~ | `assert SPACING_METERS == 1.0` |
+| FREQUENCY_HZ | **20000.0** (default) | ~~2.0~~ | `assert 100.0 <= freq <= 1e6` |
+| SPACING_METERS | **1.0** (default) | ~~1000.0~~ | `assert 0.1 <= spacing <= 10.0` |
 | DEPTH_MAX | **150.0** | ~~6000.0~~ | — |
 | TARGET_SCALING | **"log10"** | ~~"log"~~ | — |
 | SMOOTHING_TYPE | **"moving_average"** | ~~"savgol"~~ | — |
 | L_SPACING | **1.0** | — | Acompanha SPACING_METERS |
-| SEQUENCE_LENGTH | **600** | ~~601~~ | `assert SEQUENCE_LENGTH == 600` |
+| SEQUENCE_LENGTH | **600** (default) | ~~601~~ | `assert 10 <= seq <= 100000` |
 | N_MEDIDAS (θ=0°) | **600** | ~~601~~ | Ler do .out, NUNCA hardcodar |
 
 ## 2. Decoupling EM — Fórmulas de Acoplamento

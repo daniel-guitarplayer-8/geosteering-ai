@@ -16,17 +16,72 @@ from geosteering_ai.config import PipelineConfig
 class TestErrata:
     """Valores fisicos criticos — Errata v4.4.5 + v5.0.15."""
 
-    def test_frequency_must_be_20000(self):
-        with pytest.raises(AssertionError, match="20000.0"):
-            PipelineConfig(frequency_hz=2.0)
+    def test_frequency_hz_valid_range(self):
+        """frequency_hz aceita range [100, 1e6] Hz."""
+        # Valores validos (LWD comercial)
+        config_2k = PipelineConfig(frequency_hz=2000.0)
+        assert config_2k.frequency_hz == 2000.0
+        config_400k = PipelineConfig(frequency_hz=400000.0)
+        assert config_400k.frequency_hz == 400000.0
+        # Default 20 kHz
+        config_default = PipelineConfig()
+        assert config_default.frequency_hz == 20000.0
+        # Boundary values (extremos do range)
+        config_min = PipelineConfig(frequency_hz=100.0)
+        assert config_min.frequency_hz == 100.0
+        config_max = PipelineConfig(frequency_hz=1e6)
+        assert config_max.frequency_hz == 1e6
 
-    def test_spacing_must_be_1(self):
-        with pytest.raises(AssertionError, match="1.0"):
-            PipelineConfig(spacing_meters=1000.0)
+    def test_frequency_hz_rejects_out_of_range(self):
+        """frequency_hz rejeita valores fora de [100, 1e6]."""
+        with pytest.raises(AssertionError, match="frequency_hz"):
+            PipelineConfig(frequency_hz=50.0)  # Abaixo do minimo
+        with pytest.raises(AssertionError, match="frequency_hz"):
+            PipelineConfig(frequency_hz=2e6)  # Acima do maximo
 
-    def test_sequence_length_must_be_600(self):
-        with pytest.raises(AssertionError, match="600"):
-            PipelineConfig(sequence_length=601)
+    def test_spacing_meters_valid_range(self):
+        """spacing_meters aceita range [0.1, 10.0] m."""
+        config_near = PipelineConfig(spacing_meters=0.25)
+        assert config_near.spacing_meters == 0.25
+        config_deep = PipelineConfig(spacing_meters=5.0)
+        assert config_deep.spacing_meters == 5.0
+        # Default 1.0 m
+        config_default = PipelineConfig()
+        assert config_default.spacing_meters == 1.0
+        # Boundary values (extremos do range)
+        config_min = PipelineConfig(spacing_meters=0.1)
+        assert config_min.spacing_meters == 0.1
+        config_max = PipelineConfig(spacing_meters=10.0)
+        assert config_max.spacing_meters == 10.0
+
+    def test_spacing_meters_rejects_out_of_range(self):
+        """spacing_meters rejeita valores fora de [0.1, 10.0]."""
+        with pytest.raises(AssertionError, match="spacing_meters"):
+            PipelineConfig(spacing_meters=0.01)  # Abaixo
+        with pytest.raises(AssertionError, match="spacing_meters"):
+            PipelineConfig(spacing_meters=1000.0)  # Muito acima
+
+    def test_sequence_length_valid_range(self):
+        """sequence_length aceita range [10, 100000]."""
+        config_300 = PipelineConfig(sequence_length=300)
+        assert config_300.sequence_length == 300
+        config_1200 = PipelineConfig(sequence_length=1200)
+        assert config_1200.sequence_length == 1200
+        # Default 600
+        config_default = PipelineConfig()
+        assert config_default.sequence_length == 600
+        # Boundary values (extremos do range)
+        config_min = PipelineConfig(sequence_length=10)
+        assert config_min.sequence_length == 10
+        config_max = PipelineConfig(sequence_length=100000)
+        assert config_max.sequence_length == 100000
+
+    def test_sequence_length_rejects_out_of_range(self):
+        """sequence_length rejeita valores fora de [10, 100000]."""
+        with pytest.raises(AssertionError, match="sequence_length"):
+            PipelineConfig(sequence_length=5)  # Abaixo
+        with pytest.raises(AssertionError, match="sequence_length"):
+            PipelineConfig(sequence_length=200000)  # Acima
 
     def test_target_scaling_must_be_log10(self):
         with pytest.raises(AssertionError, match="log10"):

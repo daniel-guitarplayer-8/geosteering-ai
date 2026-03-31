@@ -80,9 +80,16 @@ class PipelineConfig:
     Serializavel para YAML (reprodutibilidade) e dict (logging).
 
     Attributes:
-        frequency_hz: Frequencia EM em Hz. DEVE ser 20000.0 (Errata v4.4.5).
-        spacing_meters: Espacamento T-R em metros. DEVE ser 1.0 (Errata v4.4.5).
-        sequence_length: Numero de medidas por modelo. DEVE ser 600.
+        frequency_hz: Frequencia EM em Hz. Default 20000.0 (20 kHz).
+            Configuravel: valor obtido do arquivo .out do dataset.
+            Range valido: [100, 1e6] Hz (ferramentas LWD comerciais).
+        spacing_meters: Espacamento T-R em metros. Default 1.0.
+            Configuravel: depende da geometria da ferramenta.
+            Range valido: [0.1, 10.0] m.
+        sequence_length: Numero de medidas por modelo geologico. Default 600.
+            Configuravel: valor obtido do arquivo .out do dataset.
+            Modelos com theta != 0 graus podem ter valores diferentes.
+            Range valido: [10, 100000].
         input_features: Indices das colunas de entrada no formato 22-col.
         output_targets: Indices das colunas de saida no formato 22-col.
         target_scaling: Metodo de scaling dos targets. DEVE ser "log10".
@@ -108,7 +115,7 @@ class PipelineConfig:
         Referenciado em TODOS os modulos do pacote como parametro obrigatorio.
         Ref: docs/ARCHITECTURE_v2.md secao 3.1 (design) e CLAUDE.md
         (proibicoes absolutas e valores fisicos criticos).
-        Errata v4.4.5: frequency_hz, spacing_meters, sequence_length.
+        Fisica: frequency_hz, spacing_meters, sequence_length (range-validated).
         Errata v5.0.15: input_features, output_targets, target_scaling, eps_tf.
         Validacao fail-fast no __post_init__: violacao gera AssertionError.
     """
@@ -130,12 +137,13 @@ class PipelineConfig:
     #   └──────────────────────────────────────────────────────────────────────┘
 
     # ══════════════════════════════════════════════════════════════════
-    # SECAO 1: FISICA (Errata v4.4.5 + v5.0.15 — valores imutaveis)
-    # Constantes do sensor LWD validadas contra Errata publicada.
-    # frequency_hz = 20 kHz (operacao real do tool EM);
-    # spacing_meters = 1.0 m (distancia transmissor-receptor);
-    # sequence_length = 600 medidas por modelo geologico.
-    # NUNCA alterar estes valores — violacao gera AssertionError.
+    # SECAO 1: FISICA (parametros do sensor LWD)
+    # Parametros fisicos da ferramenta LWD derivados do dataset.
+    # frequency_hz: frequencia EM (Hz) — default 20 kHz, .out metadata.
+    # spacing_meters: distancia T-R (m) — default 1.0, geometria tool.
+    # sequence_length: medidas por modelo — default 600, .out metadata.
+    # Valores variam entre datasets: theta != 0 → seq_len diferente.
+    # Validacao: ranges fisicos (nao igualdade estrita).
     # ══════════════════════════════════════════════════════════════════
     frequency_hz: float = 20000.0
     spacing_meters: float = 1.0
@@ -207,7 +215,7 @@ class PipelineConfig:
     # ══════════════════════════════════════════════════════════════════
     # SECAO 4: DECOUPLING EM
     # Remove acoplamento direto (free-space) das componentes do tensor
-    # EM. Coeficientes para L = 1.0 m:
+    # EM. Coeficientes para L = spacing_meters (default 1.0 m):
     #   ACp = -1/(4*pi*L^3) = -0.079577 (planar: Hxx, Hyy)
     #   ACx = +1/(2*pi*L^3) = +0.159155 (axial: Hzz)
     # decoupling_full_tensor: processa todos os 9 componentes (3x3).
@@ -502,20 +510,44 @@ class PipelineConfig:
                   TestMutualExclusivity (3 test cases),
                   TestValidation (9 test cases)
             Ref: CLAUDE.md secao "Valores Fisicos Criticos (Errata Imutavel)".
-            Errata v4.4.5: frequency_hz=20000.0, spacing_meters=1.0,
-            sequence_length=600.
+            Fisica: frequency_hz em [100, 1e6], spacing_meters em [0.1, 10.0],
+            sequence_length em [10, 100000]. Defaults: 20000.0, 1.0, 600
+            (dataset Inv0Dip 0 graus).
             Errata v5.0.15: input_features=[1,4,5,20,21], output_targets=[2,3],
             target_scaling="log10".
             Mutual exclusivity: use_nstage e use_curriculum (NUNCA ambos True).
         """
-        # ── Errata v4.4.5 (valores fisicos imutaveis) ────────────────
-        assert (
-            self.frequency_hz == 20000.0
-        ), "Errata v4.4.5: FREQUENCY_HZ DEVE ser 20000.0 (NUNCA 2.0)"
-        assert (
-            self.spacing_meters == 1.0
-        ), "Errata v4.4.5: SPACING_METERS DEVE ser 1.0 (NUNCA 1000.0)"
-        assert self.sequence_length == 600, "SEQUENCE_LENGTH DEVE ser 600 (NUNCA 601)"
+        # ── Errata v4.4.5 (valores fisicos com ranges validos) ────────────
+        # frequency_hz: frequencia EM da ferramenta LWD (Hz).
+        #   Default 20000.0 (20 kHz). Depende do dataset (.out metadata).
+        #   Range valido: 100 Hz – 1 MHz (ferramentas LWD comerciais).
+        #   Exemplos: 2 kHz (deep reading), 20 kHz (standard), 400 kHz (shallow).
+        #   Ref: GeoSphere HD (Schlumberger), EarthStar (Halliburton).
+        assert 100.0 <= self.frequency_hz <= 1e6, (
+            f"frequency_hz={self.frequency_hz} fora do range fisico valido "
+            f"[100, 1e6] Hz. Ferramentas LWD operam tipicamente entre "
+            f"2 kHz e 400 kHz. Valor obtido do arquivo .out do dataset."
+        )
+        # spacing_meters: distancia transmissor-receptor (m).
+        #   Default 1.0 m. Depende da geometria da ferramenta.
+        #   Range valido: 0.1 – 10.0 m (ferramentas LWD comerciais).
+        #   Exemplos: 0.25 m (near), 1.0 m (standard), 5.0 m (deep).
+        #   Ref: Wang et al. (2018) J. Geophys. Eng. 15:2339.
+        assert 0.1 <= self.spacing_meters <= 10.0, (
+            f"spacing_meters={self.spacing_meters} fora do range fisico valido "
+            f"[0.1, 10.0] m. Ferramentas LWD comerciais usam spacings "
+            f"entre 0.25 m (near) e 5.0 m (deep)."
+        )
+        # sequence_length: numero de medidas por modelo geologico.
+        #   Default 600 (dataset Inv0Dip 0 graus). Depende do dataset
+        #   (.out metadata). Modelos com theta != 0 podem ter valores
+        #   diferentes (ex: 300, 450, 900, 1200).
+        #   Range valido: 10 – 100000 (limite pratico de memoria).
+        assert 10 <= self.sequence_length <= 100000, (
+            f"sequence_length={self.sequence_length} fora do range valido "
+            f"[10, 100000]. Valor determinado pelo arquivo .out do dataset. "
+            f"Datasets com theta != 0 graus tipicamente tem sequence_length != 600."
+        )
         assert (
             self.target_scaling == "log10"
         ), "TARGET_SCALING DEVE ser 'log10' (NUNCA 'log')"

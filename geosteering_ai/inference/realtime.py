@@ -90,13 +90,14 @@ __all__ = [
 # completa, cada nova medicao desloca a mais antiga (FIFO) e dispara
 # uma inferencia via InferencePipeline.predict().
 #
-# window_size = SEQUENCE_LENGTH = 600 (Errata v4.4.5 — NUNCA 601)
+# window_size = config.sequence_length (default 600, configuravel por dataset)
 #
 # Cenario tipico: ferramenta LWD (Logging While Drilling) envia
 # medicoes EM a cada ponto de profundidade durante perfuracao.
 # O geosteerer recebe predicoes de resistividade em tempo real
 # para tomar decisoes de trajetoria.
 # ════════════════════════════════════════════════════════════════════════
+
 
 class RealtimeInference:
     """Sliding window para inferencia em tempo real de geosteering.
@@ -162,9 +163,7 @@ class RealtimeInference:
         if pipeline is None:
             raise ValueError("pipeline nao pode ser None")
         if window_size <= 0:
-            raise ValueError(
-                f"window_size deve ser > 0, recebido: {window_size}"
-            )
+            raise ValueError(f"window_size deve ser > 0, recebido: {window_size}")
 
         self.pipeline = pipeline
         self.window_size = window_size
@@ -172,8 +171,7 @@ class RealtimeInference:
         self.n_updates: int = 0
 
         logger.info(
-            "RealtimeInference inicializado — window_size=%d, "
-            "model_type=%s",
+            "RealtimeInference inicializado — window_size=%d, " "model_type=%s",
             window_size,
             pipeline.config.model_type,
         )
@@ -231,7 +229,8 @@ class RealtimeInference:
         if len(self.buffer) < self.window_size:
             logger.debug(
                 "Buffer %d/%d — aguardando preenchimento",
-                len(self.buffer), self.window_size,
+                len(self.buffer),
+                self.window_size,
             )
             return None
 
@@ -244,7 +243,8 @@ class RealtimeInference:
 
         logger.debug(
             "Inferencia realtime — update #%d, shape=%s",
-            self.n_updates, prediction.shape,
+            self.n_updates,
+            prediction.shape,
         )
         return prediction
 

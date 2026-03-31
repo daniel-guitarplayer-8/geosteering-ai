@@ -443,7 +443,7 @@ def load_binary_dat(
 # formacao). O decoupling remove o campo primario analitico para
 # isolar a resposta geofisica.
 #
-# Para L = SPACING_METERS (1.0 m, errata imutavel):
+# Para L = config.spacing_meters (default 1.0 m, configuravel):
 #   ACp = -1 / (4*pi*L^3) ≈ -0.079577  (planar: Hxx, Hyy)
 #   ACx = +1 / (2*pi*L^3) ≈ +0.159155  (axial: Hzz)
 #
@@ -478,14 +478,14 @@ def apply_decoupling(
         Ref: docs/physics/errata_valores.md (ACp/ACx constants).
         Constantes fisicas: ACp = -1/(4*pi*L^3) = -0.079577 (planar: Hxx, Hyy)
                            ACx = +1/(2*pi*L^3) = +0.159155 (axial: Hzz)
-        L = SPACING_METERS = 1.0 m (NUNCA 1000.0 m — Errata v4.4.5).
+        L = config.spacing_meters (default 1.0 m, configuravel por dataset).
         Decoupling subtrai campo primario (free-space) da parte real APENAS.
         Parte imaginaria NAO recebe decoupling (campo primario e puramente real).
     """
     import math
 
     result = data.copy()
-    L = config.spacing_meters  # 1.0 m (errata imutavel — NUNCA 1000.0)
+    L = config.spacing_meters  # config.spacing_meters (default 1.0 m)
     L3 = L**3
 
     # D7: Constantes de acoplamento analitico

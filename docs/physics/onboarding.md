@@ -193,7 +193,7 @@ Execute sequencialmente. Checkpoint após C7:
 ```python
 assert INFERENCE_MODE == "offline"
 assert MODEL_TYPE == "ResNet_18"
-assert FREQUENCY_HZ == 20000.0
+assert 100.0 <= FREQUENCY_HZ <= 1e6  # Default 20000.0
 assert N_FEATURES == 5
 ```
 

@@ -19,9 +19,9 @@
 ## Proibicoes Absolutas
 
 - **PyTorch** — PROIBIDO em qualquer parte do pipeline
-- **FREQUENCY_HZ = 2.0** — o valor correto e 20000.0
-- **SPACING_METERS = 1000.0** — o valor correto e 1.0
-- **SEQUENCE_LENGTH = 601** — o valor correto e 600
+- **FREQUENCY_HZ = 2.0** — o default e 20000.0 (range valido: 100–1e6 Hz, derivado do .out)
+- **SPACING_METERS = 1000.0** — o default e 1.0 (range valido: 0.1–10.0 m)
+- **SEQUENCE_LENGTH = 601** — o default e 600 (range valido: 10–100000, derivado do .out)
 - **TARGET_SCALING = "log"** — o valor correto e "log10"
 - **INPUT_FEATURES = [0, 3, 4, 7, 8]** — o correto e [1, 4, 5, 20, 21] (22-col)
 - **OUTPUT_TARGETS = [1, 2]** — o correto e [2, 3] (22-col)
@@ -38,9 +38,9 @@
 
 ```python
 # Validados automaticamente por PipelineConfig.__post_init__()
-assert FREQUENCY_HZ == 20000.0         # NUNCA 2.0 Hz
-assert SPACING_METERS == 1.0           # NUNCA 1000.0 m
-assert SEQUENCE_LENGTH == 600          # NUNCA 601
+assert 100.0 <= FREQUENCY_HZ <= 1e6   # Default 20000.0 (20 kHz)
+assert 0.1 <= SPACING_METERS <= 10.0  # Default 1.0 m
+assert 10 <= SEQUENCE_LENGTH <= 100000 # Default 600 (Inv0Dip 0 graus)
 assert TARGET_SCALING == "log10"       # NUNCA "log"
 assert INPUT_FEATURES == [1,4,5,20,21] # NUNCA [0,3,4,7,8]
 assert OUTPUT_TARGETS == [2,3]         # NUNCA [1,2]

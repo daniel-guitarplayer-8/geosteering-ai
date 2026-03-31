@@ -90,9 +90,10 @@ __all__ = [
 # modelo aceita tensores com shape correta na implantacao.
 #
 # Input shape: (batch, SEQUENCE_LENGTH, n_features)
-#   - SEQUENCE_LENGTH = 600 (Errata v4.4.5 — NUNCA 601)
+#   - sequence_length: config.sequence_length (default 600, configuravel)
 #   - n_features = 5 (baseline) ou 9 (P4 usd_uhr: 5 + 4 GS)
 # ════════════════════════════════════════════════════════════════════════
+
 
 def export_saved_model(
     model: Any,
@@ -125,7 +126,7 @@ def export_saved_model(
             - tests/test_inference.py: TestExport.test_export_saved_model
         Ref: docs/ARCHITECTURE_v2.md secao 6.3.
         Input signature: (None, sequence_length, n_features) onde
-        sequence_length=600 e n_features depende de feature_view + GS.
+        sequence_length=config.sequence_length (default 600) e n_features depende de feature_view + GS.
     """
     import tensorflow as tf
 
@@ -158,7 +159,9 @@ def export_saved_model(
 
     logger.info(
         "SavedModel exportado em %s — input_shape=(None, %d, %d)",
-        path, config.sequence_length, config.n_features,
+        path,
+        config.sequence_length,
+        config.n_features,
     )
     return os.path.abspath(path)
 
@@ -174,6 +177,7 @@ def export_saved_model(
 # Util para inferencia em dispositivos embarcados na plataforma de
 # perfuracao (on-rig), onde recursos computacionais sao limitados.
 # ════════════════════════════════════════════════════════════════════════
+
 
 def export_tflite(
     model: Any,
@@ -225,9 +229,7 @@ def export_tflite(
         # Dynamic range quantization: pesos int8, ativacoes float32
         # Reduz tamanho ~4x com perda minima de precisao
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
-        logger.info(
-            "Quantizacao dynamic range ativada — pesos int8, ativacoes float32"
-        )
+        logger.info("Quantizacao dynamic range ativada — pesos int8, ativacoes float32")
 
     tflite_model = converter.convert()
 
@@ -244,7 +246,9 @@ def export_tflite(
 
     logger.info(
         "TFLite exportado em %s — %.2f MB, quantize=%s",
-        path, size_mb, quantize,
+        path,
+        size_mb,
+        quantize,
     )
     return os.path.abspath(path)
 
@@ -263,6 +267,7 @@ def export_tflite(
 # Nota: ONNX e usado apenas para EXPORTACAO. O treinamento e a
 # inferencia principal permanecem exclusivamente em TensorFlow/Keras.
 # ════════════════════════════════════════════════════════════════════════
+
 
 def export_onnx(
     model: Any,
@@ -306,9 +311,7 @@ def export_onnx(
     try:
         import tf2onnx
     except ImportError:
-        raise ImportError(
-            "tf2onnx necessario para exportacao ONNX: pip install tf2onnx"
-        )
+        raise ImportError("tf2onnx necessario para exportacao ONNX: pip install tf2onnx")
 
     # Garantir diretorio de saida existe
     output_dir = os.path.dirname(path)
@@ -335,6 +338,8 @@ def export_onnx(
 
     logger.info(
         "ONNX exportado em %s — opset=15, input_shape=(None, %d, %d)",
-        path, config.sequence_length, config.n_features,
+        path,
+        config.sequence_length,
+        config.n_features,
     )
     return os.path.abspath(path)

@@ -418,9 +418,9 @@ class PipelineConfig:
     """
 
     # ── Fisica ───────────────────────────────────────────────────────
-    frequency_hz: float = 20000.0          # NUNCA 2.0 (Errata v4.4.5)
-    spacing_meters: float = 1.0            # NUNCA 1000.0 (Errata v4.4.5)
-    sequence_length: int = 600             # NUNCA 601
+    frequency_hz: float = 20000.0          # Default 20 kHz (range [100, 1e6] Hz)
+    spacing_meters: float = 1.0            # Default 1.0 m (range [0.1, 10.0] m)
+    sequence_length: int = 600             # Default 600 (range [10, 100000])
     input_features: List[int] = field(default_factory=lambda: [1, 4, 5, 20, 21])
     output_targets: List[int] = field(default_factory=lambda: [2, 3])
     target_scaling: str = "log10"          # NUNCA "log"
@@ -486,9 +486,9 @@ class PipelineConfig:
     def __post_init__(self):
         """Validacao centralizada — fail-fast."""
         # Errata fisicas (imutaveis)
-        assert self.frequency_hz == 20000.0, "NUNCA 2.0 Hz"
-        assert self.spacing_meters == 1.0, "NUNCA 1000.0 m"
-        assert self.sequence_length == 600, "NUNCA 601"
+        assert 100.0 <= self.frequency_hz <= 1e6     # Default 20 kHz
+        assert 0.1 <= self.spacing_meters <= 10.0    # Default 1.0 m
+        assert 10 <= self.sequence_length <= 100000  # Default 600
         assert self.target_scaling == "log10", "NUNCA 'log'"
         assert self.input_features == [1, 4, 5, 20, 21]
         assert self.output_targets == [2, 3]
@@ -959,9 +959,9 @@ PRIORIDADE 7: legacy/Skill/             ← Guias historicos (referencia)
 Estes valores sao validados pelo `PipelineConfig.__post_init__()` e pelo CI:
 
 ```python
-assert FREQUENCY_HZ == 20000.0        # NUNCA 2.0 Hz
-assert SPACING_METERS == 1.0          # NUNCA 1000.0 m
-assert SEQUENCE_LENGTH == 600         # NUNCA 601
+assert 100.0 <= FREQUENCY_HZ <= 1e6   # Default 20000.0 (20 kHz)
+assert 0.1 <= SPACING_METERS <= 10.0  # Default 1.0 m
+assert 10 <= SEQUENCE_LENGTH <= 100000 # Default 600
 assert TARGET_SCALING == "log10"      # NUNCA "log"
 assert INPUT_FEATURES == [1,4,5,20,21]  # NUNCA [0,3,4,7,8]
 assert OUTPUT_TARGETS == [2,3]        # NUNCA [1,2]
