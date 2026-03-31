@@ -956,8 +956,10 @@ def apply_noise_tf(
 # SECAO: VERSAO NUMPY (OFFLINE / TESTES)
 # ════════════════════════════════════════════════════════════════════════════
 # Versao numpy de apply_raw_em_noise para uso em testes, EDA,
-# e cenarios offline. Semantica identica a versao TF:
-# noise aplicado APENAS nas colunas EM (indices 1:), z preservado.
+# e cenarios offline. Semantica identica a versao TF para tipo unico.
+# NOTA: para multi-tipo, numpy usa blending ponderado enquanto TF usa
+# composicao sequencial — distribuicoes diferem levemente nesse caso.
+# noise aplicado APENAS nas colunas EM (indices n_protected:), z preservado.
 # NAO usar em produção com FV/GS ativos (usar on-the-fly TF).
 # ──────────────────────────────────────────────────────────────────────────
 

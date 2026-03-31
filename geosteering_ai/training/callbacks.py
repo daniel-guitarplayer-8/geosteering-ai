@@ -1791,6 +1791,8 @@ class MetricPlateauDetector:
         self._monitor: str = monitor
         self._patience: int = patience
         self._threshold: float = threshold
+        if mode not in ("min", "max"):
+            raise ValueError(f"mode deve ser 'min' ou 'max', recebido: '{mode}'")
         self._mode: str = mode
 
         # Inicializa _best com base no mode
