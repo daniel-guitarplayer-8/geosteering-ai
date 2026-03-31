@@ -169,6 +169,27 @@ class PipelineConfig:
     use_dual_validation: bool = True
     global_seed: int = 42
 
+    # ── 2c: Oversampling de alta resistividade (Estrategia B) ────────
+    # Repete sequencias com rho_max > threshold para equilibrar
+    # representacao de alta rho no treinamento. Factor=3 triplica
+    # a frequencia dessas amostras no dataset. Desativado por padrao.
+    # Motivacao: alta rho sub-representada → gradientes dominados por baixa rho.
+    use_rho_oversampling: bool = False
+    rho_oversampling_threshold: float = 100.0
+    rho_oversampling_factor: int = 3
+
+    # ── 2d: Curriculum de resistividade (Estrategia B) ────────────────
+    # Introduz modelos de alta rho progressivamente no treinamento.
+    # Fase 1 (easy): somente amostras com max(rho) < rho_max_start.
+    # Fase 2 (ramp): rho_max cresce linearmente ate rho_max_end.
+    # Fase 3 (full): todas as amostras incluidas.
+    # Desativado por padrao. Mutuamente exclusivo com rho_oversampling.
+    use_rho_curriculum: bool = False
+    rho_curriculum_epochs_easy: int = 30
+    rho_curriculum_epochs_ramp: int = 70
+    rho_curriculum_rho_max_start: float = 100.0
+    rho_curriculum_rho_max_end: float = 10000.0
+
     # ══════════════════════════════════════════════════════════════════
     # SECAO 2B: PERSPECTIVAS P2/P3 — Angulo e Frequencia como Features
     # Theta (angulo de inclinacao) e frequencia da ferramenta LWD
@@ -211,6 +232,15 @@ class PipelineConfig:
     geosignal_set: str = "usd_uhr"
     geosignal_families: Optional[List[str]] = None
     eps_tf: float = 1e-12
+
+    # ── 3b: Features de 2o grau (Estrategia C) ──────────────────────
+    # Features derivadas dos componentes EM: potencia |H|^2,
+    # gradiente espacial d|H|/dz, razao Re/Im (~ fase).
+    # Dois modos: "feature_view" (substitui FV) ou "postprocess" (concatena).
+    # Motivacao: amplificar sinais fracos em alta resistividade.
+    # Ref: docs/physics/perspectivas.md Estrategia C.
+    use_second_order_features: bool = False
+    second_order_mode: str = "postprocess"
 
     # ══════════════════════════════════════════════════════════════════
     # SECAO 4: DECOUPLING EM
@@ -380,8 +410,34 @@ class PipelineConfig:
     look_ahead_weight: float = 0.1
     use_dtb_loss: bool = False
     dtb_weight: float = 0.1
+    use_dtb_as_target: bool = False
+    dtb_max_from_picasso: float = 3.0
+    dtb_scaling: str = "linear"
+    dtb_boundary_threshold: float = 0.3
+    # ── PINNs (Physics-Informed Neural Networks) ────────────────────────
+    # Integra constraintes fisicas na loss function.
+    # 3 cenarios: oracle (referencia Fortran), surrogate (forward neural),
+    #   maxwell (residuo PDE Helmholtz).
+    # Lambda schedule: warmup (lambda=0) → ramp (0→target) → hold.
+    # TIV constraint: penaliza rho_v < rho_h (anisotropia TIV).
+    # Ref: docs/ARCHITECTURE_v2.md secao 18, Morales et al. (2025).
     use_pinns: bool = False
+    pinns_scenario: str = "oracle"
     pinns_lambda: float = 0.01
+    pinns_warmup_epochs: int = 10
+    pinns_ramp_epochs: int = 20
+    pinns_lambda_schedule: str = "linear"
+    pinns_physics_norm: str = "l2"
+    pinns_data_norm: str = "l2"
+    pinns_use_forward_surrogate: bool = False
+    surrogate_model_path: str = ""
+    # ── TIV Constraint (rho_v >= rho_h) ──────────────────────────────
+    # Soft constraint via penalidade quadratica: max(0, rho_h - rho_v)^2.
+    # Pode ser ativada independentemente de use_pinns.
+    # Ref: Morales et al. (2025) — hard constraint via sigmoid/ReLU.
+    use_tiv_constraint: bool = False
+    tiv_constraint_weight: float = 0.1
+    # ── Morales hybrid ───────────────────────────────────────────────
     use_morales_hybrid_loss: bool = False
     morales_physics_omega: float = 0.85
 
@@ -633,6 +689,30 @@ class PipelineConfig:
         ), "eps_tf deve ser >= 1e-15 (Errata v5.0.15: NUNCA 1e-30 para float32)"
         assert self.output_channels in (2, 4, 6), "output_channels deve ser 2, 4 ou 6"
 
+        # ── DTB (Distance to Boundary) — P5 ──────────────────────────
+        # use_dtb_as_target requer output_channels >= 4 para caber DTB_up/DTB_down.
+        # dtb_max_from_picasso: limite fisico (DOD maximo do Picasso plot).
+        # dtb_scaling: como escalar DTB — "linear" (metros), "log" (log1p),
+        #   "normalized" (DTB/max → [0,1]).
+        _VALID_DTB_SCALING = {"linear", "log", "normalized"}
+        assert (
+            self.dtb_scaling in _VALID_DTB_SCALING
+        ), f"dtb_scaling '{self.dtb_scaling}' invalido. Validos: {_VALID_DTB_SCALING}"
+        assert (
+            self.dtb_max_from_picasso > 0
+        ), f"dtb_max_from_picasso deve ser > 0, recebido: {self.dtb_max_from_picasso}"
+        if self.use_dtb_as_target:
+            assert self.output_channels >= 4, (
+                "use_dtb_as_target=True requer output_channels >= 4 "
+                f"(recebido: {self.output_channels}). DTB_up/DTB_down ocupam "
+                "canais adicionais alem de rho_h/rho_v."
+            )
+        if self.use_dtb_loss:
+            assert self.use_dtb_as_target, (
+                "use_dtb_loss=True requer use_dtb_as_target=True "
+                "(canais DTB devem existir nos targets para computar L_DTB)."
+            )
+
         # ── GradientMonitor ranges ──────────────────────────────────
         # Validacao dos campos de monitoramento de gradientes (Fase E).
         # gradient_monitor_freq deve ser >= 1 para evitar divisao por zero.
@@ -653,6 +733,84 @@ class PipelineConfig:
             ), (
                 f"vanishing_threshold ({self.gradient_vanishing_threshold}) "
                 f"deve ser < explosion_threshold ({self.gradient_explosion_threshold})"
+            )
+
+        # ── PINNs validation ─────────────────────────────────────────
+        # Valida cenario, schedule, norma e constraintes para PINNs.
+        # Ref: docs/ARCHITECTURE_v2.md secao 18 (PINNs).
+        _VALID_PINNS_SCENARIOS = {"oracle", "surrogate", "maxwell"}
+        _VALID_LAMBDA_SCHEDULES = {"fixed", "linear", "cosine", "step"}
+        _VALID_PHYSICS_NORMS = {"l1", "l2", "huber"}
+        assert self.pinns_scenario in _VALID_PINNS_SCENARIOS, (
+            f"pinns_scenario='{self.pinns_scenario}' invalido. "
+            f"Validos: {_VALID_PINNS_SCENARIOS}"
+        )
+        assert self.pinns_lambda_schedule in _VALID_LAMBDA_SCHEDULES, (
+            f"pinns_lambda_schedule='{self.pinns_lambda_schedule}' invalido. "
+            f"Validos: {_VALID_LAMBDA_SCHEDULES}"
+        )
+        assert self.pinns_physics_norm in _VALID_PHYSICS_NORMS, (
+            f"pinns_physics_norm='{self.pinns_physics_norm}' invalido. "
+            f"Validos: {_VALID_PHYSICS_NORMS}"
+        )
+        assert self.pinns_data_norm in _VALID_PHYSICS_NORMS, (
+            f"pinns_data_norm='{self.pinns_data_norm}' invalido. "
+            f"Validos: {_VALID_PHYSICS_NORMS}"
+        )
+        assert (
+            self.pinns_lambda >= 0
+        ), f"pinns_lambda deve ser >= 0, recebido: {self.pinns_lambda}"
+        assert (
+            self.pinns_warmup_epochs >= 0
+        ), f"pinns_warmup_epochs deve ser >= 0, recebido: {self.pinns_warmup_epochs}"
+        assert (
+            self.pinns_ramp_epochs >= 0
+        ), f"pinns_ramp_epochs deve ser >= 0, recebido: {self.pinns_ramp_epochs}"
+        if self.use_tiv_constraint:
+            assert self.tiv_constraint_weight > 0, (
+                f"tiv_constraint_weight deve ser > 0 quando use_tiv_constraint=True, "
+                f"recebido: {self.tiv_constraint_weight}"
+            )
+
+        # ── Second-order features ────────────────────────────────────
+        _VALID_SO_MODE = {"feature_view", "postprocess"}
+        assert self.second_order_mode in _VALID_SO_MODE, (
+            f"second_order_mode '{self.second_order_mode}' invalido. "
+            f"Validos: {_VALID_SO_MODE}"
+        )
+        if self.use_second_order_features:
+            # Ambos os modos requerem feature_view='identity' porque
+            # second-order features sao computadas sobre Re/Im brutos.
+            # Com FV nao-identity, as colunas EM ja teriam sido transformadas
+            # (log10, fase, etc.) e |H|^2/grad/Re÷Im seriam fisicamente incorretos.
+            _fv_ok = self.feature_view in ("identity", "raw")
+            assert _fv_ok, (
+                f"use_second_order_features=True requer feature_view='identity' ou 'raw' "
+                f"(recebido: '{self.feature_view}'). Features de 2o grau operam sobre "
+                "Re/Im brutos — FV nao-identity transformaria os canais antes do calculo."
+            )
+
+        # ── Oversampling / Curriculum rho ────────────────────────────
+        if self.use_rho_oversampling:
+            assert self.rho_oversampling_threshold > 0, (
+                f"rho_oversampling_threshold deve ser > 0, recebido: "
+                f"{self.rho_oversampling_threshold}"
+            )
+            assert self.rho_oversampling_factor >= 2, (
+                f"rho_oversampling_factor deve ser >= 2, recebido: "
+                f"{self.rho_oversampling_factor}"
+            )
+        if self.use_rho_curriculum:
+            assert (
+                self.rho_curriculum_rho_max_start > 0
+            ), "rho_curriculum_rho_max_start deve ser > 0"
+            assert (
+                self.rho_curriculum_rho_max_end > self.rho_curriculum_rho_max_start
+            ), "rho_curriculum_rho_max_end deve ser > rho_max_start"
+        if self.use_rho_oversampling and self.use_rho_curriculum:
+            raise AssertionError(
+                "use_rho_oversampling e use_rho_curriculum sao mutuamente "
+                "exclusivos. Oversampling eh estatico, curriculum eh dinamico."
             )
 
         # ── Inference mode valido ────────────────────────────────────
@@ -824,7 +982,22 @@ class PipelineConfig:
             Composicao: n_prefix (0-2) + n_base_features (5+) + n_geosignal_channels (0+).
             Usado para validar shape do modelo Keras (input_shape).
         """
-        return self.n_prefix + self.n_base_features + self.n_geosignal_channels
+        n = self.n_prefix + self.n_base_features + self.n_geosignal_channels
+        if self.use_second_order_features and self.second_order_mode == "postprocess":
+            n += 6  # |H1|^2, |H2|^2, d|H1|/dz, d|H2|/dz, Re(H1)/Im(H1), Re(H2)/Im(H2)
+        return n
+
+    @property
+    def n_second_order_channels(self) -> int:
+        """Numero de canais de features de 2o grau.
+
+        Retorna 6 se ativo no modo postprocess, 0 caso contrario.
+        No modo feature_view, as FVs sao substituidas (nao adicionadas).
+        6 canais: |H1|^2, |H2|^2, d|H1|/dz, d|H2|/dz, Re/Im(H1), Re/Im(H2).
+        """
+        if self.use_second_order_features and self.second_order_mode == "postprocess":
+            return 6
+        return 0
 
     @property
     def needs_onthefly_fv_gs(self) -> bool:
@@ -906,6 +1079,7 @@ class PipelineConfig:
     # robusto: E-Robusto S21, cenario padrao de producao.
     # nstage: N-Stage com estagios progressivos de noise.
     # geosinais_p4: P4 com geosinais on-the-fly.
+    # dtb_p5: P5 com DTB (Distance to Boundary) como target.
     # realtime: geosteering causal para inferencia em tempo real.
     # ══════════════════════════════════════════════════════════════════
 
@@ -1027,6 +1201,37 @@ class PipelineConfig:
         return cls(
             inference_mode="realtime",
             model_type=model_type,
+            **kwargs,
+        )
+
+    @classmethod
+    def dtb_p5(cls, dtb_scaling: str = "linear", **kwargs) -> "PipelineConfig":
+        """Preset P5 — DTB (Distance to Boundary) como target adicional.
+
+        Ativa DTB labels computados a partir de fronteiras geologicas.
+        Modelo produz 6 canais: [rho_h, rho_v, DTB_up, DTB_down, rho_up, rho_down].
+        Loss combinada com termo DTB (MSE com clipping em dtb_max).
+
+        Args:
+            dtb_scaling: Metodo de scaling DTB. Default: "linear".
+                Opcoes: "linear" (metros), "log" (log1p), "normalized" (DTB/max → [0,1]).
+            **kwargs: Overrides adicionais do config.
+
+        Note:
+            Referenciado em:
+                - tests/test_config.py: TestPresets.test_dtb_p5
+                - tests/test_boundaries.py: TestDTBComputation
+            Ref: docs/ARCHITECTURE_v2.md secao 5 (Perspectiva 5).
+            output_channels=6: [rho_h, rho_v, DTB_up, DTB_down, rho_up, rho_down].
+            use_dtb_loss auto-ativado para treinar com componente DTB.
+            dtb_max_from_picasso=3.0 metros (DOD maximo tipico do Picasso plot).
+        """
+        return cls(
+            output_channels=6,
+            use_dtb_as_target=True,
+            use_dtb_loss=True,
+            dtb_scaling=dtb_scaling,
+            dtb_max_from_picasso=3.0,
             **kwargs,
         )
 

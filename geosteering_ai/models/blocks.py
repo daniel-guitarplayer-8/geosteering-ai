@@ -1382,6 +1382,81 @@ def output_projection(
     return out
 
 
+def tiv_constraint_layer(
+    x: "tf.Tensor",
+) -> "tf.Tensor":
+    """Hard constraint layer: garante rho_v >= rho_h na saida do modelo.
+
+    Em meios TIV (Transversalmente Isotropicos Verticais), a resistividade
+    vertical eh SEMPRE >= horizontal. Esta camada aplica essa constrainte
+    diretamente na saida do modelo:
+
+      canal 0: rho_h = x[..., 0] (nao alterado)
+      canal 1: rho_v = rho_h + softplus(x[..., 1] - x[..., 0])
+        → garante rho_v >= rho_h (diferenca >= 0 via softplus)
+
+    Diagrama:
+      ┌──────────────────────────────────────────────────────────┐
+      │  x[..., 0] = rho_h_raw (log10 scale)                     │
+      │  x[..., 1] = rho_v_raw (log10 scale)                     │
+      │                                                           │
+      │  rho_h = rho_h_raw   (passthrough, nao alterado)         │
+      │  delta = softplus(rho_v_raw - rho_h_raw)                 │
+      │  rho_v = rho_h + delta  (garante rho_v >= rho_h)         │
+      │                                                           │
+      │  Quando rho_v_raw > rho_h_raw:                            │
+      │    delta ≈ rho_v_raw - rho_h_raw (passthrough)           │
+      │    rho_v ≈ rho_v_raw (quase identidade)                  │
+      │                                                           │
+      │  Quando rho_v_raw < rho_h_raw:                            │
+      │    delta → 0 (softplus comprime negativo)                 │
+      │    rho_v → rho_h (corrige violacao)                       │
+      └──────────────────────────────────────────────────────────┘
+
+    Em log10 scale:
+      rho_v >= rho_h ⟺ log10(rho_v) >= log10(rho_h)
+      softplus garante diferenca >= 0 suavemente.
+
+    Args:
+        x: Tensor (batch, seq_len, output_channels) com pelo menos 2 canais.
+            Canal 0: log10(rho_h), Canal 1: log10(rho_v).
+            Se output_channels > 2 (DTB), canais extras sao preservados.
+
+    Returns:
+        tf.Tensor: Mesma shape, com canal 1 ajustado para rho_v >= rho_h.
+
+    Note:
+        Referenciado em:
+            - models/cnn.py, tcn.py, etc.: apos output_projection()
+            - tests/test_pinns.py: TestTIVConstraintLayer
+        Ref: Morales et al. (2025) — hard constraint via sigmoid/ReLU.
+        Fisica: rho_v >= rho_h SEMPRE em TIV. softplus eh C^inf e
+        diferenciavel, garantindo gradientes suaves para backprop.
+    """
+    import tensorflow as tf
+
+    rho_h = x[..., 0:1]  # (B, N, 1)
+    rho_v_raw = x[..., 1:2]  # (B, N, 1)
+
+    # ── delta = softplus(rho_v_raw - rho_h) >= 0 ─────────────────
+    # softplus(x) = log(1 + exp(x)), suave e >= 0
+    delta = tf.math.softplus(rho_v_raw - rho_h)
+
+    # ── rho_v = rho_h + delta (garante rho_v >= rho_h) ───────────
+    rho_v = rho_h + delta
+
+    # ── Reconstituir tensor com canais extras (DTB, etc.) ─────────
+    # Usa tf.shape (runtime) para ser compativel com graph mode
+    # onde a dimensao de canais pode ser None em build time.
+    rho_constrained = tf.concat([rho_h, rho_v], axis=-1)
+    n_ch = tf.shape(x)[-1]
+    return tf.cond(
+        n_ch > 2,
+        lambda: tf.concat([rho_constrained, x[..., 2:]], axis=-1),
+        lambda: rho_constrained,
+    )
+
+
 def normalization_block(
     x: "tf.Tensor",
     norm_type: str = "layer",
@@ -1763,6 +1838,7 @@ __all__ = [
     "series_decomp_block",
     # ── Grupo 7: Utilitarios ──────────────────────────────────────────
     "output_projection",
+    "tiv_constraint_layer",
     "normalization_block",
     "skip_connection_block",
     "feedforward_block",

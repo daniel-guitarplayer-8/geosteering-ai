@@ -71,6 +71,7 @@ VALID_VIEWS = {
     "logH1_logH2",
     "IMH1_IMH2_razao",
     "IMH1_IMH2_lograzao",
+    "second_order",
 }
 
 #   ┌──────────────────────────────────────────────────────────────────────────┐
@@ -331,9 +332,31 @@ def apply_feature_view(
         result[:, re_h2_idx] = _safe_log10(mag_h1 / (mag_h2 + EPS))
         result[:, im_h2_idx] = phi_h1 - phi_h2
 
+    elif view == "second_order":
+        # ── second_order: Features de 2o grau para alta resistividade.
+        #    Substitui 4 canais EM por 6 canais derivados:
+        #    [|H1|^2, |H2|^2, d|H1|/dz, d|H2|/dz, Re(H1)/Im(H1), Re(H2)/Im(H2)]
+        #    Motivacao fisica: amplifica sinais fracos em rho > 100 Ohm.m
+        #    onde Re/Im brutos se aproximam do acoplamento direto.
+        #    O array de saida tem shape diferente: n_feat-4+6 = n_feat+2 canais.
+        from geosteering_ai.data.second_order import compute_second_order_features
+
+        # Reconstruir h1/h2 cols no espaco 2D flat
+        _h1 = (re_h1_idx, im_h1_idx)
+        _h2 = (re_h2_idx, im_h2_idx)
+        so_feats = compute_second_order_features(result, _h1, _h2, eps=EPS)
+        # Substituir colunas EM (4) por SO (6): remover 4 colunas, inserir 6
+        # Colunas antes do EM + SO + colunas depois do EM
+        _em_indices = sorted([re_h1_idx, im_h1_idx, re_h2_idx, im_h2_idx])
+        non_em_mask = np.ones(result.shape[-1], dtype=bool)
+        non_em_mask[_em_indices] = False
+        non_em = result[:, non_em_mask]
+        result = np.concatenate([non_em, so_feats], axis=-1)
+
     # ── Restaura shape 3D se entrada era 3D ──
     if result.ndim == 2 and x.ndim == 3:
-        result = result.reshape(original_shape)
+        n_seq = original_shape[0]
+        result = result.reshape(n_seq, original_shape[1], -1)
 
     return result
 
@@ -477,6 +500,30 @@ def apply_feature_view_tf(
         t_im_h1 = im_h2
         t_re_h2 = _safe_log10_tf(ratio)
         t_im_h2 = phi_h1 - phi_h2
+
+    elif view == "second_order":
+        # ── second_order: Features de 2o grau TF (alta resistividade).
+        #    Delega para compute_second_order_features_tf().
+        #    Retorna tensor com 6 canais SO no lugar dos 4 EM.
+        from geosteering_ai.data.second_order import compute_second_order_features_tf
+
+        _h1 = (re_h1_idx, im_h1_idx)
+        _h2 = (re_h2_idx, im_h2_idx)
+        so_feats = compute_second_order_features_tf(x, _h1, _h2, eps=eps)
+        # ── Construir saida: remover 4 EM, concatenar 6 SO ────────
+        # Usa tf.gather para selecionar colunas nao-EM sem loop Python.
+        # Compativel com graph mode (tf.function) — indices estaticos.
+        _em_set = {re_h1_idx, im_h1_idx, re_h2_idx, im_h2_idx}
+        n_feat_static = x.shape[-1]
+        if n_feat_static is not None:
+            non_em_idx = [i for i in range(n_feat_static) if i not in _em_set]
+        else:
+            # Fallback para shapes desconhecidos (raro)
+            non_em_idx = [i for i in range(22) if i not in _em_set]
+        if non_em_idx:
+            non_em = tf.gather(x, non_em_idx, axis=-1)
+            return tf.concat([non_em, so_feats], axis=-1)
+        return so_feats
 
     else:
         raise ValueError(f"Feature View '{view}' invalida. Validas: {VALID_VIEWS}")

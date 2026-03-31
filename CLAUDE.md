@@ -282,6 +282,7 @@ Testes minimos por modulo:
 | Plugin | Uso |
 |:-------|:----|
 | **context7-plugin** | Buscar documentacao atualizada de TensorFlow, Keras, NumPy, scikit-learn |
+| **consensus** | Busca de artigos cientificos (Semantic Scholar + ArXiv). Opcao A — MCP Server (padrao) |
 | **Figma** | (Disponivel, nao utilizado neste projeto) |
 
 ### Skills Disponiveis
@@ -290,9 +291,32 @@ Testes minimos por modulo:
 |:------|:----|
 | **geosteering-v2** | Skill PRINCIPAL v2.0 — dominio fisico (geofisica/petrofisica/EM), padroes de codigo v2.0 (PipelineConfig/Factory), DL aplicado a geociencias. Usar para TODAS as questoes do projeto |
 | **geosteering-v5015** | Skill LEGADA para celulas C0-C73. Usar apenas para referencia ao codigo legado |
+| **consensus-search** | Pesquisa cientifica multi-fonte — Semantic Scholar + ArXiv + WebSearch. Fase A (imediata) |
+| **arxiv-search** | Busca em repositorios abertos — ArXiv + Semantic Scholar. Opcao B (sem API key) |
 | **feature-dev** | Desenvolvimento guiado de features com foco em arquitetura |
 | **code-review** | Revisao de PRs e codigo |
 | **context7-plugin:docs** | Busca de documentacao de bibliotecas |
+
+### Integracao Cientifica (Consensus)
+
+O projeto integra pesquisa cientifica ao fluxo de desenvolvimento via 3 fases:
+
+| Fase | Implementacao | Status |
+|:-----|:-------------|:-------|
+| **A** | Skill `/consensus-search` via WebFetch | Ativa |
+| **B** | MCP Server `tools/consensus-mcp-server/` | Pronto (ativar em settings.json) |
+| **C** | Hook `validate-scientific-refs.sh` | Pronto (ativar em settings.json) |
+
+4 opcoes de busca disponiveis:
+
+| Opcao | Tipo | API Key | Recomendacao |
+|:------|:-----|:-------:|:-------------|
+| **A** | MCP Server (padrao) | Opcional (S2_API_KEY) | Desenvolvimento continuo |
+| **B** | Skill /arxiv-search | Nenhuma | Exploracao rapida |
+| **C** | WebSearch/WebFetch direto | Nenhuma | Buscas pontuais |
+| **D** | Hook automatico | Nenhuma | Lembrete passivo |
+
+Ref: `docs/reference/consensus_integration.md` (guia completo).
 
 ### Workflow com Agentes (Recomendado)
 
@@ -300,15 +324,17 @@ Testes minimos por modulo:
 ANTES de implementar:
   1. Explore agent → entender codigo existente e dependencias
   2. Plan agent → planejar implementacao com etapas claras
+  3. /consensus-search → validar decisoes com literatura cientifica
 
 DURANTE implementacao:
-  3. Claude Code → editar arquivos, rodar testes
-  4. context7 → consultar docs do TF/Keras quando necessario
+  4. Claude Code → editar arquivos, rodar testes
+  5. context7 → consultar docs do TF/Keras quando necessario
+  6. /arxiv-search → buscar preprints para novas tecnicas
 
 APOS implementar:
-  5. code-reviewer agent → revisar bugs, seguranca, qualidade
-  6. code-simplifier agent → otimizar legibilidade
-  7. pytest → validar automaticamente
+  7. code-reviewer agent → revisar bugs, seguranca, qualidade
+  8. code-simplifier agent → otimizar legibilidade
+  9. pytest → validar automaticamente
 ```
 
 ---

@@ -39,6 +39,18 @@ Referencia: docs/ARCHITECTURE_v2.md secao 4.3.
 """
 
 # ──────────────────────────────────────────────────────────────────────
+# Imports: boundaries.py — DTB (Distance to Boundary) labels (P5)
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.data.boundaries import (
+    apply_dtb_scaling,
+    build_extended_targets,
+    compute_dtb_for_dataset,
+    compute_dtb_labels,
+    detect_boundaries,
+    inverse_dtb_scaling,
+)
+
+# ──────────────────────────────────────────────────────────────────────
 # Imports: feature_views.py — 6 transformacoes de Feature View
 # ──────────────────────────────────────────────────────────────────────
 from geosteering_ai.data.feature_views import VALID_VIEWS, apply_feature_view
@@ -78,6 +90,15 @@ from geosteering_ai.data.loading import (
 from geosteering_ai.data.pipeline import DataPipeline, PreparedData
 
 # ──────────────────────────────────────────────────────────────────────
+# Imports: sampling.py — oversampling alta rho (Estrategia B)
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.data.sampling import (
+    compute_rho_max_per_sequence,
+    filter_by_rho_max,
+    oversample_high_rho,
+)
+
+# ──────────────────────────────────────────────────────────────────────
 # Imports: scaling.py — target scaling e scaler fit/transform
 # ──────────────────────────────────────────────────────────────────────
 from geosteering_ai.data.scaling import (
@@ -86,6 +107,14 @@ from geosteering_ai.data.scaling import (
     fit_scaler,
     inverse_target_scaling,
     transform_features,
+)
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: second_order.py — features de 2o grau (Estrategia C)
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.data.second_order import (
+    compute_second_order_features,
+    compute_second_order_features_tf,
 )
 
 # ──────────────────────────────────────────────────────────────────────
@@ -121,6 +150,13 @@ __all__ = [
     "compute_expanded_features",
     "compute_geosignals",
     "FAMILY_DEPS",
+    # --- boundaries.py: DTB (Distance to Boundary) labels (P5) ---
+    "detect_boundaries",
+    "compute_dtb_labels",
+    "apply_dtb_scaling",
+    "inverse_dtb_scaling",
+    "build_extended_targets",
+    "compute_dtb_for_dataset",
     # --- inspection.py: inspecao de dados (C26A adaptado) ---
     "inspect_data_splits",
     "export_inspection_csv",
@@ -130,4 +166,11 @@ __all__ = [
     "create_scaler",
     "fit_scaler",
     "transform_features",
+    # --- sampling.py: oversampling alta rho (Estrategia B) ---
+    "compute_rho_max_per_sequence",
+    "oversample_high_rho",
+    "filter_by_rho_max",
+    # --- second_order.py: features de 2o grau (Estrategia C) ---
+    "compute_second_order_features",
+    "compute_second_order_features_tf",
 ]

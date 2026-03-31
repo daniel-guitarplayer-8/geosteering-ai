@@ -1,0 +1,10 @@
+# Dependências do MCP Server — Consensus Scientific Search
+# Geosteering AI v2.0
+#
+# Instalação:
+#   pip install -r tools/consensus-mcp-server/requirements.txt
+#
+# Ref: docs/reference/consensus_integration.md
+
+mcp>=1.0.0
+httpx>=0.25.0

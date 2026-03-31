@@ -1,14 +1,14 @@
 # Geosteering AI
 
-Pipeline de Inversao Geofisica 1D com Deep Learning para Geosteering.
+Pipeline de Inversão Geofísica 1D com Deep Learning para Geosteering.
 
-Reproduz, com fidelidade fisica, a inversao eletromagnetica em tempo real
-atraves de arquiteturas de Deep Learning. Suporta componentes EM + geosinais
-e/ou Feature Views como features para inversao de resistividade em cenarios
-de inferencia offline (acausal) e realtime causal para geosteering em
+Reproduz, com fidelidade física, a inversão eletromagnética em tempo real
+através de arquiteturas de Deep Learning. Suporta componentes EM + geosinais
+e/ou Feature Views como features para inversão de resistividade em cenários
+de inferência offline (acausal) e realtime causal para geosteering em
 ambientes ruidosos (on-the-fly).
 
-## Instalacao
+## Instalação
 
 ```bash
 # Desenvolvimento local
@@ -21,7 +21,7 @@ pip install -e ".[dev]"
 !pip install -e /content/drive/MyDrive/Geosteering_AI
 ```
 
-## Uso Rapido
+## Uso Rápido
 
 ```python
 from geosteering_ai import PipelineConfig
@@ -29,7 +29,7 @@ from geosteering_ai.data import DataPipeline
 from geosteering_ai.models import ModelRegistry
 from geosteering_ai.training import TrainingLoop
 
-# Configuracao via preset
+# Configuração via preset
 config = PipelineConfig.robusto()
 
 # Pipeline de dados
@@ -44,24 +44,45 @@ trainer = TrainingLoop(config, model, pipeline, data)
 history = trainer.run()
 ```
 
-## Presets Disponiveis
+## Presets Disponíveis
 
-| Preset | Descricao |
+| Preset | Descrição |
 |:-------|:---------|
 | `PipelineConfig.baseline()` | P1: sem noise, sem GS, debugging |
 | `PipelineConfig.robusto()` | E-Robusto: noise 8%, curriculum, LR 1e-4 |
 | `PipelineConfig.nstage(n=2)` | N-Stage: clean → noise progressivo |
 | `PipelineConfig.geosinais_p4()` | P4: geosinais on-the-fly + noise |
+| `PipelineConfig.dtb_p5()` | P5: detecção de fronteiras geológicas (DTB) |
 | `PipelineConfig.realtime()` | Geosteering: modo causal, sliding window |
 
 ## Arquitetura
 
 - **44 arquiteturas** (39 standard + 5 geosteering nativas causais)
-- **26 funcoes de perda** (13 genericas + 4 geofisicas + 9 avancadas)
+- **26 funções de perda** (13 genéricas + 4 geofísicas + 9 avançadas)
+- **3 cenários PINN** (oracle, surrogate, maxwell) + TIV constraint
+- **7 Feature Views** (identity, H1_logH2, logH1_logH2, 3× fase/razão, second_order)
+- **5 famílias Geosinais** (USD, UAD, UHR, UHA, U3DF)
 - **Dual-mode:** offline (acausal) e realtime (causal)
 - **On-the-fly:** noise → FV → GS → scale (fisicamente correto)
+- **Integração científica:** Consensus MCP Server (Semantic Scholar + ArXiv)
 
-Documentacao completa: [docs/ARCHITECTURE_v2.md](docs/ARCHITECTURE_v2.md)
+Documentação completa: [docs/ARCHITECTURE_v2.md](docs/ARCHITECTURE_v2.md)
+
+## Estrutura do Pacote
+
+```
+geosteering_ai/
+├── config.py              ← PipelineConfig dataclass (150+ campos)
+├── data/                  ← Loading, splitting, FV, GS, scaling, pipeline
+├── noise/                 ← On-the-fly noise (15 tipos), curriculum 3-phase
+├── models/                ← 44 arquiteturas + ModelRegistry
+├── losses/                ← 26 losses + LossFactory + PINNs
+├── training/              ← TrainingLoop, callbacks, N-Stage, Optuna HPO
+├── inference/             ← InferencePipeline, realtime, export, UQ
+├── evaluation/            ← Métricas, comparação, relatórios
+├── visualization/         ← Plots, Picasso, EDA, geosteering
+└── utils/                 ← Logger, timer, validação, formatação
+```
 
 ## Framework
 
@@ -71,6 +92,6 @@ TensorFlow 2.x / Keras (EXCLUSIVO — PyTorch PROIBIDO).
 
 Daniel Leal
 
-## Licenca
+## Licença
 
 MIT

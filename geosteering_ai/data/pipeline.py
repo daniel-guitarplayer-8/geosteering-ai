@@ -79,6 +79,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from geosteering_ai.config import PipelineConfig
+from geosteering_ai.data.boundaries import compute_dtb_for_dataset
 from geosteering_ai.data.feature_views import apply_feature_view, apply_feature_view_tf
 from geosteering_ai.data.geosignals import (
     compute_expanded_features,
@@ -91,6 +92,7 @@ from geosteering_ai.data.loading import (
     load_dataset,
     parse_out_metadata,
 )
+from geosteering_ai.data.sampling import oversample_high_rho
 from geosteering_ai.data.scaling import (
     apply_target_scaling,
     fit_per_group_scalers,
@@ -98,6 +100,10 @@ from geosteering_ai.data.scaling import (
     make_tf_scaler_fn,
     transform_features,
     transform_per_group,
+)
+from geosteering_ai.data.second_order import (
+    compute_second_order_features,
+    compute_second_order_features_tf,
 )
 from geosteering_ai.data.splitting import (
     DataSplits,
@@ -371,12 +377,73 @@ class DataPipeline:
         # Garante zero data leakage entre train/val/test
         splits = split_angle_group(group, self.config)
 
+        # ── STEP 3a: Oversampling de alta rho (Estrategia B) ─────────
+        # Repete sequencias de alta resistividade N vezes no dataset
+        # de treino ANTES de target_scaling (threshold em Ohm.m).
+        # Somente train — val/test permanecem inalterados.
+        if self.config.use_rho_oversampling:
+            splits.x_train, splits.y_train, splits.z_train = oversample_high_rho(
+                splits.x_train,
+                splits.y_train,
+                splits.z_train,
+                self.config,
+            )
+
+        # ── STEP 3b: DTB labels (P5) — ANTES de target_scaling ─────────
+        # Quando use_dtb_as_target=True, computa DTB_up/DTB_down
+        # a partir de fronteiras detectadas em rho_h, e estende
+        # targets de 2 canais para 6 canais:
+        #   [rho_h, rho_v, DTB_up, DTB_down, rho_up, rho_down]
+        # IMPORTANTE: DTB usa scaling separado (config.dtb_scaling),
+        # enquanto rho channels usam target_scaling (log10).
+        if self.config.use_dtb_as_target:
+            logger.info(
+                "DTB (P5): computando DTB labels para train/val/test "
+                "(dtb_max=%.1f, dtb_scaling='%s')",
+                self.config.dtb_max_from_picasso,
+                self.config.dtb_scaling,
+            )
+            splits.y_train = compute_dtb_for_dataset(
+                splits.y_train,
+                splits.z_train,
+                self.config,
+            )
+            splits.y_val = compute_dtb_for_dataset(
+                splits.y_val,
+                splits.z_val,
+                self.config,
+            )
+            splits.y_test = compute_dtb_for_dataset(
+                splits.y_test,
+                splits.z_test,
+                self.config,
+            )
+
         # ── STEP 4: Target scaling ────────────────────────────────────
         # Transforma resistividade (Ohm.m) para dominio comprimido
         # Default: log10 comprime [0.3, 10000] → [-0.52, 4.0]
-        splits.y_train = apply_target_scaling(splits.y_train, self.config.target_scaling)
-        splits.y_val = apply_target_scaling(splits.y_val, self.config.target_scaling)
-        splits.y_test = apply_target_scaling(splits.y_test, self.config.target_scaling)
+        #
+        # Quando DTB ativo (6 canais): aplica target_scaling APENAS
+        # nos canais de resistividade (0,1,4,5). Canais DTB (2,3)
+        # ja foram escalados por apply_dtb_scaling() no Step 3b.
+        if self.config.use_dtb_as_target:
+            # ── 6-canais: scaling seletivo por tipo de canal ──────────
+            #   Canais rho (0,1,4,5): target_scaling (log10)
+            #   Canais DTB (2,3): ja escalados, nao tocar
+            _rho_idx = [0, 1, 4, 5]
+            for split_y in (splits.y_train, splits.y_val, splits.y_test):
+                split_y[..., _rho_idx] = apply_target_scaling(
+                    split_y[..., _rho_idx],
+                    self.config.target_scaling,
+                )
+        else:
+            splits.y_train = apply_target_scaling(
+                splits.y_train, self.config.target_scaling
+            )
+            splits.y_val = apply_target_scaling(splits.y_val, self.config.target_scaling)
+            splits.y_test = apply_target_scaling(
+                splits.y_test, self.config.target_scaling
+            )
 
         # ── STEPS 5-7: Feature processing + scaling ──────────────────
         # Decisao automatica: offline vs on-the-fly
@@ -459,7 +526,32 @@ class DataPipeline:
 
         n_em = x_train.shape[-1]
 
+        # ── STEP: Second-order features ANTES do scaling ──────────────
+        # Computa SO de dados com FV=identity (Re/Im fisicos, sem scale).
+        # IMPORTANTE: SO DEVE ser computado ANTES do scaler para que
+        # |H|^2, d|H|/dz e Re/Im ratio tenham significado fisico.
+        # Apos concatenar SO, o scaler eh fitado no array completo
+        # (features EM + SO), normalizando tudo de uma vez.
+        if (
+            self.config.use_second_order_features
+            and self.config.second_order_mode == "postprocess"
+        ):
+            so_train = compute_second_order_features(
+                x_train, self._h1_cols, self._h2_cols
+            )
+            so_val = compute_second_order_features(x_val, self._h1_cols, self._h2_cols)
+            so_test = compute_second_order_features(x_test, self._h1_cols, self._h2_cols)
+            x_train = np.concatenate([x_train, so_train], axis=-1)
+            x_val = np.concatenate([x_val, so_val], axis=-1)
+            x_test = np.concatenate([x_test, so_test], axis=-1)
+            n_em = x_train.shape[-1]  # atualizar n_em para incluir SO
+            logger.info(
+                "Second-order postprocess (pre-scale): +6 features → %d total",
+                x_train.shape[-1],
+            )
+
         # Fit scaler em train LIMPO, transform em todos os splits
+        # O scaler cobre features EM + SO (se ativo) de uma vez
         if self.config.use_per_group_scalers and self.config.use_geosignal_features:
             # Per-group [P3]: StandardScaler(EM) + RobustScaler(GS)
             scaler_em, scaler_gs = fit_per_group_scalers(x_train, self.config, n_em)
@@ -514,18 +606,45 @@ class DataPipeline:
         Scaler fitado em dados limpos (FV+GS clean, temporario).
         Val/test processados offline.
         """
-        # Fit scaler em CLEAN train (FV+GS aplicados temporariamente)
+        # Fit scaler em CLEAN train (FV+GS+SO aplicados temporariamente)
         # Estes dados temporarios so existem para capturar mu/sigma do scaler
         _fv_kw = dict(h1_cols=self._h1_cols, h2_cols=self._h2_cols)
         x_train_clean_fv = apply_feature_view(
             splits.x_train, self.config.feature_view, **_fv_kw
         )
-        n_em = x_train_clean_fv.shape[-1]
+
+        # ── SO no scaler: computar SO ANTES de fitar para que o scaler
+        # cubra EM + SO (consistente com o path offline).
+        _so_active = (
+            self.config.use_second_order_features
+            and self.config.second_order_mode == "postprocess"
+        )
+        if _so_active:
+            so_train_clean = compute_second_order_features(
+                x_train_clean_fv,
+                self._h1_cols,
+                self._h2_cols,
+            )
+            x_train_clean_fv = np.concatenate(
+                [x_train_clean_fv, so_train_clean],
+                axis=-1,
+            )
+        n_em = x_train_clean_fv.shape[-1]  # inclui SO se ativo
 
         # Se GS ativo, computar GS em clean para fitar scaler_gs
         scaler_gs = None
         if self.config.use_per_group_scalers and self._families:
             x_train_clean_full = self._apply_fv_gs(splits.x_train)
+            if _so_active:
+                so_full = compute_second_order_features(
+                    x_train_clean_full,
+                    self._h1_cols,
+                    self._h2_cols,
+                )
+                x_train_clean_full = np.concatenate(
+                    [x_train_clean_full, so_full],
+                    axis=-1,
+                )
             scaler_em, scaler_gs = fit_per_group_scalers(
                 x_train_clean_full,
                 self.config,
@@ -549,6 +668,24 @@ class DataPipeline:
             else apply_feature_view(splits.x_test, self.config.feature_view, **_fv_kw)
         )
 
+        # ── SO postprocess ANTES do scaling (coerencia fisica) ─────────
+        # SO computado sobre dados FV=identity (Re/Im fisicos, nao scaled).
+        # Garante que |H|^2, d|H|/dz e Re/Im ratio tenham significado fisico.
+        if (
+            self.config.use_second_order_features
+            and self.config.second_order_mode == "postprocess"
+        ):
+            so_val = compute_second_order_features(x_val_fv, self._h1_cols, self._h2_cols)
+            so_test = compute_second_order_features(
+                x_test_fv, self._h1_cols, self._h2_cols
+            )
+            x_val_fv = np.concatenate([x_val_fv, so_val], axis=-1)
+            x_test_fv = np.concatenate([x_test_fv, so_test], axis=-1)
+            logger.info(
+                "Second-order postprocess (on-the-fly val/test pre-scale): +6 → %d",
+                x_val_fv.shape[-1],
+            )
+
         if scaler_gs is not None:
             x_val_fv = transform_per_group(x_val_fv, scaler_em, scaler_gs, n_em)
             x_test_fv = transform_per_group(x_test_fv, scaler_em, scaler_gs, n_em)
@@ -556,7 +693,7 @@ class DataPipeline:
             x_val_fv = transform_features(x_val_fv, scaler_em)
             x_test_fv = transform_features(x_test_fv, scaler_em)
 
-        # Train: permanece RAW (noise+FV+GS+scale serao on-the-fly via train_map_fn)
+        # Train: permanece RAW (noise+FV+GS+scale+SO serao on-the-fly via train_map_fn)
         return PreparedData(
             x_train=splits.x_train.astype(np.float32),  # RAW! Processado on-the-fly
             y_train=splits.y_train.astype(np.float32),
@@ -639,6 +776,13 @@ class DataPipeline:
         scale_gs_fn = make_tf_scaler_fn(self._last_prepared.scaler_gs)
         n_em = self._last_prepared.n_em_features
 
+        # ── Closure vars para second-order postprocess on-the-fly ─────────
+        _use_so_postprocess = (
+            config.use_second_order_features and config.second_order_mode == "postprocess"
+        )
+        _so_h1 = self._h1_cols
+        _so_h2 = self._h2_cols
+
         # ┌──────────────────────────────────────────────────────────────────────────┐
         # │  INTERACAO NOISE × FV × GS (Fidelidade Fisica LWD)                     │
         # ├──────────────────────────────────────────────────────────────────────────┤
@@ -707,11 +851,20 @@ class DataPipeline:
                 )
                 x = tf.concat([x, gs], axis=-1)
 
-            # ── Step 4: Scaling (features normalizadas para modelo) ──────────
-            # Usa scaler fitado em dados LIMPOS (regra absoluta)
-            # Aplica normalizacao usando estatisticas de dados LIMPOS.
-            # Particiona EM e GS para per-group scaling [P3].
-            # Nota: x eh 2D (seq_len, n_feat) dentro de tf.data.map (unbatched)
+            # ── Step 4a: Second-order postprocess ANTES do scaling ─────
+            # Computa SO sobre dados com FV=identity (Re/Im fisicos,
+            # nao scaled). Garante coerencia fisica: |H|^2 e d|H|/dz
+            # sao computados sobre sinais EM em unidades fisicas (A/m).
+            # A concatenacao ANTES do scale faz com que o scaler
+            # normalize EM + SO juntos (consistente com o path offline).
+            if _use_so_postprocess:
+                so = compute_second_order_features_tf(x, _so_h1, _so_h2)
+                x = tf.concat([x, so], axis=-1)
+
+            # ── Step 4b: Scaling (features normalizadas para modelo) ──────
+            # Usa scaler fitado em dados LIMPOS (regra absoluta).
+            # Quando SO ativo, scaler cobre EM + SO de uma vez.
+            # Particiona EM(+SO) e GS para per-group scaling [P3].
             x_em = x[:, :n_em]
             x_em = scale_em_fn(x_em)
 

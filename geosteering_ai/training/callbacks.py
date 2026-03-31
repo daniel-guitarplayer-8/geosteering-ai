@@ -164,6 +164,8 @@ __all__ = [
     "make_cosine_schedule",
     "make_step_schedule",
     "make_warmup_cosine_schedule",
+    # --- Curriculum de resistividade (Estrategia B) ---
+    "RhoCurriculumCallback",
     # --- Factory functions ---
     "build_callbacks",
     "add_gradient_monitor",
@@ -2681,6 +2683,103 @@ class EpochSummary:
 #
 # Referencia: C40 legado (build_callbacks), docs/ARCHITECTURE_v2.md 6.2.
 # ════════════════════════════════════════════════════════════════════════
+
+
+# ════════════════════════════════════════════════════════════════════════
+# SECAO: CURRICULUM DE RESISTIVIDADE (Estrategia B)
+# ════════════════════════════════════════════════════════════════════════
+# Controla quais amostras sao incluidas no treinamento por epoca,
+# introduzindo progressivamente modelos de alta resistividade.
+#
+# 3 Fases:
+#   Fase 1 (Easy):   epoch < epochs_easy → rho_max = rho_max_start
+#   Fase 2 (Ramp):   epochs_easy ≤ epoch < easy+ramp → rho_max linear
+#   Fase 3 (Full):   epoch ≥ easy+ramp → rho_max = rho_max_end (tudo)
+#
+# O callback atualiza um tf.Variable que eh usado como threshold
+# para filtrar o dataset via tf.data.filter() no loop de treinamento.
+#
+# Ref: Estrategia B — curriculum de rho.
+# ════════════════════════════════════════════════════════════════════════
+
+
+class RhoCurriculumCallback:
+    """Callback para curriculum de resistividade.
+
+    Controla progressivamente o threshold de rho_max para inclusao
+    de amostras no treinamento. Amostras com max(rho_h) acima do
+    threshold sao filtradas pelo tf.data.filter().
+
+    3 Fases:
+        Fase 1 (Easy): rho_max_threshold = rho_max_start
+        Fase 2 (Ramp): threshold cresce linearmente
+        Fase 3 (Full): rho_max_threshold = rho_max_end (todas amostras)
+
+    Attributes:
+        rho_threshold_var: tf.Variable(float32) com threshold atual.
+        _epochs_easy: Duracao da fase easy.
+        _epochs_ramp: Duracao da fase ramp.
+        _rho_max_start: Threshold inicial (Ohm.m).
+        _rho_max_end: Threshold final (Ohm.m).
+
+    Example:
+        >>> import tensorflow as tf
+        >>> var = tf.Variable(100.0, dtype=tf.float32)
+        >>> cb = RhoCurriculumCallback(var, config)
+        >>> cb.on_epoch_begin(0, {})  # var = 100.0 (easy)
+        >>> cb.on_epoch_begin(50, {})  # var = ramp value
+
+    Note:
+        Referenciado em:
+            - training/loop.py: TrainingLoop.run() (adiciona callback)
+            - data/sampling.py: filter_by_rho_max() (mascara estatica)
+        Ref: Estrategia B — curriculum de resistividade.
+        Mutuamente exclusivo com use_rho_oversampling.
+    """
+
+    def __new__(cls, *args, **kwargs):
+        """Lazy TF import: garante heranca de tf.keras.callbacks.Callback."""
+        cls = _ensure_keras_callback_base(cls)
+        return super().__new__(cls)
+
+    def __init__(
+        self,
+        rho_threshold_var: Any,
+        config: PipelineConfig,
+    ):
+        super().__init__()
+        self.rho_threshold_var = rho_threshold_var
+        self._epochs_easy = config.rho_curriculum_epochs_easy
+        self._epochs_ramp = config.rho_curriculum_epochs_ramp
+        self._rho_max_start = config.rho_curriculum_rho_max_start
+        self._rho_max_end = config.rho_curriculum_rho_max_end
+
+    @property
+    def end_ramp_epoch(self) -> int:
+        """Epoca onde a fase ramp termina e full comeca."""
+        return self._epochs_easy + self._epochs_ramp
+
+    def on_epoch_begin(self, epoch: int, logs: Any = None) -> None:
+        """Atualiza rho_threshold_var conforme fase atual."""
+        if epoch < self._epochs_easy:
+            # ── Fase 1 (Easy): somente amostras faceis ────────────────
+            threshold = self._rho_max_start
+        elif epoch < self.end_ramp_epoch:
+            # ── Fase 2 (Ramp): threshold cresce linearmente ───────────
+            progress = (epoch - self._epochs_easy) / max(self._epochs_ramp, 1)
+            threshold = (
+                self._rho_max_start + (self._rho_max_end - self._rho_max_start) * progress
+            )
+        else:
+            # ── Fase 3 (Full): todas as amostras incluidas ────────────
+            threshold = self._rho_max_end
+
+        self.rho_threshold_var.assign(threshold)
+        logger.debug(
+            "RhoCurriculumCallback: epoch=%d, rho_threshold=%.1f",
+            epoch,
+            threshold,
+        )
 
 
 def build_callbacks(

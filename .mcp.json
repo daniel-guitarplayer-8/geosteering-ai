@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "consensus": {
+      "command": "python",
+      "args": ["tools/consensus-mcp-server/server.py"],
+      "env": {
+        "S2_API_KEY": "${S2_API_KEY}"
+      }
+    }
+  }
+}

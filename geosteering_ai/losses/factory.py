@@ -35,9 +35,11 @@ Fluxo de decisao para build_combined:
     │    SIM → loss_fn = morales_physics_hybrid (#26)                     │
     │    NAO ↓                                                            │
     │  loss_fn = get(config) — loss base conforme loss_type               │
+    │    use_pinns or use_tiv_constraint?                                 │
+    │      SIM → build_pinns_loss() (lambda_var × cenario + TIV)          │
     │    use_look_ahead_loss or use_dtb_loss?                             │
-    │      SIM → combined (base + extras ponderados)                      │
-    │      NAO → base simples                                             │
+    │      SIM → combined (base + extras ponderados + PINNs)              │
+    │      NAO → base simples (+ PINNs se ativas)                         │
     └──────────────────────────────────────────────────────────────────────┘
 """
 from __future__ import annotations
@@ -48,22 +50,36 @@ from typing import TYPE_CHECKING, Callable, Optional
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
 
-from geosteering_ai.losses.catalog import (
+from geosteering_ai.losses.catalog import (  # A: genericas; B: geofisicas (factories); C: geosteering; D: avancadas (factories)
     EPS,
-    # A: genericas
-    mse_loss, rmse_loss, mae_loss, mbe_loss, rse_loss, rae_loss,
-    mape_loss, msle_loss, rmsle_loss, nrmse_loss, rrmse_loss,
-    huber_loss, log_cosh_loss,
-    # B: geofisicas (factories)
-    make_log_scale_aware, make_adaptive_log_scale,
-    make_robust_log_scale, make_adaptive_robust,
-    # C: geosteering
-    probabilistic_nll, make_look_ahead_weighted,
-    # D: avancadas (factories)
-    make_dilate, make_enc_decoder, make_multitask,
-    make_sobolev, make_cross_gradient, make_spectral,
+    huber_loss,
+    log_cosh_loss,
+    mae_loss,
+    make_adaptive_log_scale,
+    make_adaptive_robust,
+    make_cross_gradient,
+    make_dilate,
+    make_enc_decoder,
+    make_log_scale_aware,
+    make_look_ahead_weighted,
     make_morales_hybrid,
+    make_multitask,
+    make_robust_log_scale,
+    make_sobolev,
+    make_spectral,
+    mape_loss,
+    mbe_loss,
+    mse_loss,
+    msle_loss,
+    nrmse_loss,
+    probabilistic_nll,
+    rae_loss,
+    rmse_loss,
+    rmsle_loss,
+    rrmse_loss,
+    rse_loss,
 )
+from geosteering_ai.losses.pinns import build_pinns_loss
 
 logger = logging.getLogger(__name__)
 
@@ -76,16 +92,35 @@ logger = logging.getLogger(__name__)
 
 VALID_LOSS_TYPES: list[str] = [
     # A: genericas
-    "mse", "rmse", "mae", "mbe", "rse", "rae", "mape",
-    "msle", "rmsle", "nrmse", "rrmse", "huber", "log_cosh",
+    "mse",
+    "rmse",
+    "mae",
+    "mbe",
+    "rse",
+    "rae",
+    "mape",
+    "msle",
+    "rmsle",
+    "nrmse",
+    "rrmse",
+    "huber",
+    "log_cosh",
     # B: geofisicas
-    "log_scale_aware", "adaptive_log_scale",
-    "robust_log_scale", "adaptive_robust",
+    "log_scale_aware",
+    "adaptive_log_scale",
+    "robust_log_scale",
+    "adaptive_robust",
     # C: geosteering
-    "probabilistic_nll", "look_ahead_weighted",
+    "probabilistic_nll",
+    "look_ahead_weighted",
     # D: avancadas
-    "dilate", "enc_decoder", "multitask", "sobolev",
-    "cross_gradient", "spectral", "morales_physics_hybrid",
+    "dilate",
+    "enc_decoder",
+    "multitask",
+    "sobolev",
+    "cross_gradient",
+    "spectral",
+    "morales_physics_hybrid",
 ]
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -102,40 +137,40 @@ _FACTORY = "factory"
 
 _LOSS_REGISTRY: dict[str, tuple[str, object]] = {
     # ── A: Genericas — funcoes diretas ────────────────────────────────────
-    "mse":        (_DIRECT,  mse_loss),
-    "rmse":       (_DIRECT,  rmse_loss),
-    "mae":        (_DIRECT,  mae_loss),
-    "mbe":        (_DIRECT,  mbe_loss),
-    "rse":        (_DIRECT,  rse_loss),
-    "rae":        (_DIRECT,  rae_loss),
-    "mape":       (_DIRECT,  mape_loss),
-    "msle":       (_DIRECT,  msle_loss),
-    "rmsle":      (_DIRECT,  rmsle_loss),
-    "nrmse":      (_DIRECT,  nrmse_loss),
-    "rrmse":      (_DIRECT,  rrmse_loss),
-    "huber":      (_DIRECT,  huber_loss),
-    "log_cosh":   (_DIRECT,  log_cosh_loss),
+    "mse": (_DIRECT, mse_loss),
+    "rmse": (_DIRECT, rmse_loss),
+    "mae": (_DIRECT, mae_loss),
+    "mbe": (_DIRECT, mbe_loss),
+    "rse": (_DIRECT, rse_loss),
+    "rae": (_DIRECT, rae_loss),
+    "mape": (_DIRECT, mape_loss),
+    "msle": (_DIRECT, msle_loss),
+    "rmsle": (_DIRECT, rmsle_loss),
+    "nrmse": (_DIRECT, nrmse_loss),
+    "rrmse": (_DIRECT, rrmse_loss),
+    "huber": (_DIRECT, huber_loss),
+    "log_cosh": (_DIRECT, log_cosh_loss),
     # ── B: Geofisicas — factories ─────────────────────────────────────────
-    "log_scale_aware":   (_FACTORY, make_log_scale_aware),
+    "log_scale_aware": (_FACTORY, make_log_scale_aware),
     "adaptive_log_scale": (_FACTORY, make_adaptive_log_scale),
-    "robust_log_scale":   (_FACTORY, make_robust_log_scale),
-    "adaptive_robust":    (_FACTORY, make_adaptive_robust),
+    "robust_log_scale": (_FACTORY, make_robust_log_scale),
+    "adaptive_robust": (_FACTORY, make_adaptive_robust),
     # ── C: Geosteering — misto ────────────────────────────────────────────
-    "probabilistic_nll":   (_DIRECT,  probabilistic_nll),
+    "probabilistic_nll": (_DIRECT, probabilistic_nll),
     "look_ahead_weighted": (_FACTORY, make_look_ahead_weighted),
     # ── D: Avancadas — factories ──────────────────────────────────────────
-    "dilate":              (_FACTORY, make_dilate),
-    "enc_decoder":         (_FACTORY, make_enc_decoder),
-    "multitask":           (_FACTORY, make_multitask),
-    "sobolev":             (_FACTORY, make_sobolev),
-    "cross_gradient":      (_FACTORY, make_cross_gradient),
-    "spectral":            (_FACTORY, make_spectral),
+    "dilate": (_FACTORY, make_dilate),
+    "enc_decoder": (_FACTORY, make_enc_decoder),
+    "multitask": (_FACTORY, make_multitask),
+    "sobolev": (_FACTORY, make_sobolev),
+    "cross_gradient": (_FACTORY, make_cross_gradient),
+    "spectral": (_FACTORY, make_spectral),
     "morales_physics_hybrid": (_FACTORY, make_morales_hybrid),
 }
 
-assert len(_LOSS_REGISTRY) == 26, (
-    f"Registry deve ter 26 losses, encontrado {len(_LOSS_REGISTRY)}"
-)
+assert (
+    len(_LOSS_REGISTRY) == 26
+), f"Registry deve ter 26 losses, encontrado {len(_LOSS_REGISTRY)}"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -145,6 +180,7 @@ assert len(_LOSS_REGISTRY) == 26, (
 # Aceita config: PipelineConfig e variaveis opcionais de runtime
 # (epoch_var, noise_level_var) para losses adaptativas.
 # ──────────────────────────────────────────────────────────────────────────
+
 
 class LossFactory:
     """Fabrica de loss functions para o pipeline de inversao de resistividade.
@@ -228,9 +264,7 @@ class LossFactory:
             return fn(config, epoch_var=epoch_var, noise_level_var=noise_level_var)
 
         # Losses de epoch precisam de epoch_var
-        if loss_type in (
-            "log_scale_aware", "robust_log_scale", "morales_physics_hybrid"
-        ):
+        if loss_type in ("log_scale_aware", "robust_log_scale", "morales_physics_hybrid"):
             return fn(config, epoch_var=epoch_var)
 
         # Factories simples (sem variaveis de runtime)
@@ -250,7 +284,7 @@ class LossFactory:
             1. use_morales_hybrid_loss → morales_physics_hybrid (#26)
             2. loss base = LossFactory.get(config)
             3. use_look_ahead_loss → adiciona look_ahead_weighted
-            4. use_dtb_loss → adiciona MSE no canal DTB (last channel)
+            4. use_dtb_loss → adiciona MSE nos canais DTB [2:4] (DTB_up, DTB_down)
             5. pinns_lambda_var → adiciona termo PINNs (via callback externo)
 
         A loss combinada e:
@@ -277,7 +311,8 @@ class LossFactory:
 
         Note:
             Referenciado em: training/loop.py (TrainingLoop.run()).
-            DTB assume que o ultimo canal de y_pred e a predicao DTB.
+            DTB usa canais [2:4] de y_pred (DTB_up, DTB_down).
+            Base loss opera APENAS em canais rho [0:2] quando DTB ativo.
         """
         # ── Caso 1: Morales hybrid substitui a loss base ──────────────────
         if config.use_morales_hybrid_loss:
@@ -287,14 +322,26 @@ class LossFactory:
 
         # ── Caso base: loss do loss_type ──────────────────────────────────
         base_fn = cls.get(config, epoch_var=epoch_var, noise_level_var=noise_level_var)
+        # ── Construir loss PINNs (cenario + TIV constraint) ──────────────
+        # build_pinns_loss retorna loss nula se use_pinns=False e
+        # use_tiv_constraint=False. Caso contrario, combina cenario
+        # PINN + TIV com lambda schedule.
+        _pinns_active = config.use_pinns or config.use_tiv_constraint
+        pinns_fn = None
+        if _pinns_active:
+            pinns_fn = build_pinns_loss(config, epoch_var=epoch_var)
+
         logger.info(
-            "LossFactory: loss_type='%s', look_ahead=%s, dtb=%s",
+            "LossFactory: loss_type='%s', look_ahead=%s, dtb=%s, pinns=%s",
             config.loss_type,
             config.use_look_ahead_loss,
             config.use_dtb_loss,
+            _pinns_active,
         )
 
-        needs_combined = config.use_look_ahead_loss or config.use_dtb_loss
+        needs_combined = (
+            config.use_look_ahead_loss or config.use_dtb_loss or _pinns_active
+        )
         if not needs_combined:
             return base_fn
 
@@ -304,28 +351,52 @@ class LossFactory:
         w_base = max(1.0 - w_la - w_dtb, 0.01)
 
         look_ahead_fn = (
-            make_look_ahead_weighted(config)
-            if config.use_look_ahead_loss
-            else None
+            make_look_ahead_weighted(config) if config.use_look_ahead_loss else None
         )
+
+        # ── Pre-computar flag DTB para uso na closure ─────────────────
+        _dtb_active = config.use_dtb_as_target
 
         def combined_loss_fn(y_true, y_pred):
             import tensorflow as tf
-            # Loss base (sobre todos os canais de predicao)
-            n_target = tf.shape(y_true)[-1]
-            y_pred_base = y_pred[..., :n_target]
-            total = w_base * base_fn(y_true, y_pred_base)
 
-            # Look-ahead geosteering
+            # ── Loss base: APENAS canais de resistividade ─────────────
+            # Quando DTB ativo (6 canais), a loss base opera SOMENTE
+            # nos canais rho (0,1) para evitar mistura de dominios:
+            #   canais 0,1: rho_h, rho_v (log10-scaled)
+            #   canais 2,3: DTB_up, DTB_down (DTB-scaled, dominio diferente)
+            #   canais 4,5: rho_up, rho_down (log10-scaled)
+            # Se DTB inativo, loss base opera sobre todos os canais.
+            if _dtb_active:
+                y_true_base = y_true[..., :2]
+                y_pred_base = y_pred[..., :2]
+            else:
+                n_target = tf.shape(y_true)[-1]
+                y_pred_base = y_pred[..., :n_target]
+                y_true_base = y_true
+            total = w_base * base_fn(y_true_base, y_pred_base)
+
+            # Look-ahead geosteering (opera sobre canais rho)
             if look_ahead_fn is not None:
-                total = total + w_la * look_ahead_fn(y_true, y_pred_base)
+                total = total + w_la * look_ahead_fn(y_true_base, y_pred_base)
 
-            # DTB: ultimo canal de y_pred vs ultimo canal de y_true
+            # ── DTB: canais 2,3 de y — DTB_up e DTB_down ─────────────
+            # Quando use_dtb_as_target=True e output_channels>=4,
+            # canais [2, 3] contem DTB_up e DTB_down (ja scaled).
+            # Loss: MSE com clipping em dtb_max (DOD fisico).
+            # Ref: docs/physics/perspectivas.md secao P5 (L_DTB).
             if config.use_dtb_loss:
-                dtb_pred = y_pred[..., -1:]
-                dtb_true = y_true[..., -1:]
+                dtb_pred = y_pred[..., 2:4]
+                dtb_true = y_true[..., 2:4]
                 dtb_loss = tf.reduce_mean(tf.square(dtb_true - dtb_pred))
                 total = total + w_dtb * dtb_loss
+
+            # ── PINNs: cenario + TIV constraint ──────────────────────
+            # PINNs adicionadas ADITIVAMENTE a loss total (nao ponderadas
+            # pelo w_base). Lambda schedule controla o peso internamente.
+            # Ref: losses/pinns.py — build_pinns_loss().
+            if pinns_fn is not None:
+                total = total + pinns_fn(y_true, y_pred)
 
             return total
 

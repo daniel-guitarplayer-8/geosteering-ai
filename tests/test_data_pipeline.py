@@ -249,7 +249,8 @@ class TestFeatureViews:
         np.testing.assert_array_equal(result, x_3d)
 
     def test_shape_preserved_all_views(self, x_3d):
-        for view in VALID_VIEWS:
+        # second_order altera n_features (4 EM -> 6 SO), testado separadamente
+        for view in VALID_VIEWS - {"second_order"}:
             result = apply_feature_view(x_3d, view)
             assert result.shape == x_3d.shape, f"Shape changed for view '{view}'"
 
@@ -284,7 +285,7 @@ class TestFeatureViews:
     def test_2d_input(self):
         """Feature Views devem funcionar com entrada 2D."""
         x_2d = np.random.uniform(0.001, 1.0, size=(100, 5))
-        for view in VALID_VIEWS:
+        for view in VALID_VIEWS - {"second_order"}:
             result = apply_feature_view(x_2d, view)
             assert result.shape == x_2d.shape
 
@@ -316,7 +317,7 @@ class TestFeatureViewsExpanded:
 
     def test_shape_preserved_all_views_7feat(self, x_7feat):
         """Shape (4, 100, 7) preservada para todas as FVs com h1_cols/h2_cols."""
-        for view in VALID_VIEWS:
+        for view in VALID_VIEWS - {"second_order"}:
             result = apply_feature_view(x_7feat, view, h1_cols=(1, 2), h2_cols=(5, 6))
             assert result.shape == x_7feat.shape, f"Shape changed for view '{view}'"
 
@@ -332,7 +333,7 @@ class TestFeatureViewsExpanded:
 
     def test_extra_em_columns_preserved(self, x_7feat):
         """Colunas EM extras (Hxy, cols 3-4) NAO sao modificadas pelas FVs."""
-        for view in VALID_VIEWS:
+        for view in VALID_VIEWS - {"second_order"}:
             result = apply_feature_view(x_7feat, view, h1_cols=(1, 2), h2_cols=(5, 6))
             # Hxy (cols 3 e 4) devem permanecer intactas
             np.testing.assert_array_equal(
