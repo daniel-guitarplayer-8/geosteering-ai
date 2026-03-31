@@ -113,6 +113,22 @@ class PipelineConfig:
         Validacao fail-fast no __post_init__: violacao gera AssertionError.
     """
 
+    #   ┌──────────────────────────────────────────────────────────────────────┐
+    #   │  PipelineConfig — 7 Secoes de Campos                                │
+    #   ├──────────────────────────────────────────────────────────────────────┤
+    #   │  SECAO 1: Fisica       │ frequency_hz, spacing_meters, seq_length   │
+    #   │  SECAO 2: Dados/Split  │ split ratios, dual_validation, holdout     │
+    #   │  SECAO 3: Noise        │ noise_level_max, curriculum, n_stage       │
+    #   │  SECAO 4: FV/GS/Scale  │ feature_view, geosignals, scaler_type     │
+    #   │  SECAO 5: Modelo       │ model_type, filters, kernel_size, blocks   │
+    #   │  SECAO 6: Treinamento  │ LR, epochs, patience, optimizer, loss      │
+    #   │  SECAO 7: Inference    │ inference_mode, export, realtime, UQ       │
+    #   ├──────────────────────────────────────────────────────────────────────┤
+    #   │  Errata: __post_init__ valida physics + mutual exclusivity          │
+    #   │  Presets: baseline, robusto, nstage, geosinais_p4, realtime        │
+    #   │  Serializacao: from_yaml/to_yaml para reprodutibilidade             │
+    #   └──────────────────────────────────────────────────────────────────────┘
+
     # ══════════════════════════════════════════════════════════════════
     # SECAO 1: FISICA (Errata v4.4.5 + v5.0.15 — valores imutaveis)
     # Constantes do sensor LWD validadas contra Errata publicada.

@@ -73,6 +73,23 @@ VALID_VIEWS = {
     "IMH1_IMH2_lograzao",
 }
 
+#   ┌──────────────────────────────────────────────────────────────────────────┐
+#   │  6 Feature Views Canonicas (Ref: docs/physics/perspectivas.md):         │
+#   │                                                                          │
+#   │  View               │ Canal 0    │ Canal 1  │ Canal 2      │ Canal 3    │
+#   │  ───────────────────┼────────────┼──────────┼──────────────┼────────────│
+#   │  identity / raw     │ Re(H1)     │ Im(H1)   │ Re(H2)       │ Im(H2)    │
+#   │  H1_logH2           │ Re(H1)     │ Im(H1)   │ log10|H2|    │ φ(H2)     │
+#   │  logH1_logH2        │ log10|H1|  │ φ(H1)    │ log10|H2|    │ φ(H2)     │
+#   │  IMH1_IMH2_razao    │ Im(H1)     │ Im(H2)   │ |H1|/|H2|   │ Δφ        │
+#   │  IMH1_IMH2_lograzao │ Im(H1)     │ Im(H2)   │ log10(ratio) │ Δφ        │
+#   │                                                                          │
+#   │  H1 = Hxx (planar), H2 = Hzz (axial)                                   │
+#   │  |H| = √(Re² + Im² + ε),  φ(H) = arctan2(Im, Re)                      │
+#   │  ε = 1e-12 (float32 safe — NUNCA 1e-30)                                │
+#   │  SEMPRE log10 (NUNCA ln — bug fix v2.0)                                │
+#   └──────────────────────────────────────────────────────────────────────────┘
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # SECAO: HELPERS MATEMATICOS

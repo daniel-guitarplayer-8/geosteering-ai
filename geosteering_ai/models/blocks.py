@@ -63,6 +63,23 @@ Note:
     Ref: docs/ARCHITECTURE_v2.md secao 5.1. Legado C27.
 """
 
+#   ┌──────────────────────────────────────────────────────────────────────────┐
+#   │  23 Blocos Keras Reutilizaveis — 7 Grupos                               │
+#   ├──────────────────────────────────────────────────────────────────────────┤
+#   │  Grupo 1 — Conv (5)       │ residual, bottleneck, convnext, se, dilated │
+#   │  Grupo 2 — Inception (2)  │ inception_module, mbconv_block              │
+#   │  Grupo 3 — Gated/TCN (2)  │ gated_activation, tcn_residual             │
+#   │  Grupo 4 — Atencao (3)    │ self_attention, transformer_encoder, autocorr│
+#   │  Grupo 5 — Transformer (4)│ patch_embedding, grn, vsn, ita             │
+#   │  Grupo 6 — Decomp (1)     │ series_decomp                              │
+#   │  Grupo 7 — Utility (6)    │ output_proj, norm, skip, ff, incep_time, att│
+#   ├──────────────────────────────────────────────────────────────────────────┤
+#   │  API: f(x: tf.Tensor, **kwargs) → tf.Tensor                            │
+#   │  Preserva dimensao temporal: (batch, seq, ch) → (batch, seq, ch')      │
+#   │  Lazy TF imports: importavel sem TF instalado                           │
+#   │  Causal: parametro explicito use_causal=True/False                      │
+#   └──────────────────────────────────────────────────────────────────────────┘
+
 from __future__ import annotations
 
 import logging
