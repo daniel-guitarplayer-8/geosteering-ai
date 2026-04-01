@@ -136,22 +136,27 @@ class _FourierLayer(tf.keras.layers.Layer):
         super().__init__(**kwargs)
         self.n_modes = n_modes
         self.out_channels = out_channels
-        # Dense para projecao espectral (criadas em build)
-        self.proj_r = None
-        self.proj_i = None
+        self._in_channels = None
 
     def build(self, input_shape):
-        in_channels = input_shape[-1]
+        self._in_channels = int(input_shape[-1])
+        flat_dim = self._in_channels * self.n_modes
+        # ── Dense para projecao espectral (pesos criados com shape fixa) ──
+        # Keras 3.x exige shapes totalmente definidas na criacao de variaveis.
+        # Ao chamar build() explicitamente com flat_dim, a Dense cria kernel
+        # de shape (flat_dim, out_ch*n_modes) — sem None.
         self.proj_r = tf.keras.layers.Dense(
             self.out_channels * self.n_modes,
             use_bias=False,
             name="proj_real",
         )
+        self.proj_r.build((None, flat_dim))
         self.proj_i = tf.keras.layers.Dense(
             self.out_channels * self.n_modes,
             use_bias=False,
             name="proj_imag",
         )
+        self.proj_i.build((None, flat_dim))
         super().build(input_shape)
 
     def call(self, x):
@@ -165,16 +170,15 @@ class _FourierLayer(tf.keras.layers.Layer):
         x_ft_r = tf.math.real(x_ft_trunc)
         x_ft_i = tf.math.imag(x_ft_trunc)
 
-        batch = tf.shape(x)[0]
-        x_flat_r = tf.reshape(x_ft_r, [batch, -1])
-        x_flat_i = tf.reshape(x_ft_i, [batch, -1])
+        # ── Flatten: (batch, ch, n_modes) → (batch, ch*n_modes) ──────
+        # Usa -1 para batch (evita tf.shape()[0] que e None no tracing)
+        flat_dim = self._in_channels * self.n_modes
+        x_flat_r = tf.reshape(x_ft_r, [-1, flat_dim])
+        x_flat_i = tf.reshape(x_ft_i, [-1, flat_dim])
 
-        proj_r = tf.reshape(
-            self.proj_r(x_flat_r), [batch, self.out_channels, self.n_modes]
-        )
-        proj_i = tf.reshape(
-            self.proj_i(x_flat_i), [batch, self.out_channels, self.n_modes]
-        )
+        # ── Projecao: (batch, in_ch*n_modes) → (batch, out_ch*n_modes) ─
+        proj_r = tf.reshape(self.proj_r(x_flat_r), [-1, self.out_channels, self.n_modes])
+        proj_i = tf.reshape(self.proj_i(x_flat_i), [-1, self.out_channels, self.n_modes])
 
         # ── Recombina em complexo e pad para iFFT ─────────────────────
         out_ft = tf.complex(proj_r, proj_i)
@@ -189,6 +193,9 @@ class _FourierLayer(tf.keras.layers.Layer):
         out_t = tf.signal.irfft(out_ft_pad)  # (batch, out_ch, seq_len)
         out_t = tf.transpose(out_t, [0, 2, 1])  # (batch, seq_len, out_ch)
         return out_t
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[1], self.out_channels)
 
     def get_config(self):
         config = super().get_config()
