@@ -554,7 +554,8 @@ class TestBuildModelValidation:
         cfg = PipelineConfig.baseline()
         registry = ModelRegistry()
         model = registry.build(cfg)
-        assert model.name == "ResNet_18"
+        # Fix CR#4: Keras deduplicates model names (_1, _2...) em multi-test.
+        assert model.name.startswith("ResNet_18")
 
     def test_resnet18_output_shape_default(self):
         """ResNet-18 deve produzir (2, 600, 2) por default."""

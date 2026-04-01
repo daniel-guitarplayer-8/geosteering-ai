@@ -25,6 +25,7 @@ import pytest
 # ── Deteccao de TF (mesmo padrao de test_models.py) ──────────────────────────
 try:
     import tensorflow as _tf  # noqa: F401
+
     HAS_TF = True
 except ImportError:
     HAS_TF = False
@@ -34,17 +35,17 @@ requires_tf = pytest.mark.skipif(not HAS_TF, reason="TensorFlow nao disponivel")
 # ── Imports CPU-safe ──────────────────────────────────────────────────────────
 from geosteering_ai.config import PipelineConfig
 from geosteering_ai.losses.factory import (
+    _LOSS_REGISTRY,
     VALID_LOSS_TYPES,
     LossFactory,
-    _LOSS_REGISTRY,
     build_loss_fn,
     list_available_losses,
 )
 
-
 # ════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def _make_config(**kwargs) -> PipelineConfig:
     """Cria PipelineConfig a partir do baseline com overrides."""
@@ -53,8 +54,9 @@ def _make_config(**kwargs) -> PipelineConfig:
 
 def _make_tensors(batch=2, seq=600, channels=2):
     """Cria tensores TF aleatorios para testes de loss."""
-    import tensorflow as tf
     import numpy as np
+    import tensorflow as tf
+
     rng = np.random.default_rng(42)
     y_true = tf.constant(rng.uniform(0.5, 3.5, (batch, seq, channels)), dtype=tf.float32)
     y_pred = tf.constant(rng.uniform(0.5, 3.5, (batch, seq, channels)), dtype=tf.float32)
@@ -71,9 +73,7 @@ class TestLossRegistry:
 
     def test_registry_count_26(self):
         """Deve haver exatamente 26 losses no registry."""
-        assert len(_LOSS_REGISTRY) == 26, (
-            f"Esperado 26, encontrado {len(_LOSS_REGISTRY)}"
-        )
+        assert len(_LOSS_REGISTRY) == 26, f"Esperado 26, encontrado {len(_LOSS_REGISTRY)}"
 
     def test_valid_loss_types_count_26(self):
         """VALID_LOSS_TYPES deve ter 26 entradas."""
@@ -86,8 +86,19 @@ class TestLossRegistry:
     def test_category_a_13_genericas(self):
         """Categoria A deve ter 13 losses genericas."""
         cat_a = [
-            "mse", "rmse", "mae", "mbe", "rse", "rae", "mape",
-            "msle", "rmsle", "nrmse", "rrmse", "huber", "log_cosh",
+            "mse",
+            "rmse",
+            "mae",
+            "mbe",
+            "rse",
+            "rae",
+            "mape",
+            "msle",
+            "rmsle",
+            "nrmse",
+            "rrmse",
+            "huber",
+            "log_cosh",
         ]
         for name in cat_a:
             assert name in _LOSS_REGISTRY, f"'{name}' falta na categoria A"
@@ -96,8 +107,10 @@ class TestLossRegistry:
     def test_category_b_4_geofisicas(self):
         """Categoria B deve ter 4 losses geofisicas."""
         cat_b = [
-            "log_scale_aware", "adaptive_log_scale",
-            "robust_log_scale", "adaptive_robust",
+            "log_scale_aware",
+            "adaptive_log_scale",
+            "robust_log_scale",
+            "adaptive_robust",
         ]
         for name in cat_b:
             assert name in _LOSS_REGISTRY, f"'{name}' falta na categoria B"
@@ -110,8 +123,13 @@ class TestLossRegistry:
     def test_category_d_7_avancadas(self):
         """Categoria D deve ter 7 losses avancadas."""
         cat_d = [
-            "dilate", "enc_decoder", "multitask", "sobolev",
-            "cross_gradient", "spectral", "morales_physics_hybrid",
+            "dilate",
+            "enc_decoder",
+            "multitask",
+            "sobolev",
+            "cross_gradient",
+            "spectral",
+            "morales_physics_hybrid",
         ]
         for name in cat_d:
             assert name in _LOSS_REGISTRY, f"'{name}' falta na categoria D"
@@ -177,13 +195,15 @@ class TestGenericLosses:
     def _assert_loss(self, loss_type: str):
         """Verifica forward pass: retorna escalar positivo (ou mbe pode ser neg)."""
         import tensorflow as tf
+
         config = _make_config(loss_type=loss_type)
         y_true, y_pred = _make_tensors()
         loss_fn = LossFactory.get(config)
         result = loss_fn(y_true, y_pred)
         assert result.shape == (), f"Loss deve ser escalar, shape={result.shape}"
         assert not tf.math.is_nan(result), f"Loss '{loss_type}' retornou NaN"
-        assert tf.experimental.numpy.isfinite(result), f"Loss '{loss_type}' retornou inf"
+        # Fix CR#3: tf.math.is_finite retorna tensor → .numpy() para bool.
+        assert tf.math.is_finite(result).numpy(), f"Loss '{loss_type}' retornou inf"
 
     def test_mse(self):
         self._assert_loss("mse")
@@ -227,6 +247,7 @@ class TestGenericLosses:
     def test_mse_zero_when_identical(self):
         """MSE deve ser 0 quando y_true == y_pred."""
         import tensorflow as tf
+
         y_true, _ = _make_tensors()
         config = _make_config(loss_type="mse")
         loss_fn = LossFactory.get(config)
@@ -236,6 +257,7 @@ class TestGenericLosses:
     def test_rmse_nonnegative(self):
         """RMSE deve ser >= 0."""
         import tensorflow as tf
+
         y_true, y_pred = _make_tensors()
         config = _make_config(loss_type="rmse")
         loss_fn = LossFactory.get(config)
@@ -250,6 +272,7 @@ class TestGeophysicalLosses:
     def _assert_geophysical(self, loss_type: str):
         """Verifica forward pass de loss geofisica."""
         import tensorflow as tf
+
         config = _make_config(loss_type=loss_type)
         y_true, y_pred = _make_tensors()
         loss_fn = LossFactory.get(config, epoch_var=None, noise_level_var=None)
@@ -272,6 +295,7 @@ class TestGeophysicalLosses:
     def test_log_scale_aware_with_epoch_var(self):
         """log_scale_aware com epoch_var deve funcionar corretamente."""
         import tensorflow as tf
+
         epoch_var = tf.Variable(5, dtype=tf.int32)
         config = _make_config(loss_type="log_scale_aware")
         y_true, y_pred = _make_tensors()
@@ -282,6 +306,7 @@ class TestGeophysicalLosses:
     def test_adaptive_log_scale_with_noise(self):
         """adaptive_log_scale com noise_level_var deve usar gangorra."""
         import tensorflow as tf
+
         noise_var = tf.Variable(0.05, dtype=tf.float32)
         config = _make_config(loss_type="adaptive_log_scale")
         y_true, y_pred = _make_tensors()
@@ -296,8 +321,9 @@ class TestGeosteering:
 
     def test_probabilistic_nll_shape(self):
         """probabilistic_nll deve funcionar com y_pred de 2x canais."""
-        import tensorflow as tf
         import numpy as np
+        import tensorflow as tf
+
         rng = np.random.default_rng(42)
         # y_pred tem 2x output_channels (media + log-var)
         y_true = tf.constant(rng.uniform(0.5, 3.5, (2, 600, 2)), dtype=tf.float32)
@@ -309,6 +335,7 @@ class TestGeosteering:
     def test_look_ahead_weighted(self):
         """look_ahead_weighted deve retornar escalar nao-negativo."""
         import tensorflow as tf
+
         config = _make_config(loss_type="look_ahead_weighted")
         y_true, y_pred = _make_tensors()
         loss_fn = LossFactory.get(config)
@@ -324,6 +351,7 @@ class TestAdvancedLosses:
 
     def _assert_advanced(self, loss_type: str):
         import tensorflow as tf
+
         config = _make_config(loss_type=loss_type)
         y_true, y_pred = _make_tensors()
         loss_fn = LossFactory.get(config)
@@ -336,8 +364,9 @@ class TestAdvancedLosses:
 
     def test_enc_decoder(self):
         """enc_decoder espera 2x canais em y_pred."""
-        import tensorflow as tf
         import numpy as np
+        import tensorflow as tf
+
         rng = np.random.default_rng(42)
         y_true = tf.constant(rng.uniform(0.5, 3.5, (2, 600, 2)), dtype=tf.float32)
         y_pred = tf.constant(rng.uniform(0.5, 3.5, (2, 600, 4)), dtype=tf.float32)
@@ -364,6 +393,7 @@ class TestAdvancedLosses:
     def test_morales_hybrid_with_epoch_var(self):
         """morales_physics_hybrid com epoch_var deve funcionar."""
         import tensorflow as tf
+
         epoch_var = tf.Variable(25, dtype=tf.int32)
         config = _make_config(
             loss_type="morales_physics_hybrid",
@@ -382,6 +412,7 @@ class TestBuildCombined:
     def test_simple_base_loss(self):
         """Sem extras, deve retornar a loss base."""
         import tensorflow as tf
+
         config = _make_config(
             loss_type="rmse",
             use_look_ahead_loss=False,
@@ -397,6 +428,7 @@ class TestBuildCombined:
     def test_with_look_ahead(self):
         """Com look_ahead ativo, deve retornar escalar valido."""
         import tensorflow as tf
+
         config = _make_config(
             loss_type="rmse",
             use_look_ahead_loss=True,
@@ -413,6 +445,7 @@ class TestBuildCombined:
     def test_morales_replaces_base(self):
         """use_morales_hybrid_loss=True deve usar morales (#26) como loss."""
         import tensorflow as tf
+
         config = _make_config(
             loss_type="rmse",
             use_look_ahead_loss=False,
@@ -428,6 +461,7 @@ class TestBuildCombined:
     def test_morales_omega_effect(self):
         """morales_physics_omega=1.0 deve dar MSE puro, 0.0 deve dar MAE puro."""
         import tensorflow as tf
+
         y_true, y_pred = _make_tensors()
 
         config_mse = _make_config(
@@ -462,6 +496,7 @@ class TestBuildLossFn:
     def test_build_loss_fn_default(self):
         """build_loss_fn com config default deve retornar callable valido."""
         import tensorflow as tf
+
         config = _make_config()
         loss_fn = build_loss_fn(config)
         y_true, y_pred = _make_tensors()
@@ -472,9 +507,21 @@ class TestBuildLossFn:
     def test_all_direct_losses_forward_pass(self):
         """Todas as 13 losses diretas devem passar no forward pass."""
         import tensorflow as tf
+
         direct_types = [
-            "mse", "rmse", "mae", "mbe", "rse", "rae", "mape",
-            "msle", "rmsle", "nrmse", "rrmse", "huber", "log_cosh",
+            "mse",
+            "rmse",
+            "mae",
+            "mbe",
+            "rse",
+            "rae",
+            "mape",
+            "msle",
+            "rmsle",
+            "nrmse",
+            "rrmse",
+            "huber",
+            "log_cosh",
         ]
         y_true, y_pred = _make_tensors()
         for lt in direct_types:

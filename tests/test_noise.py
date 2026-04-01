@@ -392,39 +392,47 @@ class TestUpdateNoiseLevelCallback:
     """Testa UpdateNoiseLevelCallback."""
 
     def test_curriculum_updates_var(self):
+        """Testa que o callback atualiza noise_level_var seguindo 3 fases."""
+        from geosteering_ai.config import PipelineConfig
         from geosteering_ai.noise import create_noise_level_var
-        from geosteering_ai.noise.curriculum import (
-            CurriculumSchedule,
-            UpdateNoiseLevelCallback,
-        )
+        from geosteering_ai.noise.curriculum import UpdateNoiseLevelCallback
 
         nv = create_noise_level_var(0.0)
-        sched = CurriculumSchedule(0.08, 10, 80)
-        cb = UpdateNoiseLevelCallback(nv, sched, use_curriculum=True)
+        # Fix CR#1: API correta — (noise_level_var, config: PipelineConfig)
+        config = PipelineConfig(
+            noise_level_max=0.08,
+            epochs_no_noise=10,
+            noise_ramp_epochs=80,
+        )
+        cb = UpdateNoiseLevelCallback(nv, config)
 
-        # Fase 1 (clean)
+        # Fase 1 (clean): epoch 0 — noise = 0.0
         cb.on_epoch_begin(0)
         assert nv.numpy() == pytest.approx(0.0)
 
-        # Fase 2 (ramp midpoint)
+        # Fase 2 (ramp midpoint): epoch 50 — noise = 0.04
         cb.on_epoch_begin(50)
         assert nv.numpy() == pytest.approx(0.04)
 
-        # Fase 3 (stable)
+        # Fase 3 (stable): epoch 100 — noise = 0.08
         cb.on_epoch_begin(100)
         assert nv.numpy() == pytest.approx(0.08)
 
     def test_no_curriculum_constant(self):
-        """Sem curriculum, noise constante desde epoch 0."""
+        """Sem curriculum (epochs_no_noise=0, ramp=0), noise constante."""
+        from geosteering_ai.config import PipelineConfig
         from geosteering_ai.noise import create_noise_level_var
-        from geosteering_ai.noise.curriculum import (
-            CurriculumSchedule,
-            UpdateNoiseLevelCallback,
-        )
+        from geosteering_ai.noise.curriculum import UpdateNoiseLevelCallback
 
         nv = create_noise_level_var(0.0)
-        sched = CurriculumSchedule(0.08, 10, 80)
-        cb = UpdateNoiseLevelCallback(nv, sched, use_curriculum=False)
+        # Fix CR#1: sem curriculum — epochs_no_noise=0 e ramp=0 dá noise
+        # constante desde epoch 0 (pula direto para Fase 3).
+        config = PipelineConfig(
+            noise_level_max=0.08,
+            epochs_no_noise=0,
+            noise_ramp_epochs=0,
+        )
+        cb = UpdateNoiseLevelCallback(nv, config)
 
         cb.on_epoch_begin(0)
         assert nv.numpy() == pytest.approx(0.08)
