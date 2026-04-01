@@ -763,7 +763,11 @@ class TestSkinDepthLoss:
 
     def test_uses_frequency_and_spacing(self):
         """Frequencia e spacing influenciam o skin depth e a loss."""
-        # Frequencia mais alta → skin depth menor → mais penalidade
+        # Frequencia mais alta → delta menor → 1/delta maior → limiar
+        # mais FROUXO (gradientes altos sao resolvidos pela ferramenta
+        # de alta frequencia) → MENOS penalidade.
+        # Frequencia mais baixa → delta maior → 1/delta menor → limiar
+        # mais APERTADO (gradientes altos sao artefatos) → MAIS penalidade.
         config_high = _make_config(
             pinns_scenario="skin_depth",
             frequency_hz=100000.0,
@@ -783,8 +787,8 @@ class TestSkinDepthLoss:
         y_pred = tf.constant(profile)
         loss_high = fn_high(y_true, y_pred).numpy()
         loss_low = fn_low(y_true, y_pred).numpy()
-        # Frequencia alta → skin depth menor → limite mais apertado → mais penalidade
-        assert loss_high >= loss_low
+        # Freq baixa → limiar menor → mais gradientes excedem → MAIS penalidade
+        assert loss_low >= loss_high
 
 
 # ════════════════════════════════════════════════════════════════════════
