@@ -1435,26 +1435,30 @@ def tiv_constraint_layer(
     """
     import tensorflow as tf
 
-    rho_h = x[..., 0:1]  # (B, N, 1)
-    rho_v_raw = x[..., 1:2]  # (B, N, 1)
+    # ── Encapsulado em Lambda para compatibilidade Keras 3.x ───────
+    # tf.math.softplus, tf.concat, tf.shape, tf.cond nao aceitam
+    # KerasTensor diretamente — executar dentro de Lambda.
+    def _apply_tiv(x_inner):
+        rho_h = x_inner[..., 0:1]  # (B, N, 1)
+        rho_v_raw = x_inner[..., 1:2]  # (B, N, 1)
 
-    # ── delta = softplus(rho_v_raw - rho_h) >= 0 ─────────────────
-    # softplus(x) = log(1 + exp(x)), suave e >= 0
-    delta = tf.math.softplus(rho_v_raw - rho_h)
+        # ── delta = softplus(rho_v_raw - rho_h) >= 0 ─────────────
+        # softplus(x) = log(1 + exp(x)), suave e >= 0
+        delta = tf.math.softplus(rho_v_raw - rho_h)
 
-    # ── rho_v = rho_h + delta (garante rho_v >= rho_h) ───────────
-    rho_v = rho_h + delta
+        # ── rho_v = rho_h + delta (garante rho_v >= rho_h) ───────
+        rho_v = rho_h + delta
 
-    # ── Reconstituir tensor com canais extras (DTB, etc.) ─────────
-    # Usa tf.shape (runtime) para ser compativel com graph mode
-    # onde a dimensao de canais pode ser None em build time.
-    rho_constrained = tf.concat([rho_h, rho_v], axis=-1)
-    n_ch = tf.shape(x)[-1]
-    return tf.cond(
-        n_ch > 2,
-        lambda: tf.concat([rho_constrained, x[..., 2:]], axis=-1),
-        lambda: rho_constrained,
-    )
+        # ── Reconstituir tensor com canais extras (DTB, etc.) ─────
+        rho_constrained = tf.concat([rho_h, rho_v], axis=-1)
+        n_ch = tf.shape(x_inner)[-1]
+        return tf.cond(
+            n_ch > 2,
+            lambda: tf.concat([rho_constrained, x_inner[..., 2:]], axis=-1),
+            lambda: rho_constrained,
+        )
+
+    return tf.keras.layers.Lambda(_apply_tiv)(x)
 
 
 def normalization_block(
@@ -1733,15 +1737,20 @@ def static_injection_stem(em_tensor, static_tensor):
     """
     import tensorflow as tf
 
-    # ── Broadcast: (batch, n_static) → (batch, seq_len, n_static) ──
-    seq_len = tf.shape(em_tensor)[1]
-    static_expanded = tf.repeat(
-        tf.expand_dims(static_tensor, axis=1),
-        repeats=seq_len,
-        axis=1,
-    )
-    # ── Concat: EM (batch, seq, n_em) + static (batch, seq, n_static) ──
-    return tf.concat([em_tensor, static_expanded], axis=-1)
+    # ── Broadcast + Concat encapsulados em Lambda (Keras 3.x compat) ──
+    # tf.shape, tf.repeat, tf.expand_dims, tf.concat nao aceitam
+    # KerasTensor diretamente fora de Layer.call() / Lambda.
+    def _inject(tensors):
+        em, static = tensors
+        seq_len = tf.shape(em)[1]
+        static_expanded = tf.repeat(
+            tf.expand_dims(static, axis=1),
+            repeats=seq_len,
+            axis=1,
+        )
+        return tf.concat([em, static_expanded], axis=-1)
+
+    return tf.keras.layers.Lambda(_inject)([em_tensor, static_tensor])
 
 
 def film_layer(hidden, static_tensor, n_channels):
@@ -1799,12 +1808,15 @@ def film_layer(hidden, static_tensor, n_channels):
         static_tensor
     )  # (batch, n_channels)
 
-    # ── Broadcast: (batch, n_ch) → (batch, 1, n_ch) para multiplicacao ─
-    gamma = tf.expand_dims(gamma, axis=1)  # (batch, 1, n_channels)
-    beta = tf.expand_dims(beta, axis=1)  # (batch, 1, n_channels)
+    # ── Broadcast + Modulacao encapsulados em Lambda (Keras 3.x compat) ─
+    # tf.expand_dims nao aceita KerasTensor fora de Layer.call() / Lambda.
+    def _film_modulate(tensors):
+        h, g, b = tensors
+        g = tf.expand_dims(g, axis=1)  # (batch, 1, n_channels)
+        b = tf.expand_dims(b, axis=1)  # (batch, 1, n_channels)
+        return g * h + b
 
-    # ── Modulacao: h_out = γ × h_in + β ───────────────────────────
-    return gamma * hidden + beta
+    return tf.keras.layers.Lambda(_film_modulate)([hidden, gamma, beta])
 
 
 # ════════════════════════════════════════════════════════════════════════════

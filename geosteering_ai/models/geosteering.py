@@ -82,6 +82,7 @@ def build_wavenet(config: "PipelineConfig") -> "tf.keras.Model":
         Skip connections somados (nao concatenados) como no paper original.
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import gated_activation_block, output_projection
 
     ap = config.arch_params or {}
@@ -94,7 +95,9 @@ def build_wavenet(config: "PipelineConfig") -> "tf.keras.Model":
 
     logger.info(
         "build_wavenet: d_model=%d, n_blocks=%d, n_levels=%d",
-        d_model, n_blocks, n_levels,
+        d_model,
+        n_blocks,
+        n_levels,
     )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
@@ -108,10 +111,14 @@ def build_wavenet(config: "PipelineConfig") -> "tf.keras.Model":
     # ── WaveNet dilation stacks ───────────────────────────────────────
     for block_i in range(n_blocks):
         for level in range(n_levels):
-            dilation = 2 ** level
+            dilation = 2**level
             h = gated_activation_block(
-                x, filters=d_model, kernel_size=kernel_size,
-                dilation_rate=dilation, l1=l1, l2=l2,
+                x,
+                filters=d_model,
+                kernel_size=kernel_size,
+                dilation_rate=dilation,
+                l1=l1,
+                l2=l2,
             )
             # ── Residual ─────────────────────────────────────────────
             res = tf.keras.layers.Conv1D(d_model, 1, padding="same")(h)
@@ -129,7 +136,8 @@ def build_wavenet(config: "PipelineConfig") -> "tf.keras.Model":
     out = tf.keras.layers.Conv1D(d_model, 1, padding="same", activation="relu")(out)
 
     out = output_projection(
-        out, config.output_channels,
+        out,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -165,7 +173,8 @@ def build_causal_transformer(config: "PipelineConfig") -> "tf.keras.Model":
         Causal nativo: todas as atencoes com use_causal_mask=True.
     """
     import tensorflow as tf
-    from geosteering_ai.models.blocks import transformer_encoder_block, output_projection
+
+    from geosteering_ai.models.blocks import output_projection, transformer_encoder_block
 
     ap = config.arch_params or {}
     n_layers = ap.get("n_layers", 4)
@@ -180,22 +189,26 @@ def build_causal_transformer(config: "PipelineConfig") -> "tf.keras.Model":
     x = tf.keras.layers.Dense(d_model)(inp)
 
     # ── Positional encoding aprendido ─────────────────────────────────
-    positions = tf.keras.layers.Embedding(config.sequence_length, d_model)(
-        tf.cast(tf.range(tf.shape(x)[1]), dtype=tf.int32)
-    )
-    x = tf.keras.layers.Add()([x, positions])
+    # Importa Layer do transformer.py (compativel com Keras 3.x)
+    from geosteering_ai.models.transformer import _LearnedPositionalEncoding
+
+    x = _LearnedPositionalEncoding(config.sequence_length, d_model)(x)
 
     # ── N blocos com mascara causal FORCADA ───────────────────────────
     for i in range(n_layers):
         x = transformer_encoder_block(
-            x, num_heads=num_heads, key_dim=d_model // num_heads,
-            ff_dim=ff_dim, dropout_rate=dr,
+            x,
+            num_heads=num_heads,
+            key_dim=d_model // num_heads,
+            ff_dim=ff_dim,
+            dropout_rate=dr,
             use_causal_mask=True,  # SEMPRE causal neste modelo
         )
 
     x = tf.keras.layers.LayerNormalization()(x)
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -234,7 +247,8 @@ def build_informer(config: "PipelineConfig") -> "tf.keras.Model":
         Implementacao simplificada — sem distillation completo.
     """
     import tensorflow as tf
-    from geosteering_ai.models.blocks import transformer_encoder_block, output_projection
+
+    from geosteering_ai.models.blocks import output_projection, transformer_encoder_block
 
     ap = config.arch_params or {}
     n_encoder = ap.get("n_encoder", 3)
@@ -244,7 +258,9 @@ def build_informer(config: "PipelineConfig") -> "tf.keras.Model":
     ff_dim = ap.get("ff_dim", 128)
     dr = ap.get("dropout_rate", config.dropout_rate)
 
-    logger.info("build_informer: d_model=%d, enc=%d, dec=%d", d_model, n_encoder, n_decoder)
+    logger.info(
+        "build_informer: d_model=%d, enc=%d, dec=%d", d_model, n_encoder, n_decoder
+    )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
     x = tf.keras.layers.Dense(d_model)(inp)
@@ -252,8 +268,12 @@ def build_informer(config: "PipelineConfig") -> "tf.keras.Model":
     # ── Encoder com atencao causal ────────────────────────────────────
     for i in range(n_encoder):
         x = transformer_encoder_block(
-            x, num_heads=num_heads, key_dim=d_model // num_heads,
-            ff_dim=ff_dim, dropout_rate=dr, use_causal_mask=True,
+            x,
+            num_heads=num_heads,
+            key_dim=d_model // num_heads,
+            ff_dim=ff_dim,
+            dropout_rate=dr,
+            use_causal_mask=True,
         )
         # ── Distillation (halving via MaxPool) ────────────────────────
         # Simplificado: nenhum pooling (seq_len preservada)
@@ -261,12 +281,17 @@ def build_informer(config: "PipelineConfig") -> "tf.keras.Model":
     # ── Decoder ───────────────────────────────────────────────────────
     for _ in range(n_decoder):
         x = transformer_encoder_block(
-            x, num_heads=num_heads, key_dim=d_model // num_heads,
-            ff_dim=ff_dim, dropout_rate=dr, use_causal_mask=True,
+            x,
+            num_heads=num_heads,
+            key_dim=d_model // num_heads,
+            ff_dim=ff_dim,
+            dropout_rate=dr,
+            use_causal_mask=True,
         )
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -301,15 +326,22 @@ def _s4_layer(x, d_model: int, dt_rank: int = 16):
         tf.Tensor: (batch, seq_len, d_model).
     """
     import tensorflow as tf
+
     # ── Aproximacao: depthwise conv causal de longo alcance ───────────
     h = tf.keras.layers.DepthwiseConv1D(
-        kernel_size=4, dilation_rate=1, padding="causal",
+        kernel_size=4,
+        dilation_rate=1,
+        padding="causal",
     )(x)
     h = tf.keras.layers.DepthwiseConv1D(
-        kernel_size=4, dilation_rate=4, padding="causal",
+        kernel_size=4,
+        dilation_rate=4,
+        padding="causal",
     )(h)
     h = tf.keras.layers.DepthwiseConv1D(
-        kernel_size=4, dilation_rate=16, padding="causal",
+        kernel_size=4,
+        dilation_rate=16,
+        padding="causal",
     )(h)
     # ── Gate seletivo (Mamba: entrada × gate) ─────────────────────────
     gate = tf.keras.layers.Conv1D(d_model, 1, activation="sigmoid", padding="same")(x)
@@ -338,6 +370,7 @@ def build_mamba_s4(config: "PipelineConfig") -> "tf.keras.Model":
         Implementacao aproximada — S4 completo requer CUDA customizado.
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import output_projection
 
     ap = config.arch_params or {}
@@ -369,7 +402,8 @@ def build_mamba_s4(config: "PipelineConfig") -> "tf.keras.Model":
 
     x = tf.keras.layers.LayerNormalization()(x)
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -409,6 +443,7 @@ def build_encoder_forecaster(config: "PipelineConfig") -> "tf.keras.Model":
         Legado C36A build_encoder_forecaster().
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import output_projection
 
     ap = config.arch_params or {}
@@ -421,7 +456,8 @@ def build_encoder_forecaster(config: "PipelineConfig") -> "tf.keras.Model":
 
     logger.info(
         "build_encoder_forecaster: lstm=%s, dec_filters=%s",
-        lstm_units, dec_filters,
+        lstm_units,
+        dec_filters,
     )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
@@ -430,22 +466,27 @@ def build_encoder_forecaster(config: "PipelineConfig") -> "tf.keras.Model":
     # ── LSTM encoder (causal nativo) ──────────────────────────────────
     for units in lstm_units:
         x = tf.keras.layers.LSTM(
-            units, return_sequences=True,
-            dropout=dr, kernel_regularizer=reg,
+            units,
+            return_sequences=True,
+            dropout=dr,
+            kernel_regularizer=reg,
         )(x)
 
     # ── CNN decoder causal ────────────────────────────────────────────
     for n_filt in dec_filters:
         x = tf.keras.layers.Conv1D(
-            n_filt, kernel_size,
+            n_filt,
+            kernel_size,
             padding="causal",
-            kernel_regularizer=reg, use_bias=False,
+            kernel_regularizer=reg,
+            use_bias=False,
         )(x)
         x = tf.keras.layers.BatchNormalization()(x)
         x = tf.keras.layers.Activation("relu")(x)
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
