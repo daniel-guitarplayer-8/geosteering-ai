@@ -36,6 +36,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+import tensorflow as tf
+
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
 
@@ -85,14 +87,18 @@ def build_dnn(config: "PipelineConfig") -> "tf.keras.Model":
     x = inp
 
     for units in hidden_units:
-        dense = tf.keras.layers.Dense(units, activation=activation, kernel_regularizer=reg)
+        dense = tf.keras.layers.Dense(
+            units, activation=activation, kernel_regularizer=reg
+        )
         x = tf.keras.layers.TimeDistributed(dense)(x)
         if dr > 0.0:
             x = tf.keras.layers.Dropout(dr)(x)
 
     out_dense = tf.keras.layers.Dense(
         config.output_channels,
-        activation=(config.constraint_activation if config.use_physical_constraint_layer else None),
+        activation=(
+            config.constraint_activation if config.use_physical_constraint_layer else None
+        ),
     )
     out = tf.keras.layers.TimeDistributed(out_dense)(x)
 
@@ -109,57 +115,90 @@ def build_dnn(config: "PipelineConfig") -> "tf.keras.Model":
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _fourier_layer(x, n_modes: int, out_channels: int):
+class _FourierLayer(tf.keras.layers.Layer):
     """Camada Fourier: FFT → multiplicacao espectral → iFFT.
 
+    Encapsulado como Layer para compatibilidade com Keras 3.x (Colab),
+    onde KerasTensor nao pode ser passado para tf.signal/tf.transpose.
+    Dentro de call(), os tensores sao concretos.
+
     Args:
-        x: Tensor (batch, seq_len, channels).
         n_modes: Numero de modos de Fourier a manter.
         out_channels: Canais de saida.
 
-    Returns:
-        tf.Tensor: (batch, seq_len, out_channels).
+    Note:
+        Ref: Li et al. (2021) ICLR — Fourier Neural Operator.
+        A multiplicacao espectral e implementada como Dense sobre
+        partes real/imaginaria separadas (equivalente a parametro R).
     """
-    import tensorflow as tf
 
-    # ── FFT ao longo da dimensao temporal ─────────────────────────────
-    x_ft = tf.signal.rfft(tf.transpose(x, [0, 2, 1]))  # (batch, ch, L//2+1)
+    def __init__(self, n_modes: int, out_channels: int, **kwargs):
+        super().__init__(**kwargs)
+        self.n_modes = n_modes
+        self.out_channels = out_channels
+        # Dense para projecao espectral (criadas em build)
+        self.proj_r = None
+        self.proj_i = None
 
-    # ── Trunca para n_modes modos ─────────────────────────────────────
-    x_ft_trunc = x_ft[..., :n_modes]  # (batch, ch, n_modes)
+    def build(self, input_shape):
+        in_channels = input_shape[-1]
+        self.proj_r = tf.keras.layers.Dense(
+            self.out_channels * self.n_modes,
+            use_bias=False,
+            name="proj_real",
+        )
+        self.proj_i = tf.keras.layers.Dense(
+            self.out_channels * self.n_modes,
+            use_bias=False,
+            name="proj_imag",
+        )
+        super().build(input_shape)
 
-    # ── Projecao espectral via Dense (equivalente a multiplicacao R) ──
-    # Parte real e imaginaria separadas
-    x_ft_r = tf.math.real(x_ft_trunc)
-    x_ft_i = tf.math.imag(x_ft_trunc)
+    def call(self, x):
+        # ── FFT ao longo da dimensao temporal ─────────────────────────
+        x_ft = tf.signal.rfft(tf.transpose(x, [0, 2, 1]))  # (batch, ch, L//2+1)
 
-    # Reshape para (batch, ch * n_modes) e projetar
-    batch = tf.shape(x)[0]
-    n_ch = x.shape[-1]
-    x_flat_r = tf.reshape(x_ft_r, [batch, -1])
-    x_flat_i = tf.reshape(x_ft_i, [batch, -1])
+        # ── Trunca para n_modes modos ─────────────────────────────────
+        x_ft_trunc = x_ft[..., : self.n_modes]  # (batch, ch, n_modes)
 
-    # Projecao: (batch, ch*n_modes) → (batch, out_ch*n_modes)
-    proj_r = tf.keras.layers.Dense(out_channels * n_modes, use_bias=False)(x_flat_r)
-    proj_i = tf.keras.layers.Dense(out_channels * n_modes, use_bias=False)(x_flat_i)
+        # ── Projecao espectral (real e imaginaria separadas) ──────────
+        x_ft_r = tf.math.real(x_ft_trunc)
+        x_ft_i = tf.math.imag(x_ft_trunc)
 
-    proj_r = tf.reshape(proj_r, [batch, out_channels, n_modes])
-    proj_i = tf.reshape(proj_i, [batch, out_channels, n_modes])
+        batch = tf.shape(x)[0]
+        x_flat_r = tf.reshape(x_ft_r, [batch, -1])
+        x_flat_i = tf.reshape(x_ft_i, [batch, -1])
 
-    # ── Recombina em complexo e pad para iFFT ─────────────────────────
-    out_ft = tf.complex(proj_r, proj_i)
-    seq_len = tf.shape(x)[1]
-    n_rfft = seq_len // 2 + 1
+        proj_r = tf.reshape(
+            self.proj_r(x_flat_r), [batch, self.out_channels, self.n_modes]
+        )
+        proj_i = tf.reshape(
+            self.proj_i(x_flat_i), [batch, self.out_channels, self.n_modes]
+        )
 
-    # Pad de volta ao tamanho rfft (zeros apos n_modes)
-    pad_size = n_rfft - n_modes
-    paddings = [[0, 0], [0, 0], [0, pad_size]]
-    out_ft_pad = tf.pad(out_ft, paddings)
+        # ── Recombina em complexo e pad para iFFT ─────────────────────
+        out_ft = tf.complex(proj_r, proj_i)
+        seq_len = tf.shape(x)[1]
+        n_rfft = seq_len // 2 + 1
 
-    # ── iFFT ──────────────────────────────────────────────────────────
-    out_t = tf.signal.irfft(out_ft_pad)  # (batch, out_ch, seq_len)
-    out_t = tf.transpose(out_t, [0, 2, 1])  # (batch, seq_len, out_ch)
-    return out_t
+        pad_size = n_rfft - self.n_modes
+        paddings = [[0, 0], [0, 0], [0, pad_size]]
+        out_ft_pad = tf.pad(out_ft, paddings)
+
+        # ── iFFT ──────────────────────────────────────────────────────
+        out_t = tf.signal.irfft(out_ft_pad)  # (batch, out_ch, seq_len)
+        out_t = tf.transpose(out_t, [0, 2, 1])  # (batch, seq_len, out_ch)
+        return out_t
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "n_modes": self.n_modes,
+                "out_channels": self.out_channels,
+            }
+        )
+        return config
 
 
 def build_fno(config: "PipelineConfig") -> "tf.keras.Model":
@@ -189,14 +228,16 @@ def build_fno(config: "PipelineConfig") -> "tf.keras.Model":
     n_modes = ap.get("n_modes", 16)
     activation = ap.get("activation", "gelu")
 
-    logger.info("build_fno: d_model=%d, n_layers=%d, n_modes=%d", d_model, n_layers, n_modes)
+    logger.info(
+        "build_fno: d_model=%d, n_layers=%d, n_modes=%d", d_model, n_layers, n_modes
+    )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
     x = tf.keras.layers.Dense(d_model)(inp)
 
     for i in range(n_layers):
         # ── Camada Fourier ────────────────────────────────────────────
-        x_fourier = _fourier_layer(x, n_modes=n_modes, out_channels=d_model)
+        x_fourier = _FourierLayer(n_modes=n_modes, out_channels=d_model)(x)
 
         # ── Camada local (Conv1D) ─────────────────────────────────────
         x_local = tf.keras.layers.Conv1D(d_model, 1, padding="same")(x)
@@ -209,8 +250,12 @@ def build_fno(config: "PipelineConfig") -> "tf.keras.Model":
     x = tf.keras.layers.LayerNormalization()(x)
 
     out = tf.keras.layers.Conv1D(
-        config.output_channels, 1, padding="same",
-        activation=(config.constraint_activation if config.use_physical_constraint_layer else None),
+        config.output_channels,
+        1,
+        padding="same",
+        activation=(
+            config.constraint_activation if config.use_physical_constraint_layer else None
+        ),
     )(x)
 
     return tf.keras.Model(inputs=inp, outputs=out, name="FNO")
@@ -254,10 +299,14 @@ def build_deeponet(config: "PipelineConfig") -> "tf.keras.Model":
     p_dim = ap.get("p_dim", 128)  # dim do produto interno
     activation = ap.get("activation", "tanh")
 
-    logger.info("build_deeponet: branch=%s, trunk=%s, p=%d", branch_units, trunk_units, p_dim)
+    logger.info(
+        "build_deeponet: branch=%s, trunk=%s, p=%d", branch_units, trunk_units, p_dim
+    )
 
     # ── Duas entradas: sinal EM e posicoes z ─────────────────────────
-    inp = tf.keras.Input(shape=(config.sequence_length, config.n_features), name="em_input")
+    inp = tf.keras.Input(
+        shape=(config.sequence_length, config.n_features), name="em_input"
+    )
 
     # ── Branch net: processa todo o sinal EM ─────────────────────────
     # Flatten para MLP (processa o sinal como vetor global)
@@ -274,26 +323,30 @@ def build_deeponet(config: "PipelineConfig") -> "tf.keras.Model":
         trunk = tf.keras.layers.TimeDistributed(
             tf.keras.layers.Dense(units, activation=activation)
         )(trunk)
-    trunk = tf.keras.layers.TimeDistributed(
-        tf.keras.layers.Dense(p_dim)
-    )(trunk)  # (batch, 600, p_dim)
+    trunk = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(p_dim))(
+        trunk
+    )  # (batch, 600, p_dim)
 
     # ── Produto interno Branch × Trunk ────────────────────────────────
     # branch: (batch, p_dim) → (batch, 1, p_dim)
-    branch_exp = tf.keras.layers.Lambda(
-        lambda b: tf.expand_dims(b, 1)
-    )(branch)  # (batch, 1, p_dim)
+    branch_exp = tf.keras.layers.Lambda(lambda b: tf.expand_dims(b, 1))(
+        branch
+    )  # (batch, 1, p_dim)
 
     # Produto elementar e soma sobre p_dim
     product = tf.keras.layers.Multiply()([trunk, branch_exp])  # (batch, 600, p_dim)
-    x = tf.keras.layers.Lambda(
-        lambda z: tf.reduce_sum(z, axis=-1, keepdims=True)
-    )(product)  # (batch, 600, 1)
+    x = tf.keras.layers.Lambda(lambda z: tf.reduce_sum(z, axis=-1, keepdims=True))(
+        product
+    )  # (batch, 600, 1)
 
     # ── Projecao para out_ch ─────────────────────────────────────────
     out = tf.keras.layers.Conv1D(
-        config.output_channels, 1, padding="same",
-        activation=(config.constraint_activation if config.use_physical_constraint_layer else None),
+        config.output_channels,
+        1,
+        padding="same",
+        activation=(
+            config.constraint_activation if config.use_physical_constraint_layer else None
+        ),
     )(x)
 
     return tf.keras.Model(inputs=inp, outputs=out, name="DeepONet")
@@ -330,8 +383,11 @@ def build_geophysical_attention(config: "PipelineConfig") -> "tf.keras.Model":
         Legado C36 build_geophysical_attention().
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import (
-        residual_block_1d, self_attention_block, output_projection
+        output_projection,
+        residual_block_1d,
+        self_attention_block,
     )
 
     ap = config.arch_params or {}
@@ -344,7 +400,9 @@ def build_geophysical_attention(config: "PipelineConfig") -> "tf.keras.Model":
 
     logger.info(
         "build_geophysical_attention: n_cnn=%d, filters=%d, heads=%d",
-        n_cnn_blocks, cnn_filters, n_attn_heads,
+        n_cnn_blocks,
+        cnn_filters,
+        n_attn_heads,
     )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
@@ -353,7 +411,10 @@ def build_geophysical_attention(config: "PipelineConfig") -> "tf.keras.Model":
     # ── CNN encoder: features locais de resistividade ─────────────────
     for i in range(n_cnn_blocks):
         x = residual_block_1d(
-            x, cnn_filters, kernel_size=3, causal=causal,
+            x,
+            cnn_filters,
+            kernel_size=3,
+            causal=causal,
             l1=config.l1_weight if config.use_l1_regularization else 0.0,
             l2=config.l2_weight if config.use_l2_regularization else 0.0,
         )
@@ -361,8 +422,11 @@ def build_geophysical_attention(config: "PipelineConfig") -> "tf.keras.Model":
 
     # ── Atencao global (opcional: causal para realtime) ───────────────
     x = self_attention_block(
-        x, num_heads=n_attn_heads, key_dim=key_dim,
-        dropout_rate=dr, use_causal_mask=causal,
+        x,
+        num_heads=n_attn_heads,
+        key_dim=key_dim,
+        dropout_rate=dr,
+        use_causal_mask=causal,
     )
 
     # ── Segundo CNN refinamento ───────────────────────────────────────
@@ -370,7 +434,8 @@ def build_geophysical_attention(config: "PipelineConfig") -> "tf.keras.Model":
     x = tf.keras.layers.LayerNormalization()(x)
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
