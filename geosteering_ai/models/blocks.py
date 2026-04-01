@@ -1671,14 +1671,16 @@ def attention_block(
 
     if use_causal_mask:
         # ── Mascara triangular inferior (nao olha para o futuro) ──────
-        seq_len = tf.shape(x)[1]
-        mask = tf.linalg.band_part(
-            tf.ones((seq_len, seq_len)), -1, 0
-        )  # (L, L) lower triangular
-        # Limita atencao: scores(i) so atende a j <= i
-        scores = tf.keras.layers.Lambda(
-            lambda s: s + (1.0 - tf.expand_dims(mask, 0)) * (-1e9)
-        )(scores)
+        # Encapsulado em Lambda para compatibilidade com Keras 3.x,
+        # onde tf.shape/tf.linalg nao aceitam KerasTensor diretamente.
+        def _apply_causal_mask(s):
+            seq_len = tf.shape(s)[1]
+            mask = tf.linalg.band_part(
+                tf.ones((seq_len, seq_len)), -1, 0
+            )  # (L, L) lower triangular
+            return s + (1.0 - tf.expand_dims(mask, 0)) * (-1e9)
+
+        scores = tf.keras.layers.Lambda(_apply_causal_mask)(scores)
 
     weights = tf.keras.layers.Activation("softmax")(scores)  # (b, L, 1)
     context = tf.keras.layers.Multiply()([x, weights])  # (b, L, ch)

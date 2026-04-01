@@ -42,6 +42,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
 
+import tensorflow as tf
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,26 +52,42 @@ logger = logging.getLogger(__name__)
 # ════════════════════════════════════════════════════════════════════════════
 # Aprendido (learned) em vez de sinoidal — mais flexivel para dados LWD
 # onde a distancia entre amostras pode variar (diferentes velocidades de
-# perfuracao). Implementado como Embedding lookup.
+# perfuracao). Implementado como Keras Layer para compatibilidade com
+# Keras 3.x (Colab), onde KerasTensor nao pode ser passado para tf.*.
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _positional_encoding(x: "tf.Tensor", max_len: int, d_model: int) -> "tf.Tensor":
-    """Adiciona positional encoding aprendido ao tensor x.
+class _LearnedPositionalEncoding(tf.keras.layers.Layer):
+    """Positional encoding aprendido via Embedding lookup.
+
+    Encapsulado como Layer para compatibilidade com Keras 3.x (Colab),
+    onde KerasTensor nao pode ser passado para funcoes tf.* diretamente.
+    Dentro de call(), os tensores sao concretos e tf.shape/tf.range funcionam.
 
     Args:
-        x: Tensor (batch, seq_len, d_model).
-        max_len: Comprimento maximo da sequencia.
-        d_model: Dimensao do modelo.
+        max_len: Comprimento maximo da sequencia (ex: 600).
+        d_model: Dimensao do modelo (embedding size).
 
-    Returns:
-        tf.Tensor: x + pos_encoding (mesma shape).
+    Note:
+        Ref: Vaswani et al. (2017) — positional encoding, aqui learned
+        em vez de sinoidal (mais flexivel para espacamento LWD variavel).
     """
-    import tensorflow as tf
-    positions = tf.keras.layers.Embedding(max_len, d_model)(
-        tf.cast(tf.range(tf.shape(x)[1]), dtype=tf.int32)
-    )
-    return x + positions
+
+    def __init__(self, max_len: int, d_model: int, **kwargs):
+        super().__init__(**kwargs)
+        self.max_len = max_len
+        self.d_model = d_model
+        self.embedding = tf.keras.layers.Embedding(max_len, d_model)
+
+    def call(self, x):
+        seq_len = tf.shape(x)[1]
+        positions = self.embedding(tf.range(seq_len))
+        return x + positions
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"max_len": self.max_len, "d_model": self.d_model})
+        return config
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -106,7 +124,8 @@ def build_transformer(config: "PipelineConfig") -> "tf.keras.Model":
         Ref: Vaswani et al. (2017) — Attention Is All You Need.
     """
     import tensorflow as tf
-    from geosteering_ai.models.blocks import transformer_encoder_block, output_projection
+
+    from geosteering_ai.models.blocks import output_projection, transformer_encoder_block
 
     ap = config.arch_params or {}
     n_layers = ap.get("n_layers", 4)
@@ -118,22 +137,28 @@ def build_transformer(config: "PipelineConfig") -> "tf.keras.Model":
 
     logger.info(
         "build_transformer: n_feat=%d, d_model=%d, n_layers=%d, heads=%d",
-        config.n_features, d_model, n_layers, num_heads,
+        config.n_features,
+        d_model,
+        n_layers,
+        num_heads,
     )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
     x = tf.keras.layers.Dense(d_model)(inp)  # projecao de entrada
 
     # ── Positional encoding aprendido ─────────────────────────────────
-    x = _positional_encoding(x, config.sequence_length, d_model)
+    x = _LearnedPositionalEncoding(config.sequence_length, d_model)(x)
     if dr > 0.0:
         x = tf.keras.layers.Dropout(dr)(x)
 
     # ── N blocos Transformer ──────────────────────────────────────────
     for i in range(n_layers):
         x = transformer_encoder_block(
-            x, num_heads=num_heads, key_dim=d_model // num_heads,
-            ff_dim=ff_dim, dropout_rate=dr,
+            x,
+            num_heads=num_heads,
+            key_dim=d_model // num_heads,
+            ff_dim=ff_dim,
+            dropout_rate=dr,
             use_causal_mask=causal,
             l1=config.l1_weight if config.use_l1_regularization else 0.0,
             l2=config.l2_weight if config.use_l2_regularization else 0.0,
@@ -142,7 +167,8 @@ def build_transformer(config: "PipelineConfig") -> "tf.keras.Model":
 
     x = tf.keras.layers.LayerNormalization()(x)
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -178,8 +204,11 @@ def build_simple_tft(config: "PipelineConfig") -> "tf.keras.Model":
         Ref: Lim et al. (2021) Int. J. Forecasting — TFT.
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import (
-        transformer_encoder_block, grn_block, output_projection
+        grn_block,
+        output_projection,
+        transformer_encoder_block,
     )
 
     ap = config.arch_params or {}
@@ -198,17 +227,22 @@ def build_simple_tft(config: "PipelineConfig") -> "tf.keras.Model":
     x = grn_block(inp, d_model=d_model, dropout_rate=dr)
 
     # ── Positional encoding ───────────────────────────────────────────
-    x = _positional_encoding(x, config.sequence_length, d_model)
+    x = _LearnedPositionalEncoding(config.sequence_length, d_model)(x)
 
     # ── N blocos Transformer ──────────────────────────────────────────
     for _ in range(n_layers):
         x = transformer_encoder_block(
-            x, num_heads=num_heads, key_dim=d_model // num_heads,
-            ff_dim=ff_dim, dropout_rate=dr, use_causal_mask=causal,
+            x,
+            num_heads=num_heads,
+            key_dim=d_model // num_heads,
+            ff_dim=ff_dim,
+            dropout_rate=dr,
+            use_causal_mask=causal,
         )
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -244,8 +278,12 @@ def build_tft(config: "PipelineConfig") -> "tf.keras.Model":
         Ref: Lim et al. (2021) — TFT. Melhor para P3/P4 (features hetero).
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import (
-        transformer_encoder_block, grn_block, vsn_block, output_projection
+        grn_block,
+        output_projection,
+        transformer_encoder_block,
+        vsn_block,
     )
 
     ap = config.arch_params or {}
@@ -268,13 +306,17 @@ def build_tft(config: "PipelineConfig") -> "tf.keras.Model":
     x = grn_block(x, d_model=d_model, dropout_rate=dr)
 
     # ── Positional encoding ───────────────────────────────────────────
-    x = _positional_encoding(x, config.sequence_length, d_model)
+    x = _LearnedPositionalEncoding(config.sequence_length, d_model)(x)
 
     # ── N blocos Transformer ──────────────────────────────────────────
     for _ in range(n_layers):
         x = transformer_encoder_block(
-            x, num_heads=num_heads, key_dim=d_model // num_heads,
-            ff_dim=ff_dim, dropout_rate=dr, use_causal_mask=causal,
+            x,
+            num_heads=num_heads,
+            key_dim=d_model // num_heads,
+            ff_dim=ff_dim,
+            dropout_rate=dr,
+            use_causal_mask=causal,
         )
 
     # ── Gated output ──────────────────────────────────────────────────
@@ -282,7 +324,8 @@ def build_tft(config: "PipelineConfig") -> "tf.keras.Model":
     x = tf.keras.layers.Multiply()([x, gate])
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -322,8 +365,11 @@ def build_patchtst(config: "PipelineConfig") -> "tf.keras.Model":
         Output: (batch, sequence_length, output_channels) via reshape.
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import (
-        patch_embedding_block, transformer_encoder_block, output_projection
+        output_projection,
+        patch_embedding_block,
+        transformer_encoder_block,
     )
 
     ap = config.arch_params or {}
@@ -338,7 +384,10 @@ def build_patchtst(config: "PipelineConfig") -> "tf.keras.Model":
 
     logger.info(
         "build_patchtst: n_feat=%d, patch_len=%d, stride=%d, d_model=%d",
-        config.n_features, patch_len, stride, d_model,
+        config.n_features,
+        patch_len,
+        stride,
+        d_model,
     )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
@@ -350,8 +399,12 @@ def build_patchtst(config: "PipelineConfig") -> "tf.keras.Model":
     n_patches = x.shape[1]  # pode ser None se dynamico
     for _ in range(n_layers):
         x = transformer_encoder_block(
-            x, num_heads=num_heads, key_dim=d_model // num_heads,
-            ff_dim=ff_dim, dropout_rate=dr, use_causal_mask=causal,
+            x,
+            num_heads=num_heads,
+            key_dim=d_model // num_heads,
+            ff_dim=ff_dim,
+            dropout_rate=dr,
+            use_causal_mask=causal,
         )
 
     # ── Projecao de volta para (batch, seq_len, out_ch) ───────────────
@@ -360,9 +413,7 @@ def build_patchtst(config: "PipelineConfig") -> "tf.keras.Model":
     x = tf.keras.layers.Dense(
         config.sequence_length * config.output_channels,
     )(x)
-    out = tf.keras.layers.Reshape(
-        (config.sequence_length, config.output_channels)
-    )(x)
+    out = tf.keras.layers.Reshape((config.sequence_length, config.output_channels))(x)
 
     if config.use_physical_constraint_layer:
         out = tf.keras.layers.Activation(config.constraint_activation)(out)
@@ -398,9 +449,12 @@ def build_autoformer(config: "PipelineConfig") -> "tf.keras.Model":
         Ref: Wu et al. (2021) NeurIPS — Autoformer.
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import (
-        series_decomp_block, autocorr_block,
-        feedforward_block, output_projection,
+        autocorr_block,
+        feedforward_block,
+        output_projection,
+        series_decomp_block,
     )
 
     ap = config.arch_params or {}
@@ -431,7 +485,8 @@ def build_autoformer(config: "PipelineConfig") -> "tf.keras.Model":
         x = tf.keras.layers.Add()([seasonal, trend_cum])
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -468,6 +523,7 @@ def build_itransformer(config: "PipelineConfig") -> "tf.keras.Model":
         Ref: Liu et al. (2023) — iTransformer. ICLR 2024.
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import ita_block, output_projection
 
     ap = config.arch_params or {}
@@ -484,12 +540,16 @@ def build_itransformer(config: "PipelineConfig") -> "tf.keras.Model":
 
     for _ in range(n_layers):
         x = ita_block(
-            x, num_heads=num_heads, key_dim=key_dim,
-            ff_dim=ff_dim, dropout_rate=dr,
+            x,
+            num_heads=num_heads,
+            key_dim=key_dim,
+            ff_dim=ff_dim,
+            dropout_rate=dr,
         )
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
