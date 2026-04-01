@@ -309,6 +309,28 @@ def build_informer(config: "PipelineConfig") -> "tf.keras.Model":
 # ──────────────────────────────────────────────────────────────════════════
 
 
+def _causal_depthwise_conv1d(x, kernel_size: int, dilation_rate: int = 1):
+    """DepthwiseConv1D causal compativel com Keras 3.x.
+
+    Keras 3.x nao suporta padding='causal' em DepthwiseConv1D.
+    Implementa causal padding manualmente: zero-pad a esquerda +
+    DepthwiseConv1D(padding='valid').
+
+    Causal pad = (kernel_size - 1) * dilation_rate zeros a esquerda.
+    Garante que output[t] depende apenas de input[<=t] (sem futuro).
+    """
+    import tensorflow as tf
+
+    pad_size = (kernel_size - 1) * dilation_rate
+    # Zero-pad a esquerda: (batch, pad+seq, ch)
+    x_padded = tf.keras.layers.ZeroPadding1D(padding=(pad_size, 0))(x)
+    return tf.keras.layers.DepthwiseConv1D(
+        kernel_size=kernel_size,
+        dilation_rate=dilation_rate,
+        padding="valid",
+    )(x_padded)
+
+
 def _s4_layer(x, d_model: int, dt_rank: int = 16):
     """Camada S4 simplificada: convolucao causal longa via Conv1D dilatada.
 
@@ -328,21 +350,11 @@ def _s4_layer(x, d_model: int, dt_rank: int = 16):
     import tensorflow as tf
 
     # ── Aproximacao: depthwise conv causal de longo alcance ───────────
-    h = tf.keras.layers.DepthwiseConv1D(
-        kernel_size=4,
-        dilation_rate=1,
-        padding="causal",
-    )(x)
-    h = tf.keras.layers.DepthwiseConv1D(
-        kernel_size=4,
-        dilation_rate=4,
-        padding="causal",
-    )(h)
-    h = tf.keras.layers.DepthwiseConv1D(
-        kernel_size=4,
-        dilation_rate=16,
-        padding="causal",
-    )(h)
+    # Usa _causal_depthwise_conv1d (ZeroPadding1D + valid) porque
+    # Keras 3.x nao suporta padding="causal" em DepthwiseConv1D.
+    h = _causal_depthwise_conv1d(x, kernel_size=4, dilation_rate=1)
+    h = _causal_depthwise_conv1d(h, kernel_size=4, dilation_rate=4)
+    h = _causal_depthwise_conv1d(h, kernel_size=4, dilation_rate=16)
     # ── Gate seletivo (Mamba: entrada × gate) ─────────────────────────
     gate = tf.keras.layers.Conv1D(d_model, 1, activation="sigmoid", padding="same")(x)
     h = tf.keras.layers.Conv1D(d_model, 1, padding="same")(h)
