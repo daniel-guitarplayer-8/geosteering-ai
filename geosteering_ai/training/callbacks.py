@@ -282,7 +282,7 @@ class UpdateNoiseLevelCallback:
         Mutuamente exclusivo com N-Stage (validado em PipelineConfig).
     """
 
-    def __new__(cls, noise_level_var: Any, config: PipelineConfig):
+    def __new__(cls, noise_level_var: Any, config: PipelineConfig, **kwargs):
         """Cria instancia herdando de tf.keras.callbacks.Callback (lazy).
 
         Args:
@@ -290,6 +290,9 @@ class UpdateNoiseLevelCallback:
                 nivel de ruido injetado no train_map_fn.
             config: PipelineConfig com campos de curriculum noise:
                 epochs_no_noise, noise_ramp_epochs, noise_level_max.
+            **kwargs: Argumentos adicionais (base_epoch, etc.) passados
+                para __init__. Aceitos aqui para compatibilidade com
+                Keras 3.x que propaga todos os args para __new__.
 
         Returns:
             Instancia de UpdateNoiseLevelCallback com heranca de
