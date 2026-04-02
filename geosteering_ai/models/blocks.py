@@ -35,6 +35,8 @@
 # ║                                                                            ║
 # ║  Historico:                                                                ║
 # ║    v2.0.0 (2026-03) — Implementacao inicial (23 blocos, 13 orig + 10)   ║
+# ║    v2.0.1 (2026-04) — Fix Keras 3.x: conv_next_block + mbconv_block     ║
+# ║                        DepthwiseConv1D causal via ZeroPadding1D + valid  ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """Blocos Keras reutilizaveis para construcao das 44 arquiteturas.
 
@@ -125,6 +127,64 @@ def _get_regularizer(l1: float = 0.0, l2: float = 0.0):
     if l1 == 0.0 and l2 == 0.0:
         return None
     return tf.keras.regularizers.L1L2(l1=l1, l2=l2)
+
+
+def _causal_depthwise_conv1d(
+    x: "tf.Tensor",
+    kernel_size: int,
+    *,
+    dilation_rate: int = 1,
+    **kwargs,
+) -> "tf.Tensor":
+    """DepthwiseConv1D com padding causal compatível com Keras 3.x.
+
+    Keras 3.x removeu suporte a padding='causal' em DepthwiseConv1D
+    (apenas Conv1D retém esse suporte). Este helper implementa causal
+    padding manualmente: ZeroPadding1D à esquerda + DepthwiseConv1D
+    com padding='valid'.
+
+    Equivalência matemática:
+        output[t] depende apenas de input[<=t] (sem dados futuros).
+        Bit-for-bit idêntico a DepthwiseConv1D(padding='causal') do
+        Keras 2.x para mesmos pesos.
+
+    Cálculo do padding:
+        pad_size = (kernel_size - 1) * dilation_rate
+        ZeroPadding1D(padding=(pad_size, 0))  → pad_size zeros à esquerda
+        DepthwiseConv1D(padding='valid')       → convolução sem pad interno
+
+    Args:
+        x: Tensor de entrada (batch, seq_len, channels).
+        kernel_size: Tamanho do kernel depthwise.
+        dilation_rate: Taxa de dilatação. Default: 1.
+            Kernel 4 com dilation 4 → campo receptivo efetivo de 16.
+        **kwargs: Argumentos adicionais passados a DepthwiseConv1D
+            (ex: depthwise_regularizer, use_bias).
+
+    Returns:
+        tf.Tensor: Output (batch, seq_len, channels). Dimensão temporal
+            preservada — mesmo seq_len da entrada.
+
+    Note:
+        Referenciado em:
+            - models/blocks.py: conv_next_block (quando causal=True)
+            - models/blocks.py: mbconv_block (quando causal=True)
+            - models/geosteering.py: _s4_layer (Mamba_S4, 3× empilhadas)
+        Fix: Keras 3.x (Colab TF 2.19) — DepthwiseConv1D(causal) falha.
+        Ref: keras-team/keras#19311 (remoção de causal em DepthwiseConv1D).
+    """
+    import tensorflow as tf
+
+    pad_size = (kernel_size - 1) * dilation_rate
+    # ── Zero-pad à esquerda: (batch, pad+seq, ch) ────────────────────
+    # Apenas lado esquerdo recebe zeros — garante causalidade estrita.
+    x_padded = tf.keras.layers.ZeroPadding1D(padding=(pad_size, 0))(x)
+    return tf.keras.layers.DepthwiseConv1D(
+        kernel_size=kernel_size,
+        dilation_rate=dilation_rate,
+        padding="valid",
+        **kwargs,
+    )(x_padded)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -366,17 +426,28 @@ def conv_next_block(
     """
     import tensorflow as tf
 
-    pad = _padding(causal)
     reg = _get_regularizer(l1, l2)
     n_ch = x.shape[-1]
 
     # ── Depthwise conv (per-channel spatial mixing) ───────────────────
-    y = tf.keras.layers.DepthwiseConv1D(
-        kernel_size,
-        padding=pad,
-        depthwise_regularizer=reg,
-        use_bias=True,
-    )(x)
+    # Keras 3.x não suporta padding='causal' em DepthwiseConv1D.
+    # Quando causal=True, usa _causal_depthwise_conv1d (ZeroPadding1D +
+    # valid) para garantir compatibilidade com Keras 2.x e 3.x.
+    # Quando causal=False, usa padding='same' diretamente.
+    if causal:
+        y = _causal_depthwise_conv1d(
+            x,
+            kernel_size,
+            depthwise_regularizer=reg,
+            use_bias=True,
+        )
+    else:
+        y = tf.keras.layers.DepthwiseConv1D(
+            kernel_size,
+            padding="same",
+            depthwise_regularizer=reg,
+            use_bias=True,
+        )(x)
     y = tf.keras.layers.LayerNormalization()(y)
 
     # ── Pointwise MLP (channel mixing): expand → GELU → compress ─────
@@ -654,12 +725,11 @@ def mbconv_block(
     """
     import tensorflow as tf
 
-    pad = _padding(causal)
     reg = _get_regularizer(l1, l2)
     n_ch = x.shape[-1]
     mid_ch = n_ch * expansion
 
-    # ── Expansao 1x1 ──────────────────────────────────────────────────
+    # ── Expansão 1x1 ─────────────────────────────────────────────────
     y = tf.keras.layers.Conv1D(
         mid_ch,
         1,
@@ -671,12 +741,23 @@ def mbconv_block(
     y = tf.keras.layers.Activation("swish")(y)
 
     # ── Depthwise conv ────────────────────────────────────────────────
-    y = tf.keras.layers.DepthwiseConv1D(
-        kernel_size,
-        padding=pad,
-        use_bias=False,
-        depthwise_regularizer=reg,
-    )(y)
+    # Keras 3.x não suporta padding='causal' em DepthwiseConv1D.
+    # Quando causal=True, usa _causal_depthwise_conv1d (ZeroPadding1D +
+    # valid) para garantir compatibilidade com Keras 2.x e 3.x.
+    if causal:
+        y = _causal_depthwise_conv1d(
+            y,
+            kernel_size,
+            use_bias=False,
+            depthwise_regularizer=reg,
+        )
+    else:
+        y = tf.keras.layers.DepthwiseConv1D(
+            kernel_size,
+            padding="same",
+            use_bias=False,
+            depthwise_regularizer=reg,
+        )(y)
     y = tf.keras.layers.BatchNormalization()(y)
     y = tf.keras.layers.Activation("swish")(y)
 

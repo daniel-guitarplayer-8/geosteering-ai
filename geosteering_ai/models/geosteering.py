@@ -309,26 +309,12 @@ def build_informer(config: "PipelineConfig") -> "tf.keras.Model":
 # ──────────────────────────────────────────────────────────────════════════
 
 
-def _causal_depthwise_conv1d(x, kernel_size: int, dilation_rate: int = 1):
-    """DepthwiseConv1D causal compativel com Keras 3.x.
-
-    Keras 3.x nao suporta padding='causal' em DepthwiseConv1D.
-    Implementa causal padding manualmente: zero-pad a esquerda +
-    DepthwiseConv1D(padding='valid').
-
-    Causal pad = (kernel_size - 1) * dilation_rate zeros a esquerda.
-    Garante que output[t] depende apenas de input[<=t] (sem futuro).
-    """
-    import tensorflow as tf
-
-    pad_size = (kernel_size - 1) * dilation_rate
-    # Zero-pad a esquerda: (batch, pad+seq, ch)
-    x_padded = tf.keras.layers.ZeroPadding1D(padding=(pad_size, 0))(x)
-    return tf.keras.layers.DepthwiseConv1D(
-        kernel_size=kernel_size,
-        dilation_rate=dilation_rate,
-        padding="valid",
-    )(x_padded)
+# ── Importação do helper causal centralizado em blocks.py ─────────────
+# Evita duplicação: _causal_depthwise_conv1d resolve a incompatibilidade
+# Keras 3.x (DepthwiseConv1D não suporta padding='causal') via
+# ZeroPadding1D(left) + DepthwiseConv1D(padding='valid').
+# Ref: blocks.py (Grupo Utility), geosteering.py (Mamba_S4).
+from geosteering_ai.models.blocks import _causal_depthwise_conv1d
 
 
 def _s4_layer(x, d_model: int, dt_rank: int = 16):
