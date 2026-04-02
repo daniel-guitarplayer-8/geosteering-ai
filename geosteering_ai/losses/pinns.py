@@ -430,9 +430,11 @@ def _analytical_forward_1d(rho_log, omega_mu, spacing):
     import tensorflow as tf
 
     # ── Conversao log10 → linear ──────────────────────────────────────
-    # rho_log esta em escala log10 (ex: 1.0 = 10 Ohm.m, 2.0 = 100 Ohm.m)
-    # Precisamos de rho linear para calcular skin depth.
-    rho = tf.pow(10.0, rho_log)  # (B, N, 2)
+    # rho_log está em escala log10 (ex: 1.0 = 10 Ohm.m, 2.0 = 100 Ohm.m)
+    # Clamp para estabilidade numérica: [-2, 5] → [0.01, 100000] Ohm.m.
+    # Consistente com make_maxwell_physics_loss e make_variational_loss.
+    rho_log_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
+    rho = tf.pow(10.0, rho_log_clamped)  # (B, N, 2)
 
     # ── Skin depth: delta = sqrt(2 × rho / (omega × mu0)) ────────────
     # O skin depth governa a penetracao do campo EM no meio condutor.
@@ -762,88 +764,65 @@ def make_maxwell_physics_loss(
         rho_log = y_pred[..., :2]  # (B, N, 2)
 
         # ── Guard para seq_len < 3 (d2 requer 3+ pontos) ─────────
-        # Sequencias muito curtas nao permitem diferencas finitas
+        # Sequências muito curtas não permitem diferenças finitas
         # centrais de 2a ordem. Retorna 0 para evitar crash.
+        # Usa tf.cond para compatibilidade com tf.function (graph mode).
         seq_len = tf.shape(rho_log)[1]
-        if_short = tf.less(seq_len, 3)
-        if tf.executing_eagerly():
-            if if_short:
-                return tf.constant(0.0, dtype=tf.float32)
 
-        # ── Condutividade (S/m) a partir de log10(rho) ───────────
-        # sigma = 1/rho = 10^(-log10(rho))
-        # Clamp para evitar overflow: log10(rho) em [-2, 5]
-        # corresponde a rho em [0.01, 100000] Ohm.m
-        # Range fisico: folhelho (~0.5 Ohm.m) a anidrita (~10^4 Ohm.m)
-        rho_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
-        sigma = tf.pow(10.0, -rho_clamped)  # (B, N, 2)
+        def _compute_maxwell():
+            """Corpo do resíduo Helmholtz (extraído para tf.cond)."""
+            # ── Condutividade (S/m) a partir de log10(rho) ───────────
+            # sigma = 1/rho = 10^(-log10(rho))
+            # Clamp para evitar overflow: log10(rho) em [-2, 5]
+            # corresponde a rho em [0.01, 100000] Ohm.m
+            # Range físico: folhelho (~0.5 Ohm.m) a anidrita (~10^4 Ohm.m)
+            rho_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
+            sigma = tf.pow(10.0, -rho_clamped)  # (B, N, 2)
 
-        # ── |k^2| = omega × mu × sigma (magnitude do wavenumber^2) ─
-        # |k^2| grande → meio condutivo → skin depth pequeno →
-        # campo EM decai rapido → mais resolucao espacial →
-        # mais curvatura permitida no perfil de rho.
-        # |k^2| pequeno → meio resistivo → skin depth grande →
-        # campo EM penetra longe → menos resolucao → perfil suave.
-        k_sq = omega_mu * sigma  # (B, N, 2)
+            # ── |k^2| = omega × mu × sigma (magnitude do wavenumber^2) ─
+            # |k^2| grande → meio condutivo → skin depth pequeno →
+            # campo EM decai rápido → mais resolução espacial →
+            # mais curvatura permitida no perfil de rho.
+            k_sq = omega_mu * sigma  # (B, N, 2)
 
-        # ── Derivada de 1a ordem: d(rho)/dz ──────────────────────
-        # Diferencas finitas forward: (f[i+1] - f[i]) / dz
-        # Shape: (B, N-1, 2) — um ponto a menos que a sequencia.
-        # Representa o gradiente local do perfil de resistividade.
-        # Em zonas homogeneas (camada unica): d1 ≈ 0.
-        # Nos limites de camada: d1 >> 0 (transicao abrupta).
-        d1_rho = (rho_clamped[:, 1:, :] - rho_clamped[:, :-1, :]) / dz  # (B, N-1, 2)
+            # ── Derivada de 1a ordem: d(rho)/dz ──────────────────────
+            # Diferenças finitas forward: (f[i+1] - f[i]) / dz
+            # Shape: (B, N-1, 2) — um ponto a menos que a sequência.
+            d1_rho = (rho_clamped[:, 1:, :] - rho_clamped[:, :-1, :]) / dz
 
-        # ── Derivada de 2a ordem: d^2(rho)/dz^2 ──────────────────
-        # Diferencas finitas centrais: (f[i+1] - 2*f[i] + f[i-1]) / dz^2
-        # Shape: (B, N-2, 2) — pontos interiores apenas.
-        # Mede a curvatura do perfil: oscilacoes espurias → d2 grande.
-        # Perfis blocky (geosteering) tem d2 ≈ 0 exceto nas interfaces.
-        d2_rho = (
-            rho_clamped[:, 2:, :] - 2.0 * rho_clamped[:, 1:-1, :] + rho_clamped[:, :-2, :]
-        ) / dz_sq  # (B, N-2, 2)
+            # ── Derivada de 2a ordem: d^2(rho)/dz^2 ──────────────────
+            # Diferenças finitas centrais: (f[i+1] - 2f[i] + f[i-1]) / dz^2
+            # Shape: (B, N-2, 2) — pontos interiores apenas.
+            d2_rho = (
+                rho_clamped[:, 2:, :]
+                - 2.0 * rho_clamped[:, 1:-1, :]
+                + rho_clamped[:, :-2, :]
+            ) / dz_sq  # (B, N-2, 2)
 
-        # ── Componente 1: Curvatura (proxy para d^2E/dz^2) ───────
-        # Penaliza oscilacoes nao-fisicas no perfil predito.
-        # (d2_rho)^2 eh sempre >= 0, com 0 para perfis planos ou lineares.
-        # Este termo ja existia na versao simplificada e eh o regularizador
-        # principal para suavidade do perfil.
-        curvature_term = tf.square(d2_rho)  # (B, N-2, 2)
+            # ── Componente 1: Curvatura (proxy para d^2E/dz^2) ───────
+            curvature_term = tf.square(d2_rho)  # (B, N-2, 2)
 
-        # ── Componente 2: Coupling gradiente × wavenumber ─────────
-        # Modela o acoplamento k^2 × E na equacao de Helmholtz.
-        # No regime difusivo, o campo E decai como exp(-z/delta),
-        # onde delta = sqrt(2/(omega*mu*sigma)). A variacao do campo
-        # eh proporcional ao gradiente de rho multiplicado por |k^2|:
-        #   dE/dz ~ -(d(rho)/dz) × sqrt(|k^2|/2)
-        # Portanto: (dE/dz)^2 ~ (d(rho)/dz)^2 × |k^2|/2
-        # Simplificamos removendo o fator 1/2 (absorvido pelo lambda).
-        #
-        # Alinhamento de shapes:
-        #   d1_rho: (B, N-1, 2) → d1_interior = d1_rho[:, :-1, :] → (B, N-2, 2)
-        #   k_sq:   (B, N, 2)   → k_sq_mid = k_sq[:, 1:-1, :]     → (B, N-2, 2)
-        # Ambos alinhados com os pontos interiores [1:-1].
-        k_sq_mid = k_sq[:, 1:-1, :]  # (B, N-2, 2)
-        d1_interior = d1_rho[:, :-1, :]  # (B, N-2, 2)
-        coupling_term = tf.square(d1_interior) * k_sq_mid  # (B, N-2, 2)
+            # ── Componente 2: Coupling gradiente × wavenumber ─────────
+            # (dE/dz)^2 ~ (d(rho)/dz)^2 × |k^2|/2
+            # Fator 1/2 absorvido pelo lambda.
+            k_sq_mid = k_sq[:, 1:-1, :]  # (B, N-2, 2)
+            d1_interior = d1_rho[:, :-1, :]  # (B, N-2, 2)
+            coupling_term = tf.square(d1_interior) * k_sq_mid
 
-        # ── Residuo Helmholtz completo normalizado ────────────────
-        # R = (curvature + coupling) / (1 + |k^2| + eps)
-        #
-        # Normalizacao por (1 + |k^2|):
-        #   - Meios condutivos (|k^2| grande) → denominador grande →
-        #     residuo menor → mais curvatura tolerada (resolucao maior).
-        #   - Meios resistivos (|k^2| pequeno) → denominador ≈ 1 →
-        #     penalidade maxima (campo pouco sensivel a detalhes).
-        #   - +1 evita divisao por zero quando sigma → 0 (ar, sal).
-        #   - +EPS (1e-12): seguranca numerica adicional float32.
-        #
-        # O residuo eh sempre >= 0 (soma de quadrados / positivo).
-        # Para perfil plano: curvature=0, coupling=0 → R=0 ✓
-        normalizer = 1.0 + k_sq_mid + EPS
-        residual = (curvature_term + coupling_term) / normalizer  # (B, N-2, 2)
+            # ── Resíduo normalizado ───────────────────────────────────
+            # R = (curvature + coupling) / (1 + |k^2| + eps)
+            normalizer = 1.0 + k_sq_mid + EPS
+            residual = (curvature_term + coupling_term) / normalizer
 
-        return tf.reduce_mean(residual)
+            return tf.reduce_mean(residual)
+
+        return tf.cond(
+            tf.less(seq_len, 3),
+            lambda: tf.constant(0.0, dtype=tf.float32),
+            _compute_maxwell,
+        )
+
+    return maxwell_physics_loss
 
     return maxwell_physics_loss
 
@@ -1572,63 +1551,44 @@ def make_self_adaptive_loss(
         # Fix CR#2: slice estatico [:2] preserva shape em tf.function.
         rho_log = y_pred[..., :2]  # (B, N, 2) — shape estatica
 
-        # ── Fix CR#4: guard para seq_len < 3 (d2 requer 3+ pontos) ─
+        # ── Guard para seq_len < 3 (d2 requer 3+ pontos) ─────────
+        # Usa tf.cond para compatibilidade com tf.function (graph mode).
         seq_len = tf.shape(rho_log)[1]
-        if_short = tf.less(seq_len, 3)
-        if tf.executing_eagerly():
-            if if_short:
-                return tf.constant(0.0, dtype=tf.float32)
 
-        # ── Condutividade sigma(z) = 10^(-rho_log) ───────────────
-        rho_log_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
-        sigma = tf.pow(10.0, -rho_log_clamped)  # (B, N, C)
+        def _compute_self_adaptive():
+            """Corpo do resíduo SA-PINN (extraído para tf.cond)."""
+            rho_log_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
+            sigma = tf.pow(10.0, -rho_log_clamped)
+            k_sq = omega_mu * sigma
 
-        # ── k^2(z) = omega × mu × sigma ──────────────────────────
-        k_sq = omega_mu * sigma  # (B, N, C)
+            d2_rho = (
+                rho_log_clamped[:, 2:, :]
+                - 2.0 * rho_log_clamped[:, 1:-1, :]
+                + rho_log_clamped[:, :-2, :]
+            ) / (dz_sq + EPS)
 
-        # ── Derivada de 2a ordem d^2(rho)/dz^2 (pontos interiores)
-        # Fix CR#5: usar rho_log_clamped para consistencia com k_sq.
-        # Stencil central: (f[i+1] - 2f[i] + f[i-1]) / dz^2
-        # Shape resultante: (B, N-2, C)
-        d2_rho = (
-            rho_log_clamped[:, 2:, :]
-            - 2.0 * rho_log_clamped[:, 1:-1, :]
-            + rho_log_clamped[:, :-2, :]
-        ) / (dz_sq + EPS)
+            k_sq_interior = k_sq[:, 1:-1, :]
+            residual = d2_rho / (1.0 + k_sq_interior + EPS)
+            residual_sq = tf.square(residual)
 
-        # ── Normalizar residuo por (1 + k^2) nos pontos interiores
-        k_sq_interior = k_sq[:, 1:-1, :]
-        residual = d2_rho / (1.0 + k_sq_interior + EPS)
-        residual_sq = tf.square(residual)  # (B, N-2, C)
+            d1_rho = tf.abs(
+                (rho_log_clamped[:, 1:, :] - rho_log_clamped[:, :-1, :]) / (dz + EPS)
+            )
+            d1_rho_interior = 0.5 * (d1_rho[:, 1:, :] + d1_rho[:, :-1, :])
 
-        # ── Derivada de 1a ordem |d(rho)/dz| (para pesos) ────────
-        # Fix CR#5: usar rho_log_clamped para consistencia.
-        d1_rho = tf.abs(
-            (rho_log_clamped[:, 1:, :] - rho_log_clamped[:, :-1, :]) / (dz + EPS)
+            # ── Pesos adaptativos: w(z) = softplus(|grad|) ───────
+            weights = tf.math.softplus(d1_rho_interior)
+
+            # ── Loss ponderada: mean(w × R²) / mean(w) ──────────
+            weighted_residual = tf.reduce_mean(weights * residual_sq)
+            norm = tf.reduce_mean(weights) + EPS
+            return weighted_residual / norm
+
+        return tf.cond(
+            tf.less(seq_len, 3),
+            lambda: tf.constant(0.0, dtype=tf.float32),
+            _compute_self_adaptive,
         )
-
-        # ── Alinhar d1_rho com pontos interiores (N-2) ───────────
-        # Media dos gradientes adjacentes para ter shape (B, N-2, C).
-        # d1_rho[i] e d1_rho[i+1] cobrem o ponto interior [i+1].
-        d1_rho_interior = 0.5 * (d1_rho[:, 1:, :] + d1_rho[:, :-1, :])
-        # (B, N-2, C)
-
-        # ── Pesos adaptativos: w(z) = softplus(|grad|) ───────────
-        # softplus(x) = log(1 + exp(x)):
-        #   - x ≈ 0 (zona homogenea): w ≈ 0.69 (peso base)
-        #   - x >> 0 (borda de camada): w ≈ x (peso alto)
-        # Suave e diferenciavel em todo o dominio.
-        weights = tf.math.softplus(d1_rho_interior)  # (B, N-2, C)
-
-        # ── Loss ponderada: mean(w × R^2) / mean(w) ──────────────
-        # Numerador: residuo quadratico ponderado pela atencao.
-        # Denominador: normalizacao para escala invariante.
-        # Sem denominador, a loss cresceria com o gradiente medio,
-        # criando instabilidade numerica.
-        weighted_residual = tf.reduce_mean(weights * residual_sq)
-        normalizer = tf.reduce_mean(weights) + EPS
-
-        return weighted_residual / normalizer
 
     return self_adaptive_loss
 
