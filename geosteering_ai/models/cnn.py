@@ -71,6 +71,7 @@ def _get_reg(config: "PipelineConfig"):
         tf.keras.regularizers.Regularizer | None.
     """
     import tensorflow as tf
+
     l1 = config.l1_weight if config.use_l1_regularization else 0.0
     l2 = config.l2_weight if config.use_l2_regularization else 0.0
     if l1 == 0.0 and l2 == 0.0:
@@ -92,10 +93,14 @@ def _stem_block(x, filters: int, kernel_size: int, causal: bool, reg):
         tf.Tensor: (batch, seq_len, filters).
     """
     import tensorflow as tf
+
     pad = "causal" if causal else "same"
     x = tf.keras.layers.Conv1D(
-        filters, kernel_size, padding=pad,
-        kernel_regularizer=reg, use_bias=False,
+        filters,
+        kernel_size,
+        padding=pad,
+        kernel_regularizer=reg,
+        use_bias=False,
     )(x)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Activation("relu")(x)
@@ -153,7 +158,12 @@ def build_resnet18(config: "PipelineConfig") -> "tf.keras.Model":
         Ref: docs/ARCHITECTURE_v2.md secao 5.2.1.
     """
     import tensorflow as tf
-    from geosteering_ai.models.blocks import residual_block_1d, se_block, output_projection
+
+    from geosteering_ai.models.blocks import (
+        output_projection,
+        residual_block_1d,
+        se_block,
+    )
 
     # ── Resolucao de hiperparametros (config + arch_params overrides) ─
     ap = config.arch_params or {}
@@ -169,7 +179,10 @@ def build_resnet18(config: "PipelineConfig") -> "tf.keras.Model":
 
     logger.info(
         "build_resnet18: n_feat=%d, out_ch=%d, causal=%s, se=%s",
-        config.n_features, config.output_channels, causal, use_se,
+        config.n_features,
+        config.output_channels,
+        causal,
+        use_se,
     )
 
     # ── Input ─────────────────────────────────────────────────────────
@@ -182,7 +195,9 @@ def build_resnet18(config: "PipelineConfig") -> "tf.keras.Model":
     for stage_i, (n_filt, n_blocks) in enumerate(zip(stage_filters, blocks_per_stage)):
         for _ in range(n_blocks):
             x = residual_block_1d(
-                x, n_filt, kernel_size,
+                x,
+                n_filt,
+                kernel_size,
                 causal=causal,
                 dropout_rate=dr,
                 l1=config.l1_weight if config.use_l1_regularization else 0.0,
@@ -194,7 +209,8 @@ def build_resnet18(config: "PipelineConfig") -> "tf.keras.Model":
 
     # ── Output projection ─────────────────────────────────────────────
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -230,7 +246,12 @@ def build_resnet34(config: "PipelineConfig") -> "tf.keras.Model":
         Ref: He et al. (2016) CVPR — ResNet-34 config: [3,4,6,3].
     """
     import tensorflow as tf
-    from geosteering_ai.models.blocks import residual_block_1d, se_block, output_projection
+
+    from geosteering_ai.models.blocks import (
+        output_projection,
+        residual_block_1d,
+        se_block,
+    )
 
     ap = config.arch_params or {}
     stage_filters = ap.get("stage_filters", [64, 128, 256, 512])
@@ -243,7 +264,9 @@ def build_resnet34(config: "PipelineConfig") -> "tf.keras.Model":
     dr = config.dropout_rate
     use_se = config.use_se_block
 
-    logger.info("build_resnet34: n_feat=%d, out_ch=%d", config.n_features, config.output_channels)
+    logger.info(
+        "build_resnet34: n_feat=%d, out_ch=%d", config.n_features, config.output_channels
+    )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
     x = _stem_block(inp, stem_filters, stem_k, causal, reg)
@@ -251,7 +274,11 @@ def build_resnet34(config: "PipelineConfig") -> "tf.keras.Model":
     for stage_i, (n_filt, n_blocks) in enumerate(zip(stage_filters, blocks_per_stage)):
         for _ in range(n_blocks):
             x = residual_block_1d(
-                x, n_filt, kernel_size, causal=causal, dropout_rate=dr,
+                x,
+                n_filt,
+                kernel_size,
+                causal=causal,
+                dropout_rate=dr,
                 l1=config.l1_weight if config.use_l1_regularization else 0.0,
                 l2=config.l2_weight if config.use_l2_regularization else 0.0,
             )
@@ -259,7 +286,8 @@ def build_resnet34(config: "PipelineConfig") -> "tf.keras.Model":
             x = se_block(x, reduction=config.se_reduction)
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -295,7 +323,12 @@ def build_resnet50(config: "PipelineConfig") -> "tf.keras.Model":
         Ref: He et al. (2016) CVPR — ResNet-50 com bottleneck.
     """
     import tensorflow as tf
-    from geosteering_ai.models.blocks import bottleneck_block_1d, se_block, output_projection
+
+    from geosteering_ai.models.blocks import (
+        bottleneck_block_1d,
+        output_projection,
+        se_block,
+    )
 
     ap = config.arch_params or {}
     stage_filters = ap.get("stage_filters", [64, 128, 256, 512])  # pre-expansion
@@ -306,7 +339,9 @@ def build_resnet50(config: "PipelineConfig") -> "tf.keras.Model":
     causal = config.use_causal_mode
     use_se = config.use_se_block
 
-    logger.info("build_resnet50: n_feat=%d, out_ch=%d", config.n_features, config.output_channels)
+    logger.info(
+        "build_resnet50: n_feat=%d, out_ch=%d", config.n_features, config.output_channels
+    )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
     x = _stem_block(inp, stem_filters, 7, causal, _get_reg(config))
@@ -314,7 +349,11 @@ def build_resnet50(config: "PipelineConfig") -> "tf.keras.Model":
     for stage_i, (n_filt, n_blocks) in enumerate(zip(stage_filters, blocks_per_stage)):
         for _ in range(n_blocks):
             x = bottleneck_block_1d(
-                x, n_filt, kernel_size, causal=causal, expansion=expansion,
+                x,
+                n_filt,
+                kernel_size,
+                causal=causal,
+                expansion=expansion,
                 l1=config.l1_weight if config.use_l1_regularization else 0.0,
                 l2=config.l2_weight if config.use_l2_regularization else 0.0,
             )
@@ -322,7 +361,8 @@ def build_resnet50(config: "PipelineConfig") -> "tf.keras.Model":
             x = se_block(x, reduction=config.se_reduction)
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -363,6 +403,7 @@ def build_convnext(config: "PipelineConfig") -> "tf.keras.Model":
         Ref: Liu et al. (2022) — ConvNeXt. Stage [3,3,9,3] = Tiny.
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import conv_next_block, output_projection
 
     ap = config.arch_params or {}
@@ -373,7 +414,9 @@ def build_convnext(config: "PipelineConfig") -> "tf.keras.Model":
     causal = config.use_causal_mode
     dr = config.dropout_rate
 
-    logger.info("build_convnext: n_feat=%d, out_ch=%d", config.n_features, config.output_channels)
+    logger.info(
+        "build_convnext: n_feat=%d, out_ch=%d", config.n_features, config.output_channels
+    )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
 
@@ -392,7 +435,10 @@ def build_convnext(config: "PipelineConfig") -> "tf.keras.Model":
 
         for _ in range(n_blocks):
             x = conv_next_block(
-                x, n_filt, kernel_size=kernel_size, causal=causal,
+                x,
+                n_filt,
+                kernel_size=kernel_size,
+                causal=causal,
                 dropout_rate=dr,
                 l1=config.l1_weight if config.use_l1_regularization else 0.0,
                 l2=config.l2_weight if config.use_l2_regularization else 0.0,
@@ -401,7 +447,8 @@ def build_convnext(config: "PipelineConfig") -> "tf.keras.Model":
     x = tf.keras.layers.LayerNormalization()(x)
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -438,6 +485,7 @@ def build_inceptionnet(config: "PipelineConfig") -> "tf.keras.Model":
         Ref: Szegedy et al. (2014) — GoogLeNet/Inception.
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import inception_module, output_projection
 
     ap = config.arch_params or {}
@@ -447,14 +495,20 @@ def build_inceptionnet(config: "PipelineConfig") -> "tf.keras.Model":
     kernel_sizes = ap.get("kernel_sizes", (9, 19, 39))
     causal = config.use_causal_mode
 
-    logger.info("build_inceptionnet: n_feat=%d, out_ch=%d", config.n_features, config.output_channels)
+    logger.info(
+        "build_inceptionnet: n_feat=%d, out_ch=%d",
+        config.n_features,
+        config.output_channels,
+    )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
     x = inp
 
     for i in range(n_modules):
         x = inception_module(
-            x, filters=filters, causal=causal,
+            x,
+            filters=filters,
+            causal=causal,
             bottleneck_size=bottleneck,
             kernel_sizes=tuple(kernel_sizes),
             l1=config.l1_weight if config.use_l1_regularization else 0.0,
@@ -463,7 +517,8 @@ def build_inceptionnet(config: "PipelineConfig") -> "tf.keras.Model":
         logger.debug("InceptionNet module %d: out_ch=%d", i + 1, x.shape[-1])
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -499,6 +554,7 @@ def build_inceptiontime(config: "PipelineConfig") -> "tf.keras.Model":
         Ref: Ismail Fawaz et al. (2020) Data Mining and Knowledge Discovery.
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import inception_time_block, output_projection
 
     ap = config.arch_params or {}
@@ -508,14 +564,20 @@ def build_inceptiontime(config: "PipelineConfig") -> "tf.keras.Model":
     bottleneck = ap.get("bottleneck_size", 32)
     causal = config.use_causal_mode
 
-    logger.info("build_inceptiontime: n_feat=%d, out_ch=%d", config.n_features, config.output_channels)
+    logger.info(
+        "build_inceptiontime: n_feat=%d, out_ch=%d",
+        config.n_features,
+        config.output_channels,
+    )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
     x = inp
 
     for i in range(n_blocks):
         x = inception_time_block(
-            x, filters=filters, causal=causal,
+            x,
+            filters=filters,
+            causal=causal,
             use_residual=True,
             kernel_sizes=tuple(kernel_sizes),
             bottleneck_size=bottleneck,
@@ -525,7 +587,8 @@ def build_inceptiontime(config: "PipelineConfig") -> "tf.keras.Model":
         logger.debug("InceptionTime block %d: out_ch=%d", i + 1, x.shape[-1])
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -579,15 +642,23 @@ def build_cnn1d(config: "PipelineConfig") -> "tf.keras.Model":
     reg = _get_reg(config)
     dr = config.dropout_rate
 
-    logger.info("build_cnn1d: n_feat=%d, out_ch=%d, filters=%s", config.n_features, config.output_channels, filter_list)
+    logger.info(
+        "build_cnn1d: n_feat=%d, out_ch=%d, filters=%s",
+        config.n_features,
+        config.output_channels,
+        filter_list,
+    )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
     x = inp
 
     for i, n_filt in enumerate(filter_list):
         x = tf.keras.layers.Conv1D(
-            n_filt, kernel_size, padding=pad,
-            kernel_regularizer=reg, use_bias=not use_bn,
+            n_filt,
+            kernel_size,
+            padding=pad,
+            kernel_regularizer=reg,
+            use_bias=not use_bn,
         )(x)
         if use_bn:
             x = tf.keras.layers.BatchNormalization()(x)
@@ -596,11 +667,228 @@ def build_cnn1d(config: "PipelineConfig") -> "tf.keras.Model":
             x = tf.keras.layers.Dropout(dr)(x)
 
     out = tf.keras.layers.Conv1D(
-        config.output_channels, 1, padding="same",
-        activation=(config.constraint_activation if config.use_physical_constraint_layer else None),
+        config.output_channels,
+        1,
+        padding="same",
+        activation=(
+            config.constraint_activation if config.use_physical_constraint_layer else None
+        ),
     )(x)
 
     return tf.keras.Model(inputs=inp, outputs=out, name="CNN_1D")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECAO: RESNEXT — AGGREGATED RESIDUAL TRANSFORMATIONS
+# ════════════════════════════════════════════════════════════════════════════
+# ResNeXt (Xie et al. 2017) estende o ResNet com "grouped convolutions":
+# em vez de um unico caminho (1 Conv1D largo), divide em C caminhos
+# paralelos (cardinality) com Conv1D menores e agrega por concatenação.
+#
+# Vantagem sobre ResNet: melhor trade-off params/performance.
+# Para inversão EM 1D, cada "caminho" captura padroes de escala diferente
+# nas componentes do tensor H (alta/media/baixa frequencia espacial).
+#
+# Adaptacao 1D para geosteering:
+#   - Cardinalidade C=32 (default) com largura d=4 por grupo
+#   - 4 stages [64, 128, 256, 512] filtros (como ResNet-18)
+#   - Compativel com modo causal (padding='causal')
+#
+# Ref: Xie et al. (2017) "Aggregated Residual Transformations for Deep
+#      Neural Networks" CVPR — ResNeXt-50 32×4d.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _resnext_block_1d(
+    x, filters, cardinality, group_width, kernel_size, causal, dropout_rate, reg
+):
+    """Bloco ResNeXt 1D com grouped convolutions.
+
+    Estrutura bottleneck com C caminhos paralelos (grouped convolution):
+      x → Conv1D(C*d, k=1) → BN → ReLU
+        → Conv1D(C*d, k=3, groups=C) → BN → ReLU
+        → Conv1D(filters, k=1) → BN → +skip → ReLU
+
+    Args:
+        x: Tensor de entrada (B, N, C_in).
+        filters: Canais de saida do bloco.
+        cardinality: Numero de grupos paralelos C (default 32).
+        group_width: Largura de cada grupo d (default 4).
+        kernel_size: Tamanho do kernel (default 3).
+        causal: Se True, padding causal.
+        dropout_rate: Taxa de dropout.
+        reg: Regularizador kernel.
+
+    Returns:
+        Tensor (B, N, filters) com skip connection residual.
+
+    Note:
+        Funcao privada — usada apenas por build_resnext().
+        Grouped convolution: 32 grupos × 4 canais = 128 canais intermediarios.
+        Ref: Xie et al. (2017) Fig. 3c — grouped convolution pathway.
+    """
+    import tensorflow as tf
+
+    pad = "causal" if causal else "same"
+    intermediate = cardinality * group_width
+
+    skip = x
+
+    # ── Bottleneck: 1×1 → grouped 3×k → 1×1 ─────────────────────────
+    # 1×1 reduce para C*d canais
+    x = tf.keras.layers.Conv1D(
+        intermediate,
+        1,
+        padding="same",
+        kernel_regularizer=reg,
+        use_bias=False,
+    )(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation("relu")(x)
+
+    # Grouped convolution: C grupos, cada um com d canais
+    x = tf.keras.layers.Conv1D(
+        intermediate,
+        kernel_size,
+        padding=pad,
+        groups=cardinality,
+        kernel_regularizer=reg,
+        use_bias=False,
+    )(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation("relu")(x)
+
+    # 1×1 projeta para filters
+    x = tf.keras.layers.Conv1D(
+        filters,
+        1,
+        padding="same",
+        kernel_regularizer=reg,
+        use_bias=False,
+    )(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+
+    if dropout_rate > 0:
+        x = tf.keras.layers.Dropout(dropout_rate)(x)
+
+    # ── Skip connection ───────────────────────────────────────────────
+    in_channels = getattr(skip.shape, "__getitem__", lambda _: None)(-1)
+    if in_channels is None or in_channels != filters:
+        skip = tf.keras.layers.Conv1D(filters, 1, padding="same")(skip)
+
+    x = tf.keras.layers.Add()([skip, x])
+    x = tf.keras.layers.Activation("relu")(x)
+    return x
+
+
+def build_resnext(config: "PipelineConfig") -> "tf.keras.Model":
+    """Constroi ResNeXt 1D para inversao seq2seq de resistividade.
+
+    ResNeXt adapta o ResNet com grouped convolutions (cardinalidade C=32,
+    largura d=4), obtendo melhor tradeoff parametros/performance. Cada
+    grupo captura padroes de escala espacial diferente nas componentes EM.
+
+    Arquitetura:
+      ┌──────────────────────────────────────────────────────────────┐
+      │  Input (B, 600, n_features)                                 │
+      │    ↓                                                        │
+      │  Stem: Conv1D(64, k=7) → BN → ReLU                         │
+      │    ↓                                                        │
+      │  Stage 1: 2× ResNeXtBlock(64,  C=32, d=4)                 │
+      │  Stage 2: 2× ResNeXtBlock(128, C=32, d=4)                 │
+      │  Stage 3: 2× ResNeXtBlock(256, C=32, d=4)                 │
+      │  Stage 4: 2× ResNeXtBlock(512, C=32, d=4)                 │
+      │    ↓                                                        │
+      │  Output: Conv1D(output_ch, k=1)                             │
+      │  Output (B, 600, output_channels)                           │
+      └──────────────────────────────────────────────────────────────┘
+
+    Dual-mode:
+      ┌────────────────────────────────────────────────────────────┐
+      │  "same"   →  Offline (acausal, batch completo)            │
+      │  "causal" →  Realtime (causal, geosteering)               │
+      └────────────────────────────────────────────────────────────┘
+
+    Args:
+        config: PipelineConfig com:
+            - n_features, sequence_length, output_channels
+            - use_causal_mode, use_se_block, dropout_rate
+            - arch_params: override granular:
+                - stage_filters (list, default [64, 128, 256, 512])
+                - blocks_per_stage (list, default [2, 2, 2, 2])
+                - cardinality (int, default 32): grupos paralelos
+                - group_width (int, default 4): canais por grupo
+
+    Returns:
+        tf.keras.Model: ResNeXt seq2seq.
+
+    Example:
+        >>> config = PipelineConfig(model_type="ResNeXt")
+        >>> model = build_resnext(config)
+        >>> assert model.output_shape == (None, 600, 2)
+
+    Note:
+        Referenciado em:
+            - models/registry.py: _REGISTRY['ResNeXt']
+            - tests/test_models.py: TestResNeXt
+        Causal mode: padding='causal' em todas as Conv1D.
+        Cardinalidade 32×4d: 32 caminhos paralelos com 4 canais cada,
+        equivalente em FLOPs a ResNet mas com performance superior.
+        Ref: Xie et al. (2017) CVPR — "Aggregated Residual Transformations".
+    """
+    import tensorflow as tf
+
+    from geosteering_ai.models.blocks import output_projection, se_block
+
+    ap = config.arch_params or {}
+    stage_filters = ap.get("stage_filters", [64, 128, 256, 512])
+    blocks_per_stage = ap.get("blocks_per_stage", [2, 2, 2, 2])
+    cardinality = ap.get("cardinality", 32)
+    group_width = ap.get("group_width", 4)
+    kernel_size = ap.get("kernel_size", 3)
+    causal = config.use_causal_mode
+    reg = _get_reg(config)
+    dr = config.dropout_rate
+    use_se = config.use_se_block
+
+    logger.info(
+        "build_resnext: n_feat=%d, C=%d, d=%d, causal=%s",
+        config.n_features,
+        cardinality,
+        group_width,
+        causal,
+    )
+
+    inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
+
+    # ── Stem ──────────────────────────────────────────────────────────
+    x = _stem_block(inp, stage_filters[0], 7, causal, reg)
+
+    # ── 4 Stages com blocos ResNeXt ──────────────────────────────────
+    for stage_i, (n_filt, n_blocks) in enumerate(zip(stage_filters, blocks_per_stage)):
+        for _ in range(n_blocks):
+            x = _resnext_block_1d(
+                x,
+                n_filt,
+                cardinality,
+                group_width,
+                kernel_size,
+                causal,
+                dr,
+                reg,
+            )
+        if use_se:
+            x = se_block(x, reduction=config.se_reduction)
+        logger.debug("ResNeXt Stage %d: filters=%d", stage_i + 1, n_filt)
+
+    out = output_projection(
+        x,
+        config.output_channels,
+        constraint_activation=(
+            config.constraint_activation if config.use_physical_constraint_layer else None
+        ),
+    )
+    return tf.keras.Model(inputs=inp, outputs=out, name="ResNeXt")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -615,4 +903,5 @@ __all__ = [
     "build_inceptionnet",
     "build_inceptiontime",
     "build_cnn1d",
+    "build_resnext",
 ]

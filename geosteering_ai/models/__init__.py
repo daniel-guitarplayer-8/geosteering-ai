@@ -59,7 +59,7 @@ from geosteering_ai.models.registry import (
     is_causal_compatible,
     list_available_models,
 )
-from geosteering_ai.models.surrogate import build_surrogate
+from geosteering_ai.models.surrogate import build_surrogate, build_surrogate_modern
 
 # ── D8: Exports publicos ─────────────────────────────────────────────────
 __all__ = [
@@ -84,4 +84,5 @@ __all__ = [
     "film_layer",
     # ── SurrogateNet (forward model neural — PINNs) ──────────────────
     "build_surrogate",
+    "build_surrogate_modern",
 ]

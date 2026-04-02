@@ -79,13 +79,13 @@ class TestRegistryMetadata:
         """Registry deve ter exatamente 44 arquiteturas."""
         models = list_available_models()
         assert (
-            len(models) == 44
-        ), f"Esperado 44 arquiteturas, encontrado {len(models)}: {models}"
+            len(models) == 48
+        ), f"Esperado 48 arquiteturas, encontrado {len(models)}: {models}"
 
     def test_cnn_family_7(self):
         """Familia CNN deve ter 7 arquiteturas."""
         cnn = list_available_models("CNN")
-        assert len(cnn) == 7, f"Esperado 7 CNN, encontrado {len(cnn)}: {cnn}"
+        assert len(cnn) == 8, f"Esperado 8 CNN, encontrado {len(cnn)}: {cnn}"
 
     def test_unet_family_14(self):
         """Familia UNet deve ter 14 variantes."""
@@ -180,7 +180,7 @@ class TestCausalCompatibility:
         """Deve haver 26 arquiteturas causal-compatible (44 - 18)."""
         all_models = list_available_models()
         compat = [m for m in all_models if is_causal_compatible(m)]
-        assert len(compat) == 26, f"Esperado 26 compat, encontrado {len(compat)}"
+        assert len(compat) == 30, f"Esperado 30 compat, encontrado {len(compat)}"
 
 
 class TestGetModelInfo:
@@ -216,17 +216,17 @@ class TestModelRegistryClass:
     def test_count_property_44(self):
         """registry.count deve retornar 44."""
         registry = ModelRegistry()
-        assert registry.count == 44
+        assert registry.count == 48
 
     def test_available_method(self):
         """registry.available() deve listar todos os modelos."""
         registry = ModelRegistry()
-        assert len(registry.available()) == 44
+        assert len(registry.available()) == 48
 
     def test_available_by_family(self):
         """registry.available(family='CNN') deve retornar 7."""
         registry = ModelRegistry()
-        assert len(registry.available("CNN")) == 7
+        assert len(registry.available("CNN")) == 8
 
     def test_causal_compatible_method(self):
         """registry.causal_compatible() deve delegar para is_causal_compatible()."""
@@ -594,7 +594,7 @@ class TestInitReExports:
         """ModelRegistry deve ser importavel de geosteering_ai.models."""
         from geosteering_ai.models import ModelRegistry as MR
 
-        assert MR().count == 44
+        assert MR().count == 48
 
     def test_blocks_importable(self):
         """Blocos utilitarios devem ser importaveis diretamente."""

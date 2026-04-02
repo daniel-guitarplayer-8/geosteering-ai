@@ -33,7 +33,7 @@
 | Arquivos Python (testes) | 15 |
 | Testes totais | 802 (CPU) / 1011+ (GPU) |
 | Campos PipelineConfig | 246 |
-| Arquiteturas (ModelRegistry) | 44 (9 famílias) |
+| Arquiteturas (ModelRegistry) | 48 (9 famílias) |
 | Funções de perda | 26 (4 categorias) |
 | Tipos de ruído | 34 implementados |
 | Feature Views | 7 (identity, raw, H1_logH2, logH1_logH2, 3× razão/fase, second_order) |
@@ -66,10 +66,10 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 │   └── curriculum.py                     # Curriculum 3-phase (clean→ramp→stable)
 ├── models/ (13 módulos, ~8.800 LOC)
 │   ├── blocks.py                         # 23+ blocos Keras reutilizáveis
-│   ├── cnn.py                            # ResNet-18/34/50, ConvNeXt, Inception, CNN_1D
-│   ├── tcn.py                            # TCN, TCN_Advanced
+│   ├── cnn.py                            # ResNet-18/34/50, ConvNeXt, Inception, CNN_1D, ResNeXt
+│   ├── tcn.py                            # TCN, TCN_Advanced, ModernTCN
 │   ├── rnn.py                            # LSTM, BiLSTM
-│   ├── hybrid.py                         # CNN_LSTM, CNN_BiLSTM_ED
+│   ├── hybrid.py                         # CNN_LSTM, CNN_BiLSTM_ED, ResNeXt_LSTM
 │   ├── unet.py                           # 14 variantes U-Net
 │   ├── transformer.py                    # 6 Transformers
 │   ├── decomposition.py                  # N-BEATS, N-HiTS
@@ -137,9 +137,15 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 | **Dados** | SurrogateDataset — extração pares Modo A/B/C (K componentes) | ✅ |
 | **Ruído** | 34 tipos (9 CORE + 13 EXTENDED + 8 geofísicos + 4 geosteering) | ✅ |
 | **Ruído** | Curriculum 3-phase (clean → ramp → stable) | ✅ |
-| **Modelos** | 44 arquiteturas em 9 famílias (CNN, TCN, RNN, Hybrid, U-Net, Transformer, Decomposition, Operator, Geosteering) | ✅ |
+| **Modelos** | 48 arquiteturas em 9 famílias (CNN, TCN, RNN, Hybrid, U-Net, Transformer, Decomposition, Advanced, Geosteering) | ✅ |
 | **Modelos** | 23+ blocos Keras reutilizáveis | ✅ |
 | **Modelos** | SurrogateNet TCN dilatado (6 blocos, campo receptivo ~127m) | ✅ |
+| **Modelos** | SurrogateNet v2 ModernTCN (4 blocos DWConv, campo receptivo ~204m) | ✅ |
+| **Modelos** | ModernTCN — convolução pura moderna para inversão seq2seq (Luo 2024) | ✅ |
+| **Modelos** | INN — Invertible Neural Network para UQ probabilística (Ardizzone 2019) | ✅ |
+| **Modelos** | ResNeXt — grouped convolutions 32×4d bottleneck (Xie 2017) | ✅ |
+| **Modelos** | ResNeXt_LSTM — híbrido ResNeXt encoder + LSTM temporal | ✅ |
+| **Inference** | UQ via INN (sampling da posterior, alternativa ao MC Dropout) | ✅ |
 | **Modelos** | Static injection P2/P3 (broadcast, dual_input, FiLM) | ✅ |
 | **Modelos** | TIVConstraintLayer (hard constraint rho_v ≥ rho_h via softplus) | ✅ |
 | **Losses** | 26 funções de perda (13 genéricas + 4 geofísicas + 2 geosteering + 7 avançadas) | ✅ |
@@ -185,12 +191,12 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 | # | Referência | Contribuição para o Projeto |
 |:-:|:-----------|:---------------------------|
 | 1 | Morales et al. (2025) — *Anisotropic resistivity estimation and uncertainty quantification from borehole triaxial electromagnetic induction measurements: Gradient-based inversion and physics-informed neural network.* Computers & Geosciences, 196, 105786. | Base teórica dos cenários PINN. PINN estima propriedades petrofísicas em 0,5 ms com 91-99% de acurácia vs minutos com inversão baseada em gradiente. Validado com medidas triaxiais. **Já referenciado no projeto.** |
-| 2 | INN-UDAR (2025) — *Invertible neural network for real-time inversion and uncertainty quantification of ultra-deep resistivity measurements.* Computers & Geosciences. | Redes invertíveis (INN) fornecem distribuição posterior completa para quantificação de incerteza probabilística em tempo real, sem necessidade de múltiplas forward passes (MC Dropout). **Proposta: adicionar INN como arquitetura #45.** |
+| 2 | INN-UDAR (2025) — *Invertible neural network for real-time inversion and uncertainty quantification of ultra-deep resistivity measurements.* Computers & Geosciences. | Redes invertíveis (INN) fornecem distribuição posterior completa para quantificação de incerteza probabilística em tempo real, sem necessidade de múltiplas forward passes (MC Dropout). **Implementado: INN como arquitetura #45 em `models/advanced.py` + UQ em `inference/uncertainty.py`.** |
 | 3 | SPE/SPWLA (2021) — *Real-Time 2.5D Inversion of LWD Resistivity Measurements Using Deep Learning for Geosteering Applications Across Faulted Formations.* | Deep learning para inversão 2.5D com custo online desprezível. Validado com ferramenta LWD triaxial em formações anisotrópicas com falhas. **Referência para extensão futura (v3.0).** |
 | 4 | Li et al. (2025) — *Self-Supervised Deep Learning Inversion Incorporating a Fast Forward Network for Transient Electromagnetic Data.* JGR: Machine Learning and Computation. | Inversão auto-supervisionada que incorpora rede forward rápida diretamente na função de perda. **Alinha com cenário "surrogate" PINN do projeto.** |
 | 5 | Jiang et al. (2025) — *One-Fit-All Transformer for Multimodal Geophysical Inversion.* JGR: Machine Learning and Computation. | Framework G-Query — Transformer unificado que adapta entre múltiplas modalidades geofísicas via query tokens. **Proposta: avaliar como arquitetura #46 (G_Query_Transformer).** |
 | 6 | Frontiers (2025) — *Fast forward modeling and response analysis of extra-deep azimuthal resistivity measurements in complex model.* | Modelagem direta rápida para UDAR (Ultra-Deep Azimuthal Resistivity) em modelos complexos. **Complementa o surrogate neural do projeto.** |
-| 7 | ModernTCN (ICLR 2024) — *A Modern Pure Convolution Structure for General Time Series Analysis.* | Modernização do TCN clássico com patch embedding e channel mixing, superando TCN em benchmarks de séries temporais. **Proposta: atualizar SurrogateNet para ModernTCN.** |
+| 7 | ModernTCN (ICLR 2024) — *A Modern Pure Convolution Structure for General Time Series Analysis.* | Modernização do TCN clássico com patch embedding e channel mixing, superando TCN em benchmarks de séries temporais. **Implementado: ModernTCN em `models/tcn.py` + SurrogateNet v2 em `models/surrogate.py`.** |
 | 8 | Physics-guided AEM inversion (GJI 2024) — *Physics-guided deep learning-based inversion for airborne electromagnetic data.* | PGNN incorpora leis físicas governantes diretamente na função de perda para inversão EM aerotransportada. **Valida a abordagem PINN adotada pelo projeto.** |
 | 9 | Noh, K., Pardo, D., Torres-Verdín, C. (2023) — *Physics-guided deep-learning inversion method for the interpretation of noisy logging-while-drilling resistivity measurements.* Geophysical Journal International, 235. | Combina constraints físicas com DL para inversão de medidas LWD ruidosas. Diretamente aplicável aos cenários PINN do projeto com injeção de ruído. **PDF disponível em `PDFs/ggad217.pdf`.** |
 | 10 | Puzyrev, V. (2019) — *Deep learning electromagnetic inversion with convolutional neural networks.* Geophysical Journal International, 218. | Demonstra viabilidade de CNNs para inversão EM em tempo real — base histórica para a abordagem DL do projeto. **PDF disponível em `PDFs/ggz204.pdf`.** |

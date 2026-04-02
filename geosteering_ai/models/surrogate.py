@@ -72,6 +72,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "build_surrogate",
+    "build_surrogate_modern",
 ]
 
 
@@ -261,6 +262,158 @@ def build_surrogate(
     logger.info(
         "SurrogateNet construido: %d componentes (%s), %d canais saida, "
         "%d parametros, campo receptivo ~127 pontos",
+        n_components,
+        "/".join(config.surrogate_output_components),
+        n_outputs,
+        model.count_params(),
+    )
+
+    return model
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECAO: FACTORY — BUILD_SURROGATE_MODERN (ModernTCN)
+# ════════════════════════════════════════════════════════════════════════════
+# SurrogateNet v2 baseado em ModernTCN: large-kernel DWConv + ConvFFN.
+# Campo receptivo ~200+ m (vs ~127 m do TCN classico), ~50% menos params.
+# LayerNorm invariante a batch — sem degradacao em B=1 (realtime).
+# Ref: Luo & Wang (ICLR 2024) arXiv:2310.06625.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _surrogate_modern_block(x, filters, large_kernel, dropout_rate):
+    """Bloco ModernTCN para SurrogateNet v2.
+
+    Estrutura:
+      x → LN → DWConv(k=large_kernel) → LN → Dense(4C) → GELU
+        → Dense(C) → Dropout → +skip → out
+
+    Args:
+        x: Tensor de entrada (B, N, C).
+        filters: Numero de canais C.
+        large_kernel: Tamanho do kernel DWConv (default 51).
+        dropout_rate: Taxa de dropout (0.0-1.0).
+
+    Returns:
+        Tensor (B, N, C) com skip connection residual.
+
+    Note:
+        Funcao privada — usada apenas por build_surrogate_modern().
+        DWConv processa cada canal (Re/Im de cada componente EM)
+        independentemente, respeitando a fisicidade do sinal.
+        Ref: Luo & Wang (ICLR 2024) Secao 3.2.
+    """
+    import tensorflow as tf
+
+    skip = x
+
+    # ── DWConv temporal ───────────────────────────────────────────────
+    x = tf.keras.layers.LayerNormalization()(x)
+    x = tf.keras.layers.DepthwiseConv1D(
+        kernel_size=large_kernel,
+        padding="causal",
+        depth_multiplier=1,
+        use_bias=False,
+    )(x)
+    x = tf.keras.layers.LayerNormalization()(x)
+
+    # ── ConvFFN (mixing de canais) ────────────────────────────────────
+    x = tf.keras.layers.Dense(filters * 4, use_bias=False)(x)
+    x = tf.keras.layers.Activation("gelu")(x)
+    x = tf.keras.layers.Dense(filters, use_bias=False)(x)
+    if dropout_rate > 0:
+        x = tf.keras.layers.Dropout(dropout_rate)(x)
+
+    # ── Projecao skip se dimensoes incompativeis ──────────────────────
+    in_channels = getattr(skip.shape, "__getitem__", lambda _: None)(-1)
+    if in_channels is None or in_channels != filters:
+        skip = tf.keras.layers.Dense(filters, use_bias=False)(skip)
+
+    return tf.keras.layers.Add()([skip, x])
+
+
+def build_surrogate_modern(
+    config: "PipelineConfig",
+    *,
+    dropout_rate: float = 0.1,
+) -> "tf.keras.Model":
+    """Constroi SurrogateNet v2 (ModernTCN) para forward model rho → H_EM.
+
+    Versao modernizada do SurrogateNet com large-kernel DWConv,
+    LayerNorm e ConvFFN. Campo receptivo ~200+ m (vs ~127 m do TCN
+    classico) e ~50% menos parametros.
+
+    Arquitetura:
+      ┌──────────────────────────────────────────────────────────────┐
+      │  Input (B, None, 2) — [log10(rho_h), log10(rho_v)]        │
+      │    ↓                                                        │
+      │  Stem: Conv1D(128, k=1) — projecao de canais                │
+      │    ↓                                                        │
+      │  4 × ModernTCN Block:                                       │
+      │    LN → DWConv(k=51, causal) → LN                          │
+      │    → Dense(C→4C) → GELU → Dense(4C→C) → Drop → +skip      │
+      │    ↓                                                        │
+      │  LN → Dense(128) → ReLU → Dense(64) → ReLU                │
+      │    ↓                                                        │
+      │  Dense(2*K, 'linear')                                       │
+      │    ↓                                                        │
+      │  Output (B, None, 2*K) — Re+Im de K componentes EM        │
+      └──────────────────────────────────────────────────────────────┘
+
+    Args:
+        config: PipelineConfig com surrogate_output_components.
+        dropout_rate: Taxa de dropout nos blocos (default 0.1).
+
+    Returns:
+        tf.keras.Model: SurrogateNet v2 (ModernTCN).
+            Input shape: (None, None, 2)
+            Output shape: (None, None, 2*K)
+
+    Example:
+        >>> from geosteering_ai.config import PipelineConfig
+        >>> config = PipelineConfig(surrogate_output_components=["XX", "ZZ"])
+        >>> model = build_surrogate_modern(config)
+        >>> assert model.output_shape == (None, None, 4)
+
+    Note:
+        Referenciado em:
+            - losses/pinns.py: make_surrogate_physics_loss() (modo neural)
+            - tests/test_surrogate.py: TestBuildSurrogateModern
+        Campo receptivo: 51 × 4 blocos = 204 pontos (~204 m).
+        Cobre ~5.7× skin depth maximo (delta ≈ 35.7m, rho=100, f=20kHz).
+        Ref: Luo & Wang (ICLR 2024) arXiv:2310.06625.
+    """
+    import tensorflow as tf
+
+    n_components = len(config.surrogate_output_components)
+    n_outputs = 2 * n_components
+
+    filters = 128
+    n_blocks = 4
+    large_kernel = 51
+
+    inp = tf.keras.layers.Input(shape=(None, 2), name="surrogate_modern_input")
+
+    # ── Stem ──────────────────────────────────────────────────────────
+    x = tf.keras.layers.Conv1D(filters, 1, padding="same", use_bias=False)(inp)
+
+    # ── ModernTCN blocks ──────────────────────────────────────────────
+    for _ in range(n_blocks):
+        x = _surrogate_modern_block(x, filters, large_kernel, dropout_rate)
+
+    # ── Decoder ───────────────────────────────────────────────────────
+    x = tf.keras.layers.LayerNormalization()(x)
+    x = tf.keras.layers.Dense(128, activation="relu", name="modern_decoder1")(x)
+    x = tf.keras.layers.Dense(64, activation="relu", name="modern_decoder2")(x)
+    out = tf.keras.layers.Dense(
+        n_outputs, activation="linear", name="surrogate_modern_output"
+    )(x)
+
+    model = tf.keras.Model(inputs=inp, outputs=out, name="SurrogateNet_Modern")
+
+    logger.info(
+        "SurrogateNet_Modern construido: %d componentes (%s), %d canais saida, "
+        "%d parametros, campo receptivo ~204 pontos",
         n_components,
         "/".join(config.surrogate_output_components),
         n_outputs,

@@ -1,6 +1,6 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  MODULO: models/registry.py                                                ║
-# ║  Bloco: 3k — ModelRegistry (44 arquiteturas)                             ║
+# ║  Bloco: 3k — ModelRegistry (48 arquiteturas)                             ║
 # ║                                                                            ║
 # ║  Geosteering AI v2.0 — Inversao 1D de Resistividade via Deep Learning     ║
 # ║  Autor: Daniel Leal                                                        ║
@@ -10,20 +10,20 @@
 # ║  Config: PipelineConfig dataclass (NUNCA globals().get())                  ║
 # ║                                                                            ║
 # ║  Proposito:                                                                ║
-# ║    • ModelRegistry: dicionario de 44 funcoes build_* + metadados         ║
+# ║    • ModelRegistry: dicionario de 48 funcoes build_* + metadados         ║
 # ║    • build_model(config): factory central — ponto unico de construcao     ║
 # ║    • get_model_info(name): metadados (familia, tier, causal_compat)       ║
-# ║    • list_available_models(): lista todas as 44 arquiteturas              ║
+# ║    • list_available_models(): lista todas as 48 arquiteturas              ║
 # ║    • is_causal_compatible(name): verifica compatibilidade causal           ║
 # ║                                                                            ║
-# ║  Dependencias: config.py (PipelineConfig), models/*.py (44 builders)      ║
+# ║  Dependencias: config.py (PipelineConfig), models/*.py (48 builders)      ║
 # ║  Exports: 5 simbolos — ver __all__                                        ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 5.11, legado C37                    ║
 # ║                                                                            ║
 # ║  Historico:                                                                ║
-# ║    v2.0.0 (2026-03) — Implementacao inicial (44 entradas)               ║
+# ║    v2.0.0 (2026-03) — Implementacao inicial (48 entradas)               ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
-"""ModelRegistry: factory central para as 44 arquiteturas.
+"""ModelRegistry: factory central para as 48 arquiteturas.
 
 Mapeamento model_type (str) → funcao build_*(config: PipelineConfig).
 Metadados por arquitetura: familia, tier, causal_compatible.
@@ -99,7 +99,7 @@ _CAUSAL_INCOMPATIBLE: frozenset = frozenset(
     }
 )
 
-# ── Familias das 44 arquiteturas ──────────────────────────────────────────
+# ── Familias das 48 arquiteturas ──────────────────────────────────────────
 _FAMILIES: Dict[str, str] = {
     # CNN
     "ResNet_18": "CNN",
@@ -109,15 +109,18 @@ _FAMILIES: Dict[str, str] = {
     "InceptionNet": "CNN",
     "InceptionTime": "CNN",
     "CNN_1D": "CNN",
+    "ResNeXt": "CNN",
     # TCN
     "TCN": "TCN",
     "TCN_Advanced": "TCN",
+    "ModernTCN": "TCN",
     # RNN
     "LSTM": "RNN",
     "BiLSTM": "RNN",
     # Hybrid
     "CNN_LSTM": "Hybrid",
     "CNN_BiLSTM_ED": "Hybrid",
+    "ResNeXt_LSTM": "Hybrid",
     # UNet (14)
     "UNet_Base": "UNet",
     "UNet_Attention": "UNet",
@@ -148,6 +151,7 @@ _FAMILIES: Dict[str, str] = {
     "FNO": "Advanced",
     "DeepONet": "Advanced",
     "Geophysical_Attention": "Advanced",
+    "INN": "Advanced",
     # Geosteering (5)
     "WaveNet": "Geosteering",
     "Causal_Transformer": "Geosteering",
@@ -166,14 +170,17 @@ _TIERS: Dict[str, int] = {
     "ResNet_50": 2,
     "ConvNeXt": 1,
     "CNN_1D": 1,  # Baseline simples
+    "ResNeXt": 2,
     "InceptionNet": 2,
     "InceptionTime": 2,
     "TCN": 1,  # Causal nativo validado
     "TCN_Advanced": 2,
+    "ModernTCN": 2,
     "LSTM": 1,
     "BiLSTM": 2,
     "CNN_LSTM": 2,
     "CNN_BiLSTM_ED": 2,
+    "ResNeXt_LSTM": 2,
     "Transformer": 2,
     "Simple_TFT": 2,
     "TFT": 3,
@@ -184,6 +191,7 @@ _TIERS: Dict[str, int] = {
     "FNO": 3,
     "DeepONet": 3,
     "Geophysical_Attention": 2,
+    "INN": 3,
     "WaveNet": 1,  # Causal geosteering validado
     "Causal_Transformer": 2,
     "Informer": 2,
@@ -210,7 +218,7 @@ def _get_build_fn(model_type: str) -> Callable:
     Imports lazy por familia para nao carregar TF no nivel de modulo.
 
     Args:
-        model_type: Nome da arquitetura (44 opcoes).
+        model_type: Nome da arquitetura (48 opcoes).
 
     Returns:
         Callable: funcao build_*(config) → tf.keras.Model.
@@ -227,6 +235,7 @@ def _get_build_fn(model_type: str) -> Callable:
         "InceptionNet",
         "InceptionTime",
         "CNN_1D",
+        "ResNeXt",
     ):
         from geosteering_ai.models.cnn import (
             build_cnn1d,
@@ -236,6 +245,7 @@ def _get_build_fn(model_type: str) -> Callable:
             build_resnet18,
             build_resnet34,
             build_resnet50,
+            build_resnext,
         )
 
         _cnn = {
@@ -246,14 +256,23 @@ def _get_build_fn(model_type: str) -> Callable:
             "InceptionNet": build_inceptionnet,
             "InceptionTime": build_inceptiontime,
             "CNN_1D": build_cnn1d,
+            "ResNeXt": build_resnext,
         }
         return _cnn[model_type]
 
     # ── TCN ───────────────────────────────────────────────────────────
-    if model_type in ("TCN", "TCN_Advanced"):
-        from geosteering_ai.models.tcn import build_tcn, build_tcn_advanced
+    if model_type in ("TCN", "TCN_Advanced", "ModernTCN"):
+        from geosteering_ai.models.tcn import (
+            build_modern_tcn,
+            build_tcn,
+            build_tcn_advanced,
+        )
 
-        return {"TCN": build_tcn, "TCN_Advanced": build_tcn_advanced}[model_type]
+        return {
+            "TCN": build_tcn,
+            "TCN_Advanced": build_tcn_advanced,
+            "ModernTCN": build_modern_tcn,
+        }[model_type]
 
     # ── RNN ───────────────────────────────────────────────────────────
     if model_type in ("LSTM", "BiLSTM"):
@@ -262,12 +281,18 @@ def _get_build_fn(model_type: str) -> Callable:
         return {"LSTM": build_lstm, "BiLSTM": build_bilstm}[model_type]
 
     # ── Hybrid ────────────────────────────────────────────────────────
-    if model_type in ("CNN_LSTM", "CNN_BiLSTM_ED"):
-        from geosteering_ai.models.hybrid import build_cnn_bilstm_ed, build_cnn_lstm
+    if model_type in ("CNN_LSTM", "CNN_BiLSTM_ED", "ResNeXt_LSTM"):
+        from geosteering_ai.models.hybrid import (
+            build_cnn_bilstm_ed,
+            build_cnn_lstm,
+            build_resnext_lstm,
+        )
 
-        return {"CNN_LSTM": build_cnn_lstm, "CNN_BiLSTM_ED": build_cnn_bilstm_ed}[
-            model_type
-        ]
+        return {
+            "CNN_LSTM": build_cnn_lstm,
+            "CNN_BiLSTM_ED": build_cnn_bilstm_ed,
+            "ResNeXt_LSTM": build_resnext_lstm,
+        }[model_type]
 
     # ── U-Net ─────────────────────────────────────────────────────────
     if model_type.startswith("UNet"):
@@ -342,12 +367,13 @@ def _get_build_fn(model_type: str) -> Callable:
         return {"N_BEATS": build_nbeats, "N_HiTS": build_nhits}[model_type]
 
     # ── Advanced ──────────────────────────────────────────────────────
-    if model_type in ("DNN", "FNO", "DeepONet", "Geophysical_Attention"):
+    if model_type in ("DNN", "FNO", "DeepONet", "Geophysical_Attention", "INN"):
         from geosteering_ai.models.advanced import (
             build_deeponet,
             build_dnn,
             build_fno,
             build_geophysical_attention,
+            build_inn,
         )
 
         _adv = {
@@ -355,6 +381,7 @@ def _get_build_fn(model_type: str) -> Callable:
             "FNO": build_fno,
             "DeepONet": build_deeponet,
             "Geophysical_Attention": build_geophysical_attention,
+            "INN": build_inn,
         }
         return _adv[model_type]
 
@@ -385,7 +412,7 @@ def _get_build_fn(model_type: str) -> Callable:
 
     raise ValueError(
         f"model_type '{model_type}' nao encontrado no registry. "
-        f"Use list_available_models() para ver as 44 opcoes."
+        f"Use list_available_models() para ver as 48 opcoes."
     )
 
 
@@ -515,7 +542,7 @@ def _wrap_dual_input(
     Constroi core com shape expandida (n_em + n_static) e envolve em
     wrapper que aceita [em_input, static_input]. O stem faz broadcast +
     concat dos escalares com as features EM, produzindo tensor unico
-    que o core processa normalmente. Todas as 44 arquiteturas compativeis.
+    que o core processa normalmente. Todas as 48 arquiteturas compativeis.
 
     Args:
         build_fn: Funcao build_* para o model_type.
@@ -637,12 +664,15 @@ def get_model_info(model_type: str) -> Dict[str, Any]:
         "InceptionNet": "InceptionNet 1D — multi-escala (9,19,39 kernels)",
         "InceptionTime": "InceptionTime 1D — inception + residual (TSAI)",
         "CNN_1D": "CNN_1D baseline — 6 camadas simetricas [32,64,128,128,64,32]",
+        "ResNeXt": "ResNeXt — grouped convolutions 32×4d bottleneck (Xie 2017)",
         "TCN": "TCN — dilation doubling causal nativo (Bai 2018)",
         "TCN_Advanced": "TCN_Advanced — multi-scale stacks + SE + atencao",
+        "ModernTCN": "ModernTCN — DWConv largo + ConvFFN + LayerNorm (Luo 2024)",
         "LSTM": "LSTM — recorrente causal nativo (3 camadas)",
         "BiLSTM": "BiLSTM — bidirecional CAUSAL_INCOMPATIBLE",
         "CNN_LSTM": "CNN_LSTM — CNN encoder + LSTM temporal",
         "CNN_BiLSTM_ED": "CNN_BiLSTM_ED — encoder-decoder CAUSAL_INCOMPATIBLE",
+        "ResNeXt_LSTM": "ResNeXt_LSTM — grouped conv + LSTM temporal (Xie 2017)",
         "Transformer": "Transformer vanilla — pre-LN, pos. enc. aprendido",
         "Simple_TFT": "Simple_TFT — GRN + Transformer simplificado",
         "TFT": "TFT completo — VSN + GRN + gating (Lim 2021)",
@@ -655,6 +685,7 @@ def get_model_info(model_type: str) -> Dict[str, Any]:
         "FNO": "FNO — Fourier Neural Operator espectral (Li 2021)",
         "DeepONet": "DeepONet — branch-trunk operator network (Lu 2021)",
         "Geophysical_Attention": "Geophysical_Attention — CNN+atencao fisica LWD",
+        "INN": "INN — Invertible Neural Network para UQ probabilistica (Ardizzone 2019)",
         "WaveNet": "WaveNet — gated activation causal (Oord 2016)",
         "Causal_Transformer": "Causal_Transformer — Transformer mascara causal",
         "Informer": "Informer — sparse attention O(L log L) (Zhou 2021)",
@@ -678,7 +709,7 @@ def get_model_info(model_type: str) -> Dict[str, Any]:
 
 
 def list_available_models(family: Optional[str] = None) -> List[str]:
-    """Lista todas as 44 arquiteturas disponíveis.
+    """Lista todas as 48 arquiteturas disponíveis.
 
     Args:
         family: Filtro por familia ('CNN', 'TCN', 'RNN', 'Hybrid',
@@ -697,7 +728,7 @@ def list_available_models(family: Optional[str] = None) -> List[str]:
     Note:
         Referenciado em:
             - tests/test_models.py: TestRegistry.test_list_models_count
-        Conta total: 7+2+2+2+14+6+2+4+5 = 44 arquiteturas.
+        Conta total: 7+2+2+2+14+6+2+4+5 = 48 arquiteturas.
     """
     if family is not None:
         return [k for k, v in _FAMILIES.items() if v == family]

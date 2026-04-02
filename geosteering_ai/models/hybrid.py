@@ -76,6 +76,7 @@ def build_cnn_lstm(config: "PipelineConfig") -> "tf.keras.Model":
         Legado C32 build_cnn_lstm().
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import output_projection
 
     ap = config.arch_params or {}
@@ -90,7 +91,9 @@ def build_cnn_lstm(config: "PipelineConfig") -> "tf.keras.Model":
 
     logger.info(
         "build_cnn_lstm: n_feat=%d, cnn=%s, lstm=%s",
-        config.n_features, cnn_filters, lstm_units,
+        config.n_features,
+        cnn_filters,
+        lstm_units,
     )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
@@ -99,8 +102,11 @@ def build_cnn_lstm(config: "PipelineConfig") -> "tf.keras.Model":
     # ── CNN encoder ───────────────────────────────────────────────────
     for n_filt in cnn_filters:
         x = tf.keras.layers.Conv1D(
-            n_filt, kernel_size, padding=pad,
-            kernel_regularizer=reg, use_bias=False,
+            n_filt,
+            kernel_size,
+            padding=pad,
+            kernel_regularizer=reg,
+            use_bias=False,
         )(x)
         x = tf.keras.layers.BatchNormalization()(x)
         x = tf.keras.layers.Activation("relu")(x)
@@ -110,12 +116,15 @@ def build_cnn_lstm(config: "PipelineConfig") -> "tf.keras.Model":
     # ── LSTM temporal modeling ────────────────────────────────────────
     for units in lstm_units:
         x = tf.keras.layers.LSTM(
-            units, return_sequences=True,
-            dropout=dr, kernel_regularizer=reg,
+            units,
+            return_sequences=True,
+            dropout=dr,
+            kernel_regularizer=reg,
         )(x)
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -155,6 +164,7 @@ def build_cnn_bilstm_ed(config: "PipelineConfig") -> "tf.keras.Model":
         Legado C32 build_cnn_bilstm_ed().
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import output_projection
 
     ap = config.arch_params or {}
@@ -171,7 +181,10 @@ def build_cnn_bilstm_ed(config: "PipelineConfig") -> "tf.keras.Model":
 
     logger.info(
         "build_cnn_bilstm_ed: n_feat=%d, enc=%s, bilstm=%d, dec=%s",
-        config.n_features, enc_filters, bilstm_units, dec_filters,
+        config.n_features,
+        enc_filters,
+        bilstm_units,
+        dec_filters,
     )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
@@ -180,8 +193,11 @@ def build_cnn_bilstm_ed(config: "PipelineConfig") -> "tf.keras.Model":
     # ── Encoder CNN ───────────────────────────────────────────────────
     for n_filt in enc_filters:
         x = tf.keras.layers.Conv1D(
-            n_filt, kernel_size, padding="same",
-            kernel_regularizer=reg, use_bias=False,
+            n_filt,
+            kernel_size,
+            padding="same",
+            kernel_regularizer=reg,
+            use_bias=False,
         )(x)
         x = tf.keras.layers.BatchNormalization()(x)
         x = tf.keras.layers.Activation("relu")(x)
@@ -195,14 +211,18 @@ def build_cnn_bilstm_ed(config: "PipelineConfig") -> "tf.keras.Model":
     # ── Decoder CNN ───────────────────────────────────────────────────
     for n_filt in dec_filters:
         x = tf.keras.layers.Conv1D(
-            n_filt, kernel_size, padding="same",
-            kernel_regularizer=reg, use_bias=False,
+            n_filt,
+            kernel_size,
+            padding="same",
+            kernel_regularizer=reg,
+            use_bias=False,
         )(x)
         x = tf.keras.layers.BatchNormalization()(x)
         x = tf.keras.layers.Activation("relu")(x)
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),
@@ -210,4 +230,164 @@ def build_cnn_bilstm_ed(config: "PipelineConfig") -> "tf.keras.Model":
     return tf.keras.Model(inputs=inp, outputs=out, name="CNN_BiLSTM_ED")
 
 
-__all__ = ["build_cnn_lstm", "build_cnn_bilstm_ed"]
+# ════════════════════════════════════════════════════════════════════════════
+# SECAO: RESNEXT_LSTM — HIBRIDO RESNEXT + LSTM
+# ════════════════════════════════════════════════════════════════════════════
+# Combina ResNeXt (grouped convolutions para extracao multi-escala de
+# features locais) com LSTM (modelagem de dependencias de longo alcance).
+#
+# ResNeXt captura padroes espaciais multi-escala nas componentes EM
+# (alta/media/baixa frequencia) via cardinalidade C=32, enquanto LSTM
+# modela a evolucao temporal ao longo dos 600 pontos de profundidade.
+#
+# Causal-compatible: LSTM eh nativo forward-only; Conv1D usa padding='causal'.
+# Vantagem sobre CNN_LSTM: grouped convolutions sao mais eficientes e
+# capturam melhor features multi-escala do tensor EM (Hxx/Hzz/Hxz/Hzx).
+#
+# Ref: Xie et al. (2017) CVPR — ResNeXt.
+#      Hochreiter & Schmidhuber (1997) — LSTM.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def build_resnext_lstm(config: "PipelineConfig") -> "tf.keras.Model":
+    """Constroi ResNeXt_LSTM: extrator ResNeXt + modelagem temporal LSTM.
+
+    3 blocos ResNeXt bottleneck (grouped conv) capturam features
+    multi-escala, seguidos por 2 camadas LSTM para dependencias
+    temporais ao longo do perfil de resistividade.
+
+    Arquitetura:
+      ┌──────────────────────────────────────────────────────────────┐
+      │  Input (B, 600, n_features)                                 │
+      │    ↓                                                        │
+      │  ResNeXtBlock(64,  C=32, d=4, k=3) — features locais       │
+      │  ResNeXtBlock(128, C=32, d=4, k=3) — features multi-escala │
+      │  ResNeXtBlock(256, C=32, d=4, k=3) — features abstratas    │
+      │    ↓                                                        │
+      │  LSTM(128, return_sequences=True) — temporal longo          │
+      │  LSTM(64,  return_sequences=True) — temporal refinado       │
+      │    ↓                                                        │
+      │  Output: Dense(output_channels, 'linear')                   │
+      │  Output (B, 600, output_channels)                           │
+      └──────────────────────────────────────────────────────────────┘
+
+    Args:
+        config: PipelineConfig com:
+            - n_features, sequence_length, output_channels
+            - use_causal_mode, dropout_rate
+            - arch_params: override granular:
+                - resnext_filters (list, default [64, 128, 256])
+                - lstm_units (list, default [128, 64])
+                - cardinality (int, default 32)
+                - group_width (int, default 4)
+                - kernel_size (int, default 3)
+
+    Returns:
+        tf.keras.Model: ResNeXt_LSTM seq2seq hibrido.
+
+    Example:
+        >>> config = PipelineConfig(model_type="ResNeXt_LSTM")
+        >>> model = build_resnext_lstm(config)
+        >>> assert model.output_shape == (None, 600, 2)
+
+    Note:
+        Referenciado em:
+            - models/registry.py: _REGISTRY['ResNeXt_LSTM']
+            - tests/test_models.py: TestHybrid.test_resnext_lstm_forward
+        Causal mode: Conv1D usa padding='causal'; LSTM eh nativo causal.
+        Ref: Xie et al. (2017) CVPR + Hochreiter & Schmidhuber (1997).
+    """
+    import tensorflow as tf
+
+    from geosteering_ai.models.blocks import output_projection
+
+    ap = config.arch_params or {}
+    resnext_filters = ap.get("resnext_filters", [64, 128, 256])
+    lstm_units = ap.get("lstm_units", [128, 64])
+    cardinality = ap.get("cardinality", 32)
+    group_width = ap.get("group_width", 4)
+    kernel_size = ap.get("kernel_size", 3)
+    dr = config.dropout_rate
+    causal = config.use_causal_mode
+    pad = "causal" if causal else "same"
+    l2 = config.l2_weight if config.use_l2_regularization else 0.0
+    reg = tf.keras.regularizers.L2(l2) if l2 > 0.0 else None
+
+    logger.info(
+        "build_resnext_lstm: n_feat=%d, resnext=%s, lstm=%s, C=%d",
+        config.n_features,
+        resnext_filters,
+        lstm_units,
+        cardinality,
+    )
+
+    inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
+    x = inp
+
+    # ── ResNeXt encoder (grouped convolution bottleneck) ──────────────
+    for n_filt in resnext_filters:
+        intermediate = cardinality * group_width
+        skip = x
+
+        # Bottleneck: 1×1 → grouped k×1 → 1×1
+        x = tf.keras.layers.Conv1D(
+            intermediate,
+            1,
+            padding="same",
+            kernel_regularizer=reg,
+            use_bias=False,
+        )(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Activation("relu")(x)
+
+        x = tf.keras.layers.Conv1D(
+            intermediate,
+            kernel_size,
+            padding=pad,
+            groups=cardinality,
+            kernel_regularizer=reg,
+            use_bias=False,
+        )(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Activation("relu")(x)
+
+        x = tf.keras.layers.Conv1D(
+            n_filt,
+            1,
+            padding="same",
+            kernel_regularizer=reg,
+            use_bias=False,
+        )(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+
+        # Skip connection
+        in_ch = getattr(skip.shape, "__getitem__", lambda _: None)(-1)
+        if in_ch is None or in_ch != n_filt:
+            skip = tf.keras.layers.Conv1D(n_filt, 1, padding="same")(skip)
+
+        x = tf.keras.layers.Add()([skip, x])
+        x = tf.keras.layers.Activation("relu")(x)
+
+        if dr > 0.0:
+            x = tf.keras.layers.Dropout(dr)(x)
+
+    # ── LSTM temporal modeling ────────────────────────────────────────
+    for units in lstm_units:
+        x = tf.keras.layers.LSTM(
+            units,
+            return_sequences=True,
+            dropout=dr,
+            kernel_regularizer=reg,
+        )(x)
+
+    out = output_projection(
+        x,
+        config.output_channels,
+        constraint_activation=(
+            config.constraint_activation if config.use_physical_constraint_layer else None
+        ),
+    )
+    return tf.keras.Model(inputs=inp, outputs=out, name="ResNeXt_LSTM")
+
+
+__all__ = ["build_cnn_lstm", "build_cnn_bilstm_ed", "build_resnext_lstm"]
