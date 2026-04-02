@@ -192,6 +192,15 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 | 6 | Frontiers (2025) — *Fast forward modeling and response analysis of extra-deep azimuthal resistivity measurements in complex model.* | Modelagem direta rápida para UDAR (Ultra-Deep Azimuthal Resistivity) em modelos complexos. **Complementa o surrogate neural do projeto.** |
 | 7 | ModernTCN (ICLR 2024) — *A Modern Pure Convolution Structure for General Time Series Analysis.* | Modernização do TCN clássico com patch embedding e channel mixing, superando TCN em benchmarks de séries temporais. **Proposta: atualizar SurrogateNet para ModernTCN.** |
 | 8 | Physics-guided AEM inversion (GJI 2024) — *Physics-guided deep learning-based inversion for airborne electromagnetic data.* | PGNN incorpora leis físicas governantes diretamente na função de perda para inversão EM aerotransportada. **Valida a abordagem PINN adotada pelo projeto.** |
+| 9 | Noh, K., Pardo, D., Torres-Verdín, C. (2023) — *Physics-guided deep-learning inversion method for the interpretation of noisy logging-while-drilling resistivity measurements.* Geophysical Journal International, 235. | Combina constraints físicas com DL para inversão de medidas LWD ruidosas. Diretamente aplicável aos cenários PINN do projeto com injeção de ruído. **PDF disponível em `PDFs/ggad217.pdf`.** |
+| 10 | Puzyrev, V. (2019) — *Deep learning electromagnetic inversion with convolutional neural networks.* Geophysical Journal International, 218. | Demonstra viabilidade de CNNs para inversão EM em tempo real — base histórica para a abordagem DL do projeto. **PDF disponível em `PDFs/ggz204.pdf`.** |
+| 11 | Guo, W. et al. (2024) — *Efficient 1D Modeling of Triaxial Electromagnetic Logging in Uniaxial and Biaxial Anisotropic Formations Using Virtual Boundaries and Equivalent Resistivity Schemes.* Journal of Geophysics and Engineering. | Algoritmo de propagação eficiente para forward 1D triaxial em formações TIV — relevante para o surrogate analítico e validação do SurrogateNet. **PDF disponível em `PDFs/gxag017.pdf`.** |
+| 12 | Liu, W. et al. (2022) — *Physics-Driven Deep Learning Inversion with Application to Magnetotelluric.* Remote Sensing, 14, 3218. | Propõe operador físico forward integrado ao treinamento DL — valida a abordagem physics-driven do projeto. **PDF disponível em `PDFs/remotesensing-14-03218-v2.pdf`.** |
+| 13 | Liu, W. et al. (2024) — *Physics-Informed Deep Learning Inversion with Application to Noisy Magnetotelluric Measurements.* Remote Sensing, 16, 62. | Estende abordagem com Swin Transformer e estratégias de noise injection para dados EM ruidosos de campo — alinha diretamente com o curriculum de ruído do projeto. **PDF disponível em `PDFs/remotesensing-16-00062-v2.pdf`.** |
+| 14 | Constable, M. V. et al. (2016) — *Looking Ahead of the Bit While Drilling: From Vision to Reality.* Petrophysics, 57(5). | Apresenta a ferramenta EMLA para detecção de contrastes de resistividade à frente da broca, com DOI > 75 m. Contexto aplicado da ferramenta LWD que o projeto pretende substituir por DL. **PDF disponível em `PDFs/Constable_et_al_2016_Petrophysics.pdf`.** |
+| 15 | Wang, L. et al. (2018) — *Sensitivity analysis and inversion processing of azimuthal resistivity logging-while-drilling measurements.* Journal of Geophysics and Engineering, 15, 2339. | Inversão Gauss-Newton com janela deslizante 1D para medidas ARM. Referência de algoritmo convencional que o projeto busca substituir via DL em tempo real. **PDF disponível em `PDFs/Wang_2018_J._Geophys._Eng._15_2339.pdf`.** |
+| 16 | Guoyu Li et al. (2025) — *Optimization and Analysis of Sensitive Areas for Look-Ahead Electromagnetic Logging-While-Drilling Based on Geometric Factors.* Energies, 18, 3014. | Análise de áreas sensíveis para look-ahead EM LWD via fatores geométricos — relevante para design de features e avaliação DOD do projeto. **PDF disponível em `PDFs/Guoyu_et_al_2025_FG.pdf`.** |
+| 17 | Bai, J. et al. (2022) — *An Introduction to Programming Physics-Informed Neural Networks for Computational Solid Mechanics.* arXiv:2210.09060. | Tutorial prático de implementação de PINNs com TensorFlow/PyTorch — referência pedagógica para os cenários PINN implementados em `losses/pinns.py`. **PDF disponível em `PDFs/2210.09060v4.pdf`.** |
 
 ### 2.2 Tendências Identificadas
 
@@ -206,6 +215,10 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 5. **Inversão 2.5D/3D via Deep Learning** em formações complexas (falhas, intrusões salinas, dip variável) — próxima fronteira para o pipeline, atualmente limitado a 1D.
 
 6. **Quantificação de incerteza como requisito obrigatório** para decisões operacionais em geosteering — não é mais opcional, é mandatório para uso em tempo real.
+
+7. **Robustez a ruído como critério de avaliação primário** — Liu et al. (2024) e Noh et al. (2023) mostram que modelos treinados sem estratégias de noise injection falham em dados de campo reais, reforçando o curriculum de 34 tipos de ruído do projeto.
+
+8. **Forward modeling eficiente como habilitador** — algoritmos rápidos para 1D triaxial (Guo et al. 2024) são pré-requisito para treinar surrogates em escala e para o ciclo de auto-supervisão.
 
 ---
 
@@ -591,14 +604,14 @@ As seguintes requisições podem ser utilizadas em futuras sessões de desenvolv
 
 ## 7. Referências Bibliográficas
 
-### Artigos Fundamentais do Pipeline
+### 7.1 Artigos Fundamentais do Pipeline
 
 - Morales, M. et al. (2025). Anisotropic resistivity estimation and uncertainty quantification from borehole triaxial electromagnetic induction measurements: Gradient-based inversion and physics-informed neural network. *Computers & Geosciences*, 196, 105786.
 - He, K. et al. (2016). Deep Residual Learning for Image Recognition. *CVPR*.
 - Bai, S. et al. (2018). An Empirical Evaluation of Generic Convolutional and Recurrent Networks for Sequence Modeling. *arXiv:1803.01271*.
 - Oord, A. et al. (2016). WaveNet: A Generative Model for Raw Audio. *arXiv:1609.03499*.
 
-### Artigos Recentes (2024-2026) — Expansões Propostas
+### 7.2 Artigos Recentes (2024-2026) — Expansões Propostas
 
 - INN-UDAR (2025). Invertible neural network for real-time inversion and uncertainty quantification of ultra-deep resistivity measurements. *Computers & Geosciences*.
 - Jiang, H. et al. (2025). One-Fit-All Transformer for Multimodal Geophysical Inversion. *JGR: Machine Learning and Computation*.
@@ -606,10 +619,79 @@ As seguintes requisições podem ser utilizadas em futuras sessões de desenvolv
 - ModernTCN (2024). A Modern Pure Convolution Structure for General Time Series Analysis. *ICLR*.
 - SPE/SPWLA (2021). Real-Time 2.5D Inversion of LWD Resistivity Measurements Using Deep Learning for Geosteering Applications Across Faulted Formations.
 
-### Livros-Texto
+### 7.3 Referências dos PDFs do Projeto (`PDFs/`)
+
+Os artigos abaixo estão disponíveis localmente na pasta `PDFs/` e devem ser consultados nas fases de expansão científica (F4) e validação física (F5).
+
+#### 7.3.1 Deep Learning para Inversão EM
+
+- **Noh, K., Pardo, D., Torres-Verdín, C.** (2023). Physics-guided deep-learning inversion method for the interpretation of noisy logging-while-drilling resistivity measurements. *Geophysical Journal International*, 235, ggad217. DOI: 10.1093/gji/ggad217
+  → Arquivo: `PDFs/ggad217.pdf`
+  → Uso: Validação científica dos cenários PINN (`losses/pinns.py`) com ênfase em robustez a ruído LWD.
+
+- **Puzyrev, V.** (2019). Deep learning electromagnetic inversion with convolutional neural networks. *Geophysical Journal International*, 218, 817–832.
+  → Arquivo: `PDFs/ggz204.pdf`
+  → Uso: Base histórica para inversão EM via DL; comparação com arquiteturas CNN do projeto.
+
+- **Liu, W., Wang, H., Xi, Z., Zhang, R., Huang, X.** (2022). Physics-Driven Deep Learning Inversion with Application to Magnetotelluric. *Remote Sensing*, 14(13), 3218. DOI: 10.3390/rs14133218
+  → Arquivo: `PDFs/remotesensing-14-03218-v2.pdf`
+  → Uso: Valida integração de operador forward físico no loop de treinamento (cenário "surrogate" PINN).
+
+- **Liu, W., Wang, H., Xi, Z., Wang, L.** (2024). Physics-Informed Deep Learning Inversion with Application to Noisy Magnetotelluric Measurements. *Remote Sensing*, 16(1), 62. DOI: 10.3390/rs16010062
+  → Arquivo: `PDFs/remotesensing-16-00062-v2.pdf`
+  → Uso: Estratégias de noise injection para dados EM de campo; alinha com curriculum 3-phase do projeto.
+
+#### 7.3.2 Forward Modeling e Ferramenta LWD
+
+- **Guo, W., Wang, L., Wang, N., Qiao, P., Zeng, Z., Yang, K.** (2024). Efficient 1D Modeling of Triaxial Electromagnetic Logging in Uniaxial and Biaxial Anisotropic Formations Using Virtual Boundaries and Equivalent Resistivity Schemes. *Journal of Geophysics and Engineering*, gxag017. DOI: 10.1093/jge/gxag017
+  → Arquivo: `PDFs/gxag017.pdf`
+  → Uso: Algoritmo eficiente para forward 1D triaxial TIV — base para treinar SurrogateNet e validar surrogate analítico.
+
+- **Wang, L., Li, H., Fan, Y., Wu, Z.** (2018). Sensitivity analysis and inversion processing of azimuthal resistivity logging-while-drilling measurements. *Journal of Geophysics and Engineering*, 15, 2339–2352. DOI: 10.1088/1742-2140/aac5b1
+  → Arquivo: `PDFs/Wang_2018_J._Geophys._Eng._15_2339.pdf`
+  → Uso: Algoritmo de inversão convencional Gauss-Newton + janela deslizante 1D — baseline para comparação com o pipeline DL.
+
+- **Guoyu Li, Zhenguan Wu, Xiaoqiao Liao, Xizhou Yue, Xiang Zhang, Tianlin Liu, Yunxin Zeng** (2025). Optimization and Analysis of Sensitive Areas for Look-Ahead Electromagnetic Logging-While-Drilling Based on Geometric Factors. *Energies*, 18, 3014. DOI: 10.3390/en18123014
+  → Arquivo: `PDFs/Guoyu_et_al_2025_FG.pdf`
+  → Uso: Análise de sensibilidade e DOD para look-ahead EM LWD — referência para avaliação de DOD Picasso (`evaluation/dod.py`).
+
+- **Constable, M. V., Antonsen, F., Stalheim, S. O.** et al. (2016). Looking Ahead of the Bit While Drilling: From Vision to Reality. *Petrophysics*, 57(5), 426–438.
+  → Arquivo: `PDFs/Constable_et_al_2016_Petrophysics.pdf`
+  → Uso: Contexto aplicado da ferramenta EMLA (look-ahead EM) com DOI > 75 m; justifica o foco em geosteering de longo alcance.
+
+#### 7.3.3 PINNs e Métodos Físico-Informados
+
+- **Bai, J., Jeong, H., Batuwatta-Gamage, C. P.** et al. (2022). An Introduction to Programming Physics-Informed Neural Networks for Computational Solid Mechanics. *arXiv:2210.09060*.
+  → Arquivo: `PDFs/2210.09060v4.pdf`
+  → Uso: Tutorial de implementação de PINNs (TensorFlow/JAX) — referência pedagógica para `losses/pinns.py`.
+
+#### 7.3.4 Documentação Técnica de Ferramentas
+
+- **SDAR Work Group** (2020). Benchmark Models for Look-Ahead Applications — Standardization of LWD Deep Azimuthal Resistivity. Industry Technical Document.
+  → Arquivo: `PDFs/Benchmark_Look_Ahead_Models.pdf`
+  → Uso: Modelos benchmark padrão para look-ahead com LWD — referência para validação de cenários de geosteering.
+
+- **University of Houston** (2016). A Survey on Definitions of Some Key Service Specs of LWD Deep Azimuthal Resistivity Tools. Technical Report.
+  → Arquivo: `PDFs/Key_Specs_Survey_UH.pdf`
+  → Uso: Definições de DOI (Depth of Investigation), DOD (Depth of Detection) e especificações de ferramentas — base conceitual para `evaluation/dod.py` (Picasso plots).
+
+- **Schlumberger** (2020). GeoSphere HD — High-Definition Reservoir Mapping-While-Drilling Service. Internal Documentation Rev. 1.0.
+  → Arquivos: `PDFs/arquivo.md` (texto) e `PDFs/Schlumberger_GeoSphere HD 1.0.pdf`
+  → Uso: Especificações da ferramenta GeoSphere HD — física dos geosinais USD/UAD/UHR/UHA/U3DF, configuração de antenas, interpretação de medidas, Picasso plots.
+
+- **CNOOC/COSL** (internal). GeoSphere vs. TatuAniso1D — Convenções de Sinais. Technical Note.
+  → Arquivo: `PDFs/GeoSphereXTatu.pdf`
+  → Uso: Tabela de conversão de sinais USD/UAD/U3DF entre GeoSphere e simulador TatuAniso1D — essencial para validar `data/geosignals.py`.
+
+### 7.4 Livros-Texto
 
 - Ellis, D. V. & Singer, J. M. (2008). *Well Logging for Earth Scientists* (2nd ed.). Springer.
+  → Arquivo: `PDFs/Darwin V Ellis Julian M Singer - Well Logging for Earth Scientists 2008 Springer - libgenli.pdf`
+- Zhang, W. (2013). *Principles and Applications of Well Logging*. Springer.
+  → Arquivo: `PDFs/Principles and Applications of Well Logging.pdf`
 - Misra, S., Li, H. & He, J. (2019). *Machine Learning for Subsurface Characterization*. Elsevier.
+- Zhang, A. et al. (2023). *Dive into Deep Learning*. D2L.ai.
+  → Arquivo: `PDFs/[Livro] Dive Into Deep Learning_compressed.pdf`
 
 ---
 
