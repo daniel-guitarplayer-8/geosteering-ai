@@ -485,41 +485,64 @@ class TestInitReExports:
 #            anisotropy_misalignment, formation_heterogeneity, telemetry
 # ──────────────────────────────────────────────────────────────────────────
 
-# Lista dos 11 novos tipos para parametrizacao
+# Lista dos 30 tipos adicionais (além dos 4 originais) para parametrização.
+# Total: 4 originais + 30 novos = 34 tipos no NOISE_FN_MAP.
 _NEW_NOISE_TYPES = [
-    # ── 5 CORE ──────────────────────────────────────────────────────────
+    # ── 5 CORE (Fase II) ────────────────────────────────────────────────
     "drift",
     "depth_dependent",
     "spikes",
     "pink",
     "saturation",
-    # ── 6 LWD Geofisicos (R1-R6) ────────────────────────────────────────
+    # ── 5 CORE adicionais ────────────────────────────────────────────────
+    "varying",
+    "gaussian_local",
+    "gaussian_global",
+    "speckle",
+    "quantization",
+    # ── 6 LWD Geofísicos (R1-R6) ────────────────────────────────────────
     "shoulder_bed",
     "borehole_effect",
     "mud_invasion",
     "anisotropy_misalignment",
     "formation_heterogeneity",
     "telemetry",
+    # ── 12 EXTENDED ──────────────────────────────────────────────────────
+    "cross_talk",
+    "orientation",
+    "emi_noise",
+    "freq_dependent",
+    "noise_floor",
+    "proportional",
+    "reim_diff",
+    "component_diff",
+    "gaussian_keras",
+    "motion",
+    "thermal",
+    "phase_shift",
+    # ── 2 Geosteering (R7-R8) ───────────────────────────────────────────
+    "bha_vibration",
+    "eccentricity",
 ]
 
 
 class TestNewNoiseTypesRegistered:
-    """Verifica que os 11 novos tipos estao registrados em NOISE_FN_MAP."""
+    """Verifica que os 34 tipos estão registrados em NOISE_FN_MAP."""
 
-    def test_noise_fn_map_has_15_types(self):
-        """NOISE_FN_MAP deve ter 15 tipos (4 originais + 11 novos)."""
+    def test_noise_fn_map_has_34_types(self):
+        """NOISE_FN_MAP deve ter 34 tipos (4 originais + 30 novos)."""
         from geosteering_ai.noise import NOISE_FN_MAP
 
-        assert len(NOISE_FN_MAP) == 15, (
-            f"Esperado 15 tipos, encontrado {len(NOISE_FN_MAP)}: "
+        assert len(NOISE_FN_MAP) == 34, (
+            f"Esperado 34 tipos, encontrado {len(NOISE_FN_MAP)}: "
             f"{sorted(NOISE_FN_MAP.keys())}"
         )
 
-    def test_valid_noise_types_has_15(self):
-        """VALID_NOISE_TYPES deve ter 15 tipos."""
+    def test_valid_noise_types_has_34(self):
+        """VALID_NOISE_TYPES deve ter 34 tipos."""
         from geosteering_ai.noise import VALID_NOISE_TYPES
 
-        assert len(VALID_NOISE_TYPES) == 15
+        assert len(VALID_NOISE_TYPES) == 34
 
     @pytest.mark.parametrize("noise_type", _NEW_NOISE_TYPES)
     def test_type_in_noise_fn_map(self, noise_type):

@@ -10,7 +10,7 @@
 # ║  Config: PipelineConfig dataclass (NUNCA globals().get())                  ║
 # ║                                                                            ║
 # ║  Proposito:                                                                ║
-# ║    • Funcoes TF de noise on-the-fly para tf.data.map (4 tipos core)       ║
+# ║    • Funcoes TF de noise on-the-fly para tf.data.map (34 tipos)           ║
 # ║    • NOISE_FN_MAP: registro tipo→funcao (extensivel)                      ║
 # ║    • apply_noise_tf(): dispatcher que mixa N tipos com pesos              ║
 # ║    • apply_raw_em_noise(): versao numpy para uso offline/testes           ║
@@ -44,14 +44,44 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────
 
 #   ┌──────────────────────────────────────────────────────────────────────────┐
-#   │  4 Tipos de Noise Core (TF on-the-fly):                                │
+#   │  34 Tipos de Noise (TF on-the-fly):                                     │
 #   │                                                                          │
-#   │  Tipo           │ Formula                    │ Dominio Fisico            │
-#   │  ───────────────┼────────────────────────────┼───────────────────────────│
-#   │  gaussian       │ x + N(0, σ²)              │ Ruido eletronico aditivo  │
-#   │  multiplicative │ x · (1 + N(0, σ²))        │ Erro de ganho do amp.    │
-#   │  uniform        │ x + U(-σ, σ)              │ Quantizacao ADC           │
-#   │  dropout        │ x · Bernoulli(1-σ)/(1-σ)  │ Dropout de canal/amostra │
+#   │  GRUPO │ Tipo                     │ Formula                │ Fenomeno   │
+#   │  ──────┼──────────────────────────┼────────────────────────┼────────────│
+#   │  ORIG  │ gaussian                 │ x + N(0,σ²)           │ Elet.adit. │
+#   │  ORIG  │ multiplicative           │ x·(1+N(0,σ²))         │ Ganho amp  │
+#   │  ORIG  │ uniform                  │ x + U(-σ,σ)           │ Quant. ADC │
+#   │  ORIG  │ dropout                  │ x·Bern(1-σ)/(1-σ)     │ Dropout    │
+#   │  CORE  │ drift                    │ cumsum(N)·φ            │ Deriva T   │
+#   │  CORE  │ depth_dependent          │ N(0,σ·(1+αz/L))       │ Aten. z    │
+#   │  CORE  │ spikes                   │ Bern(p)·N(0,5σ)       │ EMI picos  │
+#   │  CORE  │ pink                     │ 0.5W+0.5Brown          │ Flicker    │
+#   │  CORE  │ saturation               │ clip(x,Plo,Phi)        │ ADC clip   │
+#   │  CORE+ │ varying                  │ N·U(σ_min,σ_max)·|x|  │ Heterosced │
+#   │  CORE+ │ gaussian_local           │ N(0,pct·|x|)          │ Calib.loc  │
+#   │  CORE+ │ gaussian_global          │ N(0,pct·std_glob)     │ Calib.glob │
+#   │  CORE+ │ speckle                  │ x·(1+N(0,σ²))         │ Ganho²     │
+#   │  CORE+ │ quantization             │ round(x/q)·q          │ ADC bits   │
+#   │  R1-R6 │ shoulder_bed             │ MA(3)+N               │ Shoulder   │
+#   │  R1-R6 │ borehole_effect          │ gain+offset            │ Borehole   │
+#   │  R1-R6 │ mud_invasion             │ x·(1-σ·U)             │ Invasion   │
+#   │  R1-R6 │ anisotropy_misalignment  │ col_i+=δ·col_j        │ TIV axis   │
+#   │  R1-R6 │ formation_heterogeneity  │ x·(1+smooth)          │ Hetero.    │
+#   │  R1-R6 │ telemetry                │ drop+bit_err           │ MWD link   │
+#   │  EXT   │ cross_talk               │ Re+=ε·Im, Im+=ε·Re    │ Coupling   │
+#   │  EXT   │ orientation              │ cos(θ)c0+sin(θ)c1     │ Mandrel    │
+#   │  EXT   │ emi_noise                │ Σ A·sin(2πkft)        │ EMI 60Hz   │
+#   │  EXT   │ freq_dependent           │ N(0,σ·f^α)            │ Freq.dep.  │
+#   │  EXT   │ noise_floor              │ N(0,floor)             │ Det.limit  │
+#   │  EXT   │ proportional             │ N(0,0.03·|x|)·scale   │ Prop. 3%   │
+#   │  EXT   │ reim_diff                │ Re:σ, Im:1.5σ          │ Im noisier │
+#   │  EXT   │ component_diff           │ Hxx:1.0σ, Hzz:0.8σ   │ Antena Δ   │
+#   │  EXT   │ gaussian_keras           │ N(0,σ)                │ Keras compat│
+#   │  EXT   │ motion                   │ x·(1+A·sin(2πft/L))   │ BHA vib    │
+#   │  EXT   │ thermal                  │ N(0,0.3σ)             │ Johnson-N  │
+#   │  EXT   │ phase_shift              │ rot(Re,Im,φ)          │ Demod err  │
+#   │  R7    │ bha_vibration            │ shift·sin(2πt/L+φ)    │ Lateral    │
+#   │  R8    │ eccentricity             │ x·(1+ecc·cos(2πt/L))  │ Ecc. tool  │
 #   │                                                                          │
 #   │  σ = noise_level_var (tf.Variable, controlado pelo curriculum)          │
 #   │  Aplicado ANTES de FV e GS (fidelidade LWD)                            │
@@ -779,11 +809,904 @@ def _add_telemetry_noise_tf(x, noise_level, n_protected=1):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# SECAO: FUNCOES DE NOISE CORE MISSING — 5 TIPOS
+# ════════════════════════════════════════════════════════════════════════════
+# 5 tipos que completam o catalogo CORE de noise encontrado em 100% dos
+# sistemas de aquisicao LWD. Cada tipo modela um aspecto distinto do
+# erro de medicao EM que nao eh capturado pelos 9 tipos anteriores.
+#
+#   ┌──────────────────────────────────────────────────────────────────────────┐
+#   │  5 Tipos CORE Missing:                                                  │
+#   │                                                                          │
+#   │  Tipo             │ Formula                         │ Fenomeno Fisico    │
+#   │  ─────────────────┼─────────────────────────────────┼────────────────────│
+#   │  varying          │ x + N·U(σ_min,σ_max)·|x|       │ Heteroscedastico  │
+#   │  gaussian_local   │ x + N(0,pct·|x|)               │ Erro calib. local │
+#   │  gaussian_global  │ x + N(0,pct·std_global)         │ Erro calib. global│
+#   │  speckle          │ x·(1+N(0,σ²))                  │ Variacao ganho    │
+#   │  quantization     │ round(x/q)·q                   │ Resolucao ADC     │
+#   │                                                                          │
+#   │  Adicionados ANTES da secao LWD R1-R6 por afinidade funcional.         │
+#   └──────────────────────────────────────────────────────────────────────────┘
+#
+# Ref: docs/reference/noise_catalog.md secao 3 (CORE missing).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _add_varying_noise_tf(x, noise_level, n_protected=1):
+    """Noise heteroscedastico: incerteza dependente do sinal.
+
+    Modela a incerteza de medicao que varia com a magnitude do sinal.
+    Em receptores LWD reais, o SNR nao eh constante — sinais fracos
+    (alta resistividade, grande spacing) tem erro relativo maior que
+    sinais fortes. O sigma de cada amostra eh amostrado de U(σ_min, σ_max)
+    e multiplicado por |x|, criando noise proporcional ao sinal.
+
+    Formula: x + N(0,1) × U(σ_min, σ_max) × |x|
+    Onde σ_min = 0.01 × noise_level, σ_max = noise_level.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar com sigma base.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com noise heteroscedastico nas colunas EM.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["varying"].
+        Ref: noise_catalog.md tipo varying.
+        σ_min=0.01×σ garante noise minimo mesmo em sinais fortes.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Sigma variavel por amostra: U(σ_min, σ_max) ─────────────────
+    # Cada posicao (batch, seq, feat) recebe sigma diferente,
+    # simulando incerteza nao-estacionaria do receptor LWD.
+    sigma_min = 0.01 * noise_level
+    sigma_max = noise_level
+    sigma_local = tf.random.uniform(
+        shape=tf.shape(em_feats),
+        minval=sigma_min,
+        maxval=tf.maximum(sigma_max, sigma_min + 1e-12),
+        dtype=tf.float32,
+    )
+    noise = tf.random.normal(shape=tf.shape(em_feats), dtype=tf.float32)
+    noisy_em = em_feats + noise * sigma_local * tf.abs(em_feats)
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_gaussian_local_noise_tf(x, noise_level, n_protected=1):
+    """Noise gaussiano local: erro proporcional ao sinal local.
+
+    Modela erro de calibracao local do receptor LWD onde a incerteza
+    de cada medicao eh proporcional a magnitude absoluta daquela
+    medicao especifica. Comum em amplificadores com ganho variavel.
+
+    Formula: x + N(0, pct × |x|) onde pct = noise_level.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar (pct do sinal).
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com noise proporcional ao sinal local.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["gaussian_local"].
+        Ref: noise_catalog.md tipo gaussian_local.
+        pct=0.05 → erro de ~5% da magnitude local.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Noise proporcional a |x| local ──────────────────────────────
+    # stddev = pct × |x|, onde pct = noise_level (tipicamente 0.05).
+    stddev = noise_level * tf.abs(em_feats)
+    noise = tf.random.normal(shape=tf.shape(em_feats), dtype=tf.float32)
+    noisy_em = em_feats + noise * stddev
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_gaussian_global_noise_tf(x, noise_level, n_protected=1):
+    """Noise gaussiano global: erro proporcional ao desvio padrao global.
+
+    Modela erro de medicao do sistema LWD onde a incerteza eh constante
+    e proporcional a dispersao global do sinal. Tipico de sistemas com
+    calibracao fixa (auto-range desabilitado).
+
+    Formula: x + N(0, pct × std_global) onde std_global = std(em_feats).
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar (pct da dispersao global).
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com noise proporcional ao desvio padrao global.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["gaussian_global"].
+        Ref: noise_catalog.md tipo gaussian_global.
+        pct=0.05 → erro de ~5% do std global das features EM.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Desvio padrao global das features EM ────────────────────────
+    # Calculado sobre todo o batch para representar a escala do sinal.
+    std_global = tf.math.reduce_std(em_feats)
+    std_global = tf.maximum(std_global, 1e-12)
+    noise = tf.random.normal(
+        shape=tf.shape(em_feats),
+        mean=0.0,
+        stddev=noise_level * std_global,
+        dtype=tf.float32,
+    )
+    noisy_em = em_feats + noise
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_speckle_noise_tf(x, noise_level, n_protected=1):
+    """Noise speckle: variacao de ganho do amplificador com sigma².
+
+    Modela flutuacoes de ganho do amplificador LWD causadas por
+    variacao termica. Similar ao multiplicativo, mas com sigma
+    ao quadrado para representar noise de ganho (gain noise) que
+    escala quadraticamente com a instabilidade do sistema.
+
+    Formula: x × (1 + N(0, noise_level²)).
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com speckle noise (sigma quadrado) nas colunas EM.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["speckle"].
+        Ref: noise_catalog.md tipo speckle.
+        sigma² para noise_level=0.05 → stddev=0.0025 (muito leve).
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Speckle: ganho multiplicativo com σ² ─────────────────────────
+    # noise_level² produz efeito mais suave que multiplicative puro.
+    noise = tf.random.normal(
+        shape=tf.shape(em_feats),
+        mean=0.0,
+        stddev=noise_level * noise_level,
+        dtype=tf.float32,
+    )
+    noisy_em = em_feats * (1.0 + noise)
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_quantization_noise_tf(x, noise_level, n_protected=1):
+    """Noise de quantizacao: resolucao finita do ADC.
+
+    Modela o erro de discretizacao do conversor analogico-digital (ADC)
+    com resolucao finita. O sinal continuo eh arredondado para o
+    multiplo mais proximo do quantum q, introduzindo erro uniforme
+    de magnitude maxima q/2.
+
+    Formula: round(x / q) × q, onde q = noise_level × 0.1.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar (controla tamanho do quantum).
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x quantizado nas colunas EM.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["quantization"].
+        Ref: noise_catalog.md tipo quantization.
+        q = 0.005 para noise_level=0.05 (resolucao de ~12 bits em range ±10).
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Quantizacao: arredondamento para multiplo de q ───────────────
+    # q = noise_level × 0.1 garante granularidade proporcional ao noise.
+    # tf.round pode nao ser diferenciavel, mas noise nao entra no backprop.
+    q = noise_level * 0.1
+    q = tf.maximum(q, 1e-12)  # protecao contra divisao por zero
+    quantized = tf.round(em_feats / q) * q
+    return tf.concat([protected, quantized], axis=-1)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECAO: FUNCOES DE NOISE EXTENDED — 12 TIPOS
+# ════════════════════════════════════════════════════════════════════════════
+# Efeitos avancados de noise presentes em cenarios especificos de campo
+# LWD. Incluem acoplamento entre canais, efeitos de orientacao da
+# ferramenta, interferencia eletromagnetica, e efeitos termicos.
+#
+#   ┌──────────────────────────────────────────────────────────────────────────┐
+#   │  12 Tipos Extended:                                                      │
+#   │                                                                          │
+#   │  Tipo             │ Formula                         │ Fenomeno Fisico    │
+#   │  ─────────────────┼─────────────────────────────────┼────────────────────│
+#   │  cross_talk       │ Re+=ε·Im, Im+=ε·Re             │ Acoplamento cap.   │
+#   │  orientation      │ cos(θ)c0+sin(θ)c1              │ Rotacao mandrel    │
+#   │  emi_noise        │ Σ A·sin(2πkft)                 │ EMI 60Hz harmonics │
+#   │  freq_dependent   │ N(0,σ·f^α)                     │ Piso freq-dep.     │
+#   │  noise_floor      │ N(0,floor)                     │ Limite deteccao    │
+#   │  proportional     │ N(0,0.03·|x|)·scale            │ Erro prop. ~3%     │
+#   │  reim_diff        │ Re:σ, Im:1.5σ                  │ Im mais ruidoso    │
+#   │  component_diff   │ Hxx:1.0σ, Hzz:0.8σ            │ Sensib. antena Δ   │
+#   │  gaussian_keras   │ N(0,σ)                         │ Keras GaussianNoise│
+#   │  motion           │ x·(1+A·sin(2πft/L))            │ Vibracao BHA       │
+#   │  thermal          │ N(0,0.3σ)                      │ Johnson-Nyquist    │
+#   │  phase_shift      │ rot(Re,Im,φ)                   │ Erro demodulador   │
+#   │                                                                          │
+#   │  Todos preservam z_obs (col 0) e operam on-the-fly via tf.data.map     │
+#   └──────────────────────────────────────────────────────────────────────────┘
+#
+# Ref: docs/reference/noise_catalog.md secao 4 (Extended).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _add_cross_talk_noise_tf(x, noise_level, n_protected=1):
+    """Noise de cross-talk: acoplamento capacitivo Re↔Im.
+
+    Modela o vazamento de sinal entre os canais in-phase (Re) e
+    quadrature (Im) causado por acoplamento capacitivo nos cabos
+    de sinal da ferramenta LWD. O efeito eh proporcional ao sinal
+    do canal vizinho.
+
+    Formula: Re += ε×Im, Im += ε×Re, onde ε = noise_level × 0.4.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com cross-talk Re↔Im nas colunas EM.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["cross_talk"].
+        Ref: noise_catalog.md tipo cross_talk.
+        ε=0.02 para noise_level=0.05 (~2% de vazamento entre canais).
+        Para 4 EM cols: [Re(Hxx), Im(Hxx), Re(Hzz), Im(Hzz)].
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Cross-talk: colunas pares (Re) vazam para impares (Im) e vice-versa
+    # epsilon = noise_level × 0.4 controla magnitude do acoplamento.
+    epsilon = noise_level * 0.4
+    n_em = tf.shape(em_feats)[2]
+    # Shift circular de 1 posicao: Re↔Im adjacentes
+    shifted = tf.roll(em_feats, shift=1, axis=2)
+    noisy_em = em_feats + epsilon * shifted
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_orientation_noise_tf(x, noise_level, n_protected=1):
+    """Noise de orientacao: rotacao do mandrel da ferramenta.
+
+    Modela a rotacao do mandrel durante a perfuracao que mistura
+    as componentes EM em pares. A ferramenta LWD rota continuamente
+    (~60-120 RPM), e erros no giroscopio/magnetometro de orientacao
+    produzem mistura entre pares de colunas.
+
+    Formula: col0' = cos(θ)×col0 + sin(θ)×col1
+             col1' = -sin(θ)×col0 + cos(θ)×col1
+    Onde θ = noise_level × 0.04 radianos (~2° para σ=0.05).
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com rotacao entre pares de colunas EM.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["orientation"].
+        Ref: noise_catalog.md tipo orientation.
+        θ=0.002 rad para noise_level=0.05 (~0.11°).
+        Rotacao aplicada a pares consecutivos de colunas EM.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Angulo de rotacao proporcional ao noise_level ────────────────
+    theta = noise_level * 0.04
+    cos_t = tf.cos(theta)
+    sin_t = tf.sin(theta)
+    # ── Rotacao aplicada a pares consecutivos (0,1), (2,3), ... ─────
+    # Para n_em impar, ultima coluna permanece inalterada.
+    n_em = tf.shape(em_feats)[2]
+    n_pairs = n_em // 2
+    # Reshape para operar em pares: (batch, seq, n_pairs, 2)
+    paired = tf.reshape(
+        em_feats[:, :, : n_pairs * 2],
+        (tf.shape(em_feats)[0], tf.shape(em_feats)[1], n_pairs, 2),
+    )
+    col0 = paired[:, :, :, 0]  # (batch, seq, n_pairs)
+    col1 = paired[:, :, :, 1]
+    rot0 = cos_t * col0 + sin_t * col1
+    rot1 = -sin_t * col0 + cos_t * col1
+    rotated = tf.stack([rot0, rot1], axis=-1)  # (batch, seq, n_pairs, 2)
+    rotated_flat = tf.reshape(
+        rotated,
+        (tf.shape(em_feats)[0], tf.shape(em_feats)[1], n_pairs * 2),
+    )
+    # Concatenar coluna impar restante se existir
+    remainder = em_feats[:, :, n_pairs * 2 :]
+    noisy_em = tf.concat([rotated_flat, remainder], axis=-1)
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_emi_noise_tf(x, noise_level, n_protected=1):
+    """Noise de interferencia eletromagnetica (EMI): harmonicos 60Hz.
+
+    Modela interferencia eletromagnetica de equipamentos do rig
+    (motores, geradores) que operam a 60Hz (ou 50Hz). O noise
+    eh composto por 3 harmonicos (60, 120, 180 Hz) com amplitude
+    decrescente.
+
+    Formula: Σ(amplitude × sin(2π × k × f × t)) para k=1..3
+    Onde f=60Hz, amplitude = noise_level × 0.2 / k.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com interferencia EMI 60Hz nas colunas EM.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["emi_noise"].
+        Ref: noise_catalog.md tipo emi_noise.
+        3 harmonicos (60, 120, 180 Hz) com amplitude 1/k.
+        Fase aleatoria por harmonic para evitar cancelamento.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Eixo temporal normalizado [0, 1) ────────────────────────────
+    seq_len = tf.cast(tf.shape(em_feats)[1], tf.float32)
+    t = tf.cast(tf.range(tf.shape(em_feats)[1]), tf.float32) / tf.maximum(seq_len, 1.0)
+    t = tf.reshape(t, (1, -1, 1))  # (1, seq_len, 1) — broadcasta
+    # ── Soma de 3 harmonicos com fase aleatoria ─────────────────────
+    base_freq = 60.0
+    amplitude = noise_level * 0.2
+    emi = tf.zeros_like(em_feats)
+    for k in range(1, 4):
+        phase = tf.random.uniform(
+            shape=(1, 1, tf.shape(em_feats)[2]),
+            minval=0.0,
+            maxval=2.0 * 3.14159265,
+            dtype=tf.float32,
+        )
+        harmonic = (amplitude / tf.cast(k, tf.float32)) * tf.sin(
+            2.0 * 3.14159265 * tf.cast(k, tf.float32) * base_freq * t + phase
+        )
+        emi = emi + harmonic
+    noisy_em = em_feats + emi
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_freq_dependent_noise_tf(x, noise_level, n_protected=1):
+    """Noise dependente de frequencia: piso de noise cresce com posicao.
+
+    Modela o piso de noise que aumenta com a frequencia de operacao
+    da ferramenta. Em LWD, frequencias mais altas sofrem maior
+    atenuacao e portanto menor SNR. Simplificacao: noise cresce
+    com posicao na sequencia (proxy para profundidade/frequencia).
+
+    Formula: x + N(0, σ × f^α) onde α=0.5, f = posicao normalizada.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com noise freq-dependent nas colunas EM.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["freq_dependent"].
+        Ref: noise_catalog.md tipo freq_dependent.
+        α=0.5 → noise cresce como sqrt(posicao) (sublinear).
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Fator posicional: (1 + idx/L)^0.5 ──────────────────────────
+    # Cresce de 1.0 a sqrt(2) ao longo da sequencia.
+    seq_len = tf.cast(tf.shape(em_feats)[1], tf.float32)
+    indices = tf.cast(tf.range(tf.shape(em_feats)[1]), tf.float32)
+    f_factor = tf.sqrt(1.0 + indices / tf.maximum(seq_len, 1.0))
+    f_factor = tf.reshape(f_factor, (1, -1, 1))  # (1, seq_len, 1)
+    noise = tf.random.normal(
+        shape=tf.shape(em_feats), mean=0.0, stddev=noise_level, dtype=tf.float32
+    )
+    noisy_em = em_feats + noise * f_factor
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_noise_floor_noise_tf(x, noise_level, n_protected=1):
+    """Noise floor: limite de deteccao do instrumento.
+
+    Modela o piso de noise constante do receptor LWD, independente
+    da magnitude do sinal. Representa o limite fundamental de
+    deteccao do sistema (thermal noise + noise de quantizacao).
+
+    Formula: x + N(0, floor_value) onde floor_value = noise_level × 1e-8 / 0.05.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com noise floor constante nas colunas EM.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["noise_floor"].
+        Ref: noise_catalog.md tipo noise_floor.
+        floor_value=2e-7 para noise_level=0.05 (~10 nV em campo H).
+        Constante — nao depende da magnitude do sinal.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Noise floor constante, escalado por noise_level ──────────────
+    floor_value = noise_level * 1e-8 / 0.05
+    noise = tf.random.normal(
+        shape=tf.shape(em_feats), mean=0.0, stddev=floor_value, dtype=tf.float32
+    )
+    noisy_em = em_feats + noise
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_proportional_noise_tf(x, noise_level, n_protected=1):
+    """Noise proporcional: erro ~3% da magnitude do sinal.
+
+    Modela o erro proporcional tipico de ferramentas LWD comerciais
+    (especificacao de fabrica: ~3% do valor lido). O noise eh
+    proporcional a |x| com fator fixo de 3%, escalado pelo noise_level.
+
+    Formula: x + N(0, 0.03 × |x|) × (noise_level / 0.05).
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com erro proporcional ~3% nas colunas EM.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["proportional"].
+        Ref: noise_catalog.md tipo proportional.
+        3% eh especificacao tipica de ferramentas Schlumberger/Halliburton.
+        noise_level=0.05 → exatamente 3%. noise_level=0.1 → 6%.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Erro proporcional: 3% × |x| × scale ─────────────────────────
+    scale = noise_level / 0.05
+    stddev = 0.03 * tf.abs(em_feats) * scale
+    noise = tf.random.normal(shape=tf.shape(em_feats), dtype=tf.float32)
+    noisy_em = em_feats + noise * stddev
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_reim_diff_noise_tf(x, noise_level, n_protected=1):
+    """Noise Re/Im diferencial: Im mais ruidoso que Re.
+
+    Modela a assimetria de noise entre canais in-phase (Re) e
+    quadrature (Im). Em receptores LWD, o canal Im tipicamente
+    tem SNR ~30% menor que Re devido a demodulacao e filtragem
+    menos eficientes no caminho quadrature.
+
+    Formula: Re += N(0, σ), Im += N(0, 1.5σ).
+    Split por colunas pares (Re) e impares (Im).
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com noise diferencial Re/Im nas colunas EM.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["reim_diff"].
+        Ref: noise_catalog.md tipo reim_diff.
+        Im recebe 50% mais noise que Re (fator 1.5).
+        Colunas pares = Re, impares = Im (layout P1: Re,Im,Re,Im).
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Noise diferencial: Re (σ) e Im (1.5σ) ──────────────────────
+    # Mascara de escala: colunas pares=1.0, impares=1.5
+    n_em = tf.shape(em_feats)[2]
+    col_idx = tf.cast(tf.range(n_em), tf.float32)
+    # Pares (0,2,4...)=1.0, impares (1,3,5...)=1.5
+    scale = tf.where(
+        tf.equal(tf.math.mod(tf.range(n_em), 2), 0),
+        tf.ones(n_em, dtype=tf.float32),
+        tf.ones(n_em, dtype=tf.float32) * 1.5,
+    )
+    scale = tf.reshape(scale, (1, 1, -1))  # (1, 1, n_em)
+    noise = tf.random.normal(
+        shape=tf.shape(em_feats), mean=0.0, stddev=noise_level, dtype=tf.float32
+    )
+    noisy_em = em_feats + noise * scale
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_component_diff_noise_tf(x, noise_level, n_protected=1):
+    """Noise por componente: Hxx e Hzz com sensibilidades diferentes.
+
+    Modela a diferenca de sensibilidade entre antenas coplanares (Hxx)
+    e coaxiais (Hzz) da ferramenta LWD. A antena coaxial tipicamente
+    tem melhor SNR (~20% menor noise) por geometria de acoplamento.
+
+    Formula: primeiras 2 cols EM × σ×1.0, ultimas 2 cols × σ×0.8.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com noise diferenciado Hxx/Hzz.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["component_diff"].
+        Ref: noise_catalog.md tipo component_diff.
+        Hxx (planar): fator 1.0. Hzz (axial): fator 0.8.
+        Para <4 EM cols, primeiras metade=1.0, segunda metade=0.8.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Escala por componente: Hxx=1.0, Hzz=0.8 ─────────────────────
+    n_em = tf.shape(em_feats)[2]
+    half = n_em // 2
+    # Primeiras 'half' colunas (Hxx): fator 1.0
+    # Ultimas colunas (Hzz): fator 0.8
+    scale_hxx = tf.ones((1, 1, half), dtype=tf.float32) * 1.0
+    scale_hzz = tf.ones((1, 1, n_em - half), dtype=tf.float32) * 0.8
+    scale = tf.concat([scale_hxx, scale_hzz], axis=-1)
+    noise = tf.random.normal(
+        shape=tf.shape(em_feats), mean=0.0, stddev=noise_level, dtype=tf.float32
+    )
+    noisy_em = em_feats + noise * scale
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_gaussian_keras_noise_tf(x, noise_level, n_protected=1):
+    """Noise gaussiano puro (Keras GaussianNoise equivalente).
+
+    Identico ao tipo 'gaussian', mas existe como entrada separada
+    no catalogo para compatibilidade com usuarios que referenciam
+    tf.keras.layers.GaussianNoise. Semantica identica: x + N(0, σ).
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com noise gaussiano puro nas colunas EM.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["gaussian_keras"].
+        Identico a NOISE_FN_MAP["gaussian"] — alias para catalogo.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    noise = tf.random.normal(
+        shape=tf.shape(em_feats), mean=0.0, stddev=noise_level, dtype=tf.float32
+    )
+    return tf.concat([protected, em_feats + noise], axis=-1)
+
+
+def _add_motion_noise_tf(x, noise_level, n_protected=1):
+    """Noise de movimento: vibracao BHA via modulacao sinusoidal.
+
+    Modela a vibracao mecanica do BHA (Bottom Hole Assembly) durante
+    a perfuracao. A vibracao lateral produz modulacao periodica do
+    sinal EM captado, com frequencia tipica de ~5 ciclos por perfil.
+
+    Formula: x × (1 + amplitude × sin(2π × freq × t / seq_len))
+    Onde amplitude = noise_level × 0.4, freq = 5.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com modulacao sinusoidal de vibracao BHA.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["motion"].
+        Ref: noise_catalog.md tipo motion.
+        freq=5 → ~5 ciclos de vibracao por perfil de 600 amostras.
+        amplitude=0.02 para noise_level=0.05 (~2% modulacao).
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Modulacao sinusoidal: 5 ciclos por sequencia ────────────────
+    amplitude = noise_level * 0.4
+    freq = 5.0
+    seq_len = tf.cast(tf.shape(em_feats)[1], tf.float32)
+    t = tf.cast(tf.range(tf.shape(em_feats)[1]), tf.float32)
+    modulation = amplitude * tf.sin(
+        2.0 * 3.14159265 * freq * t / tf.maximum(seq_len, 1.0)
+    )
+    modulation = tf.reshape(modulation, (1, -1, 1))  # (1, seq_len, 1)
+    noisy_em = em_feats * (1.0 + modulation)
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_thermal_noise_tf(x, noise_level, n_protected=1):
+    """Noise termico: Johnson-Nyquist do receptor LWD.
+
+    Modela o ruido termico fundamental (Johnson-Nyquist) gerado pela
+    resistencia dos circuitos do receptor LWD a ~175°C (temperatura
+    tipica de fundo de poco). Simplificado para N(0, 0.3σ) representando
+    sqrt(4×k_B×T×R×Δf) / referencia em unidades normalizadas.
+
+    Formula: x + N(0, σ_thermal), σ_thermal = noise_level × 0.3.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com noise termico Johnson-Nyquist.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["thermal"].
+        Ref: noise_catalog.md tipo thermal. Johnson (1928).
+        Fator 0.3 calibrado para T≈175°C, R≈50Ω, Δf≈1kHz.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Noise termico: gaussiano com σ reduzido ─────────────────────
+    sigma_thermal = noise_level * 0.3
+    noise = tf.random.normal(
+        shape=tf.shape(em_feats), mean=0.0, stddev=sigma_thermal, dtype=tf.float32
+    )
+    noisy_em = em_feats + noise
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_phase_shift_noise_tf(x, noise_level, n_protected=1):
+    """Noise de phase shift: erro do demodulador Re/Im.
+
+    Modela o erro de fase do demodulador que rota as componentes
+    Re e Im por um angulo aleatorio. Em receptores LWD, o PLL
+    (Phase-Locked Loop) pode ter jitter de fase que mistura Re↔Im.
+
+    Formula: Re' = Re×cos(φ) - Im×sin(φ)
+             Im' = Re×sin(φ) + Im×cos(φ)
+    Onde φ = noise_level × 0.1 radianos.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com rotacao de fase Re/Im nas colunas EM.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["phase_shift"].
+        Ref: noise_catalog.md tipo phase_shift.
+        φ=0.005 rad para noise_level=0.05 (~0.29°).
+        Rotacao aplicada a pares (Re,Im) consecutivos.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Angulo de fase aleatorio por batch ──────────────────────────
+    phi = noise_level * 0.1
+    cos_p = tf.cos(phi)
+    sin_p = tf.sin(phi)
+    # ── Rotacao em pares (Re, Im) consecutivos ──────────────────────
+    n_em = tf.shape(em_feats)[2]
+    n_pairs = n_em // 2
+    paired = tf.reshape(
+        em_feats[:, :, : n_pairs * 2],
+        (tf.shape(em_feats)[0], tf.shape(em_feats)[1], n_pairs, 2),
+    )
+    re = paired[:, :, :, 0]
+    im = paired[:, :, :, 1]
+    re_rot = re * cos_p - im * sin_p
+    im_rot = re * sin_p + im * cos_p
+    rotated = tf.stack([re_rot, im_rot], axis=-1)
+    rotated_flat = tf.reshape(
+        rotated,
+        (tf.shape(em_feats)[0], tf.shape(em_feats)[1], n_pairs * 2),
+    )
+    remainder = em_feats[:, :, n_pairs * 2 :]
+    noisy_em = tf.concat([rotated_flat, remainder], axis=-1)
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECAO: FUNCOES DE NOISE GEOSTEERING — 2 TIPOS (R7-R8)
+# ════════════════════════════════════════════════════════════════════════════
+# Efeitos especificos de geosteering: vibracao lateral do BHA e
+# excentricidade da ferramenta no poco. Estes efeitos sao mais
+# pronunciados em pocos horizontais/direcionais.
+#
+#   ┌──────────────────────────────────────────────────────────────────────────┐
+#   │  2 Tipos Geosteering (R7-R8):                                           │
+#   │                                                                          │
+#   │  ID │ Tipo           │ Efeito Fisico                                    │
+#   │  ───┼────────────────┼──────────────────────────────────────────────────│
+#   │  R7 │ bha_vibration  │ Deslocamento lateral sinusoidal do sensor        │
+#   │  R8 │ eccentricity   │ Ganho variavel por excentricidade no borehole    │
+#   └──────────────────────────────────────────────────────────────────────────┘
+#
+# Ref: docs/reference/noise_catalog.md secao 6 (R7-R8).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _add_bha_vibration_noise_tf(x, noise_level, n_protected=1):
+    """R7 — BHA vibration: deslocamento lateral sinusoidal do sensor.
+
+    Modela a vibracao lateral do BHA que desloca o sensor EM em
+    relacao a formacao. Em pocos direcionais/horizontais, o BHA
+    vibra com frequencia proporcional ao RPM (~1-2 Hz). O
+    deslocamento produz perturbacao aditiva sinusoidal com fase
+    aleatoria.
+
+    Formula: x + shift × sin(2π × t / seq_len + random_phase)
+    Onde shift = noise_level × 0.5.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com vibracao lateral sinusoidal.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["bha_vibration"].
+        Ref: noise_catalog.md R7.
+        shift=0.025 para noise_level=0.05 (~2.5% do sinal).
+        1 ciclo por sequencia com fase aleatoria.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Vibracao sinusoidal com fase aleatoria ──────────────────────
+    shift = noise_level * 0.5
+    seq_len = tf.cast(tf.shape(em_feats)[1], tf.float32)
+    t = tf.cast(tf.range(tf.shape(em_feats)[1]), tf.float32)
+    # Fase aleatoria por feature para diversidade
+    phase = tf.random.uniform(
+        shape=(1, 1, tf.shape(em_feats)[2]),
+        minval=0.0,
+        maxval=2.0 * 3.14159265,
+        dtype=tf.float32,
+    )
+    vibration = shift * tf.sin(
+        2.0 * 3.14159265 * tf.reshape(t, (1, -1, 1)) / tf.maximum(seq_len, 1.0) + phase
+    )
+    noisy_em = em_feats + vibration
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+def _add_eccentricity_noise_tf(x, noise_level, n_protected=1):
+    """R8 — Eccentricity: ganho variavel por ferramenta nao-centrada.
+
+    Modela o efeito de excentricidade da ferramenta no borehole.
+    Quando a ferramenta nao esta centrada, o acoplamento EM com
+    a formacao varia periodicamente com a posicao angular, criando
+    modulacao de ganho cossenoidal.
+
+    Formula: x × (1 + ecc × cos(2π × t / seq_len + phase))
+    Onde ecc = noise_level × 0.2.
+
+    Args:
+        x: Tensor 3D (batch, seq_len, n_feat).
+        noise_level: tf.Variable escalar.
+        n_protected: Colunas iniciais protegidas. Default 1 (P1).
+
+    Returns:
+        tf.Tensor: x com modulacao de ganho por excentricidade.
+
+    Note:
+        Referenciado em: NOISE_FN_MAP["eccentricity"].
+        Ref: noise_catalog.md R8.
+        ecc=0.01 para noise_level=0.05 (~1% modulacao de ganho).
+        1 ciclo por sequencia com fase aleatoria.
+        Colunas 0:n_protected preservadas (parametros conhecidos + z_obs).
+    """
+    import tensorflow as tf
+
+    protected = x[:, :, :n_protected]
+    em_feats = x[:, :, n_protected:]
+    # ── Modulacao cossenoidal por excentricidade ─────────────────────
+    ecc = noise_level * 0.2
+    seq_len = tf.cast(tf.shape(em_feats)[1], tf.float32)
+    t = tf.cast(tf.range(tf.shape(em_feats)[1]), tf.float32)
+    phase = tf.random.uniform(
+        shape=(1, 1, tf.shape(em_feats)[2]),
+        minval=0.0,
+        maxval=2.0 * 3.14159265,
+        dtype=tf.float32,
+    )
+    modulation = 1.0 + ecc * tf.cos(
+        2.0 * 3.14159265 * tf.reshape(t, (1, -1, 1)) / tf.maximum(seq_len, 1.0) + phase
+    )
+    noisy_em = em_feats * modulation
+    return tf.concat([protected, noisy_em], axis=-1)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # SECAO: REGISTRO DE FUNCOES (NOISE_FN_MAP)
 # ════════════════════════════════════════════════════════════════════════════
 # Dicionario tipo→funcao para extensibilidade. Novos tipos de noise
 # podem ser adicionados registrando aqui sem alterar o dispatcher.
-# 15 tipos totais: 4 originais + 5 CORE + 6 LWD (R1-R6).
+# 34 tipos totais: 4 originais + 5 CORE + 5 CORE missing + 6 LWD (R1-R6)
+#                  + 12 Extended + 2 Geosteering (R7-R8).
 # Ref: Factory Pattern (CLAUDE.md secao Code Patterns).
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -799,6 +1722,12 @@ NOISE_FN_MAP: Dict[str, NoiseFnType] = {
     "spikes": _add_spikes_noise_tf,
     "pink": _add_pink_noise_tf,
     "saturation": _add_saturation_noise_tf,
+    # ── 5 CORE missing (Fase III) ──────────────────────────────────────
+    "varying": _add_varying_noise_tf,
+    "gaussian_local": _add_gaussian_local_noise_tf,
+    "gaussian_global": _add_gaussian_global_noise_tf,
+    "speckle": _add_speckle_noise_tf,
+    "quantization": _add_quantization_noise_tf,
     # ── 6 Geofisicos LWD R1-R6 (Fase II) ────────────────────────────
     "shoulder_bed": _add_shoulder_bed_noise_tf,
     "borehole_effect": _add_borehole_effect_noise_tf,
@@ -806,6 +1735,22 @@ NOISE_FN_MAP: Dict[str, NoiseFnType] = {
     "anisotropy_misalignment": _add_anisotropy_misalignment_noise_tf,
     "formation_heterogeneity": _add_formation_heterogeneity_noise_tf,
     "telemetry": _add_telemetry_noise_tf,
+    # ── 12 Extended (Fase III) ───────────────────────────────────────
+    "cross_talk": _add_cross_talk_noise_tf,
+    "orientation": _add_orientation_noise_tf,
+    "emi_noise": _add_emi_noise_tf,
+    "freq_dependent": _add_freq_dependent_noise_tf,
+    "noise_floor": _add_noise_floor_noise_tf,
+    "proportional": _add_proportional_noise_tf,
+    "reim_diff": _add_reim_diff_noise_tf,
+    "component_diff": _add_component_diff_noise_tf,
+    "gaussian_keras": _add_gaussian_keras_noise_tf,
+    "motion": _add_motion_noise_tf,
+    "thermal": _add_thermal_noise_tf,
+    "phase_shift": _add_phase_shift_noise_tf,
+    # ── 2 Geosteering R7-R8 (Fase III) ──────────────────────────────
+    "bha_vibration": _add_bha_vibration_noise_tf,
+    "eccentricity": _add_eccentricity_noise_tf,
 }
 
 # Tipos validos — consultado por PipelineConfig e testes.
@@ -1165,6 +2110,189 @@ def apply_raw_em_noise(
             ).astype(em_feats.dtype)
             bit_noise = rng.normal(0.0, noise_level * 0.1, size=em_feats.shape)
             noisy = em_feats * keep + bit_noise
+            em_feats[:] = ((1.0 - w_norm) * em_feats + w_norm * noisy).astype(
+                em_feats.dtype
+            )
+
+        # ── 5 CORE missing (Fase III) ──────────────────────────────
+        elif nt == "varying":
+            # ── Heteroscedastico: N·U(σ_min,σ_max)·|x| ────────────
+            sigma_min = 0.01 * noise_level
+            sigma_max = max(noise_level, sigma_min + 1e-12)
+            sigma_local = rng.uniform(sigma_min, sigma_max, size=em_feats.shape)
+            noise = rng.normal(0.0, 1.0, size=em_feats.shape)
+            em_feats += w_norm * (noise * sigma_local * np.abs(em_feats)).astype(
+                em_feats.dtype
+            )
+
+        elif nt == "gaussian_local":
+            # ── Erro proporcional ao sinal local: N(0,pct·|x|) ─────
+            stddev = noise_level * np.abs(em_feats)
+            noise = rng.normal(0.0, 1.0, size=em_feats.shape)
+            em_feats += w_norm * (noise * stddev).astype(em_feats.dtype)
+
+        elif nt == "gaussian_global":
+            # ── Erro proporcional ao std global: N(0,pct·std_glob) ──
+            std_global = max(np.std(em_feats), 1e-12)
+            noise = rng.normal(0.0, noise_level * std_global, size=em_feats.shape)
+            em_feats += w_norm * noise.astype(em_feats.dtype)
+
+        elif nt == "speckle":
+            # ── Gain noise com σ²: x·(1+N(0,σ²)) ───────────────────
+            noise = rng.normal(0.0, noise_level * noise_level, size=em_feats.shape)
+            noisy = em_feats * (1.0 + noise)
+            em_feats[:] = ((1.0 - w_norm) * em_feats + w_norm * noisy).astype(
+                em_feats.dtype
+            )
+
+        elif nt == "quantization":
+            # ── ADC quantization: round(x/q)·q ─────────────────────
+            q = max(noise_level * 0.1, 1e-12)
+            quantized = np.round(em_feats / q) * q
+            em_feats[:] = ((1.0 - w_norm) * em_feats + w_norm * quantized).astype(
+                em_feats.dtype
+            )
+
+        # ── 12 Extended (Fase III) ─────────────────────────────────
+        elif nt == "cross_talk":
+            # ── Acoplamento capacitivo Re↔Im: shift circular ────────
+            epsilon = noise_level * 0.4
+            shifted = np.roll(em_feats, shift=1, axis=2)
+            noisy = em_feats + epsilon * shifted
+            em_feats[:] = ((1.0 - w_norm) * em_feats + w_norm * noisy).astype(
+                em_feats.dtype
+            )
+
+        elif nt == "orientation":
+            # ── Rotacao mandrel: cos(θ)c0+sin(θ)c1 por pares ───────
+            theta = noise_level * 0.04
+            cos_t = np.cos(theta)
+            sin_t = np.sin(theta)
+            n_em_local = em_feats.shape[2]
+            n_pairs = n_em_local // 2
+            result_em = em_feats.copy()
+            for p in range(n_pairs):
+                c0 = em_feats[:, :, 2 * p]
+                c1 = em_feats[:, :, 2 * p + 1]
+                result_em[:, :, 2 * p] = cos_t * c0 + sin_t * c1
+                result_em[:, :, 2 * p + 1] = -sin_t * c0 + cos_t * c1
+            em_feats[:] = ((1.0 - w_norm) * em_feats + w_norm * result_em).astype(
+                em_feats.dtype
+            )
+
+        elif nt == "emi_noise":
+            # ── EMI 60Hz: 3 harmonicos sinusoidais ──────────────────
+            seq_len_local = em_feats.shape[1]
+            t = np.arange(seq_len_local).reshape(1, -1, 1) / max(seq_len_local, 1)
+            amplitude = noise_level * 0.2
+            emi = np.zeros_like(em_feats)
+            for k in range(1, 4):
+                phase = rng.uniform(0, 2 * np.pi, size=(1, 1, em_feats.shape[2]))
+                emi += (amplitude / k) * np.sin(2 * np.pi * k * 60.0 * t + phase)
+            em_feats += w_norm * emi.astype(em_feats.dtype)
+
+        elif nt == "freq_dependent":
+            # ── Noise freq-dependent: σ·sqrt(1+idx/L) ──────────────
+            seq_len_local = em_feats.shape[1]
+            indices = np.arange(seq_len_local).reshape(1, -1, 1)
+            f_factor = np.sqrt(1.0 + indices / max(seq_len_local, 1))
+            noise = rng.normal(0.0, noise_level, size=em_feats.shape)
+            em_feats += w_norm * (noise * f_factor).astype(em_feats.dtype)
+
+        elif nt == "noise_floor":
+            # ── Piso de noise constante: N(0, floor) ────────────────
+            floor_value = noise_level * 1e-8 / 0.05
+            noise = rng.normal(0.0, floor_value, size=em_feats.shape)
+            em_feats += w_norm * noise.astype(em_feats.dtype)
+
+        elif nt == "proportional":
+            # ── Erro proporcional ~3%: N(0,0.03·|x|)·scale ─────────
+            scale = noise_level / 0.05
+            stddev = 0.03 * np.abs(em_feats) * scale
+            noise = rng.normal(0.0, 1.0, size=em_feats.shape)
+            em_feats += w_norm * (noise * stddev).astype(em_feats.dtype)
+
+        elif nt == "reim_diff":
+            # ── Im mais ruidoso que Re: pares=1.0, impares=1.5 ─────
+            n_em_local = em_feats.shape[2]
+            scale = np.ones(n_em_local, dtype=np.float32)
+            scale[1::2] = 1.5  # colunas impares (Im) recebem 50% mais
+            scale = scale.reshape(1, 1, -1)
+            noise = rng.normal(0.0, noise_level, size=em_feats.shape)
+            em_feats += w_norm * (noise * scale).astype(em_feats.dtype)
+
+        elif nt == "component_diff":
+            # ── Hxx(1.0σ) vs Hzz(0.8σ): split por metade ──────────
+            n_em_local = em_feats.shape[2]
+            half = n_em_local // 2
+            scale = np.ones(n_em_local, dtype=np.float32)
+            scale[half:] = 0.8  # Hzz (segunda metade) menos ruidoso
+            scale = scale.reshape(1, 1, -1)
+            noise = rng.normal(0.0, noise_level, size=em_feats.shape)
+            em_feats += w_norm * (noise * scale).astype(em_feats.dtype)
+
+        elif nt == "gaussian_keras":
+            # ── Keras GaussianNoise equivalente: x+N(0,σ) ──────────
+            noise = rng.normal(0.0, noise_level, size=em_feats.shape)
+            em_feats += w_norm * noise.astype(em_feats.dtype)
+
+        elif nt == "motion":
+            # ── Vibracao BHA sinusoidal: x·(1+A·sin(2πft/L)) ───────
+            amplitude = noise_level * 0.4
+            freq = 5.0
+            seq_len_local = em_feats.shape[1]
+            t = np.arange(seq_len_local).reshape(1, -1, 1)
+            modulation = amplitude * np.sin(
+                2.0 * np.pi * freq * t / max(seq_len_local, 1)
+            )
+            noisy = em_feats * (1.0 + modulation)
+            em_feats[:] = ((1.0 - w_norm) * em_feats + w_norm * noisy).astype(
+                em_feats.dtype
+            )
+
+        elif nt == "thermal":
+            # ── Johnson-Nyquist: N(0, 0.3σ) ────────────────────────
+            sigma_thermal = noise_level * 0.3
+            noise = rng.normal(0.0, sigma_thermal, size=em_feats.shape)
+            em_feats += w_norm * noise.astype(em_feats.dtype)
+
+        elif nt == "phase_shift":
+            # ── Demodulator phase error: rotacao Re/Im por φ ────────
+            phi = noise_level * 0.1
+            cos_p = np.cos(phi)
+            sin_p = np.sin(phi)
+            n_em_local = em_feats.shape[2]
+            n_pairs = n_em_local // 2
+            result_em = em_feats.copy()
+            for p in range(n_pairs):
+                re = em_feats[:, :, 2 * p]
+                im = em_feats[:, :, 2 * p + 1]
+                result_em[:, :, 2 * p] = re * cos_p - im * sin_p
+                result_em[:, :, 2 * p + 1] = re * sin_p + im * cos_p
+            em_feats[:] = ((1.0 - w_norm) * em_feats + w_norm * result_em).astype(
+                em_feats.dtype
+            )
+
+        # ── 2 Geosteering R7-R8 (Fase III) ────────────────────────
+        elif nt == "bha_vibration":
+            # ── R7: deslocamento lateral sinusoidal ─────────────────
+            shift = noise_level * 0.5
+            seq_len_local = em_feats.shape[1]
+            t = np.arange(seq_len_local).reshape(1, -1, 1)
+            phase = rng.uniform(0, 2 * np.pi, size=(1, 1, em_feats.shape[2]))
+            vibration = shift * np.sin(2.0 * np.pi * t / max(seq_len_local, 1) + phase)
+            em_feats += w_norm * vibration.astype(em_feats.dtype)
+
+        elif nt == "eccentricity":
+            # ── R8: modulacao de ganho cossenoidal ──────────────────
+            ecc = noise_level * 0.2
+            seq_len_local = em_feats.shape[1]
+            t = np.arange(seq_len_local).reshape(1, -1, 1)
+            phase = rng.uniform(0, 2 * np.pi, size=(1, 1, em_feats.shape[2]))
+            modulation = 1.0 + ecc * np.cos(
+                2.0 * np.pi * t / max(seq_len_local, 1) + phase
+            )
+            noisy = em_feats * modulation
             em_feats[:] = ((1.0 - w_norm) * em_feats + w_norm * noisy).astype(
                 em_feats.dtype
             )

@@ -10,7 +10,7 @@
 # ║                                                                            ║
 # ║  Modulos: metrics.py, comparison.py, advanced.py, predict.py,            ║
 # ║           manifest.py, report.py, realtime_comparison.py,               ║
-# ║           geosteering_metrics.py, geosteering_report.py                 ║
+# ║           geosteering_metrics.py, geosteering_report.py, dod.py        ║
 # ║  Proposito: Metricas de avaliacao pos-treinamento e comparacao de modelos ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 8                                     ║
 # ║                                                                            ║
@@ -91,6 +91,20 @@ from geosteering_ai.evaluation.comparison import ComparisonResult, compare_model
 # Imports: config_report.py — relatorio pre-treinamento (C42A adaptado)
 # ──────────────────────────────────────────────────────────────────────
 from geosteering_ai.evaluation.config_report import generate_config_report
+
+# ──────────────────────────────────────────────────────────────────────
+# Imports: dod.py — Picasso DOD (Depth of Detection) analitico
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.evaluation.dod import (
+    DODResult,
+    compute_dod_anisotropy,
+    compute_dod_contrast,
+    compute_dod_dip,
+    compute_dod_frequency,
+    compute_dod_map,
+    compute_dod_snr,
+    compute_dod_standard,
+)
 
 # ──────────────────────────────────────────────────────────────────────
 # Imports: geosteering_metrics.py — metricas especificas geosteering (C71)
@@ -181,4 +195,13 @@ __all__ = [
     "generate_geosteering_report",
     # --- config_report.py: relatorio pre-treinamento (C42A adaptado) ---
     "generate_config_report",
+    # --- dod.py: Picasso DOD (Depth of Detection) analitico ---
+    "DODResult",
+    "compute_dod_standard",
+    "compute_dod_contrast",
+    "compute_dod_snr",
+    "compute_dod_frequency",
+    "compute_dod_anisotropy",
+    "compute_dod_dip",
+    "compute_dod_map",
 ]

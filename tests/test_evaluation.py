@@ -19,21 +19,18 @@ Estrutura (ALL CPU-safe — nenhum teste requer TF):
 import numpy as np
 import pytest
 
+from geosteering_ai.evaluation.comparison import ComparisonResult, compare_models
+
 # ── Imports CPU-safe (evaluation e NumPy-only) ───────────────────────────────
 from geosteering_ai.evaluation.metrics import (
     MetricsReport,
     compute_all_metrics,
+    compute_mae,
+    compute_mape,
+    compute_mbe,
     compute_r2,
     compute_rmse,
-    compute_mae,
-    compute_mbe,
-    compute_mape,
 )
-from geosteering_ai.evaluation.comparison import (
-    ComparisonResult,
-    compare_models,
-)
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # TESTES: METRICAS INDIVIDUAIS
@@ -158,9 +155,15 @@ class TestMetricsReport:
 
     def _make_report(self, **kwargs):
         defaults = dict(
-            r2=0.98, r2_rh=0.985, r2_rv=0.975,
-            rmse=0.02, rmse_rh=0.018, rmse_rv=0.022,
-            mae=0.015, mbe=-0.001, mape=1.5,
+            r2=0.98,
+            r2_rh=0.985,
+            r2_rv=0.975,
+            rmse=0.02,
+            rmse_rh=0.018,
+            rmse_rv=0.022,
+            mae=0.015,
+            mbe=-0.001,
+            mape=1.5,
         )
         defaults.update(kwargs)
         return MetricsReport(**defaults)
@@ -177,8 +180,17 @@ class TestMetricsReport:
         d = report.to_dict()
         assert isinstance(d, dict)
         assert len(d) == 9
-        expected_keys = {"r2", "r2_rh", "r2_rv", "rmse", "rmse_rh",
-                         "rmse_rv", "mae", "mbe", "mape"}
+        expected_keys = {
+            "r2",
+            "r2_rh",
+            "r2_rv",
+            "rmse",
+            "rmse_rh",
+            "rmse_rv",
+            "mae",
+            "mbe",
+            "mape",
+        }
         assert set(d.keys()) == expected_keys
 
     def test_to_dict_values(self):
@@ -256,14 +268,26 @@ class TestCompareModels:
     def _make_reports(self):
         """Cria 2 MetricsReport: ResNet melhor que UNet."""
         r_resnet = MetricsReport(
-            r2=0.98, r2_rh=0.985, r2_rv=0.975,
-            rmse=0.02, rmse_rh=0.018, rmse_rv=0.022,
-            mae=0.015, mbe=-0.001, mape=1.5,
+            r2=0.98,
+            r2_rh=0.985,
+            r2_rv=0.975,
+            rmse=0.02,
+            rmse_rh=0.018,
+            rmse_rv=0.022,
+            mae=0.015,
+            mbe=-0.001,
+            mape=1.5,
         )
         r_unet = MetricsReport(
-            r2=0.95, r2_rh=0.96, r2_rv=0.94,
-            rmse=0.04, rmse_rh=0.035, rmse_rv=0.045,
-            mae=0.03, mbe=0.005, mape=3.0,
+            r2=0.95,
+            r2_rh=0.96,
+            r2_rv=0.94,
+            rmse=0.04,
+            rmse_rh=0.035,
+            rmse_rv=0.045,
+            mae=0.03,
+            mbe=0.005,
+            mape=3.0,
         )
         return {"ResNet_18": r_resnet, "UNet": r_unet}
 
@@ -310,3 +334,145 @@ class TestCompareModels:
         assert "ResNet_18" in s
         assert "UNet" in s
         assert "RANKING" in s
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TESTES: DOD (Depth of Detection) — Picasso analitico
+# ════════════════════════════════════════════════════════════════════════════
+
+from geosteering_ai.evaluation.dod import (
+    DODResult,
+    compute_dod_anisotropy,
+    compute_dod_contrast,
+    compute_dod_dip,
+    compute_dod_frequency,
+    compute_dod_map,
+    compute_dod_snr,
+    compute_dod_standard,
+)
+
+
+class TestDOD:
+    """Testes para o modulo DOD (Depth of Detection) analitico."""
+
+    # ── Ranges de resistividade para testes ───────────────────────────
+    RT1 = np.logspace(-1, 3, 20)  # 0.1 a 1000 Ohm.m
+    RT2 = np.logspace(-1, 3, 20)
+
+    def test_dod_standard_shape(self):
+        """compute_dod_standard via meshgrid produz shape (n_rt1, n_rt2)."""
+        RT1_grid, RT2_grid = np.meshgrid(self.RT1, self.RT2, indexing="ij")
+        dod = compute_dod_standard(RT1_grid, RT2_grid)
+        assert dod.shape == (20, 20)
+        # Todos os valores devem ser >= 0 (DOD fisicamente positivo)
+        assert np.all(dod >= 0.0)
+
+    def test_dod_diagonal_zero(self):
+        """DOD ~ 0 na diagonal (rt1 == rt2, sem contraste)."""
+        rt_values = np.logspace(-1, 3, 50)
+        dod = compute_dod_standard(rt_values, rt_values)
+        # Na diagonal, rt1 == rt2 → contraste = 0 → DOD = 0
+        assert np.allclose(dod, 0.0, atol=1e-10)
+
+    def test_dod_contrast_monotonic(self):
+        """Maior contraste de resistividade → maior DOD."""
+        rt1_fixed = np.array([10.0])
+        # Contraste crescente: 10 vs 20, 10 vs 100, 10 vs 1000
+        rt2_values = np.array([20.0, 100.0, 1000.0])
+        dod_values = []
+        for rt2 in rt2_values:
+            dod = compute_dod_contrast(rt1_fixed, np.array([rt2]))
+            dod_values.append(float(dod[0]))
+        # DOD deve ser monotonicamente crescente com contraste
+        assert dod_values[0] < dod_values[1] < dod_values[2]
+
+    def test_dod_frequency_inverse(self):
+        """Frequencia menor → DOD maior (penetracao mais profunda)."""
+        rt1 = np.array([10.0])
+        rt2 = np.array([100.0])
+        dod_low_freq = compute_dod_standard(rt1, rt2, frequency_hz=2_000.0)
+        dod_high_freq = compute_dod_standard(rt1, rt2, frequency_hz=200_000.0)
+        # Frequencia 100x menor → DOD ~10x maior (escala sqrt)
+        assert float(dod_low_freq.item()) > float(dod_high_freq.item())
+
+    def test_dod_result_dataclass(self):
+        """DODResult contem todos os campos esperados."""
+        result = compute_dod_map(
+            rt1_range=np.logspace(-1, 2, 10),
+            rt2_range=np.logspace(-1, 2, 10),
+            method="standard",
+        )
+        assert isinstance(result, DODResult)
+        assert result.dod_map.shape == (10, 10)
+        assert result.method == "standard"
+        assert result.frequency_hz == 20_000.0
+        assert result.spacing_m == 1.0
+        assert isinstance(result.metadata, dict)
+        assert result.rt1_range.shape == (10,)
+        assert result.rt2_range.shape == (10,)
+
+    def test_compute_dod_map_dispatch(self):
+        """compute_dod_map despacha corretamente para todos os 6 metodos."""
+        rt1 = np.logspace(0, 2, 5)
+        rt2 = np.logspace(0, 2, 5)
+
+        for method in ["standard", "contrast", "snr", "anisotropy", "dip"]:
+            result = compute_dod_map(rt1, rt2, method=method)
+            assert isinstance(result, DODResult), f"Falha para method={method}"
+            assert result.method == method
+            assert result.dod_map.shape == (
+                5,
+                5,
+            ), f"Shape incorreto para method={method}: {result.dod_map.shape}"
+
+        # Frequency retorna 3D (5, 5, 3) com default 3 frequencias
+        result_freq = compute_dod_map(rt1, rt2, method="frequency")
+        assert result_freq.dod_map.shape == (5, 5, 3)
+
+    def test_compute_dod_map_invalid_method_raises(self):
+        """Metodo invalido levanta ValueError."""
+        with pytest.raises(ValueError, match="invalido"):
+            compute_dod_map(
+                np.logspace(0, 2, 5),
+                np.logspace(0, 2, 5),
+                method="invalid",
+            )
+
+    def test_dod_snr_noise_effect(self):
+        """Ruído maior → DOD menor (degradação por SNR)."""
+        # Contraste baixo (10 vs 12 Ωm, signal≈0.17) para que o noise
+        # realmente degrade o SNR abaixo do threshold.
+        rt1 = np.array([10.0])
+        rt2 = np.array([12.0])
+        dod_low_noise = compute_dod_snr(rt1, rt2, noise_level=0.01)
+        dod_high_noise = compute_dod_snr(rt1, rt2, noise_level=0.5)
+        assert float(dod_low_noise.item()) > float(dod_high_noise.item())
+
+    def test_dod_anisotropy_isotropic(self):
+        """Meio isotropico (rho_h == rho_v) → DOD = skin depth."""
+        rho = np.array([10.0])
+        dod = compute_dod_anisotropy(rho, rho, frequency_hz=20_000.0)
+        # DOD deve ser igual ao skin depth para meio isotropico
+        from geosteering_ai.evaluation.dod import _compute_skin_depth
+
+        delta = _compute_skin_depth(rho, 20_000.0)
+        assert np.allclose(dod, delta)
+
+    def test_dod_dip_reduces_dod(self):
+        """Mergulho > 0 reduz DOD (correcao coseno)."""
+        rt1 = np.array([10.0])
+        rt2 = np.array([100.0])
+        dod_0 = compute_dod_dip(rt1, rt2, dip_deg=0.0)
+        dod_45 = compute_dod_dip(rt1, rt2, dip_deg=45.0)
+        dod_90 = compute_dod_dip(rt1, rt2, dip_deg=90.0)
+        # dip=0 → maximo, dip=90 → zero
+        assert float(dod_0.item()) > float(dod_45.item())
+        assert float(dod_90.item()) == pytest.approx(0.0, abs=1e-10)
+
+    def test_dod_frequency_sweep_shape(self):
+        """compute_dod_frequency retorna shape correto para sweep."""
+        rt1 = np.array([10.0, 100.0])
+        rt2 = np.array([10.0, 100.0])
+        freqs = [2_000.0, 20_000.0, 200_000.0, 2_000_000.0]
+        dod_3d = compute_dod_frequency(rt1, rt2, frequencies=freqs)
+        assert dod_3d.shape == (2, 4)  # (n_rt, n_freq)
