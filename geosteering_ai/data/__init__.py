@@ -123,6 +123,16 @@ from geosteering_ai.data.second_order import (
 from geosteering_ai.data.splitting import DataSplits, apply_split, split_model_ids
 
 # ──────────────────────────────────────────────────────────────────────
+# Imports: surrogate_data.py — extracao de pares para SurrogateNet
+# ──────────────────────────────────────────────────────────────────────
+from geosteering_ai.data.surrogate_data import (
+    SurrogateDataset,
+    compute_component_weights,
+    extract_surrogate_pairs,
+    get_component_column_indices,
+)
+
+# ──────────────────────────────────────────────────────────────────────
 # D8: Exports publicos — agrupados semanticamente por modulo
 # ──────────────────────────────────────────────────────────────────────
 __all__ = [
@@ -173,4 +183,9 @@ __all__ = [
     # --- second_order.py: features de 2o grau (Estrategia C) ---
     "compute_second_order_features",
     "compute_second_order_features_tf",
+    # --- surrogate_data.py: extracao de pares para SurrogateNet ---
+    "SurrogateDataset",
+    "extract_surrogate_pairs",
+    "get_component_column_indices",
+    "compute_component_weights",
 ]

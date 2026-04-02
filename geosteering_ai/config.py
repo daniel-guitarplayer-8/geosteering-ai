@@ -431,6 +431,45 @@ class PipelineConfig:
     pinns_data_norm: str = "l2"
     pinns_use_forward_surrogate: bool = False
     surrogate_model_path: str = ""
+    # ── Surrogate output mode ────────────────────────────────────
+    # Controla quais canais o forward model analitico retorna:
+    #   "magnitude": log10|H| (2 canais: |Hxx|, |Hzz|) — comportamento
+    #       original, compara apenas magnitudes dos campos EM.
+    #   "complex": Re(H) e Im(H) separados (4 canais: Re(Hxx), Im(Hxx),
+    #       Re(Hzz), Im(Hzz)) — inclui informacao de fase, fechando o
+    #       loop fisico completo com as mesmas grandezas usadas como
+    #       INPUT_FEATURES da rede de inversao.
+    # O modo "complex" eh recomendado pois a fase contem informacao
+    # complementar a magnitude: fase ∝ -spacing/delta enquanto
+    # magnitude ∝ exp(-spacing/delta). Ambos dependem do skin depth
+    # delta = sqrt(2*rho/(omega*mu0)), mas com sensibilidades diferentes.
+    # Ref: Ward & Hohmann (1988) eq. 4.69; docs/ARCHITECTURE_v2.md secao 18.
+    surrogate_output_mode: str = "complex"
+    # ── Surrogate output components ──────────────────────────────────
+    # Lista de componentes EM que o surrogate deve predizer.
+    # Cada componente gera 2 canais (Re + Im) no modo "complex", ou
+    # 1 canal (log10|H|) no modo "magnitude".
+    # Componentes validas: XX, XY, XZ, YX, YY, YZ, ZX, ZY, ZZ
+    # (mapeiam para EM_COMPONENTS em data/loading.py).
+    #
+    # Modos de operacao:
+    #   Modo A (default): ["XX", "ZZ"] — baseline, 4 canais Re+Im
+    #   Modo B (geosteering): ["XX", "ZZ", "XZ", "ZX"] — 8 canais,
+    #     inclui cross-components para deteccao de fronteiras (USD/UAD)
+    #   Modo C (tensor completo): todos os 9 — 18 canais
+    #
+    # Componentes cruzadas (XZ, ZX) sao zero em meio homogeneo (dip=0)
+    # e nao-zero apenas na presenca de interfaces — sinal direto de
+    # fronteiras de camada. Requerem dados multi-dip para treino.
+    # Ref: docs/ARCHITECTURE_v2.md secao 18; Geosinais USD/UAD.
+    surrogate_output_components: list = field(default_factory=lambda: ["XX", "ZZ"])
+    # ── Surrogate training weights ───────────────────────────────────
+    # Pesos por grupo de componentes na loss de treino do surrogate.
+    # Componentes cruzadas tem magnitudes ~10-100x menores que diagonais
+    # em dip baixo, necessitando pesos maiores para balanceamento.
+    # Usado apenas no treino do SurrogateNet (nao no pipeline de inversao).
+    surrogate_weight_diagonal: float = 1.0
+    surrogate_weight_cross: float = 5.0
     # ── TIV Constraint (rho_v >= rho_h) ──────────────────────────────
     # Soft constraint via penalidade quadratica: max(0, rho_h - rho_v)^2.
     # Pode ser ativada independentemente de use_pinns.
@@ -775,6 +814,35 @@ class PipelineConfig:
         assert (
             self.pinns_ramp_epochs >= 0
         ), f"pinns_ramp_epochs deve ser >= 0, recebido: {self.pinns_ramp_epochs}"
+        # Nota: duplica losses/pinns.py:VALID_SURROGATE_OUTPUT_MODES
+        # (importar daqui causaria dependencia circular config→losses→config).
+        _VALID_SURROGATE_OUTPUT_MODES = {"magnitude", "complex"}
+        assert self.surrogate_output_mode in _VALID_SURROGATE_OUTPUT_MODES, (
+            f"surrogate_output_mode='{self.surrogate_output_mode}' invalido. "
+            f"Validos: {_VALID_SURROGATE_OUTPUT_MODES}"
+        )
+        # Nota: duplica data/loading.py:EM_COMPONENTS.keys()
+        _VALID_EM_COMPONENTS = {"XX", "XY", "XZ", "YX", "YY", "YZ", "ZX", "ZY", "ZZ"}
+        assert (
+            len(self.surrogate_output_components) > 0
+        ), "surrogate_output_components deve ter pelo menos 1 componente"
+        for comp in self.surrogate_output_components:
+            assert comp in _VALID_EM_COMPONENTS, (
+                f"surrogate_output_components contem '{comp}' invalido. "
+                f"Validos: {_VALID_EM_COMPONENTS}"
+            )
+        assert len(self.surrogate_output_components) == len(
+            set(self.surrogate_output_components)
+        ), (
+            f"surrogate_output_components contem duplicatas: "
+            f"{self.surrogate_output_components}"
+        )
+        assert (
+            self.surrogate_weight_diagonal > 0
+        ), f"surrogate_weight_diagonal deve ser > 0, recebido: {self.surrogate_weight_diagonal}"
+        assert (
+            self.surrogate_weight_cross > 0
+        ), f"surrogate_weight_cross deve ser > 0, recebido: {self.surrogate_weight_cross}"
         if self.use_tiv_constraint:
             assert self.tiv_constraint_weight > 0, (
                 f"tiv_constraint_weight deve ser > 0 quando use_tiv_constraint=True, "

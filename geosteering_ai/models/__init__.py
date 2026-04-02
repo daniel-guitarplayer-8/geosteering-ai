@@ -59,6 +59,7 @@ from geosteering_ai.models.registry import (
     is_causal_compatible,
     list_available_models,
 )
+from geosteering_ai.models.surrogate import build_surrogate
 
 # ── D8: Exports publicos ─────────────────────────────────────────────────
 __all__ = [
@@ -81,4 +82,6 @@ __all__ = [
     # ── Static Injection (Abordagens B/C — P2/P3) ────────────────────
     "static_injection_stem",
     "film_layer",
+    # ── SurrogateNet (forward model neural — PINNs) ──────────────────
+    "build_surrogate",
 ]

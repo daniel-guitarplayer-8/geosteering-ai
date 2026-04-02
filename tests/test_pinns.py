@@ -3,7 +3,10 @@
 Cobertura:
     - TestLambdaSchedule: 4 schedules × 3 fases (warmup/ramp/hold)
     - TestOraclePhysicsLoss: 3 normas (l1/l2/huber), DTB compat
-    - TestSurrogatePhysicsLoss: placeholder (retorna 0.0)
+    - TestSurrogatePhysicsLoss: forward analitico (default complex)
+    - TestSurrogateComplexOutput: modo complex Re+Im (4 canais),
+      shape, fase, consistencia com magnitude, gradientes
+    - TestSurrogateMagnitudeMode: modo magnitude legado (2 canais)
     - TestMaxwellPhysicsLoss: curvatura, normalizacao por condutividade
     - TestSmoothnessLoss: Tikhonov + TV, constante vs oscilante
     - TestSkinDepthLoss: resolucao EM, constante vs gradiente abrupto
@@ -27,6 +30,7 @@ from geosteering_ai.config import PipelineConfig
 from geosteering_ai.losses.pinns import (
     VALID_LAMBDA_SCHEDULES,
     VALID_PINNS_SCENARIOS,
+    VALID_SURROGATE_OUTPUT_MODES,
     build_pinns_loss,
     compute_lambda_schedule,
     make_continuity_loss,
@@ -359,6 +363,291 @@ class TestSurrogatePhysicsLoss:
         y_true, y_pred = _make_tensors()
         loss = fn(y_true, y_pred)
         assert loss.numpy() > 0.0
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTES: SURROGATE COMPLEX OUTPUT (Re+Im, 4 canais)
+# ════════════════════════════════════════════════════════════════════════
+# Valida o modo "complex" do forward analitico que retorna
+# [Re(Hxx), Im(Hxx), Re(Hzz), Im(Hzz)] em vez de log10|H|.
+# Propriedades fisicas verificadas:
+#   - Saida tem 4 canais (Re+Im para Hxx e Hzz)
+#   - Im(H) < 0 (fase negativa: onda que se propaga)
+#   - Re(H)^2 + Im(H)^2 == |H|^2 (Euler)
+#   - Gradientes fluem corretamente via GradientTape
+#   - Modo complex vs magnitude produzem losses diferentes
+# ──────────────────────────────────────────────────────────────────────
+
+
+@skip_no_tf
+class TestSurrogateComplexOutput:
+    """Testes para surrogate_output_mode='complex' (Re+Im, 4 canais)."""
+
+    def test_complex_forward_shape(self):
+        """Forward analitico complexo retorna shape (B, N, 4)."""
+        from geosteering_ai.losses.pinns import _analytical_forward_1d_complex
+
+        rho_log = tf.constant(np.full((B, N, 2), 1.0, dtype=np.float32))  # 10 Ohm.m
+        omega = 2.0 * math.pi * 20000.0
+        mu0 = 4.0 * math.pi * 1e-7
+        omega_mu = omega * mu0
+        h = _analytical_forward_1d_complex(rho_log, omega_mu, 1.0)
+        assert h.shape == (B, N, 4)
+
+    def test_complex_forward_re_im_nonzero(self):
+        """Tanto Re(H) quanto Im(H) devem ser nao-zero para rho finito."""
+        from geosteering_ai.losses.pinns import _analytical_forward_1d_complex
+
+        rho_log = tf.constant(np.full((B, N, 2), 1.0, dtype=np.float32))  # 10 Ohm.m
+        omega_mu = 2.0 * math.pi * 20000.0 * 4.0 * math.pi * 1e-7
+        h = _analytical_forward_1d_complex(rho_log, omega_mu, 1.0)
+        # Re(Hxx), Im(Hxx), Re(Hzz), Im(Hzz) — todos nao-zero
+        for i in range(4):
+            assert tf.reduce_all(
+                tf.abs(h[..., i]) > 1e-15
+            ).numpy(), f"Canal {i} eh zero — esperado nao-zero"
+
+    def test_complex_im_negative_phase(self):
+        """Im(H) deve ser negativo (fase = -spacing/delta < 0).
+
+        No regime difusivo, a onda EM se propaga com fase decrescente:
+        H = AC × exp(-(1+j)×L/delta) → Im = AC×exp(-L/delta)×sin(-L/delta).
+        Para L/delta < pi, sin(-L/delta) < 0 → Im(H) < 0.
+        """
+        from geosteering_ai.losses.pinns import _analytical_forward_1d_complex
+
+        # rho=10 Ohm.m → delta ≈ 11.3m → L/delta ≈ 0.088 < pi → sin < 0
+        rho_log = tf.constant(np.full((B, N, 2), 1.0, dtype=np.float32))
+        omega_mu = 2.0 * math.pi * 20000.0 * 4.0 * math.pi * 1e-7
+        h = _analytical_forward_1d_complex(rho_log, omega_mu, 1.0)
+        im_hxx = h[..., 1]  # Im(Hxx)
+        im_hzz = h[..., 3]  # Im(Hzz)
+        assert tf.reduce_all(im_hxx < 0).numpy(), "Im(Hxx) deveria ser < 0"
+        assert tf.reduce_all(im_hzz < 0).numpy(), "Im(Hzz) deveria ser < 0"
+
+    def test_complex_magnitude_consistency(self):
+        """Re(H)^2 + Im(H)^2 deve ser consistente com |H|^2 do modo magnitude.
+
+        Verifica a identidade de Euler: |H|^2 = Re(H)^2 + Im(H)^2.
+        Compara o resultado do modo complex com o modo magnitude.
+        """
+        from geosteering_ai.losses.pinns import (
+            _analytical_forward_1d,
+            _analytical_forward_1d_complex,
+        )
+
+        rho_log = tf.constant(np.full((B, N, 2), 1.5, dtype=np.float32))  # ~31.6 Ohm.m
+        omega_mu = 2.0 * math.pi * 20000.0 * 4.0 * math.pi * 1e-7
+
+        # Modo complex: (B, N, 4)
+        h_complex = _analytical_forward_1d_complex(rho_log, omega_mu, 1.0)
+        re_hxx = h_complex[..., 0]
+        im_hxx = h_complex[..., 1]
+        re_hzz = h_complex[..., 2]
+        im_hzz = h_complex[..., 3]
+
+        # Magnitude via Re/Im: |H| = sqrt(Re^2 + Im^2)
+        mag_hxx_from_complex = tf.sqrt(re_hxx**2 + im_hxx**2)
+        mag_hzz_from_complex = tf.sqrt(re_hzz**2 + im_hzz**2)
+
+        # Modo magnitude: log10|H| → |H| = 10^(log10|H|)
+        h_mag = _analytical_forward_1d(rho_log, omega_mu, 1.0)
+        mag_hxx_from_magnitude = tf.pow(10.0, h_mag[..., 0])
+        mag_hzz_from_magnitude = tf.pow(10.0, h_mag[..., 1])
+
+        # Comparacao: devem ser identicas (mesma fisica)
+        np.testing.assert_allclose(
+            mag_hxx_from_complex.numpy(),
+            mag_hxx_from_magnitude.numpy(),
+            rtol=1e-5,
+            err_msg="Magnitude Hxx: complex vs magnitude inconsistentes",
+        )
+        np.testing.assert_allclose(
+            mag_hzz_from_complex.numpy(),
+            mag_hzz_from_magnitude.numpy(),
+            rtol=1e-5,
+            err_msg="Magnitude Hzz: complex vs magnitude inconsistentes",
+        )
+
+    def test_complex_gradient_flows(self):
+        """Gradientes fluem de loss_complex ate rho_pred via GradientTape."""
+        config = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+            surrogate_output_mode="complex",
+        )
+        fn = make_surrogate_physics_loss(config)
+        y_true, _ = _make_tensors()
+        y_pred = tf.Variable(y_true + 0.1)
+        with tf.GradientTape() as tape:
+            loss = fn(y_true, y_pred)
+        grad = tape.gradient(loss, y_pred)
+        assert grad is not None, "Gradiente eh None — grafo desconectado"
+        assert not tf.reduce_all(grad == 0).numpy(), "Gradiente todo zero"
+
+    def test_complex_loss_nonzero_different_preds(self):
+        """Com modo complex, rho_pred != rho_true → loss > 0."""
+        config = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+            surrogate_output_mode="complex",
+        )
+        fn = make_surrogate_physics_loss(config)
+        y_true, y_pred = _make_tensors()
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() > 0.0
+
+    def test_complex_loss_zero_identical(self):
+        """Com modo complex, rho_pred == rho_true → loss ≈ 0."""
+        config = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+            surrogate_output_mode="complex",
+        )
+        fn = make_surrogate_physics_loss(config)
+        y_true, _ = _make_tensors()
+        loss = fn(y_true, y_true)
+        assert loss.numpy() == pytest.approx(0.0, abs=1e-6)
+
+    def test_complex_monotonicity(self):
+        """Maior diferenca em rho → maior loss (monotonicidade) no modo complex."""
+        config = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+            surrogate_output_mode="complex",
+        )
+        fn = make_surrogate_physics_loss(config)
+        y_true, _ = _make_tensors()
+        loss_small = fn(y_true, y_true + 0.01)
+        loss_large = fn(y_true, y_true + 0.5)
+        assert loss_large.numpy() > loss_small.numpy()
+
+    def test_complex_l1_and_huber_norms(self):
+        """Normas L1 e Huber funcionam com modo complex."""
+        for norm_name in ("l1", "huber"):
+            config = _make_config(
+                pinns_scenario="surrogate",
+                pinns_use_forward_surrogate=False,
+                surrogate_output_mode="complex",
+                pinns_physics_norm=norm_name,
+            )
+            fn = make_surrogate_physics_loss(config)
+            y_true, y_pred = _make_tensors()
+            loss = fn(y_true, y_pred)
+            assert loss.numpy() > 0.0, f"Norma {norm_name} retornou loss=0"
+
+    def test_complex_extreme_low_rho_gradient_flow(self):
+        """Gradientes fluem mesmo com rho muito baixo (limite do clamp).
+
+        Com rho_log = -2.0 (0.01 Ohm.m, limite inferior do clamp),
+        o ratio = L/delta eh grande mas clampado a 50.0.
+        O gradiente deve continuar fluindo (nao zero) gracas ao clamp.
+        """
+        config = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+            surrogate_output_mode="complex",
+        )
+        fn = make_surrogate_physics_loss(config)
+        # rho_log = -2.0 → 0.01 Ohm.m (muito condutivo, limite do clamp)
+        y_true_low = tf.constant(np.full((B, N, 2), -2.0, dtype=np.float32))
+        y_pred_low = tf.Variable(tf.constant(np.full((B, N, 2), -1.5, dtype=np.float32)))
+        with tf.GradientTape() as tape:
+            loss = fn(y_true_low, y_pred_low)
+        grad = tape.gradient(loss, y_pred_low)
+        assert grad is not None, "Gradiente None com rho baixo"
+        assert not tf.reduce_all(
+            grad == 0
+        ).numpy(), "Gradiente zero com rho baixo — ratio clamp pode estar faltando"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTES: SURROGATE MAGNITUDE MODE (legado, 2 canais)
+# ════════════════════════════════════════════════════════════════════════
+# Valida que o modo "magnitude" (comportamento original) continua
+# funcionando corretamente apos a refatoracao.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@skip_no_tf
+class TestSurrogateMagnitudeMode:
+    """Testes para surrogate_output_mode='magnitude' (log10|H|, 2 canais)."""
+
+    def test_magnitude_loss_nonzero(self):
+        """Modo magnitude retorna loss > 0 com predicoes diferentes."""
+        config = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+            surrogate_output_mode="magnitude",
+        )
+        fn = make_surrogate_physics_loss(config)
+        y_true, y_pred = _make_tensors()
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() > 0.0
+
+    def test_magnitude_loss_zero_identical(self):
+        """Modo magnitude retorna loss ≈ 0 com predicoes identicas."""
+        config = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+            surrogate_output_mode="magnitude",
+        )
+        fn = make_surrogate_physics_loss(config)
+        y_true, _ = _make_tensors()
+        loss = fn(y_true, y_true)
+        assert loss.numpy() == pytest.approx(0.0, abs=1e-6)
+
+    def test_magnitude_differs_from_complex(self):
+        """Modo magnitude e complex produzem losses numericamente diferentes.
+
+        Verificacao de que os dois modos usam funcoes forward distintas:
+        magnitude opera em log10|H| (2 canais), complex opera em Re/Im (4 canais).
+        Com os mesmos inputs, os valores de loss devem diferir.
+        """
+        y_true, y_pred = _make_tensors()
+        config_mag = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+            surrogate_output_mode="magnitude",
+        )
+        config_cplx = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+            surrogate_output_mode="complex",
+        )
+        loss_mag = make_surrogate_physics_loss(config_mag)(y_true, y_pred)
+        loss_cplx = make_surrogate_physics_loss(config_cplx)(y_true, y_pred)
+        # Ambas > 0 e valores diferentes (escalas e espacos distintos)
+        assert loss_mag.numpy() > 0.0
+        assert loss_cplx.numpy() > 0.0
+        assert loss_mag.numpy() != pytest.approx(
+            loss_cplx.numpy(), rel=0.01
+        ), "Losses magnitude e complex deveriam diferir numericamente"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TESTES: CONFIG — SURROGATE OUTPUT MODE VALIDATION
+# ════════════════════════════════════════════════════════════════════════
+
+
+class TestConfigSurrogateOutputMode:
+    """Testes para validacao de surrogate_output_mode em PipelineConfig."""
+
+    def test_valid_modes(self):
+        """Modos 'magnitude' e 'complex' sao aceitos."""
+        for mode in ("magnitude", "complex"):
+            config = PipelineConfig(surrogate_output_mode=mode)
+            assert config.surrogate_output_mode == mode
+
+    def test_invalid_mode_raises(self):
+        """Modo invalido gera AssertionError na validacao."""
+        with pytest.raises(AssertionError, match="surrogate_output_mode"):
+            PipelineConfig(surrogate_output_mode="phase_only")
+
+    def test_default_is_complex(self):
+        """Default eh 'complex' (recomendado — inclui informacao de fase)."""
+        config = PipelineConfig()
+        assert config.surrogate_output_mode == "complex"
 
 
 # ════════════════════════════════════════════════════════════════════════

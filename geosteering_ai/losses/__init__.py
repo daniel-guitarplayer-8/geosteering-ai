@@ -38,6 +38,7 @@ from geosteering_ai.losses.factory import (
 from geosteering_ai.losses.pinns import (
     VALID_LAMBDA_SCHEDULES,
     VALID_PINNS_SCENARIOS,
+    VALID_SURROGATE_OUTPUT_MODES,
     build_pinns_loss,
     compute_lambda_schedule,
     make_maxwell_physics_loss,
@@ -55,6 +56,7 @@ __all__ = [
     # ── PINNs ─────────────────────────────────────────────────────────
     "VALID_PINNS_SCENARIOS",
     "VALID_LAMBDA_SCHEDULES",
+    "VALID_SURROGATE_OUTPUT_MODES",
     "build_pinns_loss",
     "compute_lambda_schedule",
     "make_oracle_physics_loss",

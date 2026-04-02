@@ -1,0 +1,638 @@
+# Roadmap Completo — Geosteering AI v2.0+
+
+**Versão do documento:** 1.0 (Abril 2026)
+**Autor:** Daniel Leal
+**Projeto:** Inversão 1D de Resistividade via Deep Learning para Geosteering
+**Framework:** TensorFlow 2.x / Keras (exclusivo)
+**Repositório:** `github.com/daniel-guitarplayer-8/geosteering-ai`
+
+---
+
+## Sumário
+
+1. [Status Atual do Projeto](#1-status-atual-do-projeto-abril-2026)
+2. [Embasamento Científico](#2-embasamento-científico-literatura-2024-2026)
+3. [Roadmap de Desenvolvimento (F1-F6)](#3-roadmap-de-desenvolvimento-fases-f1-f6)
+4. [Propostas de Novos Recursos](#4-propostas-de-novos-recursos)
+5. [Otimizações de Código](#5-otimizações-de-código-recomendadas)
+6. [Próximos Passos](#6-próximos-passos-requisições-futuras)
+7. [Referências Bibliográficas](#7-referências-bibliográficas)
+8. [Arquivos Críticos](#8-arquivos-críticos-para-consulta)
+
+---
+
+## 1. Status Atual do Projeto (Abril 2026)
+
+### 1.1 Métricas Globais
+
+| Métrica | Valor |
+|:--------|:------|
+| Linhas de código (produção) | 44.762 LOC |
+| Linhas de testes | 9.024 LOC |
+| Arquivos Python (src) | 73 |
+| Arquivos Python (testes) | 15 |
+| Testes totais | 802 (CPU) / 1011+ (GPU) |
+| Campos PipelineConfig | 246 |
+| Arquiteturas (ModelRegistry) | 44 (9 famílias) |
+| Funções de perda | 26 (4 categorias) |
+| Tipos de ruído | 34 implementados |
+| Feature Views | 7 (identity, raw, H1_logH2, logH1_logH2, 3× razão/fase, second_order) |
+| Famílias de Geosinais | 5 (USD, UAD, UHR, UHA, U3DF) |
+| Cenários PINN | 8 (oracle, surrogate, maxwell, smoothness, skin_depth, continuity, variational, self_adaptive) |
+| Presets YAML | 7 (baseline, robusto, nstage_n2, nstage_n3, geosinais_p4, dtb_p5, realtime_causal) |
+| Callbacks Keras | 17+ |
+| Métricas customizadas | 3 (R2Score, PerComponentMetric, AnisotropyRatioError) |
+| Formatos de exportação | 3 (SavedModel, TFLite, ONNX) |
+
+### 1.2 Arquitetura do Pacote
+
+```
+geosteering_ai/                           # 73 arquivos, 44.762 LOC
+├── config.py                             # PipelineConfig (246 campos, 7 presets)
+├── data/ (12 módulos, ~6.700 LOC)
+│   ├── loading.py                        # Carregamento .dat 22-col Fortran
+│   ├── splitting.py                      # Split por modelo geológico (P1)
+│   ├── feature_views.py                  # 7 Feature Views (NumPy + TF)
+│   ├── geosignals.py                     # 5 famílias Geosinais (NumPy + TF)
+│   ├── scaling.py                        # 8 scalers + per-group P3
+│   ├── pipeline.py                       # DataPipeline on-the-fly (noise→FV→GS→scale)
+│   ├── boundaries.py                     # DTB labels (P5)
+│   ├── sampling.py                       # Oversampling alta rho (Estratégia B)
+│   ├── second_order.py                   # Features 2º grau (Estratégia C)
+│   ├── surrogate_data.py                 # Extração pares SurrogateNet (Modo A/B/C)
+│   └── inspection.py                     # Diagnóstico pré-treinamento
+├── noise/ (2 módulos, ~2.600 LOC)
+│   ├── functions.py                      # 34 tipos de ruído
+│   └── curriculum.py                     # Curriculum 3-phase (clean→ramp→stable)
+├── models/ (13 módulos, ~8.800 LOC)
+│   ├── blocks.py                         # 23+ blocos Keras reutilizáveis
+│   ├── cnn.py                            # ResNet-18/34/50, ConvNeXt, Inception, CNN_1D
+│   ├── tcn.py                            # TCN, TCN_Advanced
+│   ├── rnn.py                            # LSTM, BiLSTM
+│   ├── hybrid.py                         # CNN_LSTM, CNN_BiLSTM_ED
+│   ├── unet.py                           # 14 variantes U-Net
+│   ├── transformer.py                    # 6 Transformers
+│   ├── decomposition.py                  # N-BEATS, N-HiTS
+│   ├── advanced.py                       # DNN, FNO, DeepONet, Geophysical_Attention
+│   ├── geosteering.py                    # WaveNet, Causal_Transformer, Informer, Mamba_S4
+│   ├── surrogate.py                      # SurrogateNet TCN (campo receptivo ~127m)
+│   └── registry.py                       # ModelRegistry — 44 entradas + build()
+├── losses/ (3 módulos, ~3.600 LOC)
+│   ├── catalog.py                        # 26 funções de perda
+│   ├── factory.py                        # LossFactory.build_combined()
+│   └── pinns.py                          # 8 cenários PINN + TIV constraint + lambda schedule
+├── training/ (7 módulos, ~8.100 LOC)
+│   ├── loop.py                           # TrainingLoop.run()
+│   ├── callbacks.py                      # 17+ callbacks Keras
+│   ├── metrics.py                        # R2Score, PerComponentMetric, AnisotropyRatioError
+│   ├── nstage.py                         # NStageTrainer (N=2,3,4)
+│   ├── adaptation.py                     # DomainAdapter (fine-tune + progressive)
+│   └── optuna_hpo.py                     # HPO com Optuna
+├── inference/ (4 módulos, ~1.800 LOC)
+│   ├── pipeline.py                       # InferencePipeline serializável (save/load)
+│   ├── realtime.py                       # Sliding window (causal)
+│   ├── export.py                         # SavedModel, TFLite, ONNX
+│   └── uncertainty.py                    # MC Dropout + Ensemble
+├── evaluation/ (11 módulos, ~7.300 LOC)
+│   ├── metrics.py                        # MetricsReport (R², RMSE, MAE, MBE, MAPE)
+│   ├── comparison.py                     # Ranking multi-modelo
+│   ├── advanced.py                       # InterfaceReport, CoherenceReport, StabilityReport
+│   ├── dod.py                            # Picasso DOD analítico (6 métodos)
+│   ├── geosteering_metrics.py            # DTB error, look-ahead accuracy
+│   ├── realtime_comparison.py            # Offline vs Realtime
+│   ├── report.py                         # Relatório Markdown automático
+│   ├── manifest.py                       # Manifesto JSON reprodutibilidade
+│   └── config_report.py                  # Relatório pré-treinamento
+├── visualization/ (11 módulos, ~2.500 LOC)
+│   ├── eda.py                            # EDA avançada (6 funções)
+│   ├── holdout.py                        # True vs predicted (clean + noisy)
+│   ├── training.py                       # Curvas loss, R², LR, noise
+│   ├── error_maps.py                     # Heatmap 2D, barras, perfil espacial
+│   ├── geosteering.py                    # Curtain, DTB, dashboard
+│   ├── uncertainty.py                    # Histogramas, bandas, calibração
+│   ├── optuna_viz.py                     # Optuna (4 visualizações)
+│   └── export.py                         # Exportação batch (PNG, PDF)
+└── utils/ (6 módulos, ~2.500 LOC)
+    ├── logger.py                         # ColoredFormatter, setup_logger
+    ├── timer.py                          # ProgressTracker, elapsed_since
+    ├── validation.py                     # ValidationTracker, validate_shape
+    ├── formatting.py                     # format_number, log_header
+    ├── system.py                         # is_colab, get_gpu_info, set_seed
+    └── io.py                             # load_json, save_json, safe_mkdir
+```
+
+### 1.3 Funcionalidades Implementadas
+
+| Categoria | Funcionalidade | Status |
+|:----------|:---------------|:------:|
+| **Dados** | Carregamento .dat 22-col Fortran | ✅ |
+| **Dados** | Split por modelo geológico (P1) — evita data leakage | ✅ |
+| **Dados** | 7 Feature Views (NumPy + TF consistentes, SEMPRE log10) | ✅ |
+| **Dados** | 5 famílias Geosinais — USD, UAD, UHR, UHA, U3DF (NumPy + TF) | ✅ |
+| **Dados** | 8 scalers (Standard, Robust, MinMax, etc.) + per-group P3 | ✅ |
+| **Dados** | DataPipeline on-the-fly — GS veem ruído (fidelidade LWD) | ✅ |
+| **Dados** | DTB labels — detect_boundaries + compute_dtb (P5) | ✅ |
+| **Dados** | Oversampling alta rho (Estratégia B) | ✅ |
+| **Dados** | Features 2º grau — |H|², d|H|/dz, Re/Im ratio (Estratégia C) | ✅ |
+| **Dados** | SurrogateDataset — extração pares Modo A/B/C (K componentes) | ✅ |
+| **Ruído** | 34 tipos (9 CORE + 13 EXTENDED + 8 geofísicos + 4 geosteering) | ✅ |
+| **Ruído** | Curriculum 3-phase (clean → ramp → stable) | ✅ |
+| **Modelos** | 44 arquiteturas em 9 famílias (CNN, TCN, RNN, Hybrid, U-Net, Transformer, Decomposition, Operator, Geosteering) | ✅ |
+| **Modelos** | 23+ blocos Keras reutilizáveis | ✅ |
+| **Modelos** | SurrogateNet TCN dilatado (6 blocos, campo receptivo ~127m) | ✅ |
+| **Modelos** | Static injection P2/P3 (broadcast, dual_input, FiLM) | ✅ |
+| **Modelos** | TIVConstraintLayer (hard constraint rho_v ≥ rho_h via softplus) | ✅ |
+| **Losses** | 26 funções de perda (13 genéricas + 4 geofísicas + 2 geosteering + 7 avançadas) | ✅ |
+| **Losses** | 8 cenários PINN + 4 lambda schedules (fixed, linear, cosine, step) | ✅ |
+| **Losses** | Forward analítico 1D (magnitude log10|H| + complexo Re/Im) | ✅ |
+| **Losses** | TIV constraint loss (penaliza rho_h > rho_v) | ✅ |
+| **Losses** | LossFactory.build_combined() — base + look_ahead + DTB + PINNs | ✅ |
+| **Treinamento** | TrainingLoop.run() + N-Stage (N=2,3,4) com mini-curriculum | ✅ |
+| **Treinamento** | 17+ callbacks (DualValidation, PINN schedule, Causal, LR schedules) | ✅ |
+| **Treinamento** | HPO Optuna com visualizações | ✅ |
+| **Treinamento** | DomainAdapter (fine-tune + progressive) | ✅ |
+| **Treinamento** | GradientMonitor (normas por layer via GradientTape) | ✅ |
+| **Inferência** | InferencePipeline serializável (model + scalers + config → save/load) | ✅ |
+| **Inferência** | Realtime sliding window (causal, buffer FIFO) | ✅ |
+| **Inferência** | Export SavedModel / TFLite (com quantização) / ONNX | ✅ |
+| **Inferência** | UQ — MC Dropout (30 passes) + Ensemble + CI 95% | ✅ |
+| **Avaliação** | Métricas (R², RMSE, MAE, MBE, MAPE por componente) | ✅ |
+| **Avaliação** | DOD Picasso analítico (6 métodos: standard, contrast, SNR, frequency, anisotropy, dip) | ✅ |
+| **Avaliação** | Relatórios Markdown automáticos + Manifesto JSON | ✅ |
+| **Avaliação** | Comparação offline vs realtime + geosteering metrics | ✅ |
+| **Visualização** | EDA, holdout, training curves, error maps, geosteering, UQ, Optuna | ✅ |
+| **Compatibilidade** | Keras 3.x (8 fixes: KerasTensor, DepthwiseConv1D, FourierLayer, etc.) | ✅ |
+| **CI/CD** | GitHub Actions (compile + pytest + mypy, Python 3.10/3.11) | ✅ |
+| **Validação GPU** | 824 passed no Colab Pro+ (TF 2.19, Keras 3.x, GPU T4) | ✅ |
+
+### 1.4 Lacunas Reconhecidas
+
+| Lacuna | Impacto | Dependência |
+|:-------|:--------|:------------|
+| Treino do SurrogateNet com dados reais | Alto — PINNs modo surrogate neural | Dados Fortran |
+| Surrogate Modo C (tensor completo 9 componentes, 18 canais) | Médio — digital twin Fortran | Fortran multi-dip |
+| Notebook de treinamento end-to-end | Alto — pipeline completo validado | Dados disponíveis |
+| Multi-Task Loss (Kendall et al. 2018) — placeholder | Baixo — auto-balanceamento | Implementação |
+| Cenário PINN petrofísica (Archie + Klein) | Baixo — requer parâmetros reservatório | Dados de campo |
+| Evidential Regression (alternativa a MC Dropout para UQ) | Baixo — MC Dropout funciona | Pesquisa |
+
+---
+
+## 2. Embasamento Científico (Literatura 2024-2026)
+
+### 2.1 Artigos-Chave
+
+| # | Referência | Contribuição para o Projeto |
+|:-:|:-----------|:---------------------------|
+| 1 | Morales et al. (2025) — *Anisotropic resistivity estimation and uncertainty quantification from borehole triaxial electromagnetic induction measurements: Gradient-based inversion and physics-informed neural network.* Computers & Geosciences, 196, 105786. | Base teórica dos cenários PINN. PINN estima propriedades petrofísicas em 0,5 ms com 91-99% de acurácia vs minutos com inversão baseada em gradiente. Validado com medidas triaxiais. **Já referenciado no projeto.** |
+| 2 | INN-UDAR (2025) — *Invertible neural network for real-time inversion and uncertainty quantification of ultra-deep resistivity measurements.* Computers & Geosciences. | Redes invertíveis (INN) fornecem distribuição posterior completa para quantificação de incerteza probabilística em tempo real, sem necessidade de múltiplas forward passes (MC Dropout). **Proposta: adicionar INN como arquitetura #45.** |
+| 3 | SPE/SPWLA (2021) — *Real-Time 2.5D Inversion of LWD Resistivity Measurements Using Deep Learning for Geosteering Applications Across Faulted Formations.* | Deep learning para inversão 2.5D com custo online desprezível. Validado com ferramenta LWD triaxial em formações anisotrópicas com falhas. **Referência para extensão futura (v3.0).** |
+| 4 | Li et al. (2025) — *Self-Supervised Deep Learning Inversion Incorporating a Fast Forward Network for Transient Electromagnetic Data.* JGR: Machine Learning and Computation. | Inversão auto-supervisionada que incorpora rede forward rápida diretamente na função de perda. **Alinha com cenário "surrogate" PINN do projeto.** |
+| 5 | Jiang et al. (2025) — *One-Fit-All Transformer for Multimodal Geophysical Inversion.* JGR: Machine Learning and Computation. | Framework G-Query — Transformer unificado que adapta entre múltiplas modalidades geofísicas via query tokens. **Proposta: avaliar como arquitetura #46 (G_Query_Transformer).** |
+| 6 | Frontiers (2025) — *Fast forward modeling and response analysis of extra-deep azimuthal resistivity measurements in complex model.* | Modelagem direta rápida para UDAR (Ultra-Deep Azimuthal Resistivity) em modelos complexos. **Complementa o surrogate neural do projeto.** |
+| 7 | ModernTCN (ICLR 2024) — *A Modern Pure Convolution Structure for General Time Series Analysis.* | Modernização do TCN clássico com patch embedding e channel mixing, superando TCN em benchmarks de séries temporais. **Proposta: atualizar SurrogateNet para ModernTCN.** |
+| 8 | Physics-guided AEM inversion (GJI 2024) — *Physics-guided deep learning-based inversion for airborne electromagnetic data.* | PGNN incorpora leis físicas governantes diretamente na função de perda para inversão EM aerotransportada. **Valida a abordagem PINN adotada pelo projeto.** |
+
+### 2.2 Tendências Identificadas
+
+1. **Redes Invertíveis (INN / Normalizing Flows)** para quantificação de incerteza probabilística — alternativa superior ao MC Dropout por fornecer a distribuição posterior completa em uma única forward pass.
+
+2. **Auto-supervisão com forward model neural** integrado na função de perda — elimina necessidade de labels supervisionados, alinhando com o cenário "surrogate" PINN já implementado no projeto.
+
+3. **Transformers multimodais** para inversão geofísica — framework G-Query demonstra que um único modelo pode adaptar entre EM, sísmica e gravimetria via tokens de query especializados.
+
+4. **ModernTCN** supera o TCN clássico em benchmarks de séries temporais, mantendo a arquitetura puramente convolucional (sem atenção) com menor custo computacional.
+
+5. **Inversão 2.5D/3D via Deep Learning** em formações complexas (falhas, intrusões salinas, dip variável) — próxima fronteira para o pipeline, atualmente limitado a 1D.
+
+6. **Quantificação de incerteza como requisito obrigatório** para decisões operacionais em geosteering — não é mais opcional, é mandatório para uso em tempo real.
+
+---
+
+## 3. Roadmap de Desenvolvimento (Fases F1-F6)
+
+### Visão Geral
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ROADMAP GEOSTEERING AI v2.0+                                              │
+│                                                                             │
+│  F1 ─ Consolidação e Commit (imediato)                                     │
+│  ├── Commit pendente (Passos 1+2 surrogate)                               │
+│  ├── Atualização MEMORY.md                                                 │
+│  └── Documentação roadmap (este documento)                                 │
+│                                                                             │
+│  F2 ─ Treinamento e Validação GPU (curto prazo)                           │
+│  ├── Notebook train_surrogate.ipynb                                        │
+│  ├── Notebook train_baseline.ipynb                                         │
+│  ├── Benchmark 44 arquiteturas no Colab                                    │
+│  ├── Validação end-to-end com dados Fortran                               │
+│  └── Preset surrogate_mode_a.yaml                                          │
+│                                                                             │
+│  F3 ─ Otimização de Performance (médio prazo)                             │
+│  ├── XLA/JIT compilation (2-3× speedup)                                   │
+│  ├── Mixed precision float16 (1.5-2× speedup)                             │
+│  ├── Profiling TensorBoard                                                 │
+│  ├── Benchmark latência por arquitetura                                    │
+│  └── Otimização DataPipeline (prefetch, cache)                            │
+│                                                                             │
+│  F4 ─ Expansão Científica (médio prazo)                                   │
+│  ├── INN (Invertible Neural Network) — arquitetura #45                    │
+│  ├── G-Query Transformer multimodal — arquitetura #46                     │
+│  ├── ModernTCN para SurrogateNet v2                                        │
+│  ├── Multi-Task Loss (Kendall et al. 2018)                                │
+│  ├── Cenário PINN petrofísica (Archie)                                    │
+│  └── Evidential Regression para UQ                                         │
+│                                                                             │
+│  F5 ─ Dados Multi-Dip e Modo C (longo prazo)                             │
+│  ├── Re-simulação Fortran multi-dip (0°-90°)                             │
+│  ├── Treino SurrogateNet Modo B/C                                          │
+│  ├── Surrogate Transformer (se TCN insuficiente)                          │
+│  └── Validação física H_surrogate vs H_Fortran                            │
+│                                                                             │
+│  F6 ─ Produção e Deploy (longo prazo)                                     │
+│  ├── API REST (FastAPI/gRPC)                                               │
+│  ├── Integração WITSML/OPC-UA                                             │
+│  ├── Dashboard web (Streamlit/Grafana)                                     │
+│  ├── Containerização (Docker + K8s)                                        │
+│  └── Monitoramento MLOps (MLflow/Weights&Biases)                          │
+│                                                                             │
+│  v3.0 ─ Inversão 2D/3D (futuro)                                           │
+│  ├── Extensão para formações com falhas                                    │
+│  ├── Múltiplas frequências simultâneas                                     │
+│  └── Digital twin completo do simulador Fortran                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### F1 — Consolidação e Commit (Imediato)
+
+**Objetivo**: Commitar trabalho pendente e estabilizar a base de código.
+
+| Passo | Descrição | Prioridade |
+|:------|:----------|:----------:|
+| F1.1 | Rodar `pytest tests/ -v --tb=short` — validar 802+ testes | Alta |
+| F1.2 | Commit dos Passos 1+2 (surrogate_data.py + surrogate.py + testes) | Alta |
+| F1.3 | Reescrever MEMORY.md (<150 linhas, atualizado) | Média |
+| F1.4 | Gerar `docs/ROADMAP.md` (este documento) | Média |
+
+**Verificação**: `pytest` green, `git log --oneline -3` mostra commit.
+
+---
+
+### F2 — Treinamento e Validação GPU (Curto Prazo)
+
+**Objetivo**: Validar o pipeline end-to-end com treinamento real no Colab Pro+ GPU.
+
+| Passo | Descrição | Artefato | Prioridade |
+|:------|:----------|:---------|:----------:|
+| F2.1 | Criar `notebooks/train_surrogate.ipynb` | Notebook Colab | Alta |
+| | — Carregar dados .dat (Inv0Dip 0°, existentes) | | |
+| | — `extract_surrogate_pairs()` Modo A (XX, ZZ → 4 canais) | | |
+| | — Split por modelo geológico (P1) | | |
+| | — `build_surrogate(config)` → `model.compile()` → `model.fit()` | | |
+| | — Salvar como `surrogate_mode_a.keras` | | |
+| F2.2 | Criar `configs/surrogate_mode_a.yaml` | YAML | Alta |
+| F2.3 | Criar `notebooks/train_baseline.ipynb` | Notebook Colab | Alta |
+| | — Pipeline completo: load → split → train → eval → report | | |
+| | — Preset `robusto.yaml` (curriculum 3-phase, noise 8%) | | |
+| | — Gerar MetricsReport + figuras (EDA, holdout, training) | | |
+| F2.4 | Criar `notebooks/benchmark_architectures.ipynb` | Notebook Colab | Média |
+| | — Forward + backward pass para 44 arquiteturas no GPU | | |
+| | — Medir: latência (ms), memória (MB), parâmetros (M) | | |
+| | — Ranking por trade-off R² × latência × parâmetros | | |
+| F2.5 | Validação surrogate analítico vs Fortran | Métricas | Alta |
+| | — Comparar H_analítico vs H_Fortran para 100+ modelos | | |
+| | — RMSE por componente (Re/Im × XX/ZZ) | | |
+
+**Verificação**: Notebooks executam sem erro no Colab Pro+ (T4/A100). SurrogateNet Mode A converge com val_loss decrescente.
+
+---
+
+### F3 — Otimização de Performance (Médio Prazo)
+
+**Objetivo**: Maximizar velocidade de treinamento e inferência.
+
+| Passo | Descrição | Ganho Esperado | Prioridade |
+|:------|:----------|:---------------|:----------:|
+| F3.1 | **XLA/JIT compilation** | 2-3× speedup treinamento | Alta |
+| | — `model.compile(jit_compile=True)` | | |
+| | — Verificar compatibilidade com as 44 arquiteturas | | |
+| | — Campo `config.use_xla` já existe no PipelineConfig | | |
+| F3.2 | **Mixed precision (float16)** | 1.5-2× speedup + 50% menos memória GPU | Alta |
+| | — `tf.keras.mixed_precision.set_global_policy('mixed_float16')` | | |
+| | — Verificar estabilidade numérica (EPS=1e-12, gradientes, losses) | | |
+| | — Campo `config.use_mixed_precision` a adicionar | | |
+| F3.3 | **Profiling TensorBoard** | Identificação de gargalos | Média |
+| | — `tf.profiler.experimental.start()` em sessão de treino | | |
+| | — Análise de utilização GPU (kernels, memória, I/O) | | |
+| F3.4 | **Benchmark latência de inferência** | Tabela por arquitetura | Média |
+| | — Medir tempo/amostra (ms) para 27 arquiteturas causais | | |
+| | — Identificar candidatas para realtime (<10ms) | | |
+| | — Comparar TFLite vs SavedModel vs ONNX | | |
+| F3.5 | **Otimização DataPipeline** | Reduzir I/O overhead | Média |
+| | — `tf.data.Dataset.cache()` para datasets que cabem em RAM | | |
+| | — `prefetch(tf.data.AUTOTUNE)` para sobreposição I/O-compute | | |
+| | — `interleave()` para carregamento paralelo | | |
+| F3.6 | **Quantização TFLite** | 4× redução de tamanho | Baixa |
+| | — Post-training quantization (int8 pesos, float32 ativações) | | |
+| | — Validar RMSE degradation < 5% pós-quantização | | |
+
+**Verificação**: Speedup mensurável documentado. Latência < 10ms para top-5 arquiteturas causais.
+
+---
+
+### F4 — Expansão Científica (Médio Prazo)
+
+**Objetivo**: Incorporar avanços recentes da literatura (2024-2026) ao pipeline.
+
+#### F4.1 — Invertible Neural Network (INN) — Arquitetura #45
+
+**Base científica**: INN-UDAR (Computers & Geosciences, 2025). Redes invertíveis fornecem distribuição posterior completa para UQ probabilística, sem necessidade de MC Dropout.
+
+| Item | Descrição |
+|:-----|:----------|
+| Módulo | `models/advanced.py` — adicionar `build_inn()` |
+| Registro | `registry.py` → entrada "INN" na ModelRegistry |
+| Testes | `test_models.py` → forward pass + verificação de invertibilidade |
+| Config | `model_type: "INN"` aceito pelo PipelineConfig |
+| Referência | Ardizzone et al. (2019) + INN-UDAR (2025) |
+
+#### F4.2 — G-Query Transformer Multimodal — Arquitetura #46
+
+**Base científica**: Jiang et al. (2025) JGR:ML. Framework "One-Fit-All" que adapta entre modalidades geofísicas via query tokens especializados.
+
+| Item | Descrição |
+|:-----|:----------|
+| Módulo | `models/transformer.py` — adicionar `build_gquery_transformer()` |
+| Registro | `registry.py` → entrada "G_Query_Transformer" |
+| Diferencial | Multi-head cross-attention entre componentes EM (XX, ZZ, XZ, ZX) |
+
+#### F4.3 — ModernTCN para SurrogateNet v2
+
+**Base científica**: ModernTCN (ICLR 2024). Modernização do TCN com patch embedding + depthwise separable + channel mixing.
+
+| Item | Descrição |
+|:-----|:----------|
+| Módulo | `models/surrogate.py` — adicionar `build_surrogate_modern()` |
+| Ganho | Melhor captura de dependências longas com menos parâmetros |
+| Config | `surrogate_architecture: "tcn"` ou `"modern_tcn"` |
+
+#### F4.4 — Multi-Task Loss (Kendall et al. 2018) — Completar #22
+
+**Base científica**: "Multi-Task Learning Using Uncertainty to Weigh Losses" — pesos automáticos via variáveis treináveis log_sigma por tarefa.
+
+| Item | Descrição |
+|:-----|:----------|
+| Módulo | `losses/catalog.py` → completar `make_multitask()` (atualmente placeholder) |
+| Fórmula | `L = Σ (0.5/σ_i²) × L_i + 0.5 × log(σ_i²)` |
+| Aplicação | Balancear rho_h + rho_v + DTB automaticamente |
+
+#### F4.5 — Cenário PINN Petrofísica (Archie + Klein)
+
+**Base científica**: Morales et al. (2025) + Lei de Archie (1942). Integrar constraints petrofísicas na função de perda.
+
+| Item | Descrição |
+|:-----|:----------|
+| Módulo | `losses/pinns.py` → cenário #9 "petrophysics" |
+| Constraint | `rho_t = a × Rw / (phi^m × Sw^n)` |
+| Dependência | Parâmetros do reservatório (Rw, phi, m, n) como inputs adicionais |
+
+#### F4.6 — Evidential Regression para UQ
+
+**Base científica**: Amini et al. (2020) — "Deep Evidential Regression". UQ em uma única forward pass sem MC Dropout.
+
+| Item | Descrição |
+|:-----|:----------|
+| Módulo | `inference/uncertainty.py` → método "evidential" |
+| Output | (μ, σ², ν, α) por ponto — incerteza aleatória + epistêmica |
+| Vantagem | ~30× mais rápido que MC Dropout (1 pass vs 30 passes) |
+
+**Verificação**: Cada nova feature tem testes unitários + validação no Colab GPU.
+
+---
+
+### F5 — Dados Multi-Dip e Modo C (Longo Prazo)
+
+**Objetivo**: Treinar SurrogateNet com tensor EM completo para múltiplos ângulos de dip.
+
+**Contexto**: As componentes off-diagonais do tensor H (Hxz, Hzx, Hxy, etc.) são estruturalmente zero em dip=0° por simetria TIV. Para treinar o Modo C (9 componentes, 18 canais), é necessário re-executar o simulador Fortran com múltiplos ângulos.
+
+| Passo | Descrição | Dependência | Prioridade |
+|:------|:----------|:------------|:----------:|
+| F5.1 | Re-executar PerfilaAnisoOmp com multi-dip | Fortran + HPC | Alta |
+| | — dip = [0°, 5°, 10°, 15°, 20°, 30°, 45°, 60°, 75°, 90°] | | |
+| | — ~40.000 modelos × 600 pontos × 22 colunas por ângulo | | |
+| | — Estimativa: ~10 GB de dados brutos | | |
+| F5.2 | Treinar SurrogateNet Modo B (XX, ZZ, XZ, ZX → 8 canais) | F5.1 | Alta |
+| | — Requer dados com dip ≥ 5° (componentes cruzadas ≠ 0) | | |
+| | — `configs/surrogate_mode_b.yaml` | | |
+| F5.3 | Treinar SurrogateNet Modo C (9 comp → 18 canais) | F5.1 | Média |
+| | — Avaliar se TCN atual (~2M params) é suficiente ou precisa escalar | | |
+| | — Alternativa: `build_surrogate_modern()` (ModernTCN, F4.3) | | |
+| | — `configs/surrogate_mode_c.yaml` | | |
+| F5.4 | Validação física H_surrogate vs H_Fortran | F5.2/F5.3 | Alta |
+| | — RMSE < 1% por componente diagonal, < 5% por cruzada | | |
+| | — Gráficos de comparação (Re/Im × componente × dip) | | |
+| F5.5 | Integrar surrogate treinado nas PINNs | F5.4 | Alta |
+| | — `make_surrogate_physics_loss()` com modo `"neural_external"` | | |
+| | — Carregar SavedModel do surrogate treinado | | |
+
+**Verificação**: Surrogate Modo B/C convergem. RMSE vs Fortran < 1% para diagonais, < 5% para cruzadas.
+
+---
+
+### F6 — Produção e Deploy (Longo Prazo)
+
+**Objetivo**: Levar o pipeline para ambiente de produção industrial para uso em operações de geosteering em tempo real.
+
+| Passo | Descrição | Tecnologia | Prioridade |
+|:------|:----------|:-----------|:----------:|
+| F6.1 | **API REST** para inferência | FastAPI + TF Serving | Alta |
+| | — `POST /predict` — inversão batch | | |
+| | — `POST /predict/realtime` — streaming com sliding window | | |
+| | — `POST /uncertainty` — predição com MC Dropout / Ensemble | | |
+| | — Documentação automática OpenAPI/Swagger | | |
+| F6.2 | **Integração WITSML/OPC-UA** | python-witsml + opcua | Média |
+| | — Consumir dados LWD em tempo real de sistemas SCADA | | |
+| | — Converter formato WITSML → layout 22 colunas | | |
+| F6.3 | **Dashboard web** | Streamlit ou Grafana | Média |
+| | — Visualização realtime (curtain plot, DTB, bandas de incerteza) | | |
+| | — Seleção de presets e configurações | | |
+| | — Histórico de predições e métricas | | |
+| F6.4 | **Containerização** | Docker + Kubernetes | Média |
+| | — Dockerfile multi-stage (build + runtime, CPU + GPU) | | |
+| | — Helm chart para deploy em cluster | | |
+| | — Auto-scaling horizontal por demanda | | |
+| F6.5 | **MLOps** | MLflow ou W&B | Baixa |
+| | — Tracking de experimentos (hiperparâmetros, métricas, artefatos) | | |
+| | — Model registry (versionamento de modelos treinados) | | |
+| | — Monitoramento de data drift em produção | | |
+| F6.6 | **Edge deployment** | TFLite + NVIDIA Jetson | Baixa |
+| | — Inferência on-rig sem conectividade cloud | | |
+| | — Latência-alvo: < 5ms em hardware embarcado | | |
+
+**Verificação**: API responde em < 100ms. Dashboard renderiza em realtime. Container passa health checks.
+
+---
+
+### v3.0 — Inversão 2D/3D (Futuro)
+
+| Área | Descrição | Base Científica |
+|:-----|:----------|:---------------|
+| Inversão 2D | Formações com falhas + dip variável | SPE/SPWLA (2021) — "Real-Time 2.5D Inversion" |
+| Multi-frequência | Múltiplas frequências simultâneas (2-96 kHz) | Perspectiva P3 + ferramentas UDAR |
+| Digital twin | Surrogate neural substitui completamente o Fortran | Li et al. (2025) — self-supervised forward |
+| Geomecânica | Integrar pressão de poros + estabilidade de poço | Extensão petrofísica além de resistividade |
+| Transfer learning | Pré-treinar em sintéticos, fine-tune em dados de campo | DomainAdapter já implementado (v2.0) |
+
+---
+
+## 4. Propostas de Novos Recursos
+
+### 4.1 Alta Prioridade
+
+| # | Recurso | Módulo | Justificativa | Esforço |
+|:-:|:--------|:-------|:-------------|:-------:|
+| 1 | Notebook `train_baseline.ipynb` | `notebooks/` | Pipeline end-to-end validado em GPU | 1 sessão |
+| 2 | Notebook `train_surrogate.ipynb` | `notebooks/` | Treinar SurrogateNet Modo A | 1 sessão |
+| 3 | XLA compilation | `training/loop.py` | 2-3× speedup de treinamento | 1 sessão |
+| 4 | Mixed precision (float16) | `training/loop.py` | 1.5-2× speedup + 50% menos memória | 1 sessão |
+| 5 | Benchmark 44 arquiteturas | `notebooks/` | Ranking R² × latência × parâmetros | 2 sessões |
+| 6 | Preset `surrogate_mode_a.yaml` | `configs/` | Reprodutibilidade do surrogate | 0.5 sessão |
+
+### 4.2 Média Prioridade
+
+| # | Recurso | Módulo | Justificativa | Esforço |
+|:-:|:--------|:-------|:-------------|:-------:|
+| 7 | INN — arquitetura #45 | `models/advanced.py` | UQ probabilística (state-of-art 2025) | 2 sessões |
+| 8 | ModernTCN SurrogateNet v2 | `models/surrogate.py` | Supera TCN clássico em benchmarks | 1 sessão |
+| 9 | Multi-Task Loss (Kendall) | `losses/catalog.py` | Auto-balanceamento rho + DTB | 1 sessão |
+| 10 | Profiling TensorBoard | `training/` | Identificar gargalos GPU | 1 sessão |
+| 11 | DataPipeline cache + prefetch | `data/pipeline.py` | Reduzir overhead de I/O | 0.5 sessão |
+| 12 | Quantização TFLite (int8) | `inference/export.py` | 4× redução tamanho para edge | 1 sessão |
+
+### 4.3 Baixa Prioridade (Pesquisa)
+
+| # | Recurso | Módulo | Justificativa | Esforço |
+|:-:|:--------|:-------|:-------------|:-------:|
+| 13 | G-Query Transformer (#46) | `models/transformer.py` | Multimodal geofísico (2025) | 3 sessões |
+| 14 | Evidential Regression | `inference/uncertainty.py` | UQ single-pass (~30× mais rápido) | 2 sessões |
+| 15 | PINN Petrofísica (Archie) | `losses/pinns.py` | Constraint de reservatório | 2 sessões |
+| 16 | API REST (FastAPI) | Novo módulo | Produção industrial | 3 sessões |
+| 17 | Dashboard Streamlit | Novo módulo | Visualização realtime | 2 sessões |
+| 18 | Containerização Docker | Infraestrutura | Deploy padronizado | 2 sessões |
+
+---
+
+## 5. Otimizações de Código Recomendadas
+
+| # | Otimização | Arquivo(s) | Impacto Esperado |
+|:-:|:-----------|:-----------|:-----------------|
+| 1 | Lazy import consistente em TODOS os módulos | Vários (`__init__.py`) | Startup ~50% mais rápido |
+| 2 | `@tf.function` em funções de loss críticas | `losses/catalog.py` | 10-30% speedup em treinamento |
+| 3 | Batch processing para `predict()` via `tf.data` | `inference/pipeline.py` | Melhor utilização GPU |
+| 4 | Pré-compilação de scalers em TF ops | `data/scaling.py` | Eliminar overhead NumPy→TF |
+| 5 | Paralelização de Feature Views + Geosinais no `tf.data.map` | `data/pipeline.py` | Reduzir latência on-the-fly |
+| 6 | Memoização de blocos Keras comuns | `models/blocks.py` | Reduzir memory footprint |
+| 7 | Gradient checkpointing para variantes U-Net | `models/unet.py` | ~40% menos memória GPU |
+
+---
+
+## 6. Próximos Passos (Requisições Futuras)
+
+As seguintes requisições podem ser utilizadas em futuras sessões de desenvolvimento:
+
+### F1 — Consolidação (Imediato)
+```
+"Commitar as mudanças pendentes dos Passos 1+2 (surrogate) e atualizar MEMORY.md"
+```
+
+### F2 — Treinamento GPU (Curto Prazo)
+```
+"Criar notebook train_baseline.ipynb para treinamento completo no Colab"
+"Criar notebook train_surrogate.ipynb para treinar SurrogateNet Modo A"
+"Criar configs/surrogate_mode_a.yaml com hiperparâmetros otimizados"
+"Criar notebook benchmark_architectures.ipynb para ranking das 44 arquiteturas"
+```
+
+### F3 — Otimização (Médio Prazo)
+```
+"Implementar XLA compilation e mixed precision no TrainingLoop"
+"Otimizar DataPipeline com cache, prefetch e interleave"
+"Criar benchmark de latência de inferência para as 27 arquiteturas causais"
+```
+
+### F4 — Expansão Científica (Médio Prazo)
+```
+"Implementar INN (Invertible Neural Network) como arquitetura #45"
+"Implementar ModernTCN para SurrogateNet v2"
+"Completar Multi-Task Loss (Kendall et al. 2018) — atualmente placeholder"
+"Adicionar cenário PINN petrofísica com constraints de Archie"
+"Implementar Evidential Regression como método alternativo de UQ"
+```
+
+### F5 — Dados Multi-Dip (Longo Prazo)
+```
+"Criar script de processamento para dados multi-dip do Fortran"
+"Treinar SurrogateNet Modo B com dados de dip 5°-90°"
+"Validar SurrogateNet vs Fortran — RMSE por componente e dip"
+```
+
+### F6 — Deploy (Longo Prazo)
+```
+"Criar API REST com FastAPI para inferência batch e realtime"
+"Criar Dockerfile multi-stage para deploy CPU e GPU"
+"Implementar dashboard Streamlit para visualização realtime"
+```
+
+---
+
+## 7. Referências Bibliográficas
+
+### Artigos Fundamentais do Pipeline
+
+- Morales, M. et al. (2025). Anisotropic resistivity estimation and uncertainty quantification from borehole triaxial electromagnetic induction measurements: Gradient-based inversion and physics-informed neural network. *Computers & Geosciences*, 196, 105786.
+- He, K. et al. (2016). Deep Residual Learning for Image Recognition. *CVPR*.
+- Bai, S. et al. (2018). An Empirical Evaluation of Generic Convolutional and Recurrent Networks for Sequence Modeling. *arXiv:1803.01271*.
+- Oord, A. et al. (2016). WaveNet: A Generative Model for Raw Audio. *arXiv:1609.03499*.
+
+### Artigos Recentes (2024-2026) — Expansões Propostas
+
+- INN-UDAR (2025). Invertible neural network for real-time inversion and uncertainty quantification of ultra-deep resistivity measurements. *Computers & Geosciences*.
+- Jiang, H. et al. (2025). One-Fit-All Transformer for Multimodal Geophysical Inversion. *JGR: Machine Learning and Computation*.
+- Li, X. et al. (2025). A Novel Self-Supervised Deep Learning Inversion Method Incorporating a Fast Forward Network for Transient Electromagnetic Data. *JGR: ML&C*.
+- ModernTCN (2024). A Modern Pure Convolution Structure for General Time Series Analysis. *ICLR*.
+- SPE/SPWLA (2021). Real-Time 2.5D Inversion of LWD Resistivity Measurements Using Deep Learning for Geosteering Applications Across Faulted Formations.
+
+### Livros-Texto
+
+- Ellis, D. V. & Singer, J. M. (2008). *Well Logging for Earth Scientists* (2nd ed.). Springer.
+- Misra, S., Li, H. & He, J. (2019). *Machine Learning for Subsurface Characterization*. Elsevier.
+
+---
+
+## 8. Arquivos Críticos para Consulta
+
+| Arquivo | Propósito |
+|:--------|:----------|
+| `geosteering_ai/config.py` | PipelineConfig (246 campos) — ponto único de verdade |
+| `geosteering_ai/models/registry.py` | ModelRegistry — 44 arquiteturas |
+| `geosteering_ai/losses/factory.py` | LossFactory.build_combined() |
+| `geosteering_ai/losses/pinns.py` | 8 cenários PINN + forward analítico |
+| `geosteering_ai/models/surrogate.py` | SurrogateNet TCN |
+| `geosteering_ai/data/surrogate_data.py` | Extração de pares para surrogate |
+| `geosteering_ai/training/loop.py` | TrainingLoop |
+| `geosteering_ai/training/callbacks.py` | 17+ callbacks Keras |
+| `geosteering_ai/inference/pipeline.py` | InferencePipeline (save/load) |
+| `docs/ARCHITECTURE_v2.md` | Especificação arquitetural completa |
+| `docs/physics/errata_valores.md` | Constantes físicas imutáveis |
+| `CLAUDE.md` | Regras e proibições de desenvolvimento |
+| `docs/ROADMAP.md` | Este documento |
+
+---
+
+*Documento gerado em Abril 2026. Geosteering AI v2.0.*
+*Framework: TensorFlow 2.x / Keras (exclusivo — PyTorch proibido).*
+*Configuração: PipelineConfig dataclass (ponto único de verdade).*

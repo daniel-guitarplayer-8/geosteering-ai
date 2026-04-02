@@ -25,6 +25,10 @@
 # ║    v2.0.0 (2026-03) — Implementacao inicial                              ║
 # ║    v2.0.1 (2026-04) — Maxwell: Helmholtz completo com curvatura +        ║
 # ║                        coupling (gradiente × wavenumber)                  ║
+# ║    v2.0.2 (2026-04) — Surrogate complex output: Re(H)+Im(H) 4 canais   ║
+# ║                        Default alterado: "magnitude" → "complex"          ║
+# ║                        Nova funcao: _analytical_forward_1d_complex()      ║
+# ║                        Config: surrogate_output_mode (magnitude|complex)  ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 """Physics-Informed Neural Network (PINN) losses para inversao EM 1D.
@@ -105,6 +109,13 @@ VALID_PINNS_SCENARIOS = {
 }
 VALID_LAMBDA_SCHEDULES = {"fixed", "linear", "cosine", "step"}
 
+# ── Modos de saida do forward model analitico ────────────────────────
+# "magnitude": log10|H| (2 canais) — comportamento original
+# "complex": Re(H), Im(H) separados (4 canais) — inclui fase
+# Controlado por config.surrogate_output_mode.
+# Ref: make_surrogate_physics_loss(), _analytical_forward_1d_complex().
+VALID_SURROGATE_OUTPUT_MODES = {"magnitude", "complex"}
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # EXPORTS
@@ -117,6 +128,7 @@ __all__ = [
     # ── Constantes ────────────────────────────────────────────────────────
     "VALID_PINNS_SCENARIOS",
     "VALID_LAMBDA_SCHEDULES",
+    "VALID_SURROGATE_OUTPUT_MODES",
     # ── Lambda schedule ───────────────────────────────────────────────────
     "compute_lambda_schedule",
     # ── Cenarios PINN ─────────────────────────────────────────────────────
@@ -355,15 +367,29 @@ def make_oracle_physics_loss(
 # Mapeia rho → H_EM (campo EM predito), permitindo comparacao end-to-end
 # diferenciavel: ||F(rho_true) - F(rho_pred)||.
 #
-# Duas opcoes de forward model:
-#   (a) Analitico built-in: aproximacao 1D homogenea (default)
-#   (b) Neural externo: modelo pre-treinado carregado via surrogate_model_path
+# Tres opcoes de forward model:
+#   (a) Analitico magnitude: log10|H| (2 canais) — modo "magnitude"
+#   (b) Analitico complexo: Re(H), Im(H) (4 canais) — modo "complex"
+#   (c) Neural externo: modelo pre-treinado carregado via surrogate_model_path
+#
+# A escolha entre (a) e (b) eh controlada por config.surrogate_output_mode:
+#   "magnitude" → _analytical_forward_1d (comportamento original)
+#   "complex"   → _analytical_forward_1d_complex (Re+Im, recomendado)
+#
+# O modo "complex" inclui informacao de fase (phi = -spacing/delta) que
+# eh complementar a magnitude: a fase transporta a mesma dependencia de
+# skin depth mas com sensibilidade diferente (linear vs exponencial).
+# Isso fecha o loop fisico completo com as mesmas grandezas que servem
+# como INPUT_FEATURES da rede de inversao [Re(Hxx), Im(Hxx), Re(Hzz), Im(Hzz)].
 #
 # Fisica do modelo analitico (1D homogeneo):
-#   k = sqrt(i × omega × mu0 / rho)  →  propagation constant
+#   k = (1+j)/delta  →  propagation constant (regime difusivo)
 #   Skin depth: delta = sqrt(2 × rho / (omega × mu0))
-#   Atenuacao: |H| ∝ |AC| × exp(-spacing / delta)
-#   Em log10: log10|H| ≈ log10|AC| - spacing / (delta × ln10)
+#   Campo complexo: H = AC × exp(-(1+j) × spacing/delta)
+#   Magnitude: |H| = AC × exp(-spacing/delta)
+#   Fase: phi(H) = -spacing/delta (radianos)
+#   Re(H) = AC × exp(-L/delta) × cos(-L/delta)
+#   Im(H) = AC × exp(-L/delta) × sin(-L/delta)
 #
 # Constantes de decoupling (L = 1.0 m):
 #   ACp = 1/(4*pi*L^3) ≈ 0.079577  (coplanar: Hxx, Hyy)
@@ -430,8 +456,8 @@ def _analytical_forward_1d(rho_log, omega_mu, spacing):
     import tensorflow as tf
 
     # ── Conversao log10 → linear ──────────────────────────────────────
-    # rho_log está em escala log10 (ex: 1.0 = 10 Ohm.m, 2.0 = 100 Ohm.m)
-    # Clamp para estabilidade numérica: [-2, 5] → [0.01, 100000] Ohm.m.
+    # rho_log esta em escala log10 (ex: 1.0 = 10 Ohm.m, 2.0 = 100 Ohm.m)
+    # Clamp para estabilidade numerica: [-2, 5] → [0.01, 100000] Ohm.m.
     # Consistente com make_maxwell_physics_loss e make_variational_loss.
     rho_log_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
     rho = tf.pow(10.0, rho_log_clamped)  # (B, N, 2)
@@ -446,14 +472,19 @@ def _analytical_forward_1d(rho_log, omega_mu, spacing):
     # ── Atenuacao exponencial ─────────────────────────────────────────
     # O campo EM decai exponencialmente com a distancia normalizada
     # pelo skin depth: |H| ∝ exp(-r/delta) onde r = spacing.
-    # Clamp spacing/delta para evitar overflow em exp() com rho muito baixo.
+    # Clamp ratio a 50.0 para manter gradientes nao-zero em rho muito
+    # baixo (exp(-50) ≈ 1.9e-22 > 0, mas exp(-700) = 0 em float32).
+    # Sem clamp, o gradiente desaparece para meios muito condutivos.
     ratio = spacing / (delta + EPS)  # (B, N, 2), adimensional
+    ratio = tf.minimum(ratio, 50.0)  # clamp para gradient flow
     attenuation = tf.exp(-ratio)  # (B, N, 2)
 
     # ── Constantes de decoupling (magnitudes absolutas) ───────────────
     # ACp = 1/(4*pi*L^3) ≈ 0.079577 para L=1.0 m (coplanar Hxx)
     # ACx = 1/(2*pi*L^3) ≈ 0.159155 para L=1.0 m (coaxial Hzz)
-    # Usamos valores absolutos pois operamos em magnitude |H|.
+    # Magnitudes absolutas — sinais aplicados em loading.py (ver errata CLAUDE.md:
+    # ACp = -1/(4*pi*L^3), ACx = +1/(2*pi*L^3); aqui usamos |AC| pois operamos
+    # em magnitude |H|).
     ac = tf.constant([0.079577, 0.159155], dtype=tf.float32)  # [Hxx, Hzz]
 
     # ── log10|H| = log10(AC) + log10(attenuation) ────────────────────
@@ -469,6 +500,134 @@ def _analytical_forward_1d(rho_log, omega_mu, spacing):
     return h_log
 
 
+def _analytical_forward_1d_complex(rho_log, omega_mu, spacing):
+    """Modelo forward analitico 1D: log10(rho) → Re(H), Im(H) (homogeneo).
+
+    Extensao de ``_analytical_forward_1d`` que retorna as partes real e
+    imaginaria dos campos EM em vez de apenas a magnitude. Isso fecha o
+    loop fisico completo, pois a rede de inversao recebe
+    [Re(Hxx), Im(Hxx), Re(Hzz), Im(Hzz)] como features de entrada
+    (INPUT_FEATURES = [1, 4, 5, 20, 21], colunas 4-5 e 20-21 do .dat).
+
+    Fisica:
+      ┌──────────────────────────────────────────────────────────────┐
+      │  Campo EM em meio homogeneo 1D (Ward & Hohmann 1988):       │
+      │                                                              │
+      │  H(z) = AC × exp(-spacing/delta) × exp(-j × spacing/delta) │
+      │       = AC × exp(-(1+j) × spacing/delta)                    │
+      │                                                              │
+      │  onde delta = sqrt(2 × rho / (omega × mu0))                │
+      │                                                              │
+      │  Decompondo em partes real e imaginaria:                     │
+      │    Re(H) = AC × exp(-L/delta) × cos(-L/delta)              │
+      │    Im(H) = AC × exp(-L/delta) × sin(-L/delta)              │
+      │                                                              │
+      │  A fase phi = -L/delta carrega informacao complementar a     │
+      │  magnitude: enquanto |H| → sensibilidade a rho absoluto,    │
+      │  phi → sensibilidade ao gradiente de rho (interfaces).       │
+      └──────────────────────────────────────────────────────────────┘
+
+    Os 4 canais de saida correspondem a:
+      - Canal 0: Re(Hxx) — parte real da componente coplanar (A/m)
+      - Canal 1: Im(Hxx) — parte imaginaria da componente coplanar (A/m)
+      - Canal 2: Re(Hzz) — parte real da componente coaxial (A/m)
+      - Canal 3: Im(Hzz) — parte imaginaria da componente coaxial (A/m)
+
+    Args:
+        rho_log: Tensor (B, N, 2) com log10(resistividade) em Ohm.m.
+            Canal 0 = rho_h (horizontal) → usado para Hxx (coplanar).
+            Canal 1 = rho_v (vertical) → usado para Hzz (coaxial).
+            Valores tipicos em log10: [-1, 4] (0.1 a 10000 Ohm.m).
+        omega_mu: Produto omega × mu0 (rad/s × H/m), scalar float32.
+            Para f=20 kHz: omega_mu ≈ 2*pi*20000 * 4*pi*1e-7 ≈ 1.58e-1.
+        spacing: Distancia Tx-Rx em metros, scalar float32.
+            Default 1.0 m. Range valido: 0.1–10.0 m.
+
+    Returns:
+        Tensor (B, N, 4) com campos EM complexos em escala linear (A/m).
+        [Re(Hxx), Im(Hxx), Re(Hzz), Im(Hzz)].
+
+    Note:
+        Referenciado em:
+            - losses/pinns.py: make_surrogate_physics_loss() (modo "complex")
+            - tests/test_pinns.py: TestSurrogateComplexOutput
+        Ref: Ward & Hohmann (1988) eq. 4.69 — campo H de dipolo magnetico
+             em meio homogeneo condutor com propagacao complexa.
+             O campo total inclui atenuacao (parte real do expoente) E
+             rotacao de fase (parte imaginaria do expoente):
+               H = AC × exp(-(1+j) × r/delta)
+             A decomposicao Re/Im preserva toda a informacao do sinal
+             complexo, ao contrario do modo magnitude que descarta a fase.
+        Limitacoes:
+            - Ignora efeitos de interface (reflexoes entre camadas)
+            - Assume far-field (spacing >> skin depth nao garantido)
+            - Componentes cruzadas (Hxz, Hzx) sao zero em 1D homogeneo
+    """
+    import tensorflow as tf
+
+    # ── Conversao log10 → linear ──────────────────────────────────────
+    # rho_log esta em escala log10 (ex: 1.0 = 10 Ohm.m, 2.0 = 100 Ohm.m)
+    # Clamp para estabilidade numerica: [-2, 5] → [0.01, 100000] Ohm.m.
+    # Consistente com _analytical_forward_1d e make_maxwell_physics_loss.
+    rho_log_clamped = tf.clip_by_value(rho_log, -2.0, 5.0)
+    rho = tf.pow(10.0, rho_log_clamped)  # (B, N, 2)
+
+    # ── Skin depth: delta = sqrt(2 × rho / (omega × mu0)) ────────────
+    # O skin depth governa a penetracao do campo EM no meio condutor.
+    # Meio resistivo (rho alto) → delta grande → pouca atenuacao e rotacao.
+    # Meio condutor (rho baixo) → delta pequeno → atenuacao e rotacao fortes.
+    # EPS evita divisao por zero quando omega_mu → 0 (nao fisico mas seguro).
+    delta = tf.sqrt(2.0 * rho / (omega_mu + EPS))  # (B, N, 2) metros
+
+    # ── Razao spacing/delta (argumento do expoente complexo) ─────────
+    # ratio = L/delta — adimensional, controla tanto atenuacao quanto fase.
+    # Em meio condutivo (delta pequeno), ratio >> 1 → atenuacao e rotacao fortes.
+    # Em meio resistivo (delta grande), ratio << 1 → campo quase inalterado.
+    # Clamp a 50.0 para manter gradientes nao-zero em rho muito baixo
+    # (exp(-50) ≈ 1.9e-22 > 0, mas exp(-700) = 0 em float32).
+    ratio = spacing / (delta + EPS)  # (B, N, 2), adimensional
+    ratio = tf.minimum(ratio, 50.0)  # clamp para gradient flow
+
+    # ── Envelope: atenuacao exponencial ──────────────────────────────
+    # |H| = AC × exp(-ratio) — mesma magnitude do modo "magnitude".
+    attenuation = tf.exp(-ratio)  # (B, N, 2)
+
+    # ── Fase: rotacao complexa = -ratio (radianos) ────────────────────
+    # No regime difusivo, a constante de propagacao eh k = (1+j)/delta,
+    # entao a fase acumulada na distancia L eh phi = -L/delta = -ratio.
+    # cos(phi) e sin(phi) sao as componentes Re e Im da rotacao.
+    phase = -ratio  # (B, N, 2) radianos (negativo: onda que se propaga)
+    cos_phase = tf.cos(phase)  # (B, N, 2)
+    sin_phase = tf.sin(phase)  # (B, N, 2)
+
+    # ── Constantes de decoupling (magnitudes absolutas) ───────────────
+    # ACp = 1/(4*pi*L^3) ≈ 0.079577 para L=1.0 m (coplanar Hxx)
+    # ACx = 1/(2*pi*L^3) ≈ 0.159155 para L=1.0 m (coaxial Hzz)
+    # Magnitudes absolutas — sinais aplicados em loading.py (ver errata CLAUDE.md:
+    # ACp = -1/(4*pi*L^3), ACx = +1/(2*pi*L^3); aqui usamos |AC| pois:
+    #   1. A loss compara F(rho_true) - F(rho_pred): o sinal cancela na diferenca
+    #   2. Os dados .dat ja passaram por decoupling em loading.py com sinais corretos
+    # ATENCAO: se esta funcao for usada para comparacao direta com dados medidos
+    # (nao via loss), os sinais devem ser ajustados: Hxx teria Re<0 (ACp negativo).
+    ac = tf.constant([0.079577, 0.159155], dtype=tf.float32)  # |ACp|, |ACx|
+
+    # ── Re(H) = |AC| × exp(-ratio) × cos(-ratio) ───────────────────
+    # Im(H) = |AC| × exp(-ratio) × sin(-ratio)
+    # Combina envelope (atenuacao) com rotacao de fase.
+    h_re = ac * attenuation * cos_phase  # (B, N, 2) Re(Hxx), Re(Hzz)
+    h_im = ac * attenuation * sin_phase  # (B, N, 2) Im(Hxx), Im(Hzz)
+
+    # ── Intercalar Re e Im para formato [Re(Hxx), Im(Hxx), Re(Hzz), Im(Hzz)]
+    # Separa os canais Hxx (idx 0) e Hzz (idx 1), depois intercala Re/Im.
+    # Resultado final shape: (B, N, 4)
+    re_hxx = h_re[..., 0:1]  # (B, N, 1) — Re(Hxx)
+    im_hxx = h_im[..., 0:1]  # (B, N, 1) — Im(Hxx)
+    re_hzz = h_re[..., 1:2]  # (B, N, 1) — Re(Hzz)
+    im_hzz = h_im[..., 1:2]  # (B, N, 1) — Im(Hzz)
+
+    return tf.concat([re_hxx, im_hxx, re_hzz, im_hzz], axis=-1)  # (B, N, 4)
+
+
 def make_surrogate_physics_loss(
     config: "PipelineConfig",
 ) -> Callable:
@@ -478,41 +637,51 @@ def make_surrogate_physics_loss(
     e rho_true: L = ||F(rho_true) - F(rho_pred)||. Quando as predicoes
     sao corretas, F(rho_true) ≈ F(rho_pred) e a loss tende a zero.
 
-    Dois modos de operacao:
+    Tres modos de operacao:
 
       ┌──────────────────────────────────────────────────────────┐
-      │  MODO 1 — Analitico built-in (DEFAULT)                  │
+      │  MODO 1a — Analitico magnitude                           │
+      │  (surrogate_output_mode="magnitude")                     │
       │                                                          │
-      │  rho_true ──→ _analytical_forward_1d ──→ H_true         │
-      │  rho_pred ──→ _analytical_forward_1d ──→ H_pred         │
-      │    ↓                                                     │
-      │  L = ||H_true - H_pred||_norm                            │
+      │  rho ──→ _analytical_forward_1d ──→ log10|H|            │
+      │  Saida: (B, N, 2) — [log10|Hxx|, log10|Hzz|]          │
+      │  Compara apenas magnitudes dos campos EM.                │
+      ├──────────────────────────────────────────────────────────┤
+      │  MODO 1b — Analitico complexo (DEFAULT, recomendado)     │
+      │  (surrogate_output_mode="complex")                       │
       │                                                          │
-      │  Usa aproximacao 1D homogenea: log10|H| funcao de       │
-      │  skin depth delta = sqrt(2*rho/(omega*mu0)).             │
-      │  Nao requer modelo externo — ativo por default.          │
+      │  rho ──→ _analytical_forward_1d_complex ──→ Re(H),Im(H)│
+      │  Saida: (B, N, 4) — [Re(Hxx),Im(Hxx),Re(Hzz),Im(Hzz)]│
+      │  Inclui informacao de fase — fecha o loop fisico         │
+      │  completo com as mesmas grandezas de INPUT_FEATURES.     │
       ├──────────────────────────────────────────────────────────┤
       │  MODO 2 — Neural externo (OPCIONAL)                     │
       │                                                          │
-      │  rho ──→ surrogate_model ──→ H                           │
+      │  rho ──→ surrogate_model ──→ H  (K canais)             │
       │                                                          │
       │  Requer: pinns_use_forward_surrogate=True +              │
       │          surrogate_model_path apontando para .keras/.h5  │
-      │  Modelo treinado separadamente (rho → H_EM).            │
+      │  Ignora surrogate_output_mode (K definido pelo modelo). │
       └──────────────────────────────────────────────────────────┘
 
-    Vantagem do forward model como loss:
-        A loss L_surrogate penaliza predicoes que gerariam campos EM
-        diferentes dos campos associados ao modelo verdadeiro.
-        Isso regulariza a inversao mesmo sem dados medidos H_measured,
-        forcando consistencia fisica end-to-end.
+    Vantagem do modo "complex" sobre "magnitude":
+        A fase phi = -spacing/delta transporta a mesma dependencia de
+        skin depth que a magnitude |H| = AC × exp(-spacing/delta), mas
+        com sensibilidade diferente (linear vs exponencial). Incluir
+        fase dobra a informacao disponivel na loss e alinha o espaco
+        de comparacao ao formato de entrada da rede de inversao
+        (INPUT_FEATURES = [1, 4, 5, 20, 21] → z, Re(Hxx), Im(Hxx),
+        Re(Hzz), Im(Hzz)).
 
     Args:
         config: PipelineConfig com:
+            - surrogate_output_mode: Modo de saida do forward analitico.
+              "complex" (default, 4 canais Re+Im) ou "magnitude"
+              (2 canais log10|H|, comportamento legado).
             - pinns_physics_norm: Norma da loss ("l2", "l1", "huber").
             - pinns_use_forward_surrogate: Se True, tenta carregar
               modelo neural externo. Se False ou modelo indisponivel,
-              usa forward analitico built-in.
+              usa forward analitico built-in no modo selecionado.
             - surrogate_model_path: Caminho para modelo .keras/.h5
               (apenas quando pinns_use_forward_surrogate=True).
             - frequency_hz: Frequencia da ferramenta LWD (Hz).
@@ -526,7 +695,8 @@ def make_surrogate_physics_loss(
     Note:
         Referenciado em:
             - losses/pinns.py: build_pinns_loss() (cenario "surrogate")
-            - tests/test_pinns.py: TestSurrogatePhysicsLoss
+            - tests/test_pinns.py: TestSurrogatePhysicsLoss,
+              TestSurrogateComplexOutput
         Ref: ARCHITECTURE_v2.md secao 18.3.2.
              Morales et al. (2025) — Klein equations como forward model
              analitico diferenciavel (2 equacoes algebricas TI).
@@ -534,11 +704,12 @@ def make_surrogate_physics_loss(
     """
     use_surrogate = config.pinns_use_forward_surrogate
     model_path = config.surrogate_model_path
+    output_mode = config.surrogate_output_mode
 
     # ── Tentativa de carregar surrogate model externo ─────────────────
     # Se flag ativa + path valido, tenta carregar modelo neural.
     # Caso contrario, _surrogate_model permanece None e o forward
-    # analitico built-in sera usado automaticamente.
+    # analitico built-in sera usado automaticamente no modo selecionado.
     _surrogate_model = None
     if use_surrogate and model_path:
         try:
@@ -553,9 +724,10 @@ def make_surrogate_physics_loss(
         except Exception as e:
             logger.warning(
                 "Surrogate model externo nao carregado (%s): %s. "
-                "Usando forward analitico built-in.",
+                "Usando forward analitico built-in (modo '%s').",
                 model_path,
                 e,
+                output_mode,
             )
 
     norm = config.pinns_physics_norm
@@ -570,11 +742,37 @@ def make_surrogate_physics_loss(
     omega_mu = omega * mu0  # Para f=20kHz: ≈ 1.58e-1
     spacing = config.spacing_meters
 
+    # ── Selecionar forward model analitico ────────────────────────────
+    # "complex" → _analytical_forward_1d_complex: retorna (B,N,4)
+    #   [Re(Hxx), Im(Hxx), Re(Hzz), Im(Hzz)] em escala linear (A/m).
+    #   Inclui informacao de fase — recomendado.
+    # "magnitude" → _analytical_forward_1d: retorna (B,N,2)
+    #   [log10|Hxx|, log10|Hzz|] em escala log10.
+    #   Comportamento original (sem fase).
+    _use_complex = output_mode == "complex"
+    _forward_fn = (
+        _analytical_forward_1d_complex if _use_complex else _analytical_forward_1d
+    )
+
+    logger.info(
+        "Surrogate loss configurada: modo='%s' (%s), norma='%s', " "f=%.0f Hz, L=%.2f m",
+        output_mode,
+        "4 canais Re+Im" if _use_complex else "2 canais log10|H|",
+        norm,
+        config.frequency_hz,
+        spacing,
+    )
+
     def surrogate_physics_loss(y_true, y_pred):
         """Surrogate loss: forward model analitico ou neural.
 
         Compara F(rho_true) com F(rho_pred) onde F e o forward model.
         Quando rho_pred ≈ rho_true, F(rho_pred) ≈ F(rho_true) e loss ≈ 0.
+
+        Shape dos campos H depende do modo:
+          - "complex" (default): (B, N, 4) — Re+Im de Hxx e Hzz
+          - "magnitude": (B, N, 2) — log10|Hxx| e log10|Hzz|
+          - neural externo: (B, N, K) — definido pelo modelo
         """
         import tensorflow as tf
 
@@ -587,14 +785,16 @@ def make_surrogate_physics_loss(
         if _surrogate_model is not None:
             # ── MODO 2: Forward pass pelo surrogate neural externo ──
             # rho (B, N, 2) → H (B, N, K) onde K depende do modelo.
+            # Ignora surrogate_output_mode — K eh definido pela rede.
             h_pred = _surrogate_model(rho_pred, training=False)
             h_true = _surrogate_model(rho_true, training=False)
         else:
-            # ── MODO 1: Forward analitico built-in (default) ────────
-            # Aproximacao 1D homogenea: rho → skin depth → |H|.
+            # ── MODO 1: Forward analitico built-in ──────────────────
+            # _forward_fn selecionada fora da closure:
+            #   complex → (B,N,4) Re+Im, magnitude → (B,N,2) log10|H|
             # Diferenciavel via TF — gradientes fluem ate rho_pred.
-            h_pred = _analytical_forward_1d(rho_pred, omega_mu, spacing)
-            h_true = _analytical_forward_1d(rho_true, omega_mu, spacing)
+            h_pred = _forward_fn(rho_pred, omega_mu, spacing)
+            h_true = _forward_fn(rho_true, omega_mu, spacing)
 
         # ── Comparacao: ||F(rho_true) - F(rho_pred)||_norm ───────
         if norm == "l2":
