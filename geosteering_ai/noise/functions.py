@@ -798,14 +798,18 @@ def _add_telemetry_noise_tf(x, noise_level, n_protected=1):
         dtype=tf.float32,
     )
     em_dropped = em_feats * keep
-    # ── Bit errors: ruido gaussiano residual (1/10 do sigma) ────────
+    # ── Bit errors: ruído gaussiano residual (1/10 do sigma) ────────
+    # Mascarado por keep: amostras dropadas ficam ZERADAS (pacote perdido
+    # real — downstream model deve aprender a lidar com zeros).
+    # Sem máscara, bit noise preencheria gaps com ruído aleatório,
+    # comprometendo a semântica física de perda de telemetria.
     bit_noise = tf.random.normal(
         shape=tf.shape(em_feats),
         mean=0.0,
         stddev=noise_level * 0.1,
         dtype=tf.float32,
     )
-    return tf.concat([protected, em_dropped + bit_noise], axis=-1)
+    return tf.concat([protected, em_dropped + bit_noise * keep], axis=-1)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1362,8 +1366,7 @@ def _add_reim_diff_noise_tf(x, noise_level, n_protected=1):
     # ── Noise diferencial: Re (σ) e Im (1.5σ) ──────────────────────
     # Mascara de escala: colunas pares=1.0, impares=1.5
     n_em = tf.shape(em_feats)[2]
-    col_idx = tf.cast(tf.range(n_em), tf.float32)
-    # Pares (0,2,4...)=1.0, impares (1,3,5...)=1.5
+    # Pares (0,2,4...)=1.0 (Re), ímpares (1,3,5...)=1.5 (Im)
     scale = tf.where(
         tf.equal(tf.math.mod(tf.range(n_em), 2), 0),
         tf.ones(n_em, dtype=tf.float32),
@@ -2109,7 +2112,7 @@ def apply_raw_em_noise(
                 rng.uniform(size=(em_feats.shape[0], em_feats.shape[1], 1)) >= drop_prob
             ).astype(em_feats.dtype)
             bit_noise = rng.normal(0.0, noise_level * 0.1, size=em_feats.shape)
-            noisy = em_feats * keep + bit_noise
+            noisy = em_feats * keep + bit_noise * keep  # bit noise só onde não dropou
             em_feats[:] = ((1.0 - w_norm) * em_feats + w_norm * noisy).astype(
                 em_feats.dtype
             )
