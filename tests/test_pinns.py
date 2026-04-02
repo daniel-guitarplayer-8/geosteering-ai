@@ -268,10 +268,10 @@ class TestOraclePhysicsLoss:
 
 @skip_no_tf
 class TestSurrogatePhysicsLoss:
-    """Testes para make_surrogate_physics_loss() — placeholder."""
+    """Testes para make_surrogate_physics_loss() — forward analitico built-in."""
 
-    def test_returns_zero_without_model(self):
-        """Sem surrogate model, retorna 0.0."""
+    def test_returns_scalar_nonneg(self):
+        """Retorna scalar float32 >= 0 com forward analitico."""
         config = _make_config(
             pinns_scenario="surrogate",
             pinns_use_forward_surrogate=False,
@@ -279,10 +279,52 @@ class TestSurrogatePhysicsLoss:
         fn = make_surrogate_physics_loss(config)
         y_true, y_pred = _make_tensors()
         loss = fn(y_true, y_pred)
-        assert loss.numpy() == pytest.approx(0.0)
+        assert loss.shape == ()
+        assert loss.dtype == tf.float32
+        assert loss.numpy() >= 0
 
-    def test_returns_zero_with_empty_path(self):
-        """Com path vazio, retorna 0.0."""
+    def test_returns_nonzero_with_analytical(self):
+        """Com forward analitico, rho_pred != rho_true → loss > 0."""
+        config = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+        )
+        fn = make_surrogate_physics_loss(config)
+        y_true, y_pred = _make_tensors()
+        loss = fn(y_true, y_pred)
+        # y_pred tem erro gaussiano vs y_true, forward analitico amplifica
+        assert loss.numpy() > 0.0
+
+    def test_identical_predictions_near_zero(self):
+        """Quando y_pred == y_true, loss deve ser ≈ 0."""
+        config = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+        )
+        fn = make_surrogate_physics_loss(config)
+        y_true, _ = _make_tensors()
+        # Predicao identica ao ground truth
+        loss = fn(y_true, y_true)
+        assert loss.numpy() == pytest.approx(0.0, abs=1e-6)
+
+    def test_higher_error_higher_loss(self):
+        """Maior diferenca em rho → maior loss (monotonicidade)."""
+        config = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+        )
+        fn = make_surrogate_physics_loss(config)
+        y_true, _ = _make_tensors()
+        # Pequeno erro
+        y_pred_small = y_true + 0.01
+        loss_small = fn(y_true, y_pred_small)
+        # Grande erro
+        y_pred_large = y_true + 0.5
+        loss_large = fn(y_true, y_pred_large)
+        assert loss_large.numpy() > loss_small.numpy()
+
+    def test_empty_path_uses_analytical(self):
+        """Com path vazio e flag=True, usa forward analitico (nao zero)."""
         config = _make_config(
             pinns_scenario="surrogate",
             pinns_use_forward_surrogate=True,
@@ -291,7 +333,32 @@ class TestSurrogatePhysicsLoss:
         fn = make_surrogate_physics_loss(config)
         y_true, y_pred = _make_tensors()
         loss = fn(y_true, y_pred)
-        assert loss.numpy() == pytest.approx(0.0)
+        # Forward analitico e usado como fallback — loss > 0
+        assert loss.numpy() > 0.0
+
+    def test_l1_norm(self):
+        """Verifica que norma L1 funciona com forward analitico."""
+        config = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+            pinns_physics_norm="l1",
+        )
+        fn = make_surrogate_physics_loss(config)
+        y_true, y_pred = _make_tensors()
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() > 0.0
+
+    def test_huber_norm(self):
+        """Verifica que norma Huber funciona com forward analitico."""
+        config = _make_config(
+            pinns_scenario="surrogate",
+            pinns_use_forward_surrogate=False,
+            pinns_physics_norm="huber",
+        )
+        fn = make_surrogate_physics_loss(config)
+        y_true, y_pred = _make_tensors()
+        loss = fn(y_true, y_pred)
+        assert loss.numpy() > 0.0
 
 
 # ════════════════════════════════════════════════════════════════════════
