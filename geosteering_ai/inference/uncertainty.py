@@ -492,43 +492,54 @@ class UncertaintyEstimator:
         x: np.ndarray,
         *,
         n_samples: int = _DEFAULT_MC_SAMPLES,
+        sigma: float = 0.1,
     ) -> UncertaintyResult:
-        """Estima incerteza via INN (Invertible Neural Network).
+        """Estima incerteza via perturbacao de entrada para modelos INN.
 
-        Executa ``n_samples`` forward passes do modelo INN, cada uma com
-        ruido gaussiano adicionado ao tensor interno para simular sampling
-        do espaco latente. Isso produz amostras da distribuicao posterior
-        P(rho | H_EM), capturando a ambiguidade intrinseca da inversao EM.
+        Executa ``n_samples`` forward passes com ruido gaussiano N(0, sigma)
+        adicionado ao tensor de entrada. A INN (Invertible Neural Network)
+        transforma essa variabilidade de entrada em diversidade nas predicoes,
+        estimando a sensibilidade local do modelo ao ruido de medicao.
 
-        Vantagem sobre MC Dropout:
-          - 10× mais rapido (coupling layers sao leves)
-          - Capta multimodalidade (MC Dropout so capta variancia)
-          - Incerteza epistemica + aleatoria simultaneamente
+        Esta implementacao utiliza **perturbacao de entrada** (input
+        perturbation), que mede a sensibilidade do modelo ao ruido nos dados
+        EM. Nao eh equivalente a sampling da posterior completa via coupling
+        layers inversas (que requer treinamento INN com loss forward+latent).
+        Para UQ posterior completa, treinar a INN com loss combinada:
+        L = L_forward + lambda * KL(q(z|x,y) || N(0,I)).
+
+        Comparacao com outros metodos de UQ:
+          ┌─────────────────────────────────────────────────────────┐
+          │  MC Dropout:   incerteza epistemica (modelo)           │
+          │  Ensemble:     incerteza inter-modelo                  │
+          │  INN (atual):  sensibilidade a ruido de entrada        │
+          │  INN (futuro): posterior completa via inverse sampling  │
+          └─────────────────────────────────────────────────────────┘
 
         Args:
-            model: Modelo INN Keras treinado (tf.keras.Model). Construido
+            model: Modelo Keras treinado (tf.keras.Model). Funciona com
+                qualquer modelo, mas projetado para uso com INN construida
                 por ``build_inn(config)`` em ``models/advanced.py``.
-                A INN usa AffineCouplingLayers que sao perturbadas via
-                ruido gaussiano no forward pass para gerar amostras.
             x: Array de entrada com shape ``(N, seq_len, n_features)``.
                 Dados ja preprocessados (FV + GS + scaled).
-            n_samples: Numero de amostras da posterior a gerar.
-                Default: 30. Mais amostras = posterior mais precisa.
+            n_samples: Numero de forward passes perturbadas.
+                Default: 30. Mais amostras = estimativa mais precisa.
+            sigma: Desvio-padrao do ruido gaussiano adicionado ao input.
+                Default: 0.1 (compativel com dados escalados em log10).
+                Valores maiores → incerteza mais ampla.
 
         Returns:
-            UncertaintyResult com mean, std e CI 95% das amostras
-            da posterior. method="inn".
+            UncertaintyResult com mean, std e CI 95%. method="inn".
 
         Raises:
             ValueError: Se ``x`` nao for 3D.
             ValueError: Se ``n_samples`` < 2.
 
         Note:
-            O sampling eh feito adicionando ruido gaussiano N(0, 0.1)
-            ao tensor de entrada em cada forward pass, simulando a
-            perturbacao do espaco latente z. Em uma INN completa
-            (com treinamento forward+latent), o sampling seria feito
-            diretamente nas coupling layers inversas.
+            Para UQ posterior completa via INN, a rede deve ser treinada
+            com loss forward+latent e o sampling feito via coupling layers
+            inversas (reverse=True). Isso requer implementacao adicional
+            do loop de treinamento INN (proposto em F4.1 do ROADMAP).
             Ref: Ardizzone et al. (ICLR 2019) arXiv:1808.04730.
                  INN-UDAR (2025) Computers & Geosciences.
         """
@@ -546,18 +557,18 @@ class UncertaintyEstimator:
             )
 
         logger.info(
-            "INN sampling: %d amostras da posterior, input shape=%s",
+            "INN perturbation UQ: %d amostras, sigma=%.3f, input shape=%s",
             n_samples,
+            sigma,
             x.shape,
         )
 
         x_tensor = tf.constant(x, dtype=tf.float32)
 
-        # ── Sampling da posterior via perturbacao gaussiana ────────────
-        # Cada amostra adiciona ruido N(0, sigma) ao input, simulando
-        # a variabilidade do espaco latente da INN. O modelo INN
-        # transforma essa perturbacao em diversidade nas predicoes.
-        sigma = 0.1  # escala do ruido latente
+        # ── Perturbacao de entrada com ruido gaussiano ────────────────
+        # Cada amostra adiciona ruido N(0, sigma) ao input. A INN
+        # transforma essa perturbacao em diversidade nas predicoes,
+        # medindo a sensibilidade local do modelo ao ruido EM.
         predictions_list: List[np.ndarray] = []
         for _ in range(n_samples):
             noise = tf.random.normal(tf.shape(x_tensor), stddev=sigma)
@@ -575,7 +586,7 @@ class UncertaintyEstimator:
         ci_upper = mean + _Z_95 * std
 
         logger.info(
-            "INN sampling concluido — %d amostras, mean_std=%.6f",
+            "INN perturbation UQ concluido — %d amostras, mean_std=%.6f",
             n_samples,
             float(np.mean(std)),
         )

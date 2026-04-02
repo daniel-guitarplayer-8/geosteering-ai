@@ -250,7 +250,7 @@ def build_tcn_advanced(config: "PipelineConfig") -> "tf.keras.Model":
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _modern_tcn_block(x, filters, large_kernel, dropout_rate):
+def _modern_tcn_block(x, filters, large_kernel, dropout_rate, causal=False):
     """Bloco ModernTCN: DWConv temporal + ConvFFN de canais.
 
     Separa mixing temporal (DWConv com kernel largo sobre patches)
@@ -267,6 +267,8 @@ def _modern_tcn_block(x, filters, large_kernel, dropout_rate):
         large_kernel: Tamanho do kernel da DWConv (tipicamente 51).
             Determina campo receptivo temporal do bloco.
         dropout_rate: Taxa de dropout (0.0-1.0).
+        causal: Se True, usa padding='causal' na DWConv (geosteering
+            realtime). Se False, usa padding='same' (offline).
 
     Returns:
         Tensor (B, N_patches, C) com skip connection residual.
@@ -276,20 +278,22 @@ def _modern_tcn_block(x, filters, large_kernel, dropout_rate):
         DWConv: cada canal eh convoluido independentemente (groups=C),
         o que eh fisicamente coerente pois cada componente EM (Re/Im de
         Hxx, Hzz, etc.) tem dependencias temporais distintas.
+        Causal mode: padding='causal' garante que ponto z nao usa z'>z.
         Ref: Luo & Wang (ICLR 2024) Secao 3.2.
     """
     import tensorflow as tf
 
     skip = x
+    pad = "causal" if causal else "same"
 
     # ── DWConv temporal (mixing entre patches) ────────────────────────
     # Cada canal convoluido independentemente com kernel largo.
-    # Padding "same" (ou "causal" em modo realtime) preserva comprimento.
+    # Padding 'causal' em realtime garante ausencia de look-ahead.
     # groups=filters → depthwise separable (1 kernel por canal).
     x = tf.keras.layers.LayerNormalization()(x)
     x = tf.keras.layers.DepthwiseConv1D(
         kernel_size=large_kernel,
-        padding="same",
+        padding=pad,
         depth_multiplier=1,
         use_bias=False,
     )(x)
@@ -377,23 +381,26 @@ def build_modern_tcn(config: "PipelineConfig") -> "tf.keras.Model":
     n_blocks = ap.get("n_blocks", 4)
     large_kernel = ap.get("large_kernel", 51)
     dr = ap.get("dropout_rate", config.dropout_rate)
+    causal = config.use_causal_mode
 
     logger.info(
-        "build_modern_tcn: n_feat=%d, filters=%d, n_blocks=%d, k=%d",
+        "build_modern_tcn: n_feat=%d, filters=%d, n_blocks=%d, k=%d, causal=%s",
         config.n_features,
         filters,
         n_blocks,
         large_kernel,
+        causal,
     )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
 
     # ── Stem: projecao de entrada para C canais ──────────────────────
-    x = tf.keras.layers.Conv1D(filters, 1, padding="same", use_bias=False)(inp)
+    pad = "causal" if causal else "same"
+    x = tf.keras.layers.Conv1D(filters, 1, padding=pad, use_bias=False)(inp)
 
     # ── N blocos ModernTCN ───────────────────────────────────────────
     for block_i in range(n_blocks):
-        x = _modern_tcn_block(x, filters, large_kernel, dr)
+        x = _modern_tcn_block(x, filters, large_kernel, dr, causal=causal)
         logger.debug("ModernTCN block %d complete", block_i + 1)
 
     # ── Decoder → output ─────────────────────────────────────────────

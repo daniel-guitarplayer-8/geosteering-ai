@@ -32,18 +32,20 @@ Catalogo:
     ┌──────────────────────────────────────────────────────────────────────┐
     │  Familia       │ Count │ Arquiteturas                                │
     ├──────────────────────────────────────────────────────────────────────┤
-    │  CNN           │  7    │ ResNet_18★, ResNet_34, ResNet_50,          │
-    │                │       │ ConvNeXt, InceptionNet, InceptionTime, CNN_1D │
-    │  TCN           │  2    │ TCN, TCN_Advanced                          │
+    │  CNN           │  8    │ ResNet_18★, ResNet_34, ResNet_50,          │
+    │                │       │ ConvNeXt, InceptionNet, InceptionTime,     │
+    │                │       │ CNN_1D, ResNeXt                            │
+    │  TCN           │  3    │ TCN, TCN_Advanced, ModernTCN               │
     │  RNN           │  2    │ LSTM, BiLSTM                               │
-    │  Hybrid        │  2    │ CNN_LSTM, CNN_BiLSTM_ED                   │
+    │  Hybrid        │  3    │ CNN_LSTM, CNN_BiLSTM_ED, ResNeXt_LSTM     │
     │  UNet          │ 14    │ UNet_Base, UNet_Attention,                 │
     │                │       │ UNet_{ResNet18/34/50, ConvNeXt,            │
     │                │       │ Inception, EfficientNet} × {Base, Attn}   │
     │  Transformer   │  6    │ Transformer, Simple_TFT, TFT, PatchTST,   │
     │                │       │ Autoformer, iTransformer                   │
     │  Decomposition │  2    │ N_BEATS, N_HiTS                           │
-    │  Advanced      │  4    │ DNN, FNO, DeepONet, Geophysical_Attention  │
+    │  Advanced      │  5    │ DNN, FNO, DeepONet, Geophysical_Attention, │
+    │                │       │ INN                                        │
     │  Geosteering   │  5    │ WaveNet, Causal_Transformer, Informer,     │
     │                │       │ Mamba_S4, Encoder_Forecaster              │
     └──────────────────────────────────────────────────────────────────────┘

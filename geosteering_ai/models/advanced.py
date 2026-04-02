@@ -542,7 +542,11 @@ class _AffineCouplingLayer(tf.keras.layers.Layer):
         Returns:
             Tensor (B, N, C) transformado.
         """
-        n_channels = tf.shape(x)[-1]
+        # Usar shape estatico quando disponivel (otimizacao XLA/graph).
+        # Fallback para tf.shape se shape estatico for None (raro).
+        n_channels = x.shape[-1]
+        if n_channels is None:
+            n_channels = tf.shape(x)[-1]
         half = n_channels // 2
 
         if self.reverse_mask:
