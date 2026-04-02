@@ -165,6 +165,11 @@ def _causal_depthwise_conv1d(
         tf.Tensor: Output (batch, seq_len, channels). Dimensão temporal
             preservada — mesmo seq_len da entrada.
 
+    Warning:
+        Esta função cria novas camadas Keras a cada invocação.
+        Usar APENAS durante construção do modelo (Functional API),
+        NUNCA dentro de Layer.call() — isso criaria pesos não rastreados.
+
     Note:
         Referenciado em:
             - models/blocks.py: conv_next_block (quando causal=True)
@@ -172,6 +177,8 @@ def _causal_depthwise_conv1d(
             - models/geosteering.py: _s4_layer (Mamba_S4, 3× empilhadas)
         Fix: Keras 3.x (Colab TF 2.19) — DepthwiseConv1D(causal) falha.
         Ref: keras-team/keras#19311 (remoção de causal em DepthwiseConv1D).
+        Nota: _causal_depthwise_conv1d NÃO está em __all__ (helper privado).
+            Importado diretamente por geosteering.py via import explícito.
     """
     import tensorflow as tf
 

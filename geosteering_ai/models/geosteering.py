@@ -309,35 +309,37 @@ def build_informer(config: "PipelineConfig") -> "tf.keras.Model":
 # ──────────────────────────────────────────────────────────────════════════
 
 
-# ── Importação do helper causal centralizado em blocks.py ─────────────
-# Evita duplicação: _causal_depthwise_conv1d resolve a incompatibilidade
-# Keras 3.x (DepthwiseConv1D não suporta padding='causal') via
-# ZeroPadding1D(left) + DepthwiseConv1D(padding='valid').
-# Ref: blocks.py (Grupo Utility), geosteering.py (Mamba_S4).
-from geosteering_ai.models.blocks import _causal_depthwise_conv1d
-
-
 def _s4_layer(x, d_model: int, dt_rank: int = 16):
-    """Camada S4 simplificada: convolucao causal longa via Conv1D dilatada.
+    """Camada S4 simplificada: convolução causal longa via Conv1D dilatada.
 
-    Aproximacao: usa stack de Conv1D causais com dilation exponencial
+    Aproximação: usa stack de Conv1D causais com dilation exponencial
     para simular o campo receptivo longo do SSM real.
-    O S4 completo requer implementacao FFT customizada nao disponivel
+    O S4 completo requer implementação FFT customizada não disponível
     nativamente no Keras.
+
+    As 3 convoluções depthwise NÃO recebem regularizer/use_bias
+    intencionalemente — o Mamba_S4 é uma aproximação leve de SSM onde
+    os pesos depthwise servem como kernel de convolução de estado,
+    não como filtros treináveis convencionais.
 
     Args:
         x: Tensor (batch, seq_len, d_model).
-        d_model: Dimensao do modelo.
-        dt_rank: Rank do timestep delta (nao usado nesta aproximacao).
+        d_model: Dimensão do modelo.
+        dt_rank: Rank do timestep delta (não usado nesta aproximação).
 
     Returns:
         tf.Tensor: (batch, seq_len, d_model).
     """
     import tensorflow as tf
 
-    # ── Aproximacao: depthwise conv causal de longo alcance ───────────
+    # ── Lazy import: mantém padrão de import dentro de função ─────────
+    # Evita import de TF no nível do módulo (compatibilidade CPU-only).
+    from geosteering_ai.models.blocks import _causal_depthwise_conv1d
+
+    # ── Aproximação: depthwise conv causal de longo alcance ───────────
     # Usa _causal_depthwise_conv1d (ZeroPadding1D + valid) porque
-    # Keras 3.x nao suporta padding="causal" em DepthwiseConv1D.
+    # Keras 3.x não suporta padding="causal" em DepthwiseConv1D.
+    # Sem regularizer: pesos SSM são leves (kernel de estado, não filtros).
     h = _causal_depthwise_conv1d(x, kernel_size=4, dilation_rate=1)
     h = _causal_depthwise_conv1d(h, kernel_size=4, dilation_rate=4)
     h = _causal_depthwise_conv1d(h, kernel_size=4, dilation_rate=16)
