@@ -323,7 +323,7 @@ def build_modern_tcn(config: "PipelineConfig") -> "tf.keras.Model":
 
     Arquitetura:
       ┌──────────────────────────────────────────────────────────────┐
-      │  Input (B, seq_len, n_features)                               │
+      │  Input (B, seq_len, n_features)                             │
       │    ↓                                                        │
       │  Stem: Conv1D(filters, k=1) — projeção de canais            │
       │    ↓                                                        │

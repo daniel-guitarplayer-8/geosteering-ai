@@ -259,7 +259,7 @@ def build_resnext_lstm(config: "PipelineConfig") -> "tf.keras.Model":
 
     Arquitetura:
       ┌──────────────────────────────────────────────────────────────┐
-      │  Input (B, seq_len, n_features)                               │
+      │  Input (B, seq_len, n_features)                             │
       │    ↓                                                        │
       │  ResNeXtBlock(64,  C=32, d=4, k=3) — features locais       │
       │  ResNeXtBlock(128, C=32, d=4, k=3) — features multi-escala │

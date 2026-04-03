@@ -791,7 +791,7 @@ def build_resnext(config: "PipelineConfig") -> "tf.keras.Model":
 
     Arquitetura:
       ┌──────────────────────────────────────────────────────────────┐
-      │  Input (B, seq_len, n_features)                               │
+      │  Input (B, seq_len, n_features)                             │
       │    ↓                                                        │
       │  Stem: Conv1D(64, k=7) → BN → ReLU                         │
       │    ↓                                                        │

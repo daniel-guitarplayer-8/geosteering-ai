@@ -589,7 +589,7 @@ def build_inn(config: "PipelineConfig") -> "tf.keras.Model":
 
     Arquitetura:
       ┌──────────────────────────────────────────────────────────────┐
-      │  Input (B, seq_len, n_features)                               │
+      │  Input (B, seq_len, n_features)                             │
       │    ↓                                                        │
       │  Stem: Conv1D(hidden, k=3) → BN → ReLU                     │
       │    ↓                                                        │
