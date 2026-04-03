@@ -21,7 +21,7 @@
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 5.2 (CNN), legado C28               ║
 # ║                                                                            ║
 # ║  Historico:                                                                ║
-# ║    v2.0.0 (2026-03) — Implementação inicial (7 arquiteturas)            ║
+# ║    v2.0.0 (2026-03) — Implementacao inicial (7 arquiteturas)            ║
 # ║    v2.0.1 (2026-04) — +ResNeXt (8 arquiteturas)                         ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """Arquiteturas CNN 1D para inversao de resistividade (seq2seq).

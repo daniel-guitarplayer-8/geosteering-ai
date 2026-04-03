@@ -14,13 +14,15 @@
 # ║    • FNO: Fourier Neural Operator (espectral, periodico)                 ║
 # ║    • DeepONet: Deep Operator Network (branch-trunk)                      ║
 # ║    • Geophysical_Attention: atencao especializada para fisica LWD        ║
+# ║    • INN: Invertible Neural Network para UQ probabilistica               ║
 # ║                                                                            ║
 # ║  Dependencias: config.py (PipelineConfig), models/blocks.py               ║
-# ║  Exports: 4 funcoes — ver __all__                                         ║
+# ║  Exports: 5 funcoes — ver __all__                                         ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 5.9, legado C36                      ║
 # ║                                                                            ║
 # ║  Historico:                                                                ║
 # ║    v2.0.0 (2026-03) — Implementacao inicial (4 arquiteturas)            ║
+# ║    v2.0.1 (2026-04) — +INN (5 arquiteturas)                              ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """Arquiteturas avancadas: DNN, FNO, DeepONet, Geophysical_Attention.
 

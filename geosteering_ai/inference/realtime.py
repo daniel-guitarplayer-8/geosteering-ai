@@ -11,7 +11,7 @@
 # ║                                                                            ║
 # ║  Proposito:                                                                ║
 # ║    • RealtimeInference: sliding window para geosteering em tempo real     ║
-# ║    • Buffer circular de medições com tamanho = config.sequence_length     ║
+# ║    • Buffer circular de medicoes com tamanho = config.sequence_length     ║
 # ║    • Inferencia a cada nova medicao (on-arrival)                          ║
 # ║    • Compoe InferencePipeline para cadeia FV+GS+scale+predict            ║
 # ║                                                                            ║

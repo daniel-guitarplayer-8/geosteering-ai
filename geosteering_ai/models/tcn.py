@@ -16,11 +16,11 @@
 # ║    • Causal nativo: sem look-ahead, compativel com InferencePipeline      ║
 # ║                                                                            ║
 # ║  Dependencias: config.py (PipelineConfig), models/blocks.py               ║
-# ║  Exports: 3 funções — ver __all__                                         ║
+# ║  Exports: 3 funcoes — ver __all__                                         ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 5.3, legado C30                      ║
 # ║                                                                            ║
 # ║  Historico:                                                                ║
-# ║    v2.0.0 (2026-03) — Implementação inicial (TCN, TCN_Advanced)          ║
+# ║    v2.0.0 (2026-03) — Implementacao inicial (TCN, TCN_Advanced)          ║
 # ║    v2.0.1 (2026-04) — +ModernTCN (3 arquiteturas)                        ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """TCN e TCN_Advanced para inversao seq2seq causalmente correta.

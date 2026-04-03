@@ -15,11 +15,11 @@
 # ║    • Combina receptive field local (CNN) + memoria longa (LSTM)           ║
 # ║                                                                            ║
 # ║  Dependencias: config.py (PipelineConfig), models/blocks.py               ║
-# ║  Exports: 3 funções — ver __all__                                         ║
+# ║  Exports: 3 funcoes — ver __all__                                         ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 5.5, legado C32                      ║
 # ║                                                                            ║
 # ║  Historico:                                                                ║
-# ║    v2.0.0 (2026-03) — Implementação inicial (CNN_LSTM, CNN_BiLSTM_ED)   ║
+# ║    v2.0.0 (2026-03) — Implementacao inicial (CNN_LSTM, CNN_BiLSTM_ED)   ║
 # ║    v2.0.1 (2026-04) — +ResNeXt_LSTM (3 arquiteturas)                    ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """Arquiteturas hibridas CNN+LSTM para inversao resistividade.
