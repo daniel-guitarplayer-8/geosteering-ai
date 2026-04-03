@@ -1,6 +1,6 @@
-# Catálogo de 26 Arquiteturas — Pipeline v5.0.15
+# Catálogo de 48 Arquiteturas — Geosteering AI v2.0
 
-## Referência rápida para geração de células C27–C37
+## Referência rápida — ModelRegistry (48 entradas, 9 famílias)
 
 ---
 
@@ -34,16 +34,31 @@
 | 24 | **Informer/PatchTST** | Transformer | ✅ | Via máscara | Geo | Sparse attention O(NlogN) |
 | 25 | **Mamba/S4** | SSM | ✅ | **Nativo** | Geo | **Menor latência O(1)** |
 | 26 | **Encoder_Forecaster** | Seq2Seq | ✅ | **Nativo** | Geo | **Look-ahead explícito** |
+| 27 | ResNet_50 | CNN | ✅ | Adaptável | 2 | Modelos muito profundos |
+| 28 | ConvNeXt | CNN | ✅ | Adaptável | 2 | CNN moderna (depthwise + LN) |
+| 29 | InceptionNet | CNN | ✅ | Adaptável | 2 | Multi-escala temporal |
+| 30 | InceptionTime | CNN | ✅ | Adaptável | 2 | Multi-escala + ensemble |
+| 31 | Simple_TFT | Transformer | ✅ | Adaptável | 2 | TFT simplificado |
+| 32 | PatchTST | Transformer | ✅ | Adaptável | 2 | Patch-based Transformer |
+| 33 | Autoformer | Transformer | ✅ | Adaptável | 2 | Auto-correlação |
+| 34 | iTransformer | Transformer | ✅ | Adaptável | 2 | Atenção invertida (channel-wise) |
+| 35-46 | 12× U-Net variantes | U-Net | ✅ | **Incompatível** | 1-2 | ResNet/ConvNeXt/Inception/EfficientNet ×2 |
+| 47 | **ModernTCN** | TCN | ✅ | Adaptável | 2 | DWConv k=51 + ConvFFN (Luo 2024) |
+| 48 | **INN** | Avançado | ✅ | Adaptável | 3 | Invertible NN para UQ (Ardizzone 2019) |
+| — | **ResNeXt** | CNN | ✅ | Adaptável | 2 | Grouped convolutions C=32 (Xie 2017) |
+| — | **ResNeXt_LSTM** | Híbrido | ✅ | Adaptável | 2 | ResNeXt encoder + LSTM temporal |
 
 *FNO: FFT global viola causalidade estritamente, mas adaptável com restrição espectral*
+
+**Novas em v2.0.1 (Abril 2026):** ModernTCN, INN, ResNeXt, ResNeXt_LSTM
 
 ## 2. Compatibilidade Causal
 
 | Categoria | Arquiteturas | Contagem |
 |:----------|:-------------|:--------:|
-| **Nativas causais** | WaveNet, Causal_Transformer, TCN, Mamba_S4, LSTM, Encoder_Forecaster | 6 |
-| **Adaptáveis** | ResNet_18/34, CNN_1D, CNN_LSTM, TCN_Advanced, TFT, Informer, N-HiTS, N-BEATS, DNN, Geophysical_Attention, Transformer | 12* |
-| **Incompatíveis** (offline only) | BiLSTM, CNN_BiLSTM_ED, UNet_*, Attention_UNet, DeepONet | 6 |
+| **Nativas causais** | WaveNet, Causal_Transformer, TCN, TCN_Advanced, ModernTCN, Mamba_S4, LSTM, Encoder_Forecaster | 8 |
+| **Adaptáveis** | ResNet_18/34/50, CNN_1D, ConvNeXt, InceptionNet/Time, ResNeXt, CNN_LSTM, ResNeXt_LSTM, TFT, Simple_TFT, Informer, PatchTST, Autoformer, iTransformer, N-HiTS, N-BEATS, DNN, FNO, Geophysical_Attention, INN, Transformer | 22 |
+| **Incompatíveis** (offline only) | BiLSTM, CNN_BiLSTM_ED, 14× UNet_*, DeepONet | 18 |
 
 ## 3. Regra de Preservação Temporal
 

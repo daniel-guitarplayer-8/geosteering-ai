@@ -57,11 +57,14 @@ history = trainer.run()
 
 ## Arquitetura
 
-- **44 arquiteturas** (39 standard + 5 geosteering nativas causais)
-- **26 funções de perda** (13 genéricas + 4 geofísicas + 9 avançadas)
-- **3 cenários PINN** (oracle, surrogate, maxwell) + TIV constraint
-- **7 Feature Views** (identity, H1_logH2, logH1_logH2, 3× fase/razão, second_order)
+- **48 arquiteturas** em 9 famílias (CNN, TCN, RNN, Híbrido, U-Net, Transformer, Decomposição, Avançado, Geosteering)
+- **26 funções de perda** (13 genéricas + 4 geofísicas + 2 geosteering + 7 avançadas)
+- **8 cenários PINN** (oracle, surrogate, maxwell, smoothness, skin_depth, continuity, variational, self_adaptive)
+- **34 tipos de ruído** (9 CORE + 6 LWD + 12 EXTENDED + 5 originais + 2 geosteering) + curriculum 3-phase
+- **7 Feature Views** (identity, raw, H1_logH2, logH1_logH2, 3× fase/razão, second_order)
 - **5 famílias Geosinais** (USD, UAD, UHR, UHA, U3DF)
+- **246 campos** PipelineConfig (ponto único de verdade)
+- **UQ:** MC Dropout + Ensemble + INN (perturbação de entrada)
 - **Dual-mode:** offline (acausal) e realtime (causal)
 - **On-the-fly:** noise → FV → GS → scale (fisicamente correto)
 - **Integração científica:** Consensus MCP Server (Semantic Scholar + ArXiv)
@@ -72,10 +75,10 @@ Documentação completa: [docs/ARCHITECTURE_v2.md](docs/ARCHITECTURE_v2.md)
 
 ```
 geosteering_ai/
-├── config.py              ← PipelineConfig dataclass (150+ campos)
-├── data/                  ← Loading, splitting, FV, GS, scaling, pipeline
-├── noise/                 ← On-the-fly noise (15 tipos), curriculum 3-phase
-├── models/                ← 44 arquiteturas + ModelRegistry
+├── config.py              ← PipelineConfig dataclass (246 campos)
+├── data/                  ← Loading, splitting, FV(7), GS(5), scaling(8), pipeline, DTB, surrogate
+├── noise/                 ← On-the-fly noise (34 tipos), curriculum 3-phase
+├── models/                ← 48 arquiteturas (9 famílias) + ModelRegistry
 ├── losses/                ← 26 losses + LossFactory + PINNs
 ├── training/              ← TrainingLoop, callbacks, N-Stage, Optuna HPO
 ├── inference/             ← InferencePipeline, realtime, export, UQ

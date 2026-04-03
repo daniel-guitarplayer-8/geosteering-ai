@@ -246,7 +246,7 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 │  F2 ─ Treinamento e Validação GPU (curto prazo)                           │
 │  ├── Notebook train_surrogate.ipynb                                        │
 │  ├── Notebook train_baseline.ipynb                                         │
-│  ├── Benchmark 44 arquiteturas no Colab                                    │
+│  ├── Benchmark 48 arquiteturas no Colab                                    │
 │  ├── Validação end-to-end com dados Fortran                               │
 │  └── Preset surrogate_mode_a.yaml                                          │
 │                                                                             │
@@ -339,7 +339,7 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 |:------|:----------|:---------------|:----------:|
 | F3.1 | **XLA/JIT compilation** | 2-3× speedup treinamento | Alta |
 | | — `model.compile(jit_compile=True)` | | |
-| | — Verificar compatibilidade com as 44 arquiteturas | | |
+| | — Verificar compatibilidade com as 48 arquiteturas | | |
 | | — Campo `config.use_xla` já existe no PipelineConfig | | |
 | F3.2 | **Mixed precision (float16)** | 1.5-2× speedup + 50% menos memória GPU | Alta |
 | | — `tf.keras.mixed_precision.set_global_policy('mixed_float16')` | | |
@@ -520,7 +520,7 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 | 2 | Notebook `train_surrogate.ipynb` | `notebooks/` | Treinar SurrogateNet Modo A | 1 sessão |
 | 3 | XLA compilation | `training/loop.py` | 2-3× speedup de treinamento | 1 sessão |
 | 4 | Mixed precision (float16) | `training/loop.py` | 1.5-2× speedup + 50% menos memória | 1 sessão |
-| 5 | Benchmark 44 arquiteturas | `notebooks/` | Ranking R² × latência × parâmetros | 2 sessões |
+| 5 | Benchmark 48 arquiteturas | `notebooks/` | Ranking R² × latência × parâmetros | 2 sessões |
 | 6 | Preset `surrogate_mode_a.yaml` | `configs/` | Reprodutibilidade do surrogate | 0.5 sessão |
 
 ### 4.2 Média Prioridade
@@ -575,7 +575,7 @@ As seguintes requisições podem ser utilizadas em futuras sessões de desenvolv
 "Criar notebook train_baseline.ipynb para treinamento completo no Colab"
 "Criar notebook train_surrogate.ipynb para treinar SurrogateNet Modo A"
 "Criar configs/surrogate_mode_a.yaml com hiperparâmetros otimizados"
-"Criar notebook benchmark_architectures.ipynb para ranking das 44 arquiteturas"
+"Criar notebook benchmark_architectures.ipynb para ranking das 48 arquiteturas"
 ```
 
 ### F3 — Otimização (Médio Prazo)
@@ -708,7 +708,7 @@ Os artigos abaixo estão disponíveis localmente na pasta `PDFs/` e devem ser co
 | Arquivo | Propósito |
 |:--------|:----------|
 | `geosteering_ai/config.py` | PipelineConfig (246 campos) — ponto único de verdade |
-| `geosteering_ai/models/registry.py` | ModelRegistry — 44 arquiteturas |
+| `geosteering_ai/models/registry.py` | ModelRegistry — 48 arquiteturas |
 | `geosteering_ai/losses/factory.py` | LossFactory.build_combined() |
 | `geosteering_ai/losses/pinns.py` | 8 cenários PINN + forward analítico |
 | `geosteering_ai/models/surrogate.py` | SurrogateNet TCN |

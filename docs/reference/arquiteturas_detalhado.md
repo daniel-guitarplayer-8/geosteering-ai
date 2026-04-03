@@ -1,12 +1,12 @@
-# Catálogo Detalhado de Arquiteturas de Rede Neural — Pipeline v5.0.15
+# Catálogo Detalhado de Arquiteturas de Rede Neural — Geosteering AI v2.0
 
 ## Pipeline de Inversão Geofísica com Deep Learning
 
 **Autor:** Daniel Leal
-**Versão:** v5.0.15
+**Versão:** v2.0 (atualizado v2.0.1 — Abril 2026)
 **Framework:** TensorFlow 2.x / Keras (exclusivo)
-**Total de Arquiteturas:** 44 (39 standard + 5 geosteering)
-**Data:** Março 2026
+**Total de Arquiteturas:** 48 (9 famílias: CNN 8, TCN 3, RNN 2, Híbrido 3, U-Net 14, Transformer 6, Decomposição 2, Avançado 5, Geosteering 5)
+**Data:** Abril 2026
 
 ---
 

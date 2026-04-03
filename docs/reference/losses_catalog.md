@@ -1,4 +1,4 @@
-# Catalogo de 25 Loss Functions — Pipeline v5.0.15
+# Catálogo de 26 Loss Functions — Pipeline v2.0
 
 ## Referencia rapida para geracao de C41 e configuracao de C10
 
@@ -11,9 +11,9 @@
 | Genericas | 13 | v5.0.1+ | MSE, MAE, Huber, RMSE, etc. |
 | Geofisicas | 4 | v5.0.3+ | log_scale_aware + variantes adaptativas (gangorra) |
 | Geosteering (v5.0.7) | 2 | v5.0.7 | probabilistic_nll + look_ahead_weighted |
-| Geosteering Avancado (v5.0.15) | 6 | v5.0.15 | DILATE, Sobolev, Spectral, Cross-Gradient, Encoder-Decoder, Multi-Task |
+| Avançadas (v5.0.15+) | 7 | v5.0.15+ | DILATE, Sobolev, Spectral, Cross-Gradient, Encoder-Decoder, Multi-Task, morales_physics_hybrid |
 
-**Total: 25 losses** — todas opt-in via FLAGS em C10, implementadas em C41 (factory).
+**Total: 26 losses** — todas configuráveis via PipelineConfig, implementadas em `losses/catalog.py` (LossFactory).
 
 ---
 

@@ -23,7 +23,7 @@ atraves de arquiteturas de Deep Learning. O sistema integrado deve ser capaz de
 utilizar **componentes EM + geosinais e/ou Feature Views** como features para
 inversao de resistividade em cenarios de:
 
-- **Inferencia offline** (acausal, batch completo, 44 arquiteturas)
+- **Inferencia offline** (acausal, batch completo, 48 arquiteturas)
 - **Inferencia causal realtime** para geosteering (sliding window, 27 arquiteturas compatíveis)
 - **Ambientes ruidosos** com noise on-the-fly (fidelidade com medicoes LWD reais)
 
@@ -49,7 +49,7 @@ quando Feature Views e Geosinais estao ativos.
 ### 1.3. Por Que Uma Arquitetura de Software
 
 O projeto atingiu **71.899 linhas** em 50+ arquivos, com **574 chamadas
-`globals().get()`**, **~1.185 FLAGS**, e **44 arquiteturas**. O formato notebook-flat
+`globals().get()`**, **~1.185 FLAGS**, e **48 arquiteturas**. O formato notebook-flat
 original nao suporta mais a complexidade do sistema:
 
 | Problema Diagnosticado | Impacto | Solucao v2.0 |
@@ -224,17 +224,19 @@ github.com/daniel-leal/geosteering-ai/
 │   │   ├── curriculum.py              ← CurriculumSchedule (3-phase ramp)
 │   │   └── utils.py                   ← apply_raw_em_noise numpy (visualizacao/debug)
 │   │
-│   ├── models/                         ← Modulo de arquiteturas (44 modelos)
+│   ├── models/                         ← Modulo de arquiteturas (48 modelos)
 │   │   ├── __init__.py
-│   │   ├── registry.py                ← ModelRegistry class (44 entradas)
+│   │   ├── registry.py                ← ModelRegistry class (48 entradas)
 │   │   ├── blocks.py                  ← 23 blocos Keras reutilizaveis
-│   │   ├── cnn.py                     ← ResNet_18/34/50, ConvNeXt, Inception, CNN_1D (7)
-│   │   ├── rnn.py                     ← LSTM, BiLSTM, CNN_LSTM, CNN_BiLSTM_ED (4)
-│   │   ├── tcn.py                     ← TCN, TCN_Advanced (2)
+│   │   ├── cnn.py                     ← ResNet_18/34/50, ConvNeXt, Inception, CNN_1D, ResNeXt (8)
+│   │   ├── rnn.py                     ← LSTM, BiLSTM (2)
+│   │   ├── hybrid.py                  ← CNN_LSTM, CNN_BiLSTM_ED, ResNeXt_LSTM (3)
+│   │   ├── tcn.py                     ← TCN, TCN_Advanced, ModernTCN (3)
 │   │   ├── transformer.py            ← Transformer, TFT, PatchTST, Autoformer, iTransformer (6)
 │   │   ├── unet.py                    ← 14 U-Net variantes (offline-only)
 │   │   ├── decomposition.py          ← N-BEATS, N-HiTS (2)
-│   │   ├── advanced.py               ← DNN, FNO, DeepONet, GeoAttention (4)
+│   │   ├── advanced.py               ← DNN, FNO, DeepONet, GeoAttention, INN (5)
+│   │   ├── surrogate.py              ← SurrogateNet TCN + SurrogateNet v2 ModernTCN
 │   │   └── geosteering.py            ← WaveNet, Causal_Transformer, Informer,
 │   │                                    Mamba_S4, Encoder_Forecaster (5 nativas causais)
 │   │
@@ -296,7 +298,7 @@ github.com/daniel-leal/geosteering-ai/
 │   ├── test_noise.py                 ← Noise functions, curriculum 3-phase
 │   ├── test_feature_views.py         ← 6 FV: numpy/TF consistency
 │   ├── test_geosignals.py            ← 5 familias: numpy/TF consistency
-│   ├── test_models.py                ← Forward pass em todas 44 arquiteturas
+│   ├── test_models.py                ← Forward pass em todas 48 arquiteturas
 │   ├── test_losses.py                ← 26 losses forward pass + gradients
 │   └── test_training.py              ← 1-epoch smoke test (CPU)
 │
@@ -453,7 +455,7 @@ class PipelineConfig:
     noise_ramp_epochs: int = 80
 
     # ── Arquitetura ──────────────────────────────────────────────────
-    model_type: str = "ResNet_18"          # 44 opcoes no ModelRegistry
+    model_type: str = "ResNet_18"          # 48 opcoes no ModelRegistry
     inference_mode: str = "offline"        # "offline" ou "realtime"
     use_causal_mode: bool = False          # Auto-True quando realtime
     output_channels: int = 2               # 2=[rho_h,rho_v], 4=[+sigma], 6=[+DTB]
@@ -522,7 +524,7 @@ class PipelineConfig:
 # geosteering_ai/models/registry.py
 
 class ModelRegistry:
-    """Registro central de 44 arquiteturas com validacao causal."""
+    """Registro central de 48 arquiteturas com validacao causal."""
 
     def register(self, name, build_fn, tier, category, causal_compatible, cell): ...
     def build(self, config: PipelineConfig) -> tf.keras.Model: ...
@@ -720,7 +722,7 @@ O modo de inferencia e controlado por `config.inference_mode`:
 | Aspecto | Offline (padrao) | Realtime (geosteering) |
 |:--------|:-----------------|:----------------------|
 | Dados de entrada | Batch completo (n, seq, feat) | Sliding window (1, W, feat) |
-| Rede | Acausal (44 arqs) | Causal (27 arqs compativeis) |
+| Rede | Acausal (48 arqs) | Causal (30 arqs compativeis) |
 | Saida | (batch, N_MEDIDAS, 2) | (1, W, 2-6) |
 | Incerteza | Opcional (ensemble UQ) | Automatica (NLL) |
 | Padding Conv1D | `"same"` | `"causal"` |
@@ -816,7 +818,7 @@ FASE 1: MODELOS (EXTRAIR)
   ├── models/blocks.py (23 blocos ← C27)
   ├── models/cnn.py, rnn.py, tcn.py, transformer.py, unet.py, etc. (← C28-C36A)
   ├── models/registry.py (ModelRegistry ← C37)
-  ├── tests/test_models.py (forward pass 44 arqs)
+  ├── tests/test_models.py (forward pass 48 arqs)
   └── VALIDACAO: build + dummy forward para cada arquitetura ✓
 
 FASE 2: DADOS + NOISE (REFATORAR)
@@ -1002,12 +1004,12 @@ assert EPS_TF == 1e-12               # NUNCA 1e-30 (float32)
 
 | Componente | Quantidade |
 |:-----------|:---------:|
-| Arquiteturas (ModelRegistry) | 44 (39 standard + 5 geosteering) |
-| Nativas causais | 6 (WaveNet, Causal_Transformer, TCN, Mamba_S4, LSTM, Encoder_Forecaster) |
-| Causais incompativeis (offline-only) | 17 (BiLSTM, U-Nets, DeepONet) |
-| Causais adaptaveis | 21 |
-| Funcoes de perda (LossFactory) | 26 (13 gen + 4 geo + 9 adv) |
-| Feature Views | 6 (identity, H1_logH2, logH1_logH2, 3× fase/razao) |
+| Arquiteturas (ModelRegistry) | 48 (9 famílias: CNN 8, TCN 3, RNN 2, Híbrido 3, U-Net 14, Transformer 6, Decomposição 2, Avançado 5, Geosteering 5) |
+| Nativas causais | 8 (WaveNet, Causal_Transformer, TCN, TCN_Advanced, ModernTCN, Mamba_S4, LSTM, Encoder_Forecaster) |
+| Causais incompativeis (offline-only) | 18 (BiLSTM, CNN_BiLSTM_ED, 14× U-Nets, DeepONet) |
+| Causais adaptaveis | 22 |
+| Funcoes de perda (LossFactory) | 26 (13 gen + 4 geo + 2 geosteering + 7 avancadas) |
+| Feature Views | 7 (identity, raw, H1_logH2, logH1_logH2, 3× fase/razao, second_order) |
 | Familias de Geosinais | 5 (USD, UAD, UHR, UHA, U3DF) |
 | Tipos de ruido (on-the-fly) | 4 (gaussian, multiplicative, uniform, dropout) |
 | Perspectivas | P1-P5 (baseline → Picasso/DTB) |

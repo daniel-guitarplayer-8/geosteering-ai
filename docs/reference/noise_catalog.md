@@ -1,4 +1,4 @@
-# Catalogo de Ruidos — Pipeline v5.0.15
+# Catálogo de Ruídos — Pipeline v2.0
 
 ## Referencia rapida para C12 (FLAGS) e C24 (implementacao)
 
@@ -10,13 +10,15 @@
 |:-----------------------|:---:|:---------------:|:------------------------------------------------|
 | CORE                   |   9 |       Sim       | Fenomenos fisicos reais na cadeia de medicao LWD |
 | EXTENDED               |  13 |       Nao       | Fenomenos LWD secundarios ou operacionais        |
-| EXPERIMENTAL           |  13 |       Nao       | Baixa relevancia para LWD EM ou exploratorios    |
-| Geofisico LWD (R1-R6) |   6 |       Nao       | Efeitos geofisicos especializados                |
-| Geosteering (R7-R8)   |   2 |       Nao       | BHA vibration + eccentricity                     |
-| **TOTAL**              |**43**|     **9**      |                                                  |
+| EXPERIMENTAL           |  13 |       Não       | Baixa relevância para LWD EM ou exploratórios (não implementados no v2.0) |
+| Geofísico LWD (R1-R6) |   6 |       Não       | Efeitos geofísicos especializados                |
+| Geosteering (R7-R8)   |   2 |       Não       | BHA vibration + eccentricity                     |
+| **TOTAL implementado** |**34**|     **9**      | 9 CORE + 12 EXTENDED + 6 LWD + 5 originais + 2 geosteering |
+| **TOTAL catalogado**   |**43**|     **9**      | Inclui 13 EXPERIMENTAL não implementados         |
 
-**Definicao:** C12 PARTE 4 (NOISE_CATALOG dict) + PARTE 6A (R1-R6) + PARTE 6B (R7-R8)
-**Implementacao:** C24 (apply_noise functions no tf.data pipeline)
+**Nota v2.0:** 34 tipos efetivamente implementados em `noise/functions.py` (NOISE_FN_MAP).
+Os 13 EXPERIMENTAL estão catalogados mas NÃO implementados no v2.0.
+**Implementação:** `geosteering_ai/noise/functions.py` (apply_raw_em_noise via tf.data pipeline)
 
 ---
 

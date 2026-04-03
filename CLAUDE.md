@@ -61,7 +61,7 @@ geosteering_ai/
 ├── config.py              ← PipelineConfig dataclass
 ├── data/                  ← Loading, splitting, FV, GS, scaling, DataPipeline
 ├── noise/                 ← On-the-fly noise (gaussian, curriculum)
-├── models/                ← 44 arquiteturas + ModelRegistry
+├── models/                ← 48 arquiteturas (9 famílias) + ModelRegistry
 ├── losses/                ← 26 losses + LossFactory
 ├── training/              ← TrainingLoop, callbacks, N-Stage
 ├── inference/             ← InferencePipeline, realtime, export
