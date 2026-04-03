@@ -175,6 +175,10 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 | **Documentação** | Manual técnico de ruídos — `docs/documentacao_noises.md` (34 tipos, curriculum, API) | ✅ |
 | **Documentação** | Manual técnico de losses — `docs/documentacao_losses.md` (26 losses, 8 PINN, TIV) | ✅ |
 | **Documentação** | Manual técnico de modelos — `docs/documentacao_models.md` (48 arqs, 9 famílias, blocos) | ✅ |
+| **Documentação** | Manual técnico de inferência offline — `docs/documentacao_inferencia_offline.md` (pipeline, UQ, export) | ✅ |
+| **Documentação** | Manual técnico de geosteering — `docs/documentacao_geosteering.md` (5 arqs causais, realtime) | ✅ |
+| **Documentação** | Manual técnico de PINNs — `docs/documentacao_pinns.md` (8 cenários, TIV, SurrogateNet) | ✅ |
+| **Documentação** | Apresentação geral do projeto — `docs/documentacao_apresentacao_geosteering_ai.md` | ✅ |
 
 ### 1.4 Lacunas Reconhecidas
 
