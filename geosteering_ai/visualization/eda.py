@@ -873,7 +873,7 @@ def plot_correlation_heatmap(
 #   - Coerencia entre componentes do mesmo tensor
 #
 # Requer dados 3D (n_models, seq_len, n_features) — cada modelo
-# geologico produz um perfil completo de 600 medicoes.
+# geológico produz um perfil completo de seq_len medições (config.sequence_length).
 #
 # Ref: docs/ARCHITECTURE_v2.md secao 21.2 (plot_sample_profiles).
 # ──────────────────────────────────────────────────────────────────────────
@@ -938,7 +938,7 @@ def plot_sample_profiles(
             - tests/test_visualization.py: TestPlotSampleProfiles
         Ref: docs/ARCHITECTURE_v2.md secao 21.2.
         Requer dados 3D — 2D nao tem eixo temporal para perfil.
-        seq_len=600 corresponde a 600 medicoes × SPACING_METERS=1.0 m.
+        seq_len corresponde a config.sequence_length medições × SPACING_METERS m.
     """
     if data.ndim != 3:
         raise ValueError(
@@ -1246,7 +1246,7 @@ def plot_sensitivity_heatmap(
             - tests/test_visualization.py: TestPlotSensitivityHeatmap
         Ref: docs/ARCHITECTURE_v2.md secao 21.2.
         Requer 3D — variancia ao longo de modelos nao faz sentido em 2D.
-        seq_len=600 × SPACING_METERS=1.0 → eixo X em metros.
+        seq_len × SPACING_METERS → eixo X em metros.
     """
     if data.ndim != 3:
         raise ValueError(

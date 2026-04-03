@@ -10,18 +10,19 @@
 # ║  Config: PipelineConfig dataclass (NUNCA globals().get())                  ║
 # ║                                                                            ║
 # ║  Proposito:                                                                ║
-# ║    • 7 arquiteturas CNN para inversao 1D seq2seq (batch, 600, ch)        ║
+# ║    • 8 arquiteturas CNN para inversao 1D seq2seq (batch, seq_len, ch)    ║
 # ║    • ResNet-18★ (default), ResNet-34, ResNet-50 (residual deep)           ║
 # ║    • ConvNeXt (depthwise + LN moderno), CNN_1D (baseline simples)        ║
 # ║    • InceptionNet, InceptionTime (multi-escala temporal)                  ║
 # ║    • Causal/acausal via config.use_causal_mode                           ║
 # ║                                                                            ║
 # ║  Dependencias: config.py (PipelineConfig), models/blocks.py               ║
-# ║  Exports: ~7 funcoes — ver __all__                                        ║
+# ║  Exports: ~8 funcoes — ver __all__                                        ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 5.2 (CNN), legado C28               ║
 # ║                                                                            ║
 # ║  Historico:                                                                ║
-# ║    v2.0.0 (2026-03) — Implementacao inicial (7 arquiteturas)            ║
+# ║    v2.0.0 (2026-03) — Implementação inicial (7 arquiteturas)            ║
+# ║    v2.0.1 (2026-04) — +ResNeXt (8 arquiteturas)                         ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """Arquiteturas CNN 1D para inversao de resistividade (seq2seq).
 
@@ -120,24 +121,24 @@ def _stem_block(x, filters: int, kernel_size: int, causal: bool, reg):
 def build_resnet18(config: "PipelineConfig") -> "tf.keras.Model":
     """Constroi ResNet-18 1D adaptado para inversao seq2seq.
 
-    4 stages com 2 blocos residuais cada. Preserva seq_len = 600.
-    Default ★ do pipeline (Tier 1, validado, estavel).
+    4 stages com 2 blocos residuais cada. Preserva seq_len = config.sequence_length.
+    Default ★ do pipeline (Tier 1, validado, estável).
 
     Arquitetura:
         ┌─────────────────────────────────────────────────────┐
-        │  Input (batch, 600, n_feat)                        │
+        │  Input (batch, seq_len, n_feat)                    │
         │  ↓ Stem: Conv(64, k=7) + BN + ReLU                │
         │  ↓ Stage 1: 2× ResBlock(64,  k=3)                 │
         │  ↓ Stage 2: 2× ResBlock(128, k=3)                 │
         │  ↓ Stage 3: 2× ResBlock(256, k=3)                 │
         │  ↓ Stage 4: 2× ResBlock(512, k=3)                 │
         │  ↓ Output: Conv(output_ch, k=1)                   │
-        │  Output (batch, 600, output_channels)              │
+        │  Output (batch, seq_len, output_channels)          │
         └─────────────────────────────────────────────────────┘
 
     Args:
         config: PipelineConfig com:
-            - sequence_length: 600 (errata)
+            - sequence_length: derivado do .out (default 600)
             - n_features: canais de entrada
             - output_channels: 2, 4 ou 6
             - use_causal_mode: padding causal se realtime
@@ -790,7 +791,7 @@ def build_resnext(config: "PipelineConfig") -> "tf.keras.Model":
 
     Arquitetura:
       ┌──────────────────────────────────────────────────────────────┐
-      │  Input (B, 600, n_features)                                 │
+      │  Input (B, seq_len, n_features)                               │
       │    ↓                                                        │
       │  Stem: Conv1D(64, k=7) → BN → ReLU                         │
       │    ↓                                                        │
@@ -800,7 +801,7 @@ def build_resnext(config: "PipelineConfig") -> "tf.keras.Model":
       │  Stage 4: 2× ResNeXtBlock(512, C=32, d=4)                 │
       │    ↓                                                        │
       │  Output: Conv1D(output_ch, k=1)                             │
-      │  Output (B, 600, output_channels)                           │
+      │  Output (B, seq_len, output_channels)                       │
       └──────────────────────────────────────────────────────────────┘
 
     Dual-mode:

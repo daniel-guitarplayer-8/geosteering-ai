@@ -10,17 +10,18 @@
 # ║  Config: PipelineConfig dataclass (NUNCA globals().get())                  ║
 # ║                                                                            ║
 # ║  Proposito:                                                                ║
-# ║    • 2 arquiteturas TCN nativas causais para geosteering realtime         ║
+# ║    • 3 arquiteturas TCN nativas causais para geosteering realtime         ║
 # ║    • TCN: empilhamento de dilatacoes exponenciais (1,2,4,...2^k)          ║
 # ║    • TCN_Advanced: multi-scale stacks + atencao + SE                      ║
 # ║    • Causal nativo: sem look-ahead, compativel com InferencePipeline      ║
 # ║                                                                            ║
 # ║  Dependencias: config.py (PipelineConfig), models/blocks.py               ║
-# ║  Exports: 2 funcoes — ver __all__                                         ║
+# ║  Exports: 3 funções — ver __all__                                         ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 5.3, legado C30                      ║
 # ║                                                                            ║
 # ║  Historico:                                                                ║
-# ║    v2.0.0 (2026-03) — Implementacao inicial                              ║
+# ║    v2.0.0 (2026-03) — Implementação inicial (TCN, TCN_Advanced)          ║
+# ║    v2.0.1 (2026-04) — +ModernTCN (3 arquiteturas)                        ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """TCN e TCN_Advanced para inversao seq2seq causalmente correta.
 
@@ -52,7 +53,7 @@ logger = logging.getLogger(__name__)
 # ════════════════════════════════════════════════════════════════════════════
 # TCN empilha tcn_residual_block com dilation doubling (1, 2, 4, 8...).
 # N_LEVELS dilation levels controlam o campo receptivo.
-# Para seq_len=600 e kernel=3: 8 niveis → campo receptivo = 255.
+# Para seq_len típico (default 600, derivado do .out) e kernel=3: 8 níveis → campo receptivo = 255.
 # Sempre causal (padding='causal') — nativo para geosteering realtime.
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -65,7 +66,7 @@ def build_tcn(config: "PipelineConfig") -> "tf.keras.Model":
 
     Arquitetura:
         ┌────────────────────────────────────────────────────────┐
-        │  Input (batch, 600, n_feat)                           │
+        │  Input (batch, seq_len, n_feat)                        │
         │  ↓ Stem: Conv(filters, k=1) — projecao de entrada     │
         │  ↓ TCNBlock(filters, d=1)                             │
         │  ↓ TCNBlock(filters, d=2)                             │
@@ -322,9 +323,9 @@ def build_modern_tcn(config: "PipelineConfig") -> "tf.keras.Model":
 
     Arquitetura:
       ┌──────────────────────────────────────────────────────────────┐
-      │  Input (B, 600, n_features)                                 │
+      │  Input (B, seq_len, n_features)                               │
       │    ↓                                                        │
-      │  Stem: Conv1D(filters, k=1) — projecao de canais            │
+      │  Stem: Conv1D(filters, k=1) — projeção de canais            │
       │    ↓                                                        │
       │  N × ModernTCN Block:                                       │
       │    LN → DWConv(k=51, groups=C) → LN                        │
@@ -332,7 +333,7 @@ def build_modern_tcn(config: "PipelineConfig") -> "tf.keras.Model":
       │    ↓                                                        │
       │  Dense(128) → ReLU → Dense(output_channels, 'linear')      │
       │    ↓                                                        │
-      │  Output (B, 600, output_channels)                           │
+      │  Output (B, seq_len, output_channels)                       │
       └──────────────────────────────────────────────────────────────┘
 
     Dual-mode:

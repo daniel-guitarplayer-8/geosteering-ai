@@ -1169,7 +1169,7 @@ def patch_embedding_block(
             - models/transformer.py: build_patchtst (embedding inicial)
             - tests/test_models.py: TestBlocks.test_patch_embedding_block
         Ref: Nie et al. (2023) ICLR — PatchTST: Patch-based Transformer.
-        Output shape muda: seq_len → n_patches (nao eh mais 600).
+        Output shape muda: seq_len → n_patches (não é mais seq_len original).
         O modelo precisa lidar com essa mudanca de dimensao.
     """
     import tensorflow as tf
@@ -1753,7 +1753,7 @@ def attention_block(
             - models/unet.py: UNet_Attention (ponte encoder-decoder)
             - tests/test_models.py: TestBlocks.test_attention_block
         Ref: Bahdanau et al. (2015) — Neural Machine Translation with attention.
-        Mais rapido que MHA para seq_len=600; adequado para U-Net attention gate.
+        Mais rápido que MHA para seq_len longo; adequado para U-Net attention gate.
     """
     import tensorflow as tf
 

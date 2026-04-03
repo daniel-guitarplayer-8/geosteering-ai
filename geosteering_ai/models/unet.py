@@ -92,10 +92,16 @@ def _build_unet_base(
         tf.keras.Model: U-Net 1D seq2seq (CAUSAL_INCOMPATIBLE).
     """
     import tensorflow as tf
+
     from geosteering_ai.models.blocks import (
-        residual_block_1d, bottleneck_block_1d, conv_next_block,
-        inception_module, mbconv_block, attention_block,
-        output_projection, se_block,
+        attention_block,
+        bottleneck_block_1d,
+        conv_next_block,
+        inception_module,
+        mbconv_block,
+        output_projection,
+        residual_block_1d,
+        se_block,
     )
 
     ap = config.arch_params or {}
@@ -123,7 +129,9 @@ def _build_unet_base(
             return mbconv_block(x, filters, kernel_size, l1=l1, l2=l2)
         else:  # base
             x = tf.keras.layers.Conv1D(
-                filters, kernel_size, padding="same",
+                filters,
+                kernel_size,
+                padding="same",
                 use_bias=False,
             )(x)
             x = tf.keras.layers.BatchNormalization()(x)
@@ -135,8 +143,13 @@ def _build_unet_base(
             skip = attention_block(skip, units=skip.shape[-1])
         return tf.keras.layers.Concatenate()([x, skip])
 
-    logger.info("build_%s: n_feat=%d, depth=%d, base_filters=%d",
-                name, config.n_features, depth, base_filters)
+    logger.info(
+        "build_%s: n_feat=%d, depth=%d, base_filters=%d",
+        name,
+        config.n_features,
+        depth,
+        base_filters,
+    )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
     x = inp
@@ -144,7 +157,7 @@ def _build_unet_base(
     # ── Encoder com skip connections ──────────────────────────────────
     skips = []
     for level in range(depth):
-        filters = base_filters * (2 ** level)
+        filters = base_filters * (2**level)
         x = _enc_block(x, filters)
         if dr > 0.0:
             x = tf.keras.layers.Dropout(dr)(x)
@@ -153,17 +166,17 @@ def _build_unet_base(
         # Para U-Net 1D sem downsampling real, usamos Conv1D stride=2
         # e depois UpSampling1D no decoder para restaurar.
         # Alternativa sem stride: manter seq_len preservado (padding only).
-        # Aqui: sem stride para manter seq_len=600 (mais simples).
+        # Aqui: sem stride para manter seq_len preservado (mais simples).
         logger.debug("UNet encoder level %d: filters=%d", level, filters)
 
     # ── Bottleneck ────────────────────────────────────────────────────
-    bn_filters = base_filters * (2 ** depth)
+    bn_filters = base_filters * (2**depth)
     x = _enc_block(x, bn_filters)
     x = tf.keras.layers.LayerNormalization()(x)
 
     # ── Decoder com skip connections ──────────────────────────────────
     for level in reversed(range(depth)):
-        filters = base_filters * (2 ** level)
+        filters = base_filters * (2**level)
         # ── Fusao com skip ─────────────────────────────────────────────
         x = _skip_with_attention(x, skips[level])
         # ── Reducao de canais apos concat ──────────────────────────────
@@ -174,7 +187,8 @@ def _build_unet_base(
         logger.debug("UNet decoder level %d: filters=%d", level, filters)
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
             config.constraint_activation if config.use_physical_constraint_layer else None
         ),

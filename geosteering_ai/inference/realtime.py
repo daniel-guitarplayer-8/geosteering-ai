@@ -11,7 +11,7 @@
 # ║                                                                            ║
 # ║  Proposito:                                                                ║
 # ║    • RealtimeInference: sliding window para geosteering em tempo real     ║
-# ║    • Buffer circular de medicoes com tamanho = SEQUENCE_LENGTH (600)      ║
+# ║    • Buffer circular de medições com tamanho = config.sequence_length     ║
 # ║    • Inferencia a cada nova medicao (on-arrival)                          ║
 # ║    • Compoe InferencePipeline para cadeia FV+GS+scale+predict            ║
 # ║                                                                            ║
@@ -37,14 +37,14 @@ sequencialmente durante perfuracao.
     │                                                                      │
     │  Medicoes LWD chegam sequencialmente (1 por ponto de medicao):      │
     │                                                                      │
-    │    t=0   t=1   t=2   ...   t=599  t=600  t=601  ...                │
-    │    [m0]  [m1]  [m2]  ...   [m599]                                   │
-    │    └─────────── buffer (600) ──────────────┘                        │
+    │    t=0   t=1   t=2   ...   t=W-1   t=W    t=W+1  ...                │
+    │    [m0]  [m1]  [m2]  ...   [mW-1]                                   │
+    │    └─────────── buffer (W) ────────────────┘                        │
     │                              → predict()                             │
     │                                                                      │
-    │    Apos t=600 (buffer cheio):                                       │
-    │    [m1]  [m2]  [m3]  ...   [m600]                                   │
-    │    └─────────── buffer (600) ──────────────┘                        │
+    │    Após t=W (buffer cheio):    W = window_size = seq_len            │
+    │    [m1]  [m2]  [m3]  ...   [mW]                                     │
+    │    └─────────── buffer (W) ────────────────┘                        │
     │                              → predict()                             │
     │                                                                      │
     │  Buffer circular: FIFO, descarta medicao mais antiga ao encher.     │
@@ -108,7 +108,7 @@ class RealtimeInference:
 
     Attributes:
         pipeline: InferencePipeline com modelo treinado e scalers.
-        window_size: Tamanho da janela deslizante (default 600 = SEQUENCE_LENGTH).
+        window_size: Tamanho da janela deslizante (default 600 = config.sequence_length).
         buffer: deque circular com capacidade maxima window_size.
         n_updates: Contador de medicoes recebidas desde ultimo reset.
 
@@ -128,7 +128,7 @@ class RealtimeInference:
             - inference/__init__.py: re-exportado como API publica
             - tests/test_inference.py: TestRealtimeInference
         Ref: docs/ARCHITECTURE_v2.md secao 6.2 (RealtimeInference).
-        window_size DEVE ser 600 (SEQUENCE_LENGTH, Errata v4.4.5).
+        window_size DEVE ser config.sequence_length (default 600, derivado do .out).
         Buffer implementado via collections.deque(maxlen=window_size).
         Retorna None ate buffer estar cheio (preenchimento inicial).
     """
@@ -148,7 +148,7 @@ class RealtimeInference:
             pipeline: InferencePipeline com modelo e scalers carregados.
                 O modelo deve estar pronto para predicao (model != None).
             window_size: Tamanho da janela deslizante em numero de medicoes.
-                Default: 600 (= SEQUENCE_LENGTH). Cada medicao e um vetor
+                Default: 600 (= config.sequence_length, derivado do .out). Cada medição é um vetor
                 de 22 valores (formato 22-colunas padrao do pipeline).
 
         Raises:

@@ -242,13 +242,11 @@ def _validate_3d_paired(
 
     if y_true.ndim != 3 or y_true.shape[-1] != 2:
         raise ValueError(
-            f"Shape esperado (N, seq, 2) para {name}_true, "
-            f"recebido {y_true.shape}"
+            f"Shape esperado (N, seq, 2) para {name}_true, " f"recebido {y_true.shape}"
         )
     if y_pred.ndim != 3 or y_pred.shape[-1] != 2:
         raise ValueError(
-            f"Shape esperado (N, seq, 2) para {name}_pred, "
-            f"recebido {y_pred.shape}"
+            f"Shape esperado (N, seq, 2) para {name}_pred, " f"recebido {y_pred.shape}"
         )
     if y_true.shape != y_pred.shape:
         raise ValueError(
@@ -278,15 +276,11 @@ def _validate_3d_single(y: np.ndarray, *, name: str = "y") -> np.ndarray:
     """
     y = np.asarray(y, dtype=np.float64)
     if y.ndim != 3 or y.shape[-1] != 2:
-        raise ValueError(
-            f"Shape esperado (N, seq, 2) para {name}, recebido {y.shape}"
-        )
+        raise ValueError(f"Shape esperado (N, seq, 2) para {name}, recebido {y.shape}")
     return y
 
 
-def _detect_interfaces(
-    y: np.ndarray, *, threshold: float
-) -> List[List[int]]:
+def _detect_interfaces(y: np.ndarray, *, threshold: float) -> List[List[int]]:
     """Detecta indices de interfaces em cada amostra.
 
     Interface = ponto onde |y[i+1] - y[i]| > threshold em qualquer
@@ -527,12 +521,10 @@ def error_by_resistivity_band(
                 "count": 0,
                 "pct": 0.0,
             }
-            logger.debug(
-                "error_by_resistivity_band: banda %s sem pontos", label
-            )
+            logger.debug("error_by_resistivity_band: banda %s sem pontos", label)
         else:
             errors = y_true_flat[mask] - y_pred_flat[mask]
-            rmse = float(np.sqrt(np.mean(errors ** 2)))
+            rmse = float(np.sqrt(np.mean(errors**2)))
             pct = 100.0 * count / max(total_points, 1)
             result[label] = {
                 "rmse": rmse,
@@ -628,9 +620,7 @@ def error_by_anisotropy(
 
         if count == 0:
             result[label] = {"rmse": 0.0, "count": 0, "pct": 0.0}
-            logger.debug(
-                "error_by_anisotropy: bin '%s' sem pontos", label
-            )
+            logger.debug("error_by_anisotropy: bin '%s' sem pontos", label)
         else:
             rmse = float(np.sqrt(np.mean(mse_per_point[mask])))
             pct = 100.0 * count / max(total_points, 1)
@@ -649,8 +639,8 @@ def error_by_anisotropy(
 # ════════════════════════════════════════════════════════════════════════
 # C53: SPATIAL ERROR PROFILE — RMSE(z) ao longo da sequencia
 #
-# Calcula RMSE para cada indice de profundidade (z) ao longo dos 600
-# pontos de medicao. Util para detectar efeitos de borda no inicio e
+# Calcula RMSE para cada índice de profundidade (z) ao longo dos seq_len
+# pontos de medição. Útil para detectar efeitos de borda no início e
 # fim da sequencia, onde redes convolucionais/causais tendem a ter
 # erros maiores por falta de contexto vizinho.
 #
@@ -842,8 +832,7 @@ def stability_analysis(
         import tensorflow as tf  # noqa: F811
     except ImportError as e:
         raise ImportError(
-            "stability_analysis requer TensorFlow. "
-            "Instale com: pip install tensorflow"
+            "stability_analysis requer TensorFlow. " "Instale com: pip install tensorflow"
         ) from e
 
     x_test = np.asarray(x_test, dtype=np.float32)
@@ -857,8 +846,7 @@ def stability_analysis(
     rng = np.random.default_rng()
 
     logger.info(
-        "stability_analysis: %d perturbacoes, sigma=%.4f, "
-        "x_test shape=%s",
+        "stability_analysis: %d perturbacoes, sigma=%.4f, " "x_test shape=%s",
         n_perturbations,
         sigma,
         x_test.shape,

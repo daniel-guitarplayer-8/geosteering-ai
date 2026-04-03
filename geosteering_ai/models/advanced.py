@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 def build_dnn(config: "PipelineConfig") -> "tf.keras.Model":
     """Constroi DNN ponto a ponto via TimeDistributed Dense.
 
-    MLP de N camadas aplicado independentemente a cada um dos 600 pontos.
+    MLP de N camadas aplicado independentemente a cada um dos pontos.
     Baseline simples: sem temporal modeling (CNN, LSTM ou Transformer).
     Util para ablation study: o quanto a sequencia importa.
 
@@ -283,7 +283,7 @@ def build_deeponet(config: "PipelineConfig") -> "tf.keras.Model":
 
     Branch net: codifica o sinal EM de entrada (u).
     Trunk net: codifica os pontos de medicao z_obs (localizacoes).
-    Output: produto escalar branch × trunk → (batch, 600, out_ch).
+    Output: produto escalar branch × trunk → (batch, seq_len, out_ch).
 
     Args:
         config: PipelineConfig.
@@ -324,7 +324,7 @@ def build_deeponet(config: "PipelineConfig") -> "tf.keras.Model":
 
     # ── Trunk net: processa posicoes (z_obs = feature 0) ─────────────
     # z_obs e a primeira feature de input
-    z_obs = tf.keras.layers.Lambda(lambda x: x[..., 0:1])(inp)  # (batch, 600, 1)
+    z_obs = tf.keras.layers.Lambda(lambda x: x[..., 0:1])(inp)  # (batch, seq_len, 1)
     trunk = z_obs
     for units in trunk_units:
         trunk = tf.keras.layers.TimeDistributed(
@@ -332,7 +332,7 @@ def build_deeponet(config: "PipelineConfig") -> "tf.keras.Model":
         )(trunk)
     trunk = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(p_dim))(
         trunk
-    )  # (batch, 600, p_dim)
+    )  # (batch, seq_len, p_dim)
 
     # ── Produto interno Branch × Trunk ────────────────────────────────
     # branch: (batch, p_dim) → (batch, 1, p_dim)
@@ -341,10 +341,10 @@ def build_deeponet(config: "PipelineConfig") -> "tf.keras.Model":
     )  # (batch, 1, p_dim)
 
     # Produto elementar e soma sobre p_dim
-    product = tf.keras.layers.Multiply()([trunk, branch_exp])  # (batch, 600, p_dim)
+    product = tf.keras.layers.Multiply()([trunk, branch_exp])  # (batch, seq_len, p_dim)
     x = tf.keras.layers.Lambda(lambda z: tf.reduce_sum(z, axis=-1, keepdims=True))(
         product
-    )  # (batch, 600, 1)
+    )  # (batch, seq_len, 1)
 
     # ── Projecao para out_ch ─────────────────────────────────────────
     out = tf.keras.layers.Conv1D(
@@ -589,18 +589,18 @@ def build_inn(config: "PipelineConfig") -> "tf.keras.Model":
 
     Arquitetura:
       ┌──────────────────────────────────────────────────────────────┐
-      │  Input (B, 600, n_features)                                 │
+      │  Input (B, seq_len, n_features)                               │
       │    ↓                                                        │
       │  Stem: Conv1D(hidden, k=3) → BN → ReLU                     │
       │    ↓                                                        │
       │  8 × AffineCouplingLayer(hidden_dim):                       │
       │    [x_A, x_B] → y_A = x_A                                  │
       │                  y_B = x_B * exp(s(x_A)) + t(x_A)          │
-      │    (mascaras alternadas: par=normal, impar=invertida)       │
+      │    (máscaras alternadas: par=normal, ímpar=invertida)       │
       │    ↓                                                        │
       │  Dense(128) → ReLU → Dense(output_channels, 'linear')      │
       │    ↓                                                        │
-      │  Output (B, 600, output_channels)                           │
+      │  Output (B, seq_len, output_channels)                       │
       └──────────────────────────────────────────────────────────────┘
 
     Modos de operacao:

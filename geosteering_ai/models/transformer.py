@@ -24,7 +24,8 @@
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """6 arquiteturas Transformer 1D para inversao resistividade.
 
-Todas implementam seq2seq: Input (batch, 600, n_feat) → Output (batch, 600, out_ch).
+Todas implementam seq2seq: Input (batch, seq_len, n_feat) → Output (batch, seq_len, out_ch).
+seq_len = config.sequence_length (default 600, derivado do .out).
 Positional encoding: learned (simples e eficaz para series fisicas).
 
 Note:
@@ -346,7 +347,7 @@ def build_patchtst(config: "PipelineConfig") -> "tf.keras.Model":
     """Constroi PatchTST: Transformer sobre patches temporais.
 
     Divide a serie em patches (tokens) → Transformer → reconstroi.
-    Mais eficiente para seq_len=600 que Transformer sobre pontos individuais.
+    Mais eficiente para seq_len longo (e.g. 600) que Transformer sobre pontos individuais.
 
     Nota: PatchTST usa seq_len diferente internamente (n_patches).
     Projecao final mapeia de volta para sequence_length via Dense.

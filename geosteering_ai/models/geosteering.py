@@ -230,8 +230,8 @@ def build_informer(config: "PipelineConfig") -> "tf.keras.Model":
     """Constroi Informer: sparse attention O(L log L).
 
     Implementacao simplificada: usa atencao padrao com sampling
-    de queries (ProbSparse aproximado). Para seq_len=600, O(L^2)
-    ja e manejavel; sparse sampling melhora eficiencia marginal.
+    de queries (ProbSparse aproximado). Para seq_len típico (default 600), O(L^2)
+    já é manejável; sparse sampling melhora eficiência marginal.
 
     Args:
         config: PipelineConfig.

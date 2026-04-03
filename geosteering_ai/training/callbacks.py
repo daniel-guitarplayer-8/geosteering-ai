@@ -1480,7 +1480,7 @@ class SlidingWindowValidation:
         Referenciado em:
             - training/callbacks.py: build_callbacks() (futuro, se causal)
         Ref: docs/ARCHITECTURE_v2.md secao 6.2 (geosteering mode).
-        Janela = config.sequence_length (600 medidas).
+        Janela = config.sequence_length (default 600, derivado do .out).
         TODO: implementar segmentacao por janela deslizante para
         comparar perda no centro vs bordas da janela (edge effects).
     """

@@ -30,7 +30,7 @@ Garante que nenhum modelo geologico aparece em mais de um split
 (train, val, test), eliminando data leakage entre particoes.
 
 Motivacao fisica:
-    Cada modelo geologico gera 600 pontos de profundidade (SEQUENCE_LENGTH).
+    Cada modelo geológico gera seq_len pontos de profundidade (config.sequence_length, derivado do .out).
     Se amostras do MESMO modelo caissem em train e test, a rede
     "memorizaria" o perfil de resistividade daquele modelo, inflando
     metricas artificialmente. O split por modelo garante que a rede
@@ -67,14 +67,15 @@ __all__ = [
 # DATA SPLITS — Container para dados particionados
 #
 # Resultado do split por modelo geologico. Cada split contem:
-#   - x: features EM 3D (n_seq, seq_len=600, n_feat)
-#   - y: targets de resistividade 3D (n_seq, seq_len=600, n_tgt)
+#   - x: features EM 3D (n_seq, seq_len, n_feat)
+#   - y: targets de resistividade 3D (n_seq, seq_len, n_tgt)
 #   - z: profundidade em metros (NUNCA escalado, usado para plots)
 #   - model_ids: quais modelos geologicos pertencem a cada split
 #
 # z_meters e preservado separadamente para reconstrucao de perfis
 # na avaliacao. O scaler NUNCA toca z_meters.
 # ════════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class DataSplits:
@@ -110,6 +111,7 @@ class DataSplits:
         y_train/y_val/y_test: mutaveis — target_scaling e aplicado in-place
         no pipeline.py (DataPipeline.prepare, Step 4).
     """
+
     x_train: np.ndarray
     y_train: np.ndarray
     z_train: np.ndarray
@@ -128,7 +130,7 @@ class DataSplits:
 # SPLIT POR MODELO GEOLOGICO [P1]
 #
 # Principio fundamental: NUNCA split por amostra (row-wise).
-# Cada modelo geologico gera multiplas sequencias de 600 pontos.
+# Cada modelo geológico gera múltiplas sequências de seq_len pontos.
 # O split deve ser feito na granularidade de MODELOS, nao de amostras.
 #
 # Diagrama — Split Model-Wise (zero leakage):
@@ -152,6 +154,7 @@ class DataSplits:
 #     Sequencias do MESMO modelo em train e test → data leakage
 #     A rede "memoriza" perfis de resistividade → metricas infladas
 # ════════════════════════════════════════════════════════════════════════
+
 
 def split_model_ids(
     n_models: int,
@@ -215,7 +218,10 @@ def split_model_ids(
 
     logger.info(
         "Split modelos: train=%d, val=%d, test=%d (total=%d)",
-        len(train_ids), len(val_ids), len(test_ids), n_models,
+        len(train_ids),
+        len(val_ids),
+        len(test_ids),
+        n_models,
     )
     return train_ids, val_ids, test_ids
 
@@ -230,6 +236,7 @@ def split_model_ids(
 # z_meters e preservado separadamente — sera usado para reconstruir
 # perfis de profundidade na avaliacao, mas NUNCA passa pelo scaler.
 # ────────────────────────────────────────────────────────────────────────
+
 
 def apply_split(
     angle_group: AngleGroup,
@@ -277,13 +284,13 @@ def apply_split(
     return DataSplits(
         x_train=angle_group.x[train_mask],
         y_train=angle_group.y[train_mask],
-        z_train=angle_group.z_meters[train_mask],       # z em metros (NUNCA escalado)
+        z_train=angle_group.z_meters[train_mask],  # z em metros (NUNCA escalado)
         x_val=angle_group.x[val_mask],
         y_val=angle_group.y[val_mask],
-        z_val=angle_group.z_meters[val_mask],            # z em metros (NUNCA escalado)
+        z_val=angle_group.z_meters[val_mask],  # z em metros (NUNCA escalado)
         x_test=angle_group.x[test_mask],
         y_test=angle_group.y[test_mask],
-        z_test=angle_group.z_meters[test_mask],          # z em metros (NUNCA escalado)
+        z_test=angle_group.z_meters[test_mask],  # z em metros (NUNCA escalado)
         train_model_ids=train_ids,
         val_model_ids=val_ids,
         test_model_ids=test_ids,
@@ -297,6 +304,7 @@ def apply_split(
 # Valida que model_ids sao contiguos [0, N-1] (requisito do formato
 # de dados .dat, onde cada modelo geologico recebe ID sequencial).
 # ────────────────────────────────────────────────────────────────────────
+
 
 def split_angle_group(
     angle_group: AngleGroup,

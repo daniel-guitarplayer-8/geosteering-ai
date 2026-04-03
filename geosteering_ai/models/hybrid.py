@@ -15,11 +15,12 @@
 # ║    • Combina receptive field local (CNN) + memoria longa (LSTM)           ║
 # ║                                                                            ║
 # ║  Dependencias: config.py (PipelineConfig), models/blocks.py               ║
-# ║  Exports: 2 funcoes — ver __all__                                         ║
+# ║  Exports: 3 funções — ver __all__                                         ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 5.5, legado C32                      ║
 # ║                                                                            ║
 # ║  Historico:                                                                ║
-# ║    v2.0.0 (2026-03) — Implementacao inicial                              ║
+# ║    v2.0.0 (2026-03) — Implementação inicial (CNN_LSTM, CNN_BiLSTM_ED)   ║
+# ║    v2.0.1 (2026-04) — +ResNeXt_LSTM (3 arquiteturas)                    ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """Arquiteturas hibridas CNN+LSTM para inversao resistividade.
 
@@ -57,7 +58,7 @@ def build_cnn_lstm(config: "PipelineConfig") -> "tf.keras.Model":
     """Constroi CNN_LSTM: extrator CNN + modelagem temporal LSTM.
 
     3 Conv1D capturam padroes locais; 2 LSTM modelam dependencias
-    de longo alcance ao longo dos 600 pontos de medicao.
+    de longo alcance ao longo dos pontos de medição (config.sequence_length).
 
     Arquitetura:
         Input → CNN(32) → CNN(64) → CNN(128) → LSTM(128) → LSTM(64) → Out
@@ -238,7 +239,7 @@ def build_cnn_bilstm_ed(config: "PipelineConfig") -> "tf.keras.Model":
 #
 # ResNeXt captura padroes espaciais multi-escala nas componentes EM
 # (alta/media/baixa frequencia) via cardinalidade C=32, enquanto LSTM
-# modela a evolucao temporal ao longo dos 600 pontos de profundidade.
+# modela a evolução temporal ao longo dos pontos de profundidade (seq_len).
 #
 # Causal-compatible: LSTM eh nativo forward-only; Conv1D usa padding='causal'.
 # Vantagem sobre CNN_LSTM: grouped convolutions sao mais eficientes e
@@ -258,7 +259,7 @@ def build_resnext_lstm(config: "PipelineConfig") -> "tf.keras.Model":
 
     Arquitetura:
       ┌──────────────────────────────────────────────────────────────┐
-      │  Input (B, 600, n_features)                                 │
+      │  Input (B, seq_len, n_features)                               │
       │    ↓                                                        │
       │  ResNeXtBlock(64,  C=32, d=4, k=3) — features locais       │
       │  ResNeXtBlock(128, C=32, d=4, k=3) — features multi-escala │
@@ -268,7 +269,7 @@ def build_resnext_lstm(config: "PipelineConfig") -> "tf.keras.Model":
       │  LSTM(64,  return_sequences=True) — temporal refinado       │
       │    ↓                                                        │
       │  Output: Dense(output_channels, 'linear')                   │
-      │  Output (B, 600, output_channels)                           │
+      │  Output (B, seq_len, output_channels)                       │
       └──────────────────────────────────────────────────────────────┘
 
     Args:

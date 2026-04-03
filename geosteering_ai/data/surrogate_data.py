@@ -28,8 +28,8 @@
 Prepara pares de treino (X_surrogate, Y_surrogate) a partir dos arquivos
 .dat do simulador Fortran PerfilaAnisoOmp:
 
-    X_surrogate: (rho_h, rho_v) em log10 scale → shape (N_models, 600, 2)
-    Y_surrogate: K componentes EM selecionadas → shape (N_models, 600, 2*K)
+    X_surrogate: (rho_h, rho_v) em log10 scale → shape (N_models, seq_len, 2)
+    Y_surrogate: K componentes EM selecionadas → shape (N_models, seq_len, 2*K)
 
 A selecao de componentes eh controlada por config.surrogate_output_components:
 
@@ -269,7 +269,7 @@ def extract_surrogate_pairs(
         data: Array 3D (N_models, seq_len, 22) do .dat Fortran.
             Formato 22-colunas conforme COL_MAP_22 em loading.py.
             N_models: numero de modelos geologicos.
-            seq_len: pontos de medicao por modelo (tipico 600).
+            seq_len: pontos de medição por modelo (derivado do .out, default 600).
         config: PipelineConfig com:
             - surrogate_output_components: Lista de componentes EM.
             - spacing_meters: Distancia Tx-Rx para decoupling (default 1.0 m).

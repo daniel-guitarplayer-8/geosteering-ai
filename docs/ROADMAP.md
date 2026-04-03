@@ -76,7 +76,7 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 │   ├── advanced.py                       # DNN, FNO, DeepONet, Geophysical_Attention
 │   ├── geosteering.py                    # WaveNet, Causal_Transformer, Informer, Mamba_S4
 │   ├── surrogate.py                      # SurrogateNet TCN (campo receptivo ~127m)
-│   └── registry.py                       # ModelRegistry — 44 entradas + build()
+│   └── registry.py                       # ModelRegistry — 48 entradas + build()
 ├── losses/ (3 módulos, ~3.600 LOC)
 │   ├── catalog.py                        # 26 funções de perda
 │   ├── factory.py                        # LossFactory.build_combined()
@@ -170,6 +170,8 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 | **Compatibilidade** | Keras 3.x (8 fixes: KerasTensor, DepthwiseConv1D, FourierLayer, etc.) | ✅ |
 | **CI/CD** | GitHub Actions (compile + pytest + mypy, Python 3.10/3.11) | ✅ |
 | **Validação GPU** | 824 passed no Colab Pro+ (TF 2.19, Keras 3.x, GPU T4) | ✅ |
+| **Documentação** | Padronização seq_len — remoção de hardcoded 600 em docstrings e comentários (~30 ocorrências corrigidas em 15 módulos) | ✅ |
+| **Documentação** | Mega-headers atualizados com contagens corretas (8 CNN, 3 TCN, 3 Hybrid, 5 Advanced) | ✅ |
 
 ### 1.4 Lacunas Reconhecidas
 
