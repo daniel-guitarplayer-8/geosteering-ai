@@ -172,6 +172,9 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 | **Validação GPU** | 824 passed no Colab Pro+ (TF 2.19, Keras 3.x, GPU T4) | ✅ |
 | **Documentação** | Padronização seq_len — remoção de hardcoded 600 em docstrings e comentários (~30 ocorrências corrigidas em 15 módulos) | ✅ |
 | **Documentação** | Mega-headers atualizados com contagens corretas (8 CNN, 3 TCN, 3 Hybrid, 5 Advanced) | ✅ |
+| **Documentação** | Manual técnico de ruídos — `docs/documentacao_noises.md` (34 tipos, curriculum, API) | ✅ |
+| **Documentação** | Manual técnico de losses — `docs/documentacao_losses.md` (26 losses, 8 PINN, TIV) | ✅ |
+| **Documentação** | Manual técnico de modelos — `docs/documentacao_models.md` (48 arqs, 9 famílias, blocos) | ✅ |
 
 ### 1.4 Lacunas Reconhecidas
 
