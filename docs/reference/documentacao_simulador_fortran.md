@@ -15,18 +15,20 @@
 1. [Introdução e Motivação](#1-introdução-e-motivação)
 2. [Fundamentos Físicos e Geofísicos](#2-fundamentos-físicos-e-geofísicos)
 3. [Formulação Matemática Completa](#3-formulação-matemática-completa)
-4. [Arquitetura do Software](#4-arquitetura-do-software)
-5. [Módulos Fortran — Análise Detalhada](#5-módulos-fortran--análise-detalhada)
-6. [Arquivo de Entrada model.in](#6-arquivo-de-entrada-modelin)
-7. [Arquivos de Saída (.dat e .out)](#7-arquivos-de-saída-dat-e-out)
-8. [Sistema de Build (Makefile)](#8-sistema-de-build-makefile)
-9. [Gerador de Modelos Geológicos (Python)](#9-gerador-de-modelos-geológicos-python)
-10. [Paralelismo OpenMP — Análise e Otimização](#10-paralelismo-openmp--análise-e-otimização)
-11. [Análise de Viabilidade CUDA (GPU)](#11-análise-de-viabilidade-cuda-gpu)
-12. [Análise de Reimplementação em Python Otimizado](#12-análise-de-reimplementação-em-python-otimizado)
-13. [Integração com o Pipeline Geosteering AI v2.0](#13-integração-com-o-pipeline-geosteering-ai-v20)
-14. [Referências Bibliográficas](#14-referências-bibliográficas)
-15. [Apêndices](#15-apêndices)
+4. [Formulação Teórica via Potenciais de Hertz](#4-formulação-teórica-via-potenciais-de-hertz)
+5. [Arquitetura do Software](#5-arquitetura-do-software)
+6. [Módulos Fortran — Análise Detalhada](#6-módulos-fortran--análise-detalhada)
+7. [Arquivo de Entrada model.in](#7-arquivo-de-entrada-modelin)
+8. [Arquivos de Saída (.dat e .out)](#8-arquivos-de-saída-dat-e-out)
+9. [Sistema de Build (Makefile)](#9-sistema-de-build-makefile)
+10. [Gerador de Modelos Geológicos (Python)](#10-gerador-de-modelos-geológicos-python)
+11. [Paralelismo OpenMP — Análise e Otimização](#11-paralelismo-openmp--análise-e-otimização)
+12. [Análise de Viabilidade CUDA (GPU)](#12-análise-de-viabilidade-cuda-gpu)
+13. [Análise de Reimplementação em Python Otimizado](#13-análise-de-reimplementação-em-python-otimizado)
+14. [Integração com o Pipeline Geosteering AI v2.0](#14-integração-com-o-pipeline-geosteering-ai-v20)
+15. [Referências Bibliográficas](#15-referências-bibliográficas)
+16. [Sugestões de Melhorias e Novos Recursos](#16-sugestões-de-melhorias-e-novos-recursos)
+17. [Apêndices](#17-apêndices)
 
 ---
 
@@ -802,9 +804,620 @@ Na perfilagem LWD:
 
 ---
 
-## 4. Arquitetura do Software
+## 4. Formulação Teórica via Potenciais de Hertz
 
-### 4.1 Estrutura de Módulos
+Esta seção apresenta a derivação teórica completa da formulação de potenciais de Hertz
+para dipolos magnéticos em meios estratificados com anisotropia TIV. A formulação segue
+Moran & Gianzero (1979) e está documentada em detalhe no documento TeX do projeto
+(`Tex_Projects/TatuAniso/FormulaçãoTatuAnisoTIV.tex`). As equações aqui apresentadas
+são a fundamentação matemática direta do código Fortran em `magneticdipoles.f08` e
+`utils.f08`.
+
+### 4.1 Equações de Maxwell para Meios TIV no Domínio da Frequência
+
+O simulador adota a convenção temporal `exp(+i*omega*t)` (engenharia), de modo que as
+transformadas direta e inversa de Fourier são:
+
+```
+Transformada direta:
+  f_hat(omega) = integral_{-inf}^{+inf} f(t) * exp(-i*omega*t) dt
+
+Transformada inversa:
+  f(t) = (1/2*pi) * integral_{-inf}^{+inf} f_hat(omega) * exp(+i*omega*t) d_omega
+
+Dependência temporal resultante: exp(+i*omega*t)
+```
+
+As equações de Maxwell no domínio da frequência, para esta convenção, são:
+
+```
+(i)    div(epsilon * E) = rho_V                  (Lei de Gauss)
+(ii)   rot(H) - y * E = J_e                      (Lei de Ampère)
+(iii)  div(mu * H) = 0                           (Lei de Coulomb magnética)
+(iv)   rot(E) + zeta * H = J_m                   (Lei de Faraday)
+
+Onde:
+  epsilon = permissividade dielétrica
+  rho_V   = densidade volumétrica de carga elétrica
+  y       = sigma + i*omega*epsilon_0  (admitividade, tensor para TIV)
+  mu      = permeabilidade magnética (isotrópica, mu_0)
+  zeta    = i*omega*mu_0              (impeditividade)
+  J_e     = vetor densidade de corrente elétrica na fonte
+  J_m     = vetor densidade de "corrente magnética" na fonte
+  E       = campo vetorial elétrico
+  H       = campo vetorial magnético
+```
+
+**Fonte de dipolo magnético:**
+
+Para um dipolo magnético com momento `m`, as fontes são:
+
+```
+J_m = -zeta * m * delta(x) * delta(y) * delta(z)
+J_e = 0
+
+Onde m = (m_x, m_y, m_z) é o vetor momento do dipolo.
+No código Fortran: mx = my = mz = 1.0 A.m^2.
+```
+
+**Tensor admitividade para meios TIV:**
+
+Em meios com anisotropia TIV na condutividade, a admitividade é um tensor diagonal:
+
+```
+         ┌                              ┐
+         │ sigma_h + i*omega*eps_0    0                      0                 │
+  y  =   │ 0                      sigma_h + i*omega*eps_0    0                 │
+         │ 0                      0                      sigma_v + i*omega*eps_0│
+         └                              ┘
+
+Onde sigma_h e sigma_v são as condutividades horizontal e vertical, respectivamente.
+```
+
+**Aproximação quasi-estática:**
+
+Sob o regime quasi-estático (sigma >> omega*epsilon_0), o tensor simplifica para
+`y ≈ diag(sigma_h, sigma_h, sigma_v)`. Esta é a aproximação adotada pelo simulador
+(validada na Seção 3.1).
+
+**Densidade volumétrica de carga em meios TIV:**
+
+Uma consequência direta da anisotropia TIV é a existência de uma densidade volumétrica
+de carga elétrica mesmo em regime estacionário. A partir da equação da continuidade
+`div(J) = 0` e da lei de Ohm `J = y * E`, obtém-se:
+
+```
+div(y * E) = 0
+
+Expandindo com o tensor TIV e usando a Lei de Gauss:
+
+  sigma_h * (dE_x/dx + dE_y/dy) + sigma_v * dE_z/dz = 0
+
+Definindo lambda^2 = sigma_h / sigma_v e substituindo div(E) = rho_V / epsilon_0:
+
+  rho_V = (epsilon_0 / lambda^2) * (lambda^2 - 1) * dE_z/dz
+
+Significado: Em meios anisotrópicos (lambda != 1), a descontinuidade de sigma
+na direção z induz uma separação de cargas proporcional ao gradiente vertical
+do campo elétrico. Essa carga desaparece no caso isotrópico (lambda = 1).
+```
+
+### 4.2 Potenciais de Hertz (pi_x, pi_u, pi_z)
+
+O potencial de Hertz `pi` é um potencial vetorial auxiliar que permite desacoplar as
+equações de Maxwell em equações escalares independentes para cada modo de propagação.
+
+**Definição (Moran & Gianzero, 1979):**
+
+```
+y * E = -y_h * zeta * rot(pi)
+
+Onde:
+  pi = (pi_x, pi_y, pi_z) é o vetor potencial de Hertz
+  y_h = sigma_h (admitividade horizontal escalar)
+  zeta = i*omega*mu_0 (impeditividade)
+```
+
+A escolha de `y_h` no membro direito é deliberada: simplifica a forma final das
+equações diferenciais para os potenciais.
+
+**Condição de calibre (gauge):**
+
+Seguindo Moran & Gianzero (1979), a condição de calibre adotada é:
+
+```
+div(y * pi) = sigma_v * Phi
+
+Onde Phi é o potencial escalar associado.
+```
+
+**Campo H em termos dos potenciais:**
+
+Substituindo a definição do potencial de Hertz na lei de Ampère e aplicando a
+condição de calibre, obtém-se:
+
+```
+H = -zeta * y_h * pi + (1/sigma_v) * grad(div(y * pi))
+```
+
+As componentes do campo magnético são então:
+
+```
+H_x = kh^2 * pi_x + lambda^2 * (d^2 pi_x/dx^2 + d^2 pi_y/dxdy) + d^2 pi_z/dzdx
+H_y = kh^2 * pi_y + lambda^2 * (d^2 pi_x/dxdy + d^2 pi_y/dy^2) + d^2 pi_z/dzdy
+H_z = kh^2 * pi_z + lambda^2 * (d^2 pi_x/dzdx + d^2 pi_y/dzdy) + d^2 pi_z/dz^2
+
+Onde kh^2 = -i*omega*mu_0*sigma_h = -zeta*sigma_h
+```
+
+**Simplificação para fonte sem componente y:**
+
+Para um dipolo magnético horizontal na direção x (DMH_x), não há necessidade de
+componente `pi_y`. O potencial de Hertz reduz-se a `pi = (pi_x, 0, pi_z)`.
+
+### 4.3 Equações de Onda Desacopladas para os Potenciais
+
+Substituindo as expressões de H e E em função de `pi` na lei de Faraday, e após
+manipulação algébrica extensa (detalhada no TeX), obtém-se equações de onda
+desacopladas para cada componente do potencial:
+
+**Equação para pi_x (modo TM):**
+
+```
+d^2 pi_x/dx^2 + d^2 pi_x/dy^2 + (1/lambda^2) * d^2 pi_x/dz^2
+  - i*omega*mu_0*sigma_v * pi_x = -(m_x / lambda^2) * delta(x)*delta(y)*delta(z)
+```
+
+**Equação para pi_y (modo TM, análoga):**
+
+```
+d^2 pi_y/dx^2 + d^2 pi_y/dy^2 + (1/lambda^2) * d^2 pi_y/dz^2
+  - i*omega*mu_0*sigma_v * pi_y = -(m_y / lambda^2) * delta(x)*delta(y)*delta(z)
+```
+
+**Equação para pi_z (modo misto, acoplada com pi_x e pi_y):**
+
+```
+d^2 pi_z/dx^2 + d^2 pi_z/dy^2 + d^2 pi_z/dz^2
+  - i*omega*mu_0*sigma_h * pi_z = (1-lambda^2) * d/dz(dpi_x/dx + dpi_y/dy)
+                                    - m_z * lambda^2 * delta(x)*delta(y)*delta(z)
+```
+
+**Observações fundamentais:**
+
+1. As equações para `pi_x` e `pi_y` são **desacopladas** entre si e são idênticas
+   em forma. Basta resolver uma delas; a outra é obtida por analogia.
+
+2. A equação para `pi_z` é **acoplada** com `pi_x` e `pi_y` (via o termo com
+   derivadas cruzadas). No entanto, como primeiro resolvemos `pi_x` e `pi_y`,
+   o membro direito de `pi_z` é conhecido, tornando-a uma equação forçada.
+
+3. O operador em `pi_x` e `pi_y` é anisotrópico: o fator `1/lambda^2` multiplica
+   a derivada em z. Isso reflete a propagação mais lenta na direção vertical em
+   meios com `sigma_v < sigma_h`.
+
+4. O operador em `pi_z` é **isotrópico** (todas as derivadas segundas com coeficiente 1),
+   mas com `kh^2` em vez de `kv^2`. Isso é consequência da escolha de calibre.
+
+### 4.4 Soluções Espectrais no Meio Ilimitado
+
+A solução das equações de onda é obtida aplicando a transformada tripla de Fourier
+para passar do domínio `(x, y, z)` para `(k_x, k_y, k_z)`.
+
+**Solução para pi_x (transformada tripla):**
+
+Definindo `v^2 = k_x^2 + k_y^2 - kv^2` e `kv^2 = -i*omega*mu_0*sigma_v`:
+
+```
+pi_x_hat_hat_hat(k_x, k_y, k_z) = m_x / ((lambda*v)^2 + k_z^2)
+```
+
+Aplicando a transformada inversa em `k_z`:
+
+```
+pi_x_hat_hat(k_x, k_y, z) = m_x * exp(-lambda*v*|z - h_0|) / (2*lambda*v)
+
+Onde h_0 é a posição vertical da fonte (transmissor).
+
+Definindo s = lambda*v (constante de propagação TM):
+  pi_x_hat_hat = m_x * exp(-s*|z - h_0|) / (2*s)
+
+Para z > h_0: pi_x_hat_hat = m_x * exp(-s*(z - h_0)) / (2*s)
+Para z < h_0: pi_x_hat_hat = m_x * exp(+s*(z - h_0)) / (2*s)
+```
+
+**Solução para pi_z (via pi_x e pi_u):**
+
+A solução de `pi_z` é obtida a partir de `pi_x` e de um potencial auxiliar `pi_u`
+associado ao modo TE:
+
+```
+pi_z_hat_hat = -(i*k_x / k_r^2) * d(pi_x_hat_hat)/dz + (i*k_x / k_r^2) * pi_u_hat_hat
+
+Onde k_r^2 = k_x^2 + k_y^2 (número de onda radial ao quadrado).
+```
+
+O potencial `pi_u` é a parte de `pi_z` associada ao modo TE. Suas soluções no
+meio ilimitado são:
+
+```
+pi_u_hat_hat = (m_x/2) * exp(-u*|z - h_0|)
+
+Onde u = sqrt(k_r^2 - kh^2) é a constante de propagação TE.
+```
+
+**Definições-chave:**
+
+```
+  ┌──────────────────────────────────────────────────────────────┐
+  │  Grandeza            │  Expressão              │  Modo       │
+  ├──────────────────────┼─────────────────────────┼─────────────┤
+  │  s = lambda * v      │  sqrt(lamb2) * v        │  TM         │
+  │  u                   │  sqrt(kr^2 - kh^2)      │  TE         │
+  │  v                   │  sqrt(kr^2 - kv^2)      │  Auxiliar   │
+  │  kr^2                │  k_x^2 + k_y^2          │  Radial     │
+  │  kh^2                │  -zeta * sigma_h         │  Horizontal │
+  │  kv^2                │  -zeta * sigma_v         │  Vertical   │
+  │  lambda^2            │  sigma_h / sigma_v       │  Anisotropia│
+  └──────────────────────┴─────────────────────────┴─────────────┘
+```
+
+### 4.5 Potenciais no Meio de Camadas (6 Zonas)
+
+No modelo de camadas horizontais com fonte (transmissor) na camada `l`, as soluções
+espectrais dos potenciais `pi_x` e `pi_u` assumem formas distintas em 6 zonas
+geométricas. Cada zona corresponde a uma combinação diferente de ondas transmitidas e
+refletidas nas interfaces.
+
+**Diagrama do modelo de camadas:**
+
+```
+  z = -inf     ┌────────────────────────────────────────┐
+               │  Zona 0: Semi-espaço superior          │  pi_x^(0) = Tx^(0) * exp(s_0*z)
+               │  (sigma_h0, sigma_v0)                  │  → Apenas onda transmitida ascendente
+  z = z_0     ─├────────────────────────────────────────┤─
+               │  ...                                    │
+  z = z_{k-1} ─├────────────────────────────────────────┤─
+               │  Zona k (k < l): Camadas acima fonte   │  pi_x^(k) = Tx^(k)[exp(s_k(z-z_k))
+               │  (sigma_hk, sigma_vk)                  │    + R_up*exp(-s_k(z-z_{k-1}))]
+  z = z_k     ─├────────────────────────────────────────┤─
+               │  ...                                    │
+  z = z_{l-1} ─├────────────────────────────────────────┤─
+               │  Zona l-up: Camada fonte, z < h_0      │  pi_x^(l,up) = Tx_up^(l)[exp(s_l(z-h_0))
+               │     ●──── Transmissor em h_0            │    + R_TM_up*Mx_up*exp(-s_l(z-z_{l-1}))
+  z = h_0     ─│─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ │─   + R_TM_dw*Mx_dw*exp(s_l(z-z_l))]
+               │  Zona l-dw: Camada fonte, z > h_0      │  pi_x^(l,dw) = Tx_dw^(l)[exp(-s_l(z-h_0))
+               │  (sigma_hl, sigma_vl)                  │    + R_TM_up*Mx_up*exp(-s_l(z-z_{l-1}))
+  z = z_l     ─├────────────────────────────────────────┤─   + R_TM_dw*Mx_dw*exp(s_l(z-z_l))]
+               │  Zona j (j > l): Camadas abaixo fonte  │  pi_x^(j) = Tx^(j)[exp(-s_j(z-z_{j-1}))
+               │  (sigma_hj, sigma_vj)                  │    + R_dw*exp(s_j(z-z_j))]
+  z = z_{n-1} ─├────────────────────────────────────────┤─
+               │  Zona n: Semi-espaço inferior           │  pi_x^(n) = Tx^(n) * exp(-s_n*(z-z_{n-1}))
+               │  (sigma_hn, sigma_vn)                  │  → Apenas onda transmitida descendente
+  z = +inf     └────────────────────────────────────────┘
+```
+
+**As 6 zonas e suas expressões:**
+
+| Zona | Condição | Descrição | Forma de `pi_x` |
+|:-----|:---------|:----------|:----------------|
+| 0 | z < z_0 | Semi-espaço superior | `Tx^(0) * exp(s_0*z)` |
+| k | z_{k-1} <= z < z_k, k < l | Camadas acima da fonte | Transmitida + refletida superiormente |
+| l (z < h_0) | z_{l-1} <= z < h_0 | Camada fonte, receptor acima | Transmitida + 2 reflexões (Mx_up, Mx_dw) |
+| l (z > h_0) | h_0 <= z < z_l | Camada fonte, receptor abaixo | Transmitida + 2 reflexões (Mx_up, Mx_dw) |
+| j | z_{j-1} <= z < z_j, j > l | Camadas abaixo da fonte | Transmitida + refletida inferiormente |
+| n | z >= z_{n-1} | Semi-espaço inferior | `Tx^(n) * exp(-s_n*(z-z_{n-1}))` |
+
+**Correspondência com os 6 casos em `hmd_TIV_optimized`:**
+
+Estas 6 zonas correspondem **diretamente** aos 6 blocos `if/elseif` na sub-rotina
+`hmd_TIV_optimized` em `magneticdipoles.f08`:
+
+```
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  Zona Teórica         │  Caso no Código        │  Condição Fortran │
+  ├───────────────────────┼────────────────────────┼───────────────────┤
+  │  Zona 0 (semi-sup.)   │  Caso 1                │  camadR == 1      │
+  │  Zona k (acima T)     │  Caso 2                │  camadR < camadT  │
+  │  Zona l (z < h_0)     │  Caso 3                │  camadR == camadT │
+  │                        │                        │   .and. z <= h0   │
+  │  Zona l (z > h_0)     │  Caso 4                │  camadR == camadT │
+  │                        │                        │   .and. z > h0    │
+  │  Zona j (abaixo T)    │  Caso 5                │  camadR > camadT  │
+  │  Zona n (semi-inf.)   │  Caso 6                │  camadR == n      │
+  └───────────────────────┴────────────────────────┴───────────────────┘
+```
+
+As expressões para `pi_u` são inteiramente análogas, substituindo `s` por `u`,
+`R_TM` por `R_TE`, e os fatores `Mx` por `Eu`.
+
+**Coeficientes de onda transmitida na camada fonte:**
+
+Na camada `l` que contém a fonte, os coeficientes de transmissão são derivados
+diretamente das soluções do meio ilimitado:
+
+```
+Tx_up^(l) = Tx_dw^(l) = m_x / (2*s_l)       (modo TM)
+Tu_up^(l) = +m_x / 2                          (modo TE, direção ascendente)
+Tu_dw^(l) = -m_x / 2                          (modo TE, direção descendente)
+```
+
+O sinal oposto em `Tu_up` e `Tu_dw` reflete a antissimetria do modo TE em relação
+à fonte. No código Fortran, estes valores aparecem na inicialização dos arrays
+`Txdw`, `Txup`, `Tudw`, `Tuup` na sub-rotina `hmd_TIV_optimized`.
+
+### 4.6 Correspondência Potenciais <-> Modos TE/TM
+
+O campo eletromagnético, expresso nas equações espectrais, pode ser escrito em
+função apenas de `pi_x` e `pi_u`. A separação em modos de propagação é:
+
+```
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  Potencial  │  Modo   │  Governa         │  Sensível a          │
+  ├─────────────┼─────────┼──────────────────┼──────────────────────┤
+  │  pi_x       │  TM     │  E_z, H_x, H_y  │  sigma_h E sigma_v  │
+  │  pi_u       │  TE     │  H_z, E_x, E_y  │  Apenas sigma_h     │
+  └─────────────┴─────────┴──────────────────┴──────────────────────┘
+
+Justificativa:
+  - E_z = zeta * lambda^2 * (i*k_y) * pi_x   → depende SOMENTE de pi_x
+  - H_z = i*k_x * pi_u                       → depende SOMENTE de pi_u
+```
+
+**Impedância e admitância intrínsecas:**
+
+Associadas a cada modo, definem-se as grandezas intrínsecas de cada camada `m`:
+
+```
+Impedância intrínseca (modo TM):
+  Z_m = s_m / sigma_h,m     onde s_m = lambda_m * v_m
+
+Admitância intrínseca (modo TE):
+  Y_m = u_m / zeta          onde u_m = sqrt(kr^2 - kh^2_m)
+```
+
+**Coeficientes de reflexão:**
+
+Os coeficientes de reflexão em cada interface são definidos pela diferença entre a
+grandeza intrínseca da camada e a grandeza aparente vista através das camadas adjacentes:
+
+```
+Modo TM (reflexão descendente na interface inferior da camada m):
+  R_TM_dw^(m) = (Z_m - Z_tilde_dw^(m+1)) / (Z_m + Z_tilde_dw^(m+1))
+
+Modo TM (reflexão ascendente na interface superior da camada m):
+  R_TM_up^(m) = (Z_m - Z_tilde_up^(m-1)) / (Z_m + Z_tilde_up^(m-1))
+
+Modo TE (reflexão descendente):
+  R_TE_dw^(m) = (Y_m - Y_tilde_dw^(m+1)) / (Y_m + Y_tilde_dw^(m+1))
+
+Modo TE (reflexão ascendente):
+  R_TE_up^(m) = (Y_m - Y_tilde_up^(m-1)) / (Y_m + Y_tilde_up^(m-1))
+```
+
+**Fórmula recursiva para impedância/admitância aparente (tanh):**
+
+```
+Impedância aparente descendente:
+  Z_tilde_dw^(n) = Z_n                               (semi-espaço inferior)
+  Z_tilde_dw^(m) = Z_m * [Z_tilde_dw^(m+1) + Z_m * tanh(s_m*h_m)]
+                         / [Z_m + Z_tilde_dw^(m+1) * tanh(s_m*h_m)]
+
+Impedância aparente ascendente:
+  Z_tilde_up^(0) = Z_0                               (semi-espaço superior)
+  Z_tilde_up^(m) = Z_m * [Z_tilde_up^(m-1) + Z_m * tanh(s_m*h_m)]
+                         / [Z_m + Z_tilde_up^(m-1) * tanh(s_m*h_m)]
+
+As admitâncias aparentes seguem fórmulas idênticas com Y_m, u_m em lugar de Z_m, s_m.
+```
+
+Para as camadas extremas (semi-espaços 0 e n), os coeficientes de reflexão são nulos:
+`R_TM_up^(0) = R_TM_dw^(n) = R_TE_up^(0) = R_TE_dw^(n) = 0`.
+
+### 4.7 Fatores de Onda na Camada do Transmissor
+
+Na camada `l` que contém a fonte, as reflexões múltiplas entre as interfaces superior
+(`z_{l-1}`) e inferior (`z_l`) são encapsuladas em fatores de onda `Mx` (TM) e `Eu` (TE).
+
+**Fatores Mx (modo TM):**
+
+```
+Fator de onda TM descendente:
+  Mx_dw = [exp(-s*(z_l - h_0)) + R_TM_up * exp(s*(z_{l-1} - h_l - h_0))]
+          / [1 - R_TM_dw * R_TM_up * exp(-2*s*h_l)]
+
+Fator de onda TM ascendente:
+  Mx_up = [exp(s*(z_{l-1} - h_0)) + R_TM_dw * exp(-s*(z_l + h_l - h_0))]
+          / [1 - R_TM_dw * R_TM_up * exp(-2*s*h_l)]
+```
+
+**Fatores Eu (modo TE):**
+
+```
+Fator de onda TE descendente:
+  Eu_dw = [exp(-u*(z_l - h_0)) - R_TE_up * exp(u*(z_{l-1} - h_l - h_0))]
+          / [1 - R_TE_dw * R_TE_up * exp(-2*u*h_l)]
+
+Fator de onda TE ascendente:
+  Eu_up = [exp(u*(z_{l-1} - h_0)) - R_TE_dw * exp(-u*(z_l + h_l - h_0))]
+          / [1 - R_TE_dw * R_TE_up * exp(-2*u*h_l)]
+```
+
+**Nota sobre o sinal:** Os fatores `Eu` (modo TE) possuem sinal negativo nos termos
+de reflexão, enquanto os fatores `Mx` (modo TM) possuem sinal positivo. Essa diferença
+reflete as condições de contorno distintas: a componente `E_z` (TM) é contínua na
+interface, enquanto `H_z` (TE) sofre uma descontinuidade proporcional à corrente
+magnética superficial equivalente.
+
+### 4.8 Coeficientes de Transmissão entre Camadas
+
+Quando o receptor está em uma camada diferente da fonte, os coeficientes de transmissão
+são calculados recursivamente a partir da camada da fonte, utilizando as condições de
+continuidade dos campos tangenciais nas interfaces.
+
+**Condições de continuidade (no domínio espectral):**
+
+```
+Em cada interface z = z_j, para meios não-magnéticos:
+
+  (a) zeta * pi_z^(j)|_{z_j} = zeta * pi_z^(j+1)     → pi_z contínuo
+  (b) d(pi_z)/dz|_{z_j} contínuo
+  (c) zeta * d(pi_x)/dz|_{z_j} contínuo               → d(pi_x)/dz contínuo
+  (d) sigma_h,j * pi_x^(j)|_{z_j} = sigma_h,j+1 * pi_x^(j+1)
+  (e) pi_u^(j)|_{z_j} = pi_u^(j+1)                    → pi_u contínuo
+  (f) d(pi_u)/dz|_{z_j} contínuo
+```
+
+**Transmissão descendente (camada j, com l+1 <= j-1 < j < n):**
+
+```
+Tx^(j) = (s_{j-1} / s_j) * Tx^(j-1) * exp(-s_{j-1} * h_{j-1})
+          * (1 - R_TM_dw^(j-1)) / (1 - R_TM_dw^(j) * exp(-2*s_j*h_j))
+
+Tu^(j) = Tu^(j-1) * exp(-u_{j-1} * h_{j-1})
+          * (1 + R_TE_dw^(j-1)) / (1 + R_TE_dw^(j) * exp(-2*u_j*h_j))
+```
+
+**Transmissão ascendente (camada k, com 0 < k < k+1 <= l-1):**
+
+```
+Tx^(k) = (s_{k+1} / s_k) * Tx^(k+1) * exp(-s_{k+1} * h_{k+1})
+          * (1 - R_TM_up^(k+1)) / (1 - R_TM_up^(k) * exp(-2*s_k*h_k))
+
+Tu^(k) = Tu^(k+1) * exp(-u_{k+1} * h_{k+1})
+          * (1 + R_TE_up^(k+1)) / (1 + R_TE_up^(k) * exp(-2*u_k*h_k))
+```
+
+**Casos especiais para semi-espaços:**
+
+```
+Semi-espaço superior (zona 0):
+  Tx^(0) = (s_1/s_0) * Tx^(1) * exp(-s_1*h_1) * (1 - R_TM_up^(1))
+  Tu^(0) = Tu^(1) * exp(-u_1*h_1) * (1 - R_TE_up^(1))
+
+Semi-espaço inferior (zona n):
+  Tx^(n) = (s_{n-1}/s_n) * Tx^(n-1) * exp(-s_{n-1}*h_{n-1}) * (1 - R_TM_dw^(n-1))
+  Tu^(n) = Tu^(n-1) * exp(-u_{n-1}*h_{n-1}) * (1 + R_TE_dw^(n-1))
+```
+
+No código Fortran (`hmd_TIV_optimized`), esses coeficientes são computados nos arrays
+`Txdw(:,j)`, `Txup(:,k)`, `Tudw(:,j)`, `Tuup(:,k)` via loops recursivos.
+
+### 4.9 Campo no Domínio Espacial via Transformada de Hankel
+
+As expressões finais do campo magnético H no domínio espacial são obtidas aplicando a
+transformada inversa de Fourier dupla (em `k_x, k_y`) às expressões espectrais. Devido
+à simetria cilíndrica do meio, essa transformada dupla reduz-se a integrais de Hankel
+com funções de Bessel `J_0` e `J_1`.
+
+**Campo espectral (resultado da Seção 4.2):**
+
+```
+H_x_hat_hat = -(k_y^2/kr^2) * kh^2 * pi_x + (k_x^2/kr^2) * d(pi_u)/dz
+H_y_hat_hat = (k_x*k_y/kr^2) * kh^2 * pi_x + (k_x*k_y/kr^2) * d(pi_u)/dz
+H_z_hat_hat = i*k_x * pi_u
+```
+
+**Transformada de Hankel — DMH_x (Dipolo Magnético Horizontal x):**
+
+Para o DMH_x, as componentes do campo no domínio espacial envolvem convoluções com
+J_0 e J_1:
+
+```
+H_x = (1/2*pi*r) * [(2*x^2/r^2 - 1) * sum(Kte_dz * wJ1)/r
+       - kh^2 * (2*y^2/r^2 - 1) * sum(Ktm * wJ1)/r
+       - (x^2/r^2) * sum(Kte_dz * wJ0 * kr)
+       + kh^2 * (y^2/r^2) * sum(Ktm * wJ0 * kr)]
+
+H_y = (x*y)/(pi*r^3) * [sum(Kte_dz * wJ1 + kh^2 * Ktm * wJ1)/r
+       - sum((Kte_dz * wJ0 + kh^2 * Ktm * wJ0) * kr)/2]
+
+H_z = -x * sum(Kte * wJ1 * kr^2) / (r * 2*pi*r)
+
+Onde:
+  Ktm = kernel modo TM (depende de pi_x, Tx, reflexões TM)
+  Kte = kernel modo TE (depende de pi_u, Tu, reflexões TE)
+  Kte_dz = derivada do kernel TE em z
+  wJ0, wJ1 = pesos do filtro de Hankel para J_0 e J_1
+  r = sqrt(x^2 + y^2) = distância horizontal T-R
+  kr = abscissa do filtro / r
+```
+
+**DMH_y (Dipolo Magnético Horizontal y):**
+
+O campo do dipolo y é obtido por rotação de 90 graus do DMH_x:
+
+```
+Regra de rotação: x → y, y → -x
+
+H_x(DMH_y) = H_y(DMH_x)  (com a substituição de variáveis)
+H_y(DMH_y) = expressão com (2*y^2/r^2 - 1) e x^2/r^2 permutados
+H_z(DMH_y) = -y * sum(Kte * wJ1 * kr^2) / (r * 2*pi*r)
+```
+
+No código, o modo `'hmdxy'` calcula ambos os dipolos simultaneamente,
+reutilizando os kernels espectrais.
+
+**DMV (Dipolo Magnético Vertical):**
+
+O DMV excita apenas o modo TE (simetria axial elimina o acoplamento TM):
+
+```
+H_x = -x * sum(Kte_dzz * J1 * kr^2) / (2*pi*r) / r
+H_y = -y * sum(Kte_dzz * J1 * kr^2) / (2*pi*r) / r
+H_z = sum(Kte_z * J0 * kr^3) / (2*pi*zeta) / r
+
+Onde Kte_dzz = AdmInt * Kte_z  (kernel segunda derivada em z com J1)
+```
+
+### 4.10 Mapeamento Formulação Teórica <-> Código Fortran
+
+A tabela abaixo estabelece a correspondência direta entre as variáveis da formulação
+teórica (conforme o documento TeX) e as variáveis do código Fortran:
+
+| Teoria (TeX) | Fortran | Sub-rotina | Tipo Fortran | Descrição |
+|:-------------|:--------|:-----------|:-------------|:----------|
+| `zeta = i*omega*mu_0` | `zeta` | `fieldsinfreqs` | `complex(dp)` | Impeditividade |
+| `sigma_h, sigma_v` | `eta(i,1), eta(i,2)` | `fieldsinfreqs` | `real(dp)` | Condutividades (1/rho) |
+| `kh^2 = -zeta*sigma_h` | `kh2(j)` | `commonarraysMD` | `complex(dp)` | Número de onda horiz. ao quadrado |
+| `kv^2 = -zeta*sigma_v` | `kv2(j)` | `commonarraysMD` | `complex(dp)` | Número de onda vert. ao quadrado |
+| `lambda^2 = sigma_h/sigma_v` | `lamb2(j)` | `commonarraysMD` | `real(dp)` | Coeficiente de anisotropia ao quadrado |
+| `u_m = sqrt(kr^2 - kh^2)` | `u(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Constante de propagação TE |
+| `v_m = sqrt(kr^2 - kv^2)` | `v(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Constante de propagação intermediária |
+| `s_m = lambda_m * v_m` | `s(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Constante de propagação TM |
+| `Y_m = u_m / zeta` | `AdmInt(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Admitância intrínseca (TE) |
+| `Z_m = s_m / sigma_h,m` | `ImpInt(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Impedância intrínseca (TM) |
+| `tanh(u_m * h_m)` | `tghuh(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Tanh estabilizada (TE) |
+| `tanh(s_m * h_m)` | `tghsh(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Tanh estabilizada (TM) |
+| `R_TE_up^(m)` | `RTEup(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Coeficiente reflexão TE ascendente |
+| `R_TE_dw^(m)` | `RTEdw(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Coeficiente reflexão TE descendente |
+| `R_TM_up^(m)` | `RTMup(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Coeficiente reflexão TM ascendente |
+| `R_TM_dw^(m)` | `RTMdw(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Coeficiente reflexão TM descendente |
+| `Y_tilde_dw^(m)` | `AdmAp_dw(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Admitância aparente descendente |
+| `Y_tilde_up^(m)` | `AdmAp_up(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Admitância aparente ascendente |
+| `Z_tilde_dw^(m)` | `ImpAp_dw(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Impedância aparente descendente |
+| `Z_tilde_up^(m)` | `ImpAp_up(:,m)` | `commonarraysMD` | `complex(dp), (npt,n)` | Impedância aparente ascendente |
+| `Mx_up, Mx_dw` | `Mxup(:), Mxdw(:)` | `commonfactorsMD` | `complex(dp), (npt)` | Fatores de onda TM na camada fonte |
+| `Eu_up, Eu_dw` | `Euup(:), Eudw(:)` | `commonfactorsMD` | `complex(dp), (npt)` | Fatores de onda TE na camada fonte |
+| `FE_dw_z, FE_up_z` | `FEdwz(:), FEupz(:)` | `commonfactorsMD` | `complex(dp), (npt)` | Fatores TE derivada z na camada fonte |
+| `Tx^(j) (descendente)` | `Txdw(:,j)` | `hmd_TIV_optimized` | `complex(dp), (npt,n)` | Coef. transmissão TM descendente |
+| `Tx^(k) (ascendente)` | `Txup(:,k)` | `hmd_TIV_optimized` | `complex(dp), (npt,n)` | Coef. transmissão TM ascendente |
+| `Tu^(j) (descendente)` | `Tudw(:,j)` | `hmd_TIV_optimized` | `complex(dp), (npt,n)` | Coef. transmissão TE descendente |
+| `Tu^(k) (ascendente)` | `Tuup(:,k)` | `hmd_TIV_optimized` | `complex(dp), (npt,n)` | Coef. transmissão TE ascendente |
+| `K_tm` (kernel TM) | `Ktm(:)` | `hmd_TIV_optimized` | `complex(dp), (npt)` | Kernel espectral modo TM |
+| `K_te` (kernel TE) | `Kte(:)` | `hmd_TIV_optimized` | `complex(dp), (npt)` | Kernel espectral modo TE |
+| `K_te_dz` (kernel TE deriv.) | `Ktedz(:)` | `hmd_TIV_optimized` | `complex(dp), (npt)` | Kernel TE derivada em z |
+| `R^T * H * R` | `RtHR` | `utils.f08` | Sub-rotina | Rotação do tensor para frame da ferramenta |
+| `h_0` (posição da fonte) | `h0` | `fieldsinfreqs` | `real(dp)` | Profundidade do transmissor |
+| `kr` (número de onda radial) | `kr(:)` | `commonarraysMD` | `real(dp), (npt)` | `absc(i) / hordist` |
+| `h_m` (espessura camada m) | `h(m)` | `sanitize_hprof_well` | `real(dp)` | Espessura da camada m |
+| `z_m` (interface inferior m) | `prof(m)` | `sanitize_hprof_well` | `real(dp)` | Profundidade da interface m |
+
+---
+
+## 5. Arquitetura do Software
+
+### 5.1 Estrutura de Módulos
 
 O simulador é composto por 6 arquivos-fonte Fortran organizados em módulos com dependências hierárquicas:
 
@@ -843,7 +1456,7 @@ O simulador é composto por 6 arquivos-fonte Fortran organizados em módulos com
   └─────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 Grafo de Dependências
+### 5.2 Grafo de Dependências
 
 ```
 parameters.f08
@@ -863,7 +1476,7 @@ PerfilaAnisoOmp.f08  (usa todos acima + omp_lib)
 RunAnisoOmp.f08      (programa principal)
 ```
 
-### 4.3 Fluxo de Execução Completo
+### 5.3 Fluxo de Execução Completo
 
 ```
 1. RunAnisoOmp lê model.in
@@ -900,7 +1513,7 @@ RunAnisoOmp.f08      (programa principal)
       └── Escreve .dat (binário, stream)
 ```
 
-### 4.4 Inventário de Linhas de Código
+### 5.4 Inventário de Linhas de Código
 
 | Arquivo | LOC | Propósito |
 |:--------|----:|:----------|
@@ -917,9 +1530,9 @@ RunAnisoOmp.f08      (programa principal)
 
 ---
 
-## 5. Módulos Fortran — Análise Detalhada
+## 6. Módulos Fortran — Análise Detalhada
 
-### 5.1 parameters.f08 — Constantes Físicas
+### 6.1 parameters.f08 — Constantes Físicas
 
 Módulo mínimo que define constantes fundamentais com precisão dupla (`dp = kind(1.d0)`):
 
@@ -937,7 +1550,7 @@ Módulo mínimo que define constantes fundamentais com precisão dupla (`dp = ki
 | `dsx, dsy, dsz` | 1.0 | `real(dp), parameter` | Área dos dipolos elétricos (m^2, não utilizado) |
 | `mx, my, mz` | 1.0 | `real(dp), parameter` | Momentos dipolares magnéticos (A.m^2) |
 
-### 5.2 filtersv2.f08 (module filterscommonbase) — Filtros Digitais para Transformada de Hankel
+### 6.2 filtersv2.f08 (module filterscommonbase) — Filtros Digitais para Transformada de Hankel
 
 **Nota:** O arquivo chama-se `filtersv2.f08`, mas o módulo Fortran declarado dentro dele é `module filterscommonbase`. O módulo principal (`PerfilaAnisoOmp.f08`) o referencia via `use filterscommonbase`.
 
@@ -950,9 +1563,9 @@ Módulo que armazena os coeficientes tabelados de 4 filtros digitais para transf
 
 A transformada de Hankel via filtro digital é uma técnica clássica em geofísica EM que substitui a integração numérica direta (quadratura) por uma soma ponderada. Os coeficientes são pré-calculados offline e tabelados, tornando a avaliação extremamente eficiente (~201 multiplicações por ponto).
 
-### 5.3 utils.f08 — Funções Utilitárias
+### 6.3 utils.f08 — Funções Utilitárias
 
-#### 5.3.1 sanitize_hprof_well
+#### 6.3.1 sanitize_hprof_well
 
 Converte espessuras de camadas em arrays de profundidade com sentinelas:
 
@@ -971,11 +1584,11 @@ Output: h(1:n) = esp  (espessuras, com h(1)=h(n)=0)
 
 As sentinelas `+/-1e300` eliminam condicionais nos cálculos de exponenciais nas camadas extremas, simplificando o código de propagação.
 
-#### 5.3.2 findlayersTR2well
+#### 6.3.2 findlayersTR2well
 
 Identifica em qual camada estão o transmissor (camadT) e o receptor (camadR), dado o array de profundidades das interfaces. A busca é feita de baixo para cima (`do i = n-1, 2, -1`) para eficiência em cenários onde T e R estão em camadas profundas.
 
-#### 5.3.3 commonarraysMD — Constantes de Propagação e Reflexão
+#### 6.3.3 commonarraysMD — Constantes de Propagação e Reflexão
 
 Esta é a sub-rotina mais importante do ponto de vista físico. Calcula, para cada ponto do filtro (`npt = 201`) e cada camada (`n`):
 
@@ -1046,21 +1659,21 @@ commonarraysMD(n, npt, hordist, krJ0J1, zeta, h, eta, ...):
     (Análogo para ImpAp_up e RTMup)
 ```
 
-#### 5.3.4 commonfactorsMD — Fatores de Onda da Camada Fonte
+#### 6.3.4 commonfactorsMD — Fatores de Onda da Camada Fonte
 
 Calcula os 6 fatores de onda refletida (Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz) para a camada do transmissor. Estes fatores encapsulam as reflexões múltiplas dentro da camada fonte e são reutilizados para todos os dipolos.
 
 **Otimização:** Esta sub-rotina só precisa ser recalculada quando a distância horizontal `r` entre T e R muda, ou quando a camada do transmissor muda. Em configurações coaxiais (r constante), o custo é amortizado.
 
-#### 5.3.5 RtHR — Rotação do Tensor Magnético
+#### 6.3.5 RtHR — Rotação do Tensor Magnético
 
 Implementa a rotação `R^T * H * R` conforme Liu (2017), equação 4.80. Recebe os três ângulos de Euler (alpha, beta, gamma) e o tensor H(3x3) complexo, retornando o tensor rotacionado no sistema de coordenadas da ferramenta.
 
 Na perfilagem inclinada, `alpha = theta` (inclinação do poço), `beta = gamma = 0`.
 
-### 5.4 magneticdipoles.f08 — Campos Dipolares
+### 6.4 magneticdipoles.f08 — Campos Dipolares
 
-#### 5.4.1 hmd_TIV_optimized — Dipolo Magnético Horizontal
+#### 6.4.1 hmd_TIV_optimized — Dipolo Magnético Horizontal
 
 Sub-rotina principal para o cálculo do campo do HMD em meio TIV. Trata 6 configurações geométricas:
 
@@ -1115,13 +1728,13 @@ Para cada caso, os kernels espectrais `Ktm` (modo TM) e `Kte` (modo TE) são cal
 
 O modo `'hmdxy'` é o utilizado no simulador, pois calcula ambos os dipolos compartilhando os kernels.
 
-#### 5.4.2 vmd_optimized — Dipolo Magnético Vertical
+#### 6.4.2 vmd_optimized — Dipolo Magnético Vertical
 
 O VMD excita apenas o modo TE (simetria axial). A estrutura é similar ao HMD, com 6 casos geométricos. Os coeficientes de transmissão `TEdwz`/`TEupz` são calculados recursivamente.
 
-### 5.5 PerfilaAnisoOmp.f08 — Módulo Principal
+### 6.5 PerfilaAnisoOmp.f08 — Módulo Principal
 
-#### 5.5.1 perfila1DanisoOMP — Loop de Perfilagem
+#### 6.5.1 perfila1DanisoOMP — Loop de Perfilagem
 
 Função principal do simulador. Etapas:
 
@@ -1134,7 +1747,7 @@ Função principal do simulador. Etapas:
    - Loop interno: medições (`j = 1..nmed(k)`), `num_threads_j = maxthreads - ntheta`
 6. **Coleta e escrita:** `writes_files(...)` escreve .dat e .out
 
-#### 5.5.2 fieldsinfreqs — Campos em Todas as Frequências
+#### 6.5.2 fieldsinfreqs — Campos em Todas as Frequências
 
 Para cada posição T-R, calcula o tensor H completo em todas as frequências. Cadeia de chamadas:
 
@@ -1155,7 +1768,7 @@ findlayersTR2well → commonarraysMD → commonfactorsMD
                       cH(f,:) = [tH(1,1), tH(1,2), ..., tH(3,3)]
 ```
 
-#### 5.5.3 writes_files — Escrita de Saída
+#### 6.5.3 writes_files — Escrita de Saída
 
 **Arquivo .out (metadados):** Escrito apenas quando `modelm == nmaxmodel` (último modelo):
 
@@ -1179,7 +1792,7 @@ Para cada ângulo k, frequência j, medição i:
   Formato: 1 int32 + 21 float64 = 22 valores por registro
 ```
 
-### 5.6 RunAnisoOmp.f08 — Programa Principal
+### 6.6 RunAnisoOmp.f08 — Programa Principal
 
 Programa sequencial que:
 1. Obtém o diretório corrente via `getcwd`
@@ -1189,9 +1802,9 @@ Programa sequencial que:
 
 ---
 
-## 6. Arquivo de Entrada model.in
+## 7. Arquivo de Entrada model.in
 
-### 6.1 Estrutura Completa
+### 7.1 Estrutura Completa
 
 O arquivo `model.in` é lido sequencialmente pelo programa principal. Cada linha contém um ou mais valores:
 
@@ -1217,7 +1830,7 @@ Linha  Variável            Tipo      Descrição
   +1   modelm nmaxmodel   integer   Modelo atual e total de modelos
 ```
 
-### 6.2 Exemplo Comentado (model.in atual)
+### 7.2 Exemplo Comentado (model.in atual)
 
 ```
 2                    ! nf = 2 frequências
@@ -1252,7 +1865,7 @@ Inv0_15Dip1000_t5    ! nome dos arquivos de saída
 1000 1000            ! modelo 1000 de 1000
 ```
 
-### 6.3 Observações Importantes
+### 7.3 Observações Importantes
 
 1. **Espessuras:** As camadas 1 e ncam são semi-espaços (espessura infinita), então `esp(1) = esp(ncam) = 0` é atribuído em `RunAnisoOmp.f08` (programa principal) antes de chamar `perfila1DanisoOMP`.
 
@@ -1264,9 +1877,9 @@ Inv0_15Dip1000_t5    ! nome dos arquivos de saída
 
 ---
 
-## 7. Arquivos de Saída (.dat e .out)
+## 8. Arquivos de Saída (.dat e .out)
 
-### 7.1 Arquivo .out — Metadados
+### 8.1 Arquivo .out — Metadados
 
 Arquivo texto com 4 linhas, escrito apenas pelo último modelo da série:
 
@@ -1286,7 +1899,7 @@ Formato:
 | t4 | 2 | 2 | 1000 | 0, 15 | 20000, 40000 | 600, 622 |
 | t5 | 1 | 2 | 1000 | 0 | 20000, 40000 | 600 |
 
-### 7.2 Arquivo .dat — Dados Binários
+### 8.2 Arquivo .dat — Dados Binários
 
 Arquivo binário no formato Fortran `stream` (sem registros fixos), escrito em modo `append`.
 
@@ -1319,7 +1932,7 @@ Arquivo binário no formato Fortran `stream` (sem registros fixos), escrito em m
 
 **Total por registro:** 4 + 21 x 8 = **172 bytes**
 
-### 7.3 Leitura no Pipeline Python (geosteering_ai)
+### 8.3 Leitura no Pipeline Python (geosteering_ai)
 
 O pipeline Python (`geosteering_ai/data/loading.py`) lê o .dat interpretando os registros binários de 172 bytes. O pseudocódigo ilustrativo abaixo mostra a lógica conceitual (a implementação real em `loading.py` utiliza `np.frombuffer` com mapeamento `COL_MAP_22`):
 
@@ -1343,7 +1956,7 @@ data = np.fromfile(filepath, dtype=dtype)
 # Col 21: Im(Hzz) → INPUT_FEATURE
 ```
 
-### 7.4 Tamanho dos Arquivos
+### 8.4 Tamanho dos Arquivos
 
 Para 1000 modelos, 1 ângulo, 2 frequências, 600 medições:
 
@@ -1355,9 +1968,9 @@ Tamanho = nmodels × ntheta × nfreq × nmeds × 172 bytes
 
 ---
 
-## 8. Sistema de Build (Makefile)
+## 9. Sistema de Build (Makefile)
 
-### 8.1 Estrutura do Makefile
+### 9.1 Estrutura do Makefile
 
 O Makefile segue a convenção padrão de projetos Fortran com:
 
@@ -1368,7 +1981,7 @@ O Makefile segue a convenção padrão de projetos Fortran com:
 | COMPILER | `gfortran` com flags de produção |
 | TARGETS | `$(binary)`, `run_python`, `all`, `clean`, `cleanall` |
 
-### 8.2 Flags de Compilação
+### 9.2 Flags de Compilação
 
 **Flags de desenvolvimento (comentadas, para debug):**
 
@@ -1399,7 +2012,7 @@ Para ativar o modo de desenvolvimento, descomente `flags = $(development_flags_g
 
 **Flags OpenMP:** `-fopenmp` adicionada tanto na compilação quanto na linkagem.
 
-### 8.3 Targets
+### 9.3 Targets
 
 | Target | Descrição |
 |:-------|:----------|
@@ -1409,7 +2022,7 @@ Para ativar o modo de desenvolvimento, descomente `flags = $(development_flags_g
 | `clean` | Remove `./build/` |
 | `cleanall` | Remove `./build/`, `tatu.x`, `*.dat`, `*.out` |
 
-### 8.4 Ordem de Compilação
+### 9.4 Ordem de Compilação
 
 ```
 parameters.f08 ──> build/parameters.o
@@ -1422,7 +2035,7 @@ RunAnisoOmp.f08 ──> build/RunAnisoOmp.o (depende de parameters, DManisoTIV)
 Linkagem: gfortran -fopenmp [flags] -o tatu.x build/*.o
 ```
 
-### 8.5 Notas e Recomendações
+### 9.5 Notas e Recomendações
 
 - **`-ffast-math`** pode afetar a precisão de operações com NaN e infinitos. Para validação numérica, recomenda-se compilar sem esta flag.
 - **`-march=native`** otimiza para a CPU local, mas o binário não é portável.
@@ -1430,13 +2043,13 @@ Linkagem: gfortran -fopenmp [flags] -o tatu.x build/*.o
 
 ---
 
-## 9. Gerador de Modelos Geológicos (Python)
+## 10. Gerador de Modelos Geológicos (Python)
 
-### 9.1 Visão Geral
+### 10.1 Visão Geral
 
 O script `fifthBuildTIVModels.py` gera modelos geológicos aleatórios usando amostragem Sobol Quasi-Monte Carlo (`scipy.stats.qmc.Sobol`). Os modelos são escritos em `model.in` e simulados pelo Fortran em sequência.
 
-### 9.2 Parâmetros dos Modelos Geológicos
+### 10.2 Parâmetros dos Modelos Geológicos
 
 | Parâmetro | Range | Distribuição | Descrição |
 |:----------|:------|:------------|:----------|
@@ -1446,7 +2059,7 @@ O script `fifthBuildTIVModels.py` gera modelos geológicos aleatórios usando am
 | `rho_v` | calculado | `lambda^2 * rho_h` | Resistividade vertical |
 | `espessuras` | 0.1-50+ m | Sobol + stick-breaking | Espessuras das camadas internas |
 
-### 9.3 Cenários de Geração (6 Geradores)
+### 10.3 Cenários de Geração (6 Geradores)
 
 | Cenário | Função | nmodels | ncam | Espessuras | Contrastes | Ruído |
 |:--------|:-------|:-------:|:----:|:-----------|:-----------|:------|
@@ -1457,7 +2070,7 @@ O script `fifthBuildTIVModels.py` gera modelos geológicos aleatórios usando am
 | **Desfavorável ruidoso** | `unfriendly_noisy_2` | 12000 | 3-30 (pesos) | Finas + ruído (3%) | Forçados + ruído (5%) | Sim |
 | **Patológico** | `generate_pathological_models_2` | 4500 | 3-28 | Muito finas (min 0.1 m) | Extremos (10x, p=0.7) | Sim (7%) |
 
-### 9.4 Funções Auxiliares e Vantagens do Sobol QMC
+### 10.4 Funções Auxiliares e Vantagens do Sobol QMC
 
 | Função | Descrição |
 |:-------|:----------|
@@ -1507,7 +2120,7 @@ Vantagens do Sobol para geração de modelos geológicos:
    independente das demais, evitando correlações espúrias entre parâmetros
    que distorceriam a distribuição dos modelos.
 
-### 9.5 Fluxo do Gerador
+### 10.5 Fluxo do Gerador
 
 ```
 Para cada modelo i = 1..nmodels:
@@ -1524,7 +2137,7 @@ Para cada modelo i = 1..nmodels:
   11. Resultado: append no .dat
 ```
 
-### 9.6 Loop de Execução via Subprocess
+### 10.6 Loop de Execução via Subprocess
 
 O gerador Python orquestra a execução do simulador Fortran via `subprocess.run()`.
 Para cada modelo geológico gerado, o fluxo é:
@@ -1575,9 +2188,9 @@ for i in range(1, nmodels + 1):
 
 ---
 
-## 10. Paralelismo OpenMP — Análise e Otimização
+## 11. Paralelismo OpenMP — Análise e Otimização
 
-### 10.1 Estrutura Atual de Paralelismo
+### 11.1 Estrutura Atual de Paralelismo
 
 O simulador utiliza **paralelismo OpenMP aninhado em 2 níveis**:
 
@@ -1605,7 +2218,7 @@ num_threads_k = ntheta                  ! Threads para ângulos (1-2)
 num_threads_j = maxthreads - ntheta     ! Restante para medições
 ```
 
-### 10.2 Análise de Desempenho
+### 11.2 Análise de Desempenho
 
 **Problemas identificados:**
 
@@ -1620,7 +2233,7 @@ num_threads_j = maxthreads - ntheta     ! Restante para medições
 
 4. **Redundância computacional:** `commonarraysMD` calcula constantes de propagação e coeficientes de reflexão que dependem apenas do modelo (n, resist, freq), não da posição T-R. Em medições onde T e R estão na mesma camada (maioria dos casos em poços verticais), `commonarraysMD` produz o mesmo resultado para todos os `j`.
 
-### 10.3 Pontos de Otimização — Memória
+### 11.3 Pontos de Otimização — Memória
 
 | Otimização | Impacto | Complexidade |
 |:-----------|:--------|:-------------|
@@ -1630,7 +2243,7 @@ num_threads_j = maxthreads - ntheta     ! Restante para medições
 | **Reduzir arrays temporários em hmd_TIV** | Médio — Tudw/Txdw/etc. alocados com tamanho mínimo | Média |
 | **Pool de memória por thread** | Alto — elimina fragmentação | Alta |
 
-### 10.4 Pontos de Otimização — Tempo de Execução
+### 11.4 Pontos de Otimização — Tempo de Execução
 
 | Otimização | Impacto Estimado | Descrição |
 |:-----------|:----------------|:----------|
@@ -1641,7 +2254,7 @@ num_threads_j = maxthreads - ntheta     ! Restante para medições
 | **Scheduler híbrido** | 5-10% | `static` quando nmed uniforme, `dynamic` quando variável |
 | **Batch de medições** | 15-25% | Agrupar medições por camadT para reutilizar coeficientes de reflexão |
 
-### 10.5 Proposta de Paralelismo Otimizado
+### 11.5 Proposta de Paralelismo Otimizado
 
 ```fortran
 ! PROPOSTA: Colapso de loops + pré-alocação + cache de coeficientes
@@ -1707,7 +2320,7 @@ do t = 0, maxthreads - 1
 end do
 ```
 
-### 10.6 Métricas de Escalabilidade
+### 11.6 Métricas de Escalabilidade
 
 Para 1000 modelos, 1 ângulo, 2 frequências, 600 medições:
 
@@ -1722,11 +2335,171 @@ Total para 1000 modelos: ≈ 2.4 × 10^9 operações
 Tempo estimado (single core, ~1 GFLOP/s complex): ~2.4 segundos por modelo
 ```
 
+### 11.7 Paralelização de Loops de Frequência e Ângulos
+
+A estrutura atual de paralelismo (2 níveis: ângulos x medições) pode ser estendida
+para 3 níveis quando o simulador opera com múltiplas frequências e ângulos
+simultaneamente.
+
+**Estrutura atual (2 níveis):**
+
+```
+Loop externo: ntheta ângulos        → num_threads_k = ntheta
+  Loop interno: nmed medições       → num_threads_j = maxthreads - ntheta
+
+Para ntheta=1, nf=2: 2 × 600 = 1200 chamadas a fieldsinfreqs,
+  mas apenas 600 são paralelizáveis (o loop de frequências é sequencial
+  dentro de fieldsinfreqs).
+```
+
+**Proposta: 3 níveis (ângulos x frequências x medições) com `collapse`:**
+
+Quando `ntheta > 1` e `nf > 1`, é possível colapsar os três loops em uma única
+região paralela, maximizando a granularidade de trabalho:
+
+```fortran
+! PROPOSTA: Paralelismo 3-level com collapse
+! Lineariza os 3 loops em um único espaço de iteração
+!$omp parallel do schedule(dynamic, 32) collapse(3) &
+!$omp& private(k, f, j, tid, ws)
+do k = 1, ntheta
+  do f = 1, nf
+    do j = 1, nmmax
+      if (j > nmed(k)) cycle
+
+      ! Cada combinação (ângulo, freq, medição) é uma tarefa independente
+      call compute_single_measurement(k, f, j, ws(tid), ...)
+    end do
+  end do
+end do
+!$omp end parallel do
+```
+
+**Análise de carga para configurações típicas:**
+
+| Configuração | ntheta | nf | nmed | Tarefas Totais | Eficiência (8 cores) |
+|:-------------|:------:|:--:|:----:|:--------------:|:--------------------:|
+| Baseline (atual) | 1 | 2 | 600 | 1200 | ~95% (150 tarefas/core) |
+| Multi-ângulo | 2 | 2 | 600/622 | 2444 | ~98% (305 tarefas/core) |
+| Multi-freq extenso | 1 | 4 | 600 | 2400 | ~97% (300 tarefas/core) |
+
+**Considerações de afinidade de threads e NUMA:**
+
+Em sistemas com múltiplos sockets (NUMA), a afinidade de threads é relevante:
+
+```
+Configuração recomendada para dual-socket:
+  export OMP_PLACES=cores
+  export OMP_PROC_BIND=close
+
+Justificativa:
+  - 'close' mantém threads próximas no mesmo socket, otimizando acesso
+    à memória local (latência ~100 ns vs ~300 ns inter-socket).
+  - 'cores' distribui uma thread por core físico, evitando contenção
+    de hyperthreading em operações FP intensivas.
+
+Para single-socket (laptop/workstation):
+  export OMP_PROC_BIND=spread
+  → Distribui threads uniformemente entre cores para balanceamento térmico.
+```
+
+### 11.8 Estratégias Avançadas de Otimização de Memória
+
+**11.8.1 Alocação de Workspace Thread-Local (pré-alocado)**
+
+O principal gargalo de memória no simulador é a alocação dinâmica repetida de arrays
+dentro do loop paralelo. A solução é pré-alocar um workspace por thread antes do loop:
+
+```fortran
+type :: thread_workspace
+    ! Arrays de propagação (npt × n_max)
+    complex(dp), allocatable :: u(:,:), s(:,:), v(:,:)
+    complex(dp), allocatable :: uh(:,:), sh(:,:)
+    complex(dp), allocatable :: tghuh(:,:), tghsh(:,:)
+
+    ! Coeficientes de reflexão (npt × n_max)
+    complex(dp), allocatable :: RTEdw(:,:), RTEup(:,:)
+    complex(dp), allocatable :: RTMdw(:,:), RTMup(:,:)
+    complex(dp), allocatable :: AdmInt(:,:), ImpInt(:,:)
+    complex(dp), allocatable :: AdmAp_dw(:,:), AdmAp_up(:,:)
+    complex(dp), allocatable :: ImpAp_dw(:,:), ImpAp_up(:,:)
+
+    ! Fatores de onda (npt)
+    complex(dp), allocatable :: Mxdw(:), Mxup(:)
+    complex(dp), allocatable :: Eudw(:), Euup(:), FEdwz(:), FEupz(:)
+
+    ! Coeficientes de transmissão (npt × n_max)
+    complex(dp), allocatable :: Txdw(:,:), Txup(:,:)
+    complex(dp), allocatable :: Tudw(:,:), Tuup(:,:)
+
+    ! Kernels e resultados (npt)
+    complex(dp), allocatable :: Ktm(:), Kte(:), Ktedz(:)
+end type
+
+! Memória estimada por thread (n_max=80, npt=201):
+!   ~30 arrays × 201 × 80 × 16 bytes ≈ 7.7 MB
+! Para 8 threads: ~62 MB (cabe confortavelmente na L3 cache de CPUs modernas)
+```
+
+**11.8.2 Stack vs Heap para Arrays Pequenos**
+
+Para arrays de tamanho fixo e pequeno (como o tensor H 3x3), a alocação em stack
+é preferível por evitar overhead de malloc:
+
+```fortran
+! CORRETO: stack allocation (tamanho fixo, conhecido em compilação)
+complex(dp) :: matH(3,3)
+complex(dp) :: Hx_p(1,2), Hy_p(1,2), Hz_p(1,2)
+
+! EVITAR: heap allocation para arrays pequenos
+complex(dp), allocatable :: matH(:,:)   ! Overhead desnecessário
+allocate(matH(3,3))
+```
+
+**11.8.3 Memory Pooling para Arrays Complexos**
+
+Para arrays de tamanho variável (como `Txdw(:,camadT:camadR)`), um pool de memória
+evita fragmentação:
+
+```fortran
+! Pool com blocos pré-alocados de tamanho máximo:
+type :: memory_pool
+    complex(dp), allocatable :: block(:,:)  ! (npt, n_max) pré-alocado
+    integer :: in_use                        ! Marca de uso
+end type
+
+! Cada thread obtém um bloco do pool, sem malloc:
+call pool_acquire(my_pool, Txdw_ptr, npt, n_needed)
+! ... usa Txdw_ptr ...
+call pool_release(my_pool, Txdw_ptr)
+```
+
+**11.8.4 Alinhamento de Cache-Line para Vetorização SIMD**
+
+Para maximizar a eficiência da vetorização SIMD (AVX-256/512) nos loops sobre
+os pontos do filtro (npt=201), os arrays devem ser alinhados a 64 bytes:
+
+```fortran
+! GCC: atributo de alinhamento
+!GCC$ attributes aligned(64) :: u, s, uh, sh
+
+! Diretiva OpenMP SIMD para o loop interno:
+!$omp simd aligned(Ktm, Kte, wJ0, wJ1: 64)
+do i = 1, npt
+    sum_J0 = sum_J0 + Ktm(i) * wJ0(i)
+    sum_J1 = sum_J1 + Kte(i) * wJ1(i)
+end do
+
+! O npt=201 não é múltiplo de 8 (AVX-512 complex), mas 201 = 25×8 + 1.
+! O compilador gerará um loop principal de 25 iterações vetorizadas
+! mais uma iteração escalar residual.
+```
+
 ---
 
-## 11. Análise de Viabilidade CUDA (GPU)
+## 12. Análise de Viabilidade CUDA (GPU)
 
-### 11.1 Identificação de Kernels Paralelizáveis
+### 12.1 Identificação de Kernels Paralelizáveis
 
 | Kernel | Dimensão | Paralelismo | Adequação GPU |
 |:-------|:---------|:------------|:-------------|
@@ -1737,7 +2510,7 @@ Tempo estimado (single core, ~1 GFLOP/s complex): ~2.4 segundos por modelo
 | Loop frequências | nf | Independente por frequência | **Média** — apenas 2 frequências |
 | Recursão reflexão | n (sequencial) | **Dependência de dados** | **Baixa** — n camadas sequenciais |
 
-### 11.2 Estratégia de Implementação CUDA
+### 12.2 Estratégia de Implementação CUDA
 
 ```
 GPU Grid:
@@ -1772,7 +2545,7 @@ Kernel 5: assemble_tensor_and_rotate
   Paralelismo: independente por medição
 ```
 
-### 11.3 Desafios CUDA
+### 12.3 Desafios CUDA
 
 1. **Recursão dos coeficientes de reflexão:** Os coeficientes são calculados de forma recursiva (camada n para 1, e 1 para n). Cada passo depende do anterior, impedindo paralelismo nesta dimensão. Porém, os 201 pontos do filtro são independentes, permitindo 201 threads executando a recursão simultaneamente.
 
@@ -1782,7 +2555,7 @@ Kernel 5: assemble_tensor_and_rotate
 
 4. **Memória:** Para n=80 camadas, npt=201: arrays de tamanho (201, 80) × complex64 = 201 × 80 × 16 bytes = ~257 KB por medição. Caberiam ~800 medições simultâneas em 200 MB de memória global.
 
-### 11.4 Análise Detalhada de Memória GPU
+### 12.4 Análise Detalhada de Memória GPU
 
 Para uma estimativa mais precisa do uso de memória na GPU, considere os arrays
 necessários por medição:
@@ -1827,7 +2600,7 @@ Para GPU com 80 GB (A100):
 A GPU é particularmente vantajosa quando múltiplos modelos são processados em batch,
 pois o overhead de transferência CPU→GPU é amortizado e a ocupação dos SMs é maximizada.
 
-### 11.5 Estimativa de Speedup
+### 12.5 Estimativa de Speedup
 
 | Componente | CPU (1 core) | GPU (estimado) | Speedup |
 |:-----------|:-------------|:---------------|:--------|
@@ -1837,7 +2610,7 @@ pois o overhead de transferência CPU→GPU é amortizado e a ocupação dos SMs
 | Overhead transferência | 0 | ~1 ms/modelo | - |
 | **Total por modelo** | ~400 ms | ~10 ms | **~40x** |
 
-### 11.6 Frameworks CUDA Recomendados
+### 12.6 Frameworks CUDA Recomendados
 
 | Framework | Linguagem | Vantagem | Desvantagem |
 |:----------|:----------|:---------|:------------|
@@ -1850,9 +2623,9 @@ pois o overhead de transferência CPU→GPU é amortizado e a ocupação dos SMs
 
 ---
 
-## 12. Análise de Reimplementação em Python Otimizado
+## 13. Análise de Reimplementação em Python Otimizado
 
-### 12.1 Motivação
+### 13.1 Motivação
 
 Uma versão Python do simulador permitiria:
 - Integração direta com o pipeline `geosteering_ai` (sem subprocess)
@@ -1861,7 +2634,7 @@ Uma versão Python do simulador permitiria:
 - Facilidade de extensão (novos modelos de ferramenta, multi-frequência)
 - Potencial implementação de backpropagation through physics (PINNs)
 
-### 12.2 Bibliotecas para Computação de Alto Desempenho em Python
+### 13.2 Bibliotecas para Computação de Alto Desempenho em Python
 
 | Biblioteca | Tipo | Paralelismo | Adequação |
 |:-----------|:-----|:------------|:----------|
@@ -1874,9 +2647,9 @@ Uma versão Python do simulador permitiria:
 | **PyTorch** | CPU/GPU | CUDA | **PROIBIDO** no projeto |
 | **empymod** | CPU | Numba JIT | **Referência** — simulador EM 1D existente |
 
-### 12.3 Estratégia de Implementação Python
+### 13.3 Estratégia de Implementação Python
 
-#### 12.3.1 Fase 1: Protótipo NumPy Vetorizado
+#### 13.3.1 Fase 1: Protótipo NumPy Vetorizado
 
 ```python
 # Vetorização do loop de medições:
@@ -1892,7 +2665,7 @@ Rz = z1 + j * pz - Lcos / 2    # shape: (nmed,)
 # Resultado: arrays de shape (npt, n) para cada frequência
 ```
 
-#### 12.3.2 Fase 2: Compilação JIT com Numba
+#### 13.3.2 Fase 2: Compilação JIT com Numba
 
 ```python
 @numba.njit(parallel=True, cache=True)
@@ -1912,7 +2685,7 @@ def compute_reflection_coefficients(kr, eta, zeta, h, n, npt):
     return u, s, RTEdw, RTMdw
 ```
 
-#### 12.3.3 Fase 3: GPU via Numba CUDA ou CuPy
+#### 13.3.3 Fase 3: GPU via Numba CUDA ou CuPy
 
 ```python
 @numba.cuda.jit
@@ -1926,7 +2699,7 @@ def kernel_commonarraysMD(kr, eta, zeta, h, n, u, s, RTEdw, RTMdw):
             # ... recursão sobre camadas
 ```
 
-### 12.4 Referência: empymod
+### 13.4 Referência: empymod
 
 O pacote Python `empymod` (Werthmuller, 2017) já implementa modelagem EM 1D/3D para meios anisotrópicos usando Numba. Principais características:
 
@@ -1968,7 +2741,7 @@ result = empymod.bipole(
 
 **Recomendação:** Usar empymod como referência e validação, mas implementar versão customizada otimizada para o caso de uso específico do pipeline.
 
-### 12.5 Diferenciação Automática com JAX para PINNs
+### 13.5 Diferenciação Automática com JAX para PINNs
 
 Uma das motivações mais fortes para reimplementar o simulador em Python é a possibilidade
 de utilizar **diferenciação automática** (AD) para calcular gradientes do forward model
@@ -2016,7 +2789,7 @@ de loops Python, o que exige reescrita cuidadosa. Além disso, operações com
 números complexos em JAX requerem atenção à convenção de branch cuts em
 funções como `sqrt`.
 
-### 12.6 Estimativa de Desempenho Python
+### 13.6 Estimativa de Desempenho Python
 
 | Implementação | Tempo/modelo (est.) | vs Fortran | Notas |
 |:-------------|:-------------------|:-----------|:------|
@@ -2027,7 +2800,7 @@ funções como `sqrt`.
 | CuPy | ~0.1 s | ~4x mais rápido | Bom com batching |
 | JAX (XLA) | ~0.05 s | ~8x mais rápido | Permite gradientes |
 
-### 12.7 Roteiro de Implementação Python
+### 13.7 Roteiro de Implementação Python
 
 ```
 Fase 1 (Protótipo — 2-3 semanas):
@@ -2055,7 +2828,7 @@ Fase 4 (Integração — 2 semanas):
   └── Testes de integração com pipeline completo
 ```
 
-### 12.8 Arquitetura Proposta para o Módulo Python
+### 13.8 Arquitetura Proposta para o Módulo Python
 
 ```
 geosteering_ai/simulation/
@@ -2073,9 +2846,9 @@ geosteering_ai/simulation/
 
 ---
 
-## 13. Integração com o Pipeline Geosteering AI v2.0
+## 14. Integração com o Pipeline Geosteering AI v2.0
 
-### 13.1 Cadeia Atual (Fortran)
+### 14.1 Cadeia Atual (Fortran)
 
 ```
 fifthBuildTIVModels.py → model.in → tatu.x (Fortran) → .dat → geosteering_ai/data/loading.py
@@ -2084,7 +2857,7 @@ fifthBuildTIVModels.py → model.in → tatu.x (Fortran) → .dat → geosteerin
                         geológicos    EM 1D TIV        22 colunas
 ```
 
-### 13.2 Cadeia Futura (Python Integrado)
+### 14.2 Cadeia Futura (Python Integrado)
 
 ```
 geosteering_ai/simulation/forward.py → geosteering_ai/data/pipeline.py
@@ -2094,7 +2867,7 @@ geosteering_ai/simulation/forward.py → geosteering_ai/data/pipeline.py
                                           tf.data.Dataset
 ```
 
-### 13.3 Benefícios da Integração
+### 14.3 Benefícios da Integração
 
 1. **Eliminação de I/O:** Dados gerados in-memory, sem escrita/leitura de .dat
 2. **Geração on-the-fly:** Novos modelos geológicos gerados durante treinamento
@@ -2102,7 +2875,7 @@ geosteering_ai/simulation/forward.py → geosteering_ai/data/pipeline.py
 4. **PINNs:** Backpropagation through o simulador para constraintes físicas
 5. **Reprodutibilidade:** Seed único controla toda a cadeia (geração + simulação + treinamento)
 
-### 13.4 Correspondência Fortran → Pipeline v2.0
+### 14.4 Correspondência Fortran → Pipeline v2.0
 
 | Parâmetro Fortran | Config v2.0 | Valor Default | Descrição |
 |:------------------|:------------|:-------------|:----------|
@@ -2114,7 +2887,7 @@ geosteering_ai/simulation/forward.py → geosteering_ai/data/pipeline.py
 | `cH(f,1:9)` | `features[:, 4:21]` (cols 4-21) | - | Tensor H (18 valores reais) |
 | `zobs` | `features[:, 1]` (col 1) | - | Profundidade (m) |
 
-### 13.5 Mapeamento .dat → Estrutura de 22 Colunas do Pipeline
+### 14.5 Mapeamento .dat → Estrutura de 22 Colunas do Pipeline
 
 O pipeline Python (`geosteering_ai/data/loading.py`) interpreta os registros binários
 de 172 bytes do .dat e os reorganiza em uma estrutura de **22 colunas** que é a
@@ -2174,9 +2947,9 @@ futuros (P2 tensor parcial, Modo C tensor completo).
 
 ---
 
-## 14. Referências Bibliográficas
+## 15. Referências Bibliográficas
 
-### 14.1 Modelagem EM em Meios Estratificados
+### 15.1 Modelagem EM em Meios Estratificados
 
 1. **Anderson, W.L.** (1982). "Fast Hankel Transforms Using Related and Lagged Convolutions". *ACM Transactions on Mathematical Software*, 8(4), 344-368. — Filtro de 801 pontos para transformada de Hankel.
 
@@ -2186,47 +2959,202 @@ futuros (P2 tensor parcial, Modo C tensor completo).
 
 4. **Key, K.** (2012). "Is the fast Hankel transform faster than quadrature?". *Geophysics*, 77(3), F21-F30. — Comparação de desempenho de filtros.
 
-### 14.2 Anisotropia TIV em Perfilagem de Poços
+### 15.2 Anisotropia TIV em Perfilagem de Poços
 
 5. **Anderson, B., Barber, T., & Habashy, T.** (2002). "The Interpretation of Multicomponent Induction Logs in the Presence of Dipping, Anisotropic Formations". *SPWLA 43rd Annual Logging Symposium*. — Resposta de ferramentas triaxiais em meios TIV.
 
 6. **Liu, C.** (2017). *Theory of Electromagnetic Well Logging*. Elsevier. — Referência principal para a rotação do tensor (eq. 4.80).
 
-### 14.3 Decomposição TE/TM e Coeficientes de Reflexão
+### 15.3 Decomposição TE/TM e Coeficientes de Reflexão
 
 7. **Chew, W.C.** (1995). *Waves and Fields in Inhomogeneous Media*. IEEE Press. — Formulação TE/TM para meios estratificados com anisotropia.
 
 8. **Ward, S.H. & Hohmann, G.W.** (1988). "Electromagnetic Theory for Geophysical Applications". In *Electromagnetic Methods in Applied Geophysics*, Vol. 1, SEG. — Fundamentação teórica das equações de Maxwell em geofísica.
 
-### 14.4 Dipolos Magnéticos em Meios TIV
+### 15.4 Dipolos Magnéticos em Meios TIV
 
 9. **Zhong, L., Li, J., Bhardwaj, A., Shen, L.C., & Liu, R.C.** (2008). "Computation of Triaxial Induction Logging Tools in Layered Anisotropic Dipping Formations". *IEEE Transactions on Geoscience and Remote Sensing*, 46(4), 1148-1163.
 
 10. **Davydycheva, S., Druskin, V., & Habashy, T.** (2003). "An efficient finite-difference scheme for electromagnetic logging in 3D anisotropic inhomogeneous media". *Geophysics*, 68(5), 1525-1536.
 
-### 14.5 Software de Modelagem EM
+### 15.5 Software de Modelagem EM
 
 11. **Werthmuller, D.** (2017). "An open-source full 3D electromagnetic modeller for 1D VTI media in Python: empymod". *Geophysics*, 82(6), WB9-WB19. — Implementação Python de referência com Numba.
 
-### 14.6 Quasi-Monte Carlo e Geração de Modelos
+### 15.6 Quasi-Monte Carlo e Geração de Modelos
 
 12. **Sobol, I.M.** (1967). "On the distribution of points in a cube and the approximate evaluation of integrals". *USSR Computational Mathematics and Mathematical Physics*, 7(4), 86-112. — Sequências quasi-aleatórias para amostragem uniforme.
 
-### 14.7 Inversão EM via Deep Learning
+### 15.7 Inversão EM via Deep Learning
 
 13. **Morales, A. et al.** (2025). "Physics-Informed Neural Networks for Triaxial Electromagnetic Inversion with Uncertainty Quantification". — PINN para inversão EM triaxial com constrainte TIV.
 
-### 14.8 Computação GPU para Geofísica
+### 15.8 Computação GPU para Geofísica
 
 14. **Weiss, C.J.** (2013). "Project APhiD: A Lorenz-gauged A-Phi decomposition for parallelized computation of ultra-broadband electromagnetic induction in a fully heterogeneous Earth". *Computers & Geosciences*, 58, 40-52. — GPU para modelagem EM.
 
 15. **Commer, M. & Newman, G.A.** (2004). "A parallel finite-difference approach for 3D transient electromagnetic modeling with galvanic sources". *Geophysics*, 69(5), 1192-1202.
 
+### 15.9 Potenciais de Hertz e Formulação TIV
+
+16. **Moran, J.H. & Gianzero, S.** (1979). "Effects of formation anisotropy on resistivity-logging measurements". *Geophysics*, 44(7), 1266-1286. — Formulação fundamental dos potenciais de Hertz para meios TIV, base do simulador.
+
+17. **Santos, W.G.** (2015). *Modelagem eletromagnética com meios anisotrópicos*. — Referência para soluções de EDO não-homogênea da equação de pi_z.
+
+18. **Hohmann, G.W. & Nabighian, M.N.** (1987). "Electromagnetic Methods in Applied Geophysics". Cap. 4. — Argumentos de continuidade para simplificação das condições de contorno.
+
 ---
 
-## 15. Apêndices
+## 16. Sugestões de Melhorias e Novos Recursos
 
-### 15.1 Apêndice A — Tabela de Sub-rotinas
+Esta seção cataloga melhorias propostas para o simulador Fortran `PerfilaAnisoOmp`,
+organizadas por prioridade e complexidade de implementação.
+
+### 16.1 Batching Multi-Frequência em Kernels GPU
+
+**Prioridade:** Alta | **Complexidade:** Média | **Impacto estimado:** 2-4x speedup
+
+Na implementação atual, as frequências são processadas sequencialmente dentro de
+`fieldsinfreqs`. Para GPU, múltiplas frequências podem ser processadas em paralelo
+como uma dimensão adicional do grid CUDA:
+
+```
+Grid GPU proposto:
+  Block: (npt=201, 1, 1)           — threads por ponto do filtro
+  Grid:  (nmed=600, nf=2, ntheta)  — blocos por (medição, freq, ângulo)
+
+Benefício: Toda a informação de um modelo geológico é processada em uma única
+chamada de kernel, eliminando overhead de lançamento repetido.
+```
+
+### 16.2 Seleção Adaptativa de Filtro de Hankel
+
+**Prioridade:** Média | **Complexidade:** Baixa | **Impacto estimado:** 1.5-3x speedup
+
+O simulador utiliza fixamente o filtro Werthmuller de 201 pontos. No entanto, a
+precisão necessária varia conforme a configuração:
+
+```
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  Cenário                      │  Filtro Recomendado   │  npt   │
+  ├───────────────────────────────┼───────────────────────┼────────┤
+  │  Geração de treinamento       │  Kong (61 pts)        │  61    │
+  │  (ruído será adicionado)      │  → 3.3x mais rápido   │        │
+  ├───────────────────────────────┼───────────────────────┼────────┤
+  │  Simulação padrão             │  Werthmuller (201 pts)│  201   │
+  │  (precisão 10^-6)             │  → ATUAL               │        │
+  ├───────────────────────────────┼───────────────────────┼────────┤
+  │  Validação / referência       │  Anderson (801 pts)   │  801   │
+  │  (precisão máxima)            │  → 4x mais lento       │        │
+  └─────────────────────────────────────────────────────────────────┘
+
+Implementação: Adicionar parâmetro filter_type em model.in ou via flag de compilação.
+```
+
+### 16.3 Suporte a Diferenciação Automática (para PINNs)
+
+**Prioridade:** Alta | **Complexidade:** Alta | **Impacto estimado:** Habilita PINNs
+
+Para integração com PINNs (`geosteering_ai/losses/pinns.py`), o simulador precisa
+fornecer gradientes `dH/d(rho_h)` e `dH/d(rho_v)`. Três abordagens são possíveis:
+
+```
+  Abordagem 1 — Diferenças finitas (imediata):
+    dH/d_rho_h ≈ [H(rho_h + eps) - H(rho_h - eps)] / (2*eps)
+    Custo: 2× simulações por parâmetro → 2*n_camadas simulações extras
+    Precisão: ~10^-6 (limitada por eps)
+
+  Abordagem 2 — Reimplementação em JAX (médio prazo):
+    jax.grad(forward_em_1d) → gradientes exatos via AD reverso
+    Custo: ~2-3× uma simulação (independente de n_parâmetros)
+    Precisão: machine epsilon
+
+  Abordagem 3 — Equações adjuntas em Fortran (longo prazo):
+    Resolver equações adjuntas analíticas para os potenciais de Hertz
+    Custo: ~1× simulação extra (independente de n_parâmetros)
+    Precisão: analítica
+```
+
+### 16.4 Extensão para Modelos 2D/3D
+
+**Prioridade:** Baixa | **Complexidade:** Muito alta | **Impacto estimado:** Novos cenários
+
+O simulador atual assume camadas horizontais infinitas (1D). Extensões possíveis:
+
+- **Camadas inclinadas (tilted layers):** Rotação do sistema de coordenadas antes
+  do cálculo 1D. Viável para ângulos moderados (< 30 graus).
+- **Formações com falhas:** Método de Born ou integral de volume para perturbações
+  laterais pequenas em relação ao background 1D.
+- **3D completo (finite-element/finite-difference):** Requer novo simulador.
+  Referências: Davydycheva et al. (2003), Commer & Newman (2004).
+
+### 16.5 Suite de Validação Cruzada (Fortran vs Python vs empymod)
+
+**Prioridade:** Alta | **Complexidade:** Média | **Impacto estimado:** Garantia de qualidade
+
+Proposta de teste de validação automatizado:
+
+```python
+# tests/test_fortran_validation.py (proposta)
+def test_fortran_vs_empymod():
+    """Compara saída do Fortran com empymod para 10 modelos canônicos."""
+    models = [
+        # Modelo 1: meio isotrópico homogêneo (solução analítica conhecida)
+        {"n": 3, "rho_h": [1e20, 10, 1e20], "rho_v": [1e20, 10, 1e20]},
+        # Modelo 2: meio TIV homogêneo (lambda = sqrt(2))
+        {"n": 3, "rho_h": [1e20, 10, 1e20], "rho_v": [1e20, 20, 1e20]},
+        # Modelo 3: 2 camadas com contraste forte
+        {"n": 3, "rho_h": [1, 1000, 1], "rho_v": [1, 1000, 1]},
+        # ... mais modelos canônicos
+    ]
+    for model in models:
+        H_fortran = run_fortran_simulation(model)
+        H_empymod = run_empymod_simulation(model)
+        assert np.allclose(H_fortran, H_empymod, rtol=1e-8)
+```
+
+### 16.6 Configurações Multi-Receptor
+
+**Prioridade:** Média | **Complexidade:** Média | **Impacto estimado:** Realismo da ferramenta
+
+Ferramentas LWD reais possuem múltiplos receptores a distâncias diferentes do
+transmissor (por exemplo, dTR = 0.5 m, 1.0 m, 1.5 m). Extensão proposta:
+
+```
+Parâmetro adicional em model.in:
+  n_receivers = 3
+  dTR_list = 0.5  1.0  1.5
+
+Impacto no código:
+  - Loop adicional sobre receptores dentro de fieldsinfreqs
+  - Reutilização de commonarraysMD (depende apenas de hordist)
+  - Arquivo .dat com n_receivers × 22 colunas por registro
+```
+
+### 16.7 Suporte a Anisotropia Biaxial (sigma_x != sigma_y)
+
+**Prioridade:** Baixa | **Complexidade:** Muito alta | **Impacto estimado:** Cenários geológicos avançados
+
+A formulação atual assume simetria TIV (sigma_x = sigma_y = sigma_h). Em formações
+com fraturas orientadas ou laminação não-horizontal, a condutividade pode ser biaxial:
+
+```
+  sigma_biaxial = diag(sigma_x, sigma_y, sigma_z)
+
+  Onde sigma_x != sigma_y  (quebra da simetria cilíndrica)
+```
+
+A decomposição TE/TM não é mais aplicável diretamente neste caso. Seria necessário
+reformular as equações de propagação usando dois potenciais de Hertz acoplados
+(pi_x e pi_y), resultando em um sistema 4×4 de equações diferenciais em vez de
+dois sistemas 2×2 independentes. Isso aumentaria significativamente a complexidade
+computacional e algorítmica.
+
+---
+
+## 17. Apêndices
+
+### 17.1 Apêndice A — Tabela de Sub-rotinas
 
 | Sub-rotina | Módulo | Argumentos | Descrição |
 |:-----------|:-------|:-----------|:----------|
@@ -2248,7 +3176,7 @@ futuros (P2 tensor parcial, Modo C tensor completo).
 | `J0J1Wer` | filterscommonbase | npt, absc, wJ0, wJ1 | Filtro Werthmuller (201 pts) |
 | `J0J1And` | filterscommonbase | npt, absc, wJ0, wJ1 | Filtro Anderson (801 pts) |
 
-### 15.2 Apêndice B — Glossário
+### 17.2 Apêndice B — Glossário
 
 | Termo | Descrição |
 |:------|:----------|
@@ -2269,7 +3197,7 @@ futuros (P2 tensor parcial, Modo C tensor completo).
 | **Forward modeling** | Cálculo da resposta do instrumento dado um modelo conhecido do meio |
 | **QMC** | Quasi-Monte Carlo — amostragem com sequências de baixa discrepância (Sobol) |
 
-### 15.3 Apêndice C — Mapeamento de Variáveis Fortran → Python
+### 17.3 Apêndice C — Mapeamento de Variáveis Fortran → Python
 
 | Variável Fortran | Tipo | Variável Python (pipeline) | Descrição |
 |:-----------------|:-----|:--------------------------|:----------|
@@ -2284,7 +3212,7 @@ futuros (P2 tensor parcial, Modo C tensor completo).
 | `n` | `integer` | `model['n_layers']` | Número de camadas |
 | `esp(2:n-1)` | `real(dp)` | `model['thicknesses']` | Espessuras internas |
 
-### 15.4 Apêndice D — Validação de Consistência Fortran-Python
+### 17.4 Apêndice D — Validação de Consistência Fortran-Python
 
 Para garantir que o pipeline Python lê corretamente os dados do Fortran, os seguintes testes de consistência devem ser executados:
 
@@ -2304,6 +3232,115 @@ assert np.all(np.isfinite(H_real + H_imag))  # Sem NaN/Inf
 assert np.allclose(Re_Hxy, Re_Hyx, rtol=1e-10)
 assert np.allclose(Im_Hxy, Im_Hyx, rtol=1e-10)
 ```
+
+### 17.5 Apêndice E — Legenda Completa de Variáveis Matemáticas e Código
+
+Esta tabela cobre todas as variáveis matemáticas e de código relevantes, com unidades,
+descrições e referências cruzadas entre a formulação teórica (Seção 4), o código
+Fortran (Seções 5-6) e o pipeline Python (Seção 14).
+
+**E.1 Constantes Físicas**
+
+| Símbolo | Variável | Unidade | Valor | Descrição |
+|:--------|:---------|:--------|:------|:----------|
+| mu_0 | `mu` (Fortran) | H/m | 4*pi*10^-7 | Permeabilidade magnética do vácuo |
+| epsilon_0 | `epsilon` (Fortran) | F/m | 8.85*10^-12 | Permissividade elétrica do vácuo |
+| pi | `pi` (Fortran) | - | 3.14159265... | Constante matemática |
+| f | `freq(i)` (Fortran) | Hz | 20000.0 / 40000.0 | Frequência de operação |
+| omega | `omega` (Fortran) | rad/s | 2*pi*f | Frequência angular |
+| m_x, m_y, m_z | `mx, my, mz` (Fortran) | A.m^2 | 1.0 | Momentos dipolares magnéticos |
+
+**E.2 Propriedades do Meio (por camada)**
+
+| Símbolo | Variável | Unidade | Range | Descrição |
+|:--------|:---------|:--------|:------|:----------|
+| rho_h | `resist(i,1)` (F), `col 2` (P) | Ohm.m | 0.05-1500 | Resistividade horizontal |
+| rho_v | `resist(i,2)` (F), `col 3` (P) | Ohm.m | >= rho_h | Resistividade vertical |
+| sigma_h | `eta(i,1)` (F) | S/m | 1/rho_h | Condutividade horizontal |
+| sigma_v | `eta(i,2)` (F) | S/m | 1/rho_v | Condutividade vertical |
+| lambda | `sqrt(lamb2(i))` (F) | - | 1.0-sqrt(2) | Coeficiente de anisotropia |
+| lambda^2 | `lamb2(i)` (F) | - | 1.0-2.0 | Quadrado do coef. anisotropia |
+| h_m | `h(m)` (F) | m | 0-inf | Espessura da camada m |
+| z_m | `prof(m)` (F) | m | -1e300 a +1e300 | Profundidade da interface inferior m |
+
+**E.3 Grandezas Eletromagnéticas (por camada e ponto do filtro)**
+
+| Símbolo | Variável Fortran | Tipo | Unidade | Descrição |
+|:--------|:-----------------|:-----|:--------|:----------|
+| zeta = i*omega*mu_0 | `zeta` | `complex(dp)` | Ohm/m | Impeditividade |
+| kh^2 = -zeta*sigma_h | `kh2(j)` | `complex(dp)` | 1/m^2 | Número de onda horiz. ao quadrado |
+| kv^2 = -zeta*sigma_v | `kv2(j)` | `complex(dp)` | 1/m^2 | Número de onda vert. ao quadrado |
+| kr | `kr(i)` | `real(dp)` | 1/m | Número de onda radial (variável de integração) |
+| u_m | `u(i,m)` | `complex(dp)` | 1/m | Constante de propagação TE |
+| v_m | `v(i,m)` | `complex(dp)` | 1/m | Constante de propagação intermediária |
+| s_m = lambda_m*v_m | `s(i,m)` | `complex(dp)` | 1/m | Constante de propagação TM |
+| Y_m = u_m/zeta | `AdmInt(i,m)` | `complex(dp)` | S | Admitância intrínseca (TE) |
+| Z_m = s_m/sigma_h | `ImpInt(i,m)` | `complex(dp)` | Ohm | Impedância intrínseca (TM) |
+
+**E.4 Coeficientes de Reflexão e Admitâncias/Impedâncias Aparentes**
+
+| Símbolo | Variável Fortran | Forma | Descrição |
+|:--------|:-----------------|:------|:----------|
+| Y_tilde_dw^(m) | `AdmAp_dw(i,m)` | `(npt, n)` | Admitância aparente TE descendente |
+| Y_tilde_up^(m) | `AdmAp_up(i,m)` | `(npt, n)` | Admitância aparente TE ascendente |
+| Z_tilde_dw^(m) | `ImpAp_dw(i,m)` | `(npt, n)` | Impedância aparente TM descendente |
+| Z_tilde_up^(m) | `ImpAp_up(i,m)` | `(npt, n)` | Impedância aparente TM ascendente |
+| R_TE_dw^(m) | `RTEdw(i,m)` | `(npt, n)` | Coeficiente reflexão TE descendente |
+| R_TE_up^(m) | `RTEup(i,m)` | `(npt, n)` | Coeficiente reflexão TE ascendente |
+| R_TM_dw^(m) | `RTMdw(i,m)` | `(npt, n)` | Coeficiente reflexão TM descendente |
+| R_TM_up^(m) | `RTMup(i,m)` | `(npt, n)` | Coeficiente reflexão TM ascendente |
+| tanh(u_m*h_m) | `tghuh(i,m)` | `(npt, n)` | Tangente hiperbólica estabilizada (TE) |
+| tanh(s_m*h_m) | `tghsh(i,m)` | `(npt, n)` | Tangente hiperbólica estabilizada (TM) |
+
+**E.5 Fatores de Onda e Transmissão**
+
+| Símbolo | Variável Fortran | Forma | Descrição |
+|:--------|:-----------------|:------|:----------|
+| Mx_dw | `Mxdw(i)` | `(npt)` | Fator onda TM descendente (camada fonte) |
+| Mx_up | `Mxup(i)` | `(npt)` | Fator onda TM ascendente (camada fonte) |
+| Eu_dw | `Eudw(i)` | `(npt)` | Fator onda TE descendente (camada fonte) |
+| Eu_up | `Euup(i)` | `(npt)` | Fator onda TE ascendente (camada fonte) |
+| FE_dw_z | `FEdwz(i)` | `(npt)` | Fator TE derivada z descendente |
+| FE_up_z | `FEupz(i)` | `(npt)` | Fator TE derivada z ascendente |
+| Tx^(j)_dw | `Txdw(i,j)` | `(npt, n)` | Coeficiente transmissão TM descendente |
+| Tx^(k)_up | `Txup(i,k)` | `(npt, n)` | Coeficiente transmissão TM ascendente |
+| Tu^(j)_dw | `Tudw(i,j)` | `(npt, n)` | Coeficiente transmissão TE descendente |
+| Tu^(k)_up | `Tuup(i,k)` | `(npt, n)` | Coeficiente transmissão TE ascendente |
+
+**E.6 Kernels Espectrais e Campos**
+
+| Símbolo | Variável Fortran | Forma | Descrição |
+|:--------|:-----------------|:------|:----------|
+| K_tm | `Ktm(i)` | `(npt)` | Kernel espectral modo TM (pi_x) |
+| K_te | `Kte(i)` | `(npt)` | Kernel espectral modo TE (pi_u) |
+| K_te_dz | `Ktedz(i)` | `(npt)` | Kernel TE derivada em z |
+| H_x | `Hx_p(1,1:2)` | `complex(dp)` | Campo magnético x (HMDx, HMDy) |
+| H_y | `Hy_p(1,1:2)` | `complex(dp)` | Campo magnético y (HMDx, HMDy) |
+| H_z | `Hz_p(1,1:2)` | `complex(dp)` | Campo magnético z (HMDx, HMDy) |
+| H(3,3) | `matH(3,3)` / `tH(3,3)` | `complex(dp)` | Tensor magnético completo |
+
+**E.7 Geometria e Posicionamento**
+
+| Símbolo | Variável Fortran | Variável Python | Unidade | Descrição |
+|:--------|:-----------------|:---------------|:--------|:----------|
+| h_0 | `h0` | - | m | Profundidade vertical do transmissor |
+| z | `z` | - | m | Profundidade vertical do receptor |
+| r | `hordist` | - | m | Distância horizontal T-R |
+| x | `cx` | - | m | Coordenada x do receptor |
+| y | `cy` | - | m | Coordenada y do receptor |
+| theta | `theta(k)` | - | graus | Ângulo de inclinação do poço |
+| dTR | `dTR` | `config.spacing_meters` | m | Espaçamento T-R |
+| z_obs | `zrho(f,1)` | `col 1` | m | Profundidade do ponto médio T-R |
+| nmed | `nmed(k)` | `config.sequence_length` | - | Número de medições por ângulo |
+
+**E.8 Filtro de Hankel**
+
+| Símbolo | Variável Fortran | Tipo | Descrição |
+|:--------|:-----------------|:-----|:----------|
+| kr_i | `absc(i)` / `hordist` | `real(dp)` | Abscissas do filtro escaladas |
+| w_J0,i | `wJ0(i)` | `real(dp)` | Pesos do filtro para Bessel J_0 |
+| w_J1,i | `wJ1(i)` | `real(dp)` | Pesos do filtro para Bessel J_1 |
+| npt | `npt` | `integer` | Número de pontos do filtro (201) |
 
 ---
 

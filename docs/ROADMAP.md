@@ -42,7 +42,8 @@
 | Presets YAML | 7 (baseline, robusto, nstage_n2, nstage_n3, geosinais_p4, dtb_p5, realtime_causal) |
 | Callbacks Keras | 17+ |
 | **Simulador Fortran** | 6.859 LOC (6 módulos F08) + gerador Python (~900 LOC) |
-| **Documentação Simulador** | 2.311 LOC (15 seções, v2.0 com PT-BR acentuado) |
+| **Documentação Simulador** | 3.348 LOC (17 seções, v3.0 com formulação Hertz + OpenMP avançado) |
+| **Formulação Teórica TeX** | `Tex_Projects/TatuAniso/FormulaçãoTatuAnisoTIV.tex` (~960 LOC TeX) |
 | Métricas customizadas | 3 (R2Score, PerComponentMetric, AnisotropyRatioError) |
 | Formatos de exportação | 3 (SavedModel, TFLite, ONNX) |
 
@@ -651,7 +652,8 @@ recursivos. A análise de viabilidade (doc v2.0) demonstra que o gargalo computa
 **Módulos propostos** (doc seção 12.8):
 `geosteering_ai/simulation/`: forward.py, propagation.py, dipoles.py, hankel.py, rotation.py, filters.py, geometry.py, cuda_kernels.py, validation.py
 
-Ref: `docs/reference/documentacao_simulador_fortran.md` (2.311 LOC, v2.0) — documentação completa com análise de viabilidade Python, CUDA, OpenMP, skin depth, decoupling e integração com pipeline v2.0.
+Ref: `docs/reference/documentacao_simulador_fortran.md` (3.348 LOC, v3.0) — documentação completa incluindo formulação teórica via Potenciais de Hertz (Moran & Gianzero 1979), análise avançada de paralelismo OpenMP (3-level collapse, NUMA), viabilidade CUDA/Python, e seção de sugestões de melhorias.
+Ref: `Tex_Projects/TatuAniso/FormulaçãoTatuAnisoTIV.tex` — artigo com a formulação matemática fundamental do simulador.
 
 ---
 
@@ -776,6 +778,7 @@ Os artigos abaixo estão disponíveis localmente na pasta `PDFs/` e devem ser co
 | `docs/reference/documentacao_simulador_fortran.md` | Documentação completa do simulador Fortran PerfilaAnisoOmp |
 | `Fortran_Gerador/PerfilaAnisoOmp.f08` | Simulador EM 1D TIV — módulo principal |
 | `Fortran_Gerador/fifthBuildTIVModels.py` | Gerador de modelos geológicos (Sobol QMC) |
+| `Tex_Projects/TatuAniso/FormulaçãoTatuAnisoTIV.tex` | Formulação teórica (Potenciais de Hertz, TIV) |
 
 ---
 
