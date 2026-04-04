@@ -31,7 +31,7 @@
 | Linhas de testes | 9.024 LOC |
 | Arquivos Python (src) | 73 |
 | Arquivos Python (testes) | 15 |
-| Testes totais | 802 (CPU) / 1011+ (GPU) |
+| Testes totais | 744 (CPU) / 1011+ (GPU) |
 | Campos PipelineConfig | 246 |
 | Arquiteturas (ModelRegistry) | 48 (9 famílias) |
 | Funções de perda | 26 (4 categorias) |
@@ -284,6 +284,13 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 │  ├── Dashboard web (Streamlit/Grafana)                                     │
 │  ├── Containerização (Docker + K8s)                                        │
 │  └── Monitoramento MLOps (MLflow/Weights&Biases)                          │
+│                                                                             │
+│  F7 ─ Simulador Python Otimizado (médio-longo prazo)                       │
+│  ├── Reimplementação do PerfilaAnisoOmp em Python (Numba JIT)             │
+│  ├── Kernels CUDA via Numba para GPU (commonarraysMD + Hankel)            │
+│  ├── Integração direta com geosteering_ai/simulation/                     │
+│  ├── Geração on-the-fly de dados sintéticos durante treinamento           │
+│  └── Validação numérica Python vs Fortran (erro < 1e-10)                  │
 │                                                                             │
 │  v3.0 ─ Inversão 2D/3D (futuro)                                           │
 │  ├── Extensão para formações com falhas                                    │
@@ -615,6 +622,17 @@ As seguintes requisições podem ser utilizadas em futuras sessões de desenvolv
 "Implementar dashboard Streamlit para visualização realtime"
 ```
 
+### F7 — Simulador Python Otimizado (Médio-Longo Prazo)
+```
+"Implementar protótipo NumPy vetorizado do PerfilaAnisoOmp — validar contra Fortran"
+"Reescrever kernels críticos (commonarraysMD, Hankel) com Numba @njit + prange"
+"Implementar CUDA kernels via Numba CUDA para propagação e convolução Hankel"
+"Integrar simulador Python como geosteering_ai/simulation/ — geração on-the-fly"
+"Benchmark throughput Python (Numba CPU/GPU) vs Fortran (OpenMP)"
+```
+
+Ref: `docs/reference/documentacao_simulador_fortran.md` — documentação completa do simulador Fortran com análise de viabilidade Python, CUDA e otimização OpenMP.
+
 ---
 
 ## 7. Referências Bibliográficas
@@ -698,7 +716,15 @@ Os artigos abaixo estão disponíveis localmente na pasta `PDFs/` e devem ser co
   → Arquivo: `PDFs/GeoSphereXTatu.pdf`
   → Uso: Tabela de conversão de sinais USD/UAD/U3DF entre GeoSphere e simulador TatuAniso1D — essencial para validar `data/geosignals.py`.
 
-### 7.4 Livros-Texto
+### 7.4 Referências do Simulador Fortran
+
+- Liu, C. (2017). *Theory of Electromagnetic Well Logging*. Elsevier. — Rotação do tensor triaxial (eq. 4.80), utilizada em `RtHR()`.
+- Werthmuller, D. (2006). "EMMOD — Electromagnetic Modelling". *Report, TU Delft*. — Filtro digital de 201 pontos para transformada de Hankel.
+- Werthmuller, D. (2017). "An open-source full 3D electromagnetic modeller for 1D VTI media in Python: empymod". *Geophysics*, 82(6), WB9-WB19. — Referência Python para reimplementação.
+- Chew, W.C. (1995). *Waves and Fields in Inhomogeneous Media*. IEEE Press. — Formulação TE/TM para meios estratificados.
+- Anderson, W.L. (1982). "Fast Hankel Transforms Using Related and Lagged Convolutions". *ACM TOMS*, 8(4), 344-368.
+
+### 7.5 Livros-Texto
 
 - Ellis, D. V. & Singer, J. M. (2008). *Well Logging for Earth Scientists* (2nd ed.). Springer.
   → Arquivo: `PDFs/Darwin V Ellis Julian M Singer - Well Logging for Earth Scientists 2008 Springer - libgenli.pdf`
@@ -727,6 +753,9 @@ Os artigos abaixo estão disponíveis localmente na pasta `PDFs/` e devem ser co
 | `docs/physics/errata_valores.md` | Constantes físicas imutáveis |
 | `CLAUDE.md` | Regras e proibições de desenvolvimento |
 | `docs/ROADMAP.md` | Este documento |
+| `docs/reference/documentacao_simulador_fortran.md` | Documentação completa do simulador Fortran PerfilaAnisoOmp |
+| `Fortran_Gerador/PerfilaAnisoOmp.f08` | Simulador EM 1D TIV — módulo principal |
+| `Fortran_Gerador/fifthBuildTIVModels.py` | Gerador de modelos geológicos (Sobol QMC) |
 
 ---
 
