@@ -1118,8 +1118,67 @@ Duas premissas do plano original (§7) precisam ser corrigidas à luz da execuç
 
 1. **Fase 0** ✅ — Concluída, baseline publicado.
 2. **Fase 1** ⏭️ — **Pulada em CPUs AVX-2 com gfortran ≥ 14.** Re-tentar apenas em hardware AVX-512 (Xeon Scalable, Ice Lake-SP).
-3. **Fase 2 (Hybrid Scheduler)** — **Promover a próxima prioridade**: ataca também o bug de anti-escalabilidade em 2 threads (débito técnico descoberto durante Fase 0).
+3. **Fase 2 (Hybrid Scheduler)** ✅ — **Concluída** (ver §13 abaixo).
 4. **Fases 3–6** — Mantidas conforme planejado. A **Fase 4 (cache de `commonarraysMD`)** permanece como **maior oportunidade de ganho** (60–120 %) por ser estrutural, não dependente de microarquitetura.
+
+---
+
+## 13. Execução Real da Fase 2 + Correções dos Débitos 1 e 2 (2026-04-04)
+
+Esta seção registra os resultados **empíricos** da execução da Fase 2 (Hybrid Scheduler) e das correções cirúrgicas dos Débitos Técnicos 1 (`writes_files` append bug) e 2 (`omp_set_nested` depreciado). Relatório completo em [`relatorio_fase2_debitos_fortran.md`](relatorio_fase2_debitos_fortran.md).
+
+### 13.1 Intervenções Aplicadas
+
+Três correções sincronizadas em [`PerfilaAnisoOmp.f08`](../../Fortran_Gerador/PerfilaAnisoOmp.f08):
+
+1. **Fase 2 + Débito 3** — particionamento multiplicativo `num_threads_k × num_threads_j` substituindo o subtrativo buggado `maxthreads − ntheta`, combinado com `schedule(dynamic)` (externo) + `schedule(static)` (interno, carga uniforme).
+2. **Débito 2** — `omp_set_nested(.true.)` → `omp_set_max_active_levels(2)` (OpenMP 5.0+).
+3. **Débito 1** — abertura condicional com `inquire()` + detecção de `modelm==1` OR arquivo ausente, eliminando o bug de concatenação silenciosa.
+
+### 13.2 Resultados do Scaling Test (2 warmups + 5 medições/ponto)
+
+| OMP_NUM_THREADS | Baseline (s) | Fase 2 (s)   | Δ%          | Speedup Baseline | Speedup Fase 2 | Avaliação              |
+|:---------------:|:------------:|:------------:|:-----------:|:----------------:|:--------------:|:-----------------------|
+| 1               | 1,432        | 1,254        | **−12,4 %** | 1,00×            | 1,00×          | Fase 2 ✓               |
+| **2**           | **1,340** ⚠  | **0,786** ✅ | **−41,3 %** | **1,07×**        | **1,60×**      | **Bug corrigido**      |
+| 4               | 0,522        | 0,400        | **−23,4 %** | 2,74×            | 3,13×          | Fase 2 ✓               |
+| 8               | 0,276        | 0,306        | +10,9 %     | 5,19×            | 4,10×          | Trade-off marginal     |
+| 16              | 0,226        | 0,240        | +6,2 %      | 6,34×            | 5,23×          | Trade-off marginal     |
+
+**Validação numérica**: `max|Δ| = 0,0000e+00` em todas as 21 colunas. MD5 idêntico entre baseline e Fase 2 (`c64745ed5d69d5f654b0bac7dde23a95`). Reprodutibilidade **bit-a-bit exata**.
+
+### 13.3 Vitórias Principais
+
+1. **Bug 2-thread corrigido definitivamente** (−41 %, speedup 1,07× → 1,60×). Era a causa-raiz #3 descoberta na Fase 0.
+2. **1 thread +12 %** (schedule(static) com menor overhead que dynamic).
+3. **4 threads +23 %** (particionamento correto + static scheduler).
+4. **MD5 idêntico** ao baseline — zero regressão numérica.
+5. **Código mais limpo**: `omp_set_max_active_levels(2)` é API moderna e semântica direta.
+6. **Arquivos de saída confiáveis**: re-runs do gerador Python agora sobrescrevem corretamente em vez de concatenar silenciosamente.
+
+### 13.4 Trade-off em Alta Concorrência (8–16 threads)
+
+A substituição de `schedule(dynamic)` por `schedule(static)` no loop interno causou regressão marginal de 6–11 % em 8–16 threads. Com 600 iterações distribuídas em 8–16 threads (75 ou 37 iter/thread), `static` fica vulnerável ao ruído de SO (interrupts, preempção), enquanto `dynamic` absorveria esse ruído via balanceamento tardio.
+
+**Mitigação planejada (Fase 2b)**: tuning de chunk size — experimentar `schedule(static, 16)` ou `schedule(guided, 4)` para recuperar balanceamento sem perder o benefício de chunks grandes. **Fora de escopo desta iteração.**
+
+### 13.5 Estado do Roteiro Após Fase 2
+
+| Fase | Descrição | Status | Ganho Real / Esperado |
+|:----:|:----------|:------:|:----------------------|
+| 0 | Benchmark Baseline | ✅ | 0,1047 s/modelo (CPU fria, 8 threads) |
+| 1 | SIMD Hankel Reduction | ⏭️ | Pulada em AVX-2 (gfortran já satura) |
+| **2** | **Hybrid Scheduler + particionamento** | ✅ **2026-04-04** | **−41 % em 2 threads (bug fix), −23 % em 4 threads, −12 % em 1 thread** |
+| 3 | Workspace Pre-allocation | 📋 Próxima | +40 a +80 % esperado |
+| 4 | Cache `commonarraysMD` | 📋 Planejada | **+60 a +120 % (maior ganho)** |
+| 5 | `collapse(3)` loops | 📋 Planejada | +10 a +20 % |
+| 6 | Cache `commonfactorsMD` | 📋 Planejada | +15 a +25 % |
+
+**Próximo passo recomendado**: **Fase 3** (Workspace Pre-allocation) — é pré-requisito estrutural para a portabilidade CPU→GPU (Pipeline A OpenACC) e primeiro passo com ganho substancial esperado.
+
+---
+
+*A Fase 2 foi executada em 2026-04-04 e validada via scaling test + reprodutibilidade numérica bit-a-bit. Relatório completo em [`relatorio_fase2_debitos_fortran.md`](relatorio_fase2_debitos_fortran.md).*
 
 ### 12.5 Débitos Técnicos Descobertos
 

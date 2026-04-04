@@ -6555,20 +6555,30 @@ Fortran (Seções 5-6) e o pipeline Python (Seção 14).
 
 ## Histórico de Execução de Otimizações
 
-| Data        | Fase             | Status        | Relatório                                                                      |
-|:------------|:-----------------|:--------------|:-------------------------------------------------------------------------------|
-| 2026-04-04  | CPU Fase 0 — Baseline  | ✅ Concluída | [`relatorio_fase0_fase1_fortran.md`](relatorio_fase0_fase1_fortran.md)         |
-| 2026-04-04  | CPU Fase 1 — SIMD      | ⏭️ Pulada (auto-vectorization gfortran 15.x já satura AVX-2) | [`relatorio_fase0_fase1_fortran.md`](relatorio_fase0_fase1_fortran.md) §3 |
-| —           | CPU Fase 2 — Hybrid Sched | 🔜 Próxima | —                                                                              |
-| —           | CPU Fases 3–6          | 📋 Planejada | [`analise_paralelismo_cpu_fortran.md`](analise_paralelismo_cpu_fortran.md) §7 |
+| Data        | Fase                                          | Status                  | Relatório                                                                      |
+|:------------|:----------------------------------------------|:------------------------|:-------------------------------------------------------------------------------|
+| 2026-04-04  | CPU Fase 0 — Baseline                         | ✅ Concluída            | [`relatorio_fase0_fase1_fortran.md`](relatorio_fase0_fase1_fortran.md)         |
+| 2026-04-04  | CPU Fase 1 — SIMD Hankel                      | ⏭️ Pulada (auto-vec gfortran 15.x satura AVX-2) | [`relatorio_fase0_fase1_fortran.md`](relatorio_fase0_fase1_fortran.md) §3 |
+| 2026-04-04  | CPU Fase 2 — Hybrid Scheduler + Débitos 1/2/3 | ✅ **Concluída**        | [`relatorio_fase2_debitos_fortran.md`](relatorio_fase2_debitos_fortran.md)     |
+| —           | CPU Fase 3 — Workspace Pre-alloc              | 🔜 Próxima              | —                                                                              |
+| —           | CPU Fases 4–6                                 | 📋 Planejadas           | [`analise_paralelismo_cpu_fortran.md`](analise_paralelismo_cpu_fortran.md) §7 |
 
-**Baseline publicado (Fase 0, 2026-04-04 — i9-9980HK, 8 cores, AVX-2, gfortran 15.2.0, OMP=8)**:
+**Baseline publicado (Fase 0, 2026-04-04 — i9-9980HK, 8 cores, AVX-2, gfortran 15.2.0, OMP=8, CPU fria)**:
 - Wall-time: **0,1047 ± 0,015 s/modelo**
 - Throughput: **~34.400 modelos/hora**
 - MD5 de referência: `c64745ed5d69d5f654b0bac7dde23a95`
+
+**Fase 2 (Hybrid Scheduler + Correções Débitos 1, 2, 3 — aplicada em `PerfilaAnisoOmp.f08`)**:
+
+- **Débito 1** (`writes_files` append bug) **corrigido**: abertura condicional com `inquire()` + detecção de `modelm==1` OR arquivo ausente.
+- **Débito 2** (`omp_set_nested` depreciado) **corrigido**: migração para `omp_set_max_active_levels(2)` (OpenMP 5.0+).
+- **Débito 3** (particionamento `num_threads_j = maxthreads - ntheta` degenerava em `OMP=2`) **corrigido**: particionamento multiplicativo `num_threads_k × num_threads_j ≈ maxthreads`.
+- **Schedule híbrido**: `dynamic` no loop externo de ângulos (carga desigual) + `static` no loop interno de medidas (carga uniforme).
+- **Validação numérica**: MD5 idêntico ao baseline, `max|Δ| = 0,0000e+00` em todas as 21 colunas.
+- **Scaling test**: bug 2-thread corrigido (−41 %, speedup 1,07× → 1,60×), 1 thread −12 %, 4 threads −23 %, trade-off marginal em 8–16 threads (+6 a +11 %).
 
 ---
 
 *Documentação do Simulador Fortran PerfilaAnisoOmp — Geosteering AI v2.0*
 *Versão 4.0 — Abril 2026 — Pipeline v5.0.15+*
-*Última atualização: 2026-04-04 (adição de histórico de otimizações CPU Fases 0/1)*
+*Última atualização: 2026-04-04 (Fase 2 + Débitos 1/2/3 concluídos)*
