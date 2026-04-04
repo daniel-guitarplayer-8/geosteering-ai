@@ -344,7 +344,27 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 | | — Comparar H_analítico vs H_Fortran para 100+ modelos | | |
 | | — RMSE por componente (Re/Im × XX/ZZ) | | |
 
-**Verificação**: Notebooks executam sem erro no Colab Pro+ (T4/A100). SurrogateNet Mode A converge com val_loss decrescente.
+#### F2.5.1 — CPU Optimization Roadmap (Simulador Fortran PerfilaAnisoOmp)
+
+Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/reference/analise_paralelismo_cpu_fortran.md`](reference/analise_paralelismo_cpu_fortran.md) §7. Relatório de execução das Fases 0–1 em [`docs/reference/relatorio_fase0_fase1_fortran.md`](reference/relatorio_fase0_fase1_fortran.md).
+
+| Fase | Descrição | Status | Ganho Real / Esperado |
+|:----:|:----------|:------:|:----------------------|
+| **Fase 0** | Benchmark Baseline (wall-time, MD5, infra `bench/`) | ✅ **Concluída 2026-04-04** | Baseline publicado: **0,1047 s/modelo**, **~34.400 mod/h** (i9-9980HK, 8 threads, AVX-2) |
+| **Fase 1** | SIMD Hankel Reduction (`!$omp simd` em `commonarraysMD`) | ⏭️ **Pulada 2026-04-04** | Δ +0,96 % (Welch *t*=+0,425, não-significativo). Causa: gfortran 15.x já auto-vetoriza em AVX-2 32-byte. Experimento arquivado em `Fortran_Gerador/bench/attic/`. Re-avaliar em AVX-512. |
+| **Fase 2** | Hybrid Scheduler (static/dynamic/guided conforme `ntheta × nmed`) | 🔜 **Próxima** | +5–15 % esperado. Também corrige bug de anti-escalabilidade em 2 threads (débito técnico descoberto na Fase 0). |
+| **Fase 3** | Workspace Pre-allocation (`thread_workspace` tipo) | 📋 Planejada | +40–80 % esperado. Pré-requisito estrutural para GPU. |
+| **Fase 4** | Cache de `commonarraysMD` por `(r, freq)` — 1200 → 2 chamadas/modelo | 📋 Planejada | **+60–120 % — maior ganho do roteiro** |
+| **Fase 5** | `collapse(3)` nos loops `theta × medidas × freq` | 📋 Planejada | +10–20 % adicional |
+| **Fase 6** | Cache de `commonfactorsMD` por `camadT` | 📋 Planejada | +15–25 % adicional |
+
+**Débitos técnicos descobertos durante Fase 0** (correção em fases futuras):
+
+1. [`writes_files` em PerfilaAnisoOmp.f08:245-246](../Fortran_Gerador/PerfilaAnisoOmp.f08) usa `position='append'` sem limpeza — concatena em re-execuções (prioridade **Alta**).
+2. [`omp_set_nested(.true.)` em PerfilaAnisoOmp.f08:74](../Fortran_Gerador/PerfilaAnisoOmp.f08) depreciado desde OpenMP 5.0 — migrar para `omp_set_max_active_levels(2)` (prioridade Média).
+3. [`num_threads_j = maxthreads - ntheta` em PerfilaAnisoOmp.f08:85](../Fortran_Gerador/PerfilaAnisoOmp.f08) produz 1 thread no nível interno quando `OMP_NUM_THREADS=2` — endereçada pela **Fase 2** (prioridade Alta).
+
+**Verificação**: Notebooks executam sem erro no Colab Pro+ (T4/A100). SurrogateNet Mode A converge com val_loss decrescente. Simulador Fortran com baseline CPU publicado e infra `bench/` operacional.
 
 ---
 

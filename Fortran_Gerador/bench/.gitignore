@@ -1,0 +1,11 @@
+# Arquivos bin\u00e1rios grandes de benchmarks futuros
+*.dat
+*.info
+__pycache__/
+*.pyc
+
+# Mas PRESERVAR as sa\u00eddas bin\u00e1rias de refer\u00eancia baseline/phase1 (atomic, pequenas, 204KB cada)
+!results/baseline_output.dat
+!results/baseline_output.info
+!results/phase1_output.dat
+!results/phase1_output.info

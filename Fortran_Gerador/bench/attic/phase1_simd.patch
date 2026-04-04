@@ -1,0 +1,122 @@
+--- utils.f08	2026-04-04 18:05:03
++++ bench/attic/utils_phase1_experiment.f08	2026-04-04 18:07:24
+@@ -186,10 +186,16 @@
+   complex(dp), intent(in) :: zeta
+   complex(dp), dimension(npt,1:n), intent(out) :: u, s, uh, sh, RTEdw, RTMdw, RTEup, RTMup, AdmInt
+ 
+-  integer :: i
++  integer :: i, ipt
+   real(dp) :: r, kr(npt), lamb2(1:n)
+   complex(dp) :: kh2(1:n), kv2(1:n), tghuh(npt,1:n), tghsh(npt,1:n), v(npt,1:n)
+   complex(dp) :: ImpInt(npt,1:n), AdmApdw(npt,1:n), ImpApdw(npt,1:n), AdmApup(npt,1:n), ImpApup(npt,1:n)
++  ! ── Fase 1 (CPU SIMD): escalares hoisted do loop interno de 201 pontos ─────
++  ! Evita recomputar invariantes (sqrt(lamb2), 1/zeta, 1/eta(i,1), h(i), kh2(i),
++  ! kv2(i)) dentro do loop vetorizado, reduzindo press\u00e3o de registradores e
++  ! instru\u00e7\u00f5es escalares emitidas a cada itera\u00e7\u00e3o SIMD.
++  real(dp) :: h_i, eta1_i, sqrt_lamb2_i
++  complex(dp) :: kh2_i, kv2_i, inv_zeta, u_tmp, s_tmp, e_uh, e_sh
+ 
+   if (hordist < eps) then
+     r = 1.d-2 !valor usado no caso da singularidade
+@@ -198,19 +204,44 @@
+   end if
+ 
+   kr = krJ0J1 / r
++  inv_zeta = (1.d0, 0.d0) / zeta
++  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
++  ! Fase 1 — Otimiza\u00e7\u00e3o CPU SIMD (ref. docs/reference/analise_paralelismo_cpu_fortran.md \u00a77.1)
++  !
++  ! A sintaxe de array Fortran (`u(:,i) = sqrt(kr*kr - kh2(i))`) gera loops
++  ! impl\u00edcitos que o gfortran 15.x j\u00e1 vetoriza com AVX-2 (32 bytes), por\u00e9m
++  ! insere verifica\u00e7\u00f5es de aliasing em tempo de execu\u00e7\u00e3o (loop versioning).
++  ! Convertendo para loop `do ipt=1,npt` expl\u00edcito com `!$omp simd` ensinamos
++  ! o compilador que n\u00e3o h\u00e1 aliasing, eliminamos a vers\u00e3o escalar de fallback
++  ! e fundimos as 9 atribui\u00e7\u00f5es num \u00fanico passo sobre o array (reduz tr\u00e1fego
++  ! L1 e press\u00e3o de cache para npt=201 pontos x 10 camadas).
++  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+   do i = 1, n
+-    kh2(i) = -zeta * eta(i,1)
+-    kv2(i) = -zeta * eta(i,2)
++    kh2_i = -zeta * eta(i,1)
++    kv2_i = -zeta * eta(i,2)
+     lamb2(i) = eta(i,1) / eta(i,2)
+-    u(:,i) = sqrt(kr * kr - kh2(i))
+-    v(:,i) = sqrt(kr * kr - kv2(i))
+-    s(:,i) = sqrt(lamb2(i)) * v(:,i)
+-    AdmInt(:,i) = u(:,i) / zeta
+-    ImpInt(:,i) = s(:,i) / eta(i,1)
+-    uh(:,i) = u(:,i) * h(i)
+-    sh(:,i) = s(:,i) * h(i)
+-    tghuh(:,i) = (1.d0 - exp(-2.d0 * uh(:,i))) / (1.d0 + exp(-2.d0 * uh(:,i)))
+-    tghsh(:,i) = (1.d0 - exp(-2.d0 * sh(:,i))) / (1.d0 + exp(-2.d0 * sh(:,i)))
++    kh2(i) = kh2_i
++    kv2(i) = kv2_i
++    sqrt_lamb2_i = sqrt(lamb2(i))
++    h_i = h(i)
++    eta1_i = eta(i,1)
++    !$omp simd private(u_tmp, s_tmp, e_uh, e_sh)
++    do ipt = 1, npt
++      u_tmp = sqrt(kr(ipt) * kr(ipt) - kh2_i)
++      s_tmp = sqrt_lamb2_i * sqrt(kr(ipt) * kr(ipt) - kv2_i)
++      u(ipt,i)      = u_tmp
++      v(ipt,i)      = s_tmp / sqrt_lamb2_i
++      s(ipt,i)      = s_tmp
++      AdmInt(ipt,i) = u_tmp * inv_zeta
++      ImpInt(ipt,i) = s_tmp / eta1_i
++      uh(ipt,i)     = u_tmp * h_i
++      sh(ipt,i)     = s_tmp * h_i
++      e_uh = exp(-2.d0 * u_tmp * h_i)
++      e_sh = exp(-2.d0 * s_tmp * h_i)
++      tghuh(ipt,i) = (1.d0 - e_uh) / (1.d0 + e_uh)
++      tghsh(ipt,i) = (1.d0 - e_sh) / (1.d0 + e_sh)
++    end do
++    !$omp end simd
+   end do
+ 
+   AdmApdw(:,n) = AdmInt(:,n)
+@@ -218,12 +249,16 @@
+   RTEdw(:,n) = (0.d0,0.d0)
+   RTMdw(:,n) = (0.d0,0.d0)
+   do i = n-1, 1, -1
+-    AdmApdw(:,i) = AdmInt(:,i) * (AdmApdw(:,i+1) + AdmInt(:,i) * &
+-                  tghuh(:,i)) / (AdmInt(:,i) + AdmApdw(:,i+1) * tghuh(:,i))
+-    ImpApdw(:,i) = ImpInt(:,i) * (ImpApdw(:,i+1) + ImpInt(:,i) * &
+-                  tghsh(:,i)) / (ImpInt(:,i) + ImpApdw(:,i+1) * tghsh(:,i))
+-    RTEdw(:,i) = (AdmInt(:,i) - AdmApdw(:,i+1)) / (AdmInt(:,i) + AdmApdw(:,i+1))
+-    RTMdw(:,i) = (ImpInt(:,i) - ImpApdw(:,i+1)) / (ImpInt(:,i) + ImpApdw(:,i+1))
++    !$omp simd
++    do ipt = 1, npt
++      AdmApdw(ipt,i) = AdmInt(ipt,i) * (AdmApdw(ipt,i+1) + AdmInt(ipt,i) * &
++                    tghuh(ipt,i)) / (AdmInt(ipt,i) + AdmApdw(ipt,i+1) * tghuh(ipt,i))
++      ImpApdw(ipt,i) = ImpInt(ipt,i) * (ImpApdw(ipt,i+1) + ImpInt(ipt,i) * &
++                    tghsh(ipt,i)) / (ImpInt(ipt,i) + ImpApdw(ipt,i+1) * tghsh(ipt,i))
++      RTEdw(ipt,i) = (AdmInt(ipt,i) - AdmApdw(ipt,i+1)) / (AdmInt(ipt,i) + AdmApdw(ipt,i+1))
++      RTMdw(ipt,i) = (ImpInt(ipt,i) - ImpApdw(ipt,i+1)) / (ImpInt(ipt,i) + ImpApdw(ipt,i+1))
++    end do
++    !$omp end simd
+   end do
+ 
+   AdmApup(:,1) = AdmInt(:,1)
+@@ -231,12 +266,16 @@
+   RTEup(:,1) = (0.d0,0.d0)
+   RTMup(:,1) = (0.d0,0.d0)
+   do i = 2, n
+-    AdmApup(:,i) = AdmInt(:,i) * (AdmApup(:,i-1) + AdmInt(:,i) * &
+-                tghuh(:,i)) / (AdmInt(:,i) + AdmApup(:,i-1) * tghuh(:,i))
+-    ImpApup(:,i) = ImpInt(:,i) * (ImpApup(:,i-1) + ImpInt(:,i) * &
+-                tghsh(:,i)) / (ImpInt(:,i) + ImpApup(:,i-1) * tghsh(:,i))
+-    RTEup(:,i) = (AdmInt(:,i) - AdmApup(:,i-1)) / (AdmInt(:,i) + AdmApup(:,i-1))
+-    RTMup(:,i) = (ImpInt(:,i) - ImpApup(:,i-1)) / (ImpInt(:,i) + ImpApup(:,i-1))
++    !$omp simd
++    do ipt = 1, npt
++      AdmApup(ipt,i) = AdmInt(ipt,i) * (AdmApup(ipt,i-1) + AdmInt(ipt,i) * &
++                  tghuh(ipt,i)) / (AdmInt(ipt,i) + AdmApup(ipt,i-1) * tghuh(ipt,i))
++      ImpApup(ipt,i) = ImpInt(ipt,i) * (ImpApup(ipt,i-1) + ImpInt(ipt,i) * &
++                  tghsh(ipt,i)) / (ImpInt(ipt,i) + ImpApup(ipt,i-1) * tghsh(ipt,i))
++      RTEup(ipt,i) = (AdmInt(ipt,i) - AdmApup(ipt,i-1)) / (AdmInt(ipt,i) + AdmApup(ipt,i-1))
++      RTMup(ipt,i) = (ImpInt(ipt,i) - ImpApup(ipt,i-1)) / (ImpInt(ipt,i) + ImpApup(ipt,i-1))
++    end do
++    !$omp end simd
+   end do
+ end subroutine commonarraysMD
+ !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§

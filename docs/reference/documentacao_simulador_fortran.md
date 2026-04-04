@@ -6553,5 +6553,22 @@ Fortran (Seções 5-6) e o pipeline Python (Seção 14).
 
 ---
 
+## Histórico de Execução de Otimizações
+
+| Data        | Fase             | Status        | Relatório                                                                      |
+|:------------|:-----------------|:--------------|:-------------------------------------------------------------------------------|
+| 2026-04-04  | CPU Fase 0 — Baseline  | ✅ Concluída | [`relatorio_fase0_fase1_fortran.md`](relatorio_fase0_fase1_fortran.md)         |
+| 2026-04-04  | CPU Fase 1 — SIMD      | ⏭️ Pulada (auto-vectorization gfortran 15.x já satura AVX-2) | [`relatorio_fase0_fase1_fortran.md`](relatorio_fase0_fase1_fortran.md) §3 |
+| —           | CPU Fase 2 — Hybrid Sched | 🔜 Próxima | —                                                                              |
+| —           | CPU Fases 3–6          | 📋 Planejada | [`analise_paralelismo_cpu_fortran.md`](analise_paralelismo_cpu_fortran.md) §7 |
+
+**Baseline publicado (Fase 0, 2026-04-04 — i9-9980HK, 8 cores, AVX-2, gfortran 15.2.0, OMP=8)**:
+- Wall-time: **0,1047 ± 0,015 s/modelo**
+- Throughput: **~34.400 modelos/hora**
+- MD5 de referência: `c64745ed5d69d5f654b0bac7dde23a95`
+
+---
+
 *Documentação do Simulador Fortran PerfilaAnisoOmp — Geosteering AI v2.0*
 *Versão 4.0 — Abril 2026 — Pipeline v5.0.15+*
+*Última atualização: 2026-04-04 (adição de histórico de otimizações CPU Fases 0/1)*
