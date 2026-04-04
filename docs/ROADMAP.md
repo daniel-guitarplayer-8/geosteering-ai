@@ -41,6 +41,8 @@
 | Cenários PINN | 8 (oracle, surrogate, maxwell, smoothness, skin_depth, continuity, variational, self_adaptive) |
 | Presets YAML | 7 (baseline, robusto, nstage_n2, nstage_n3, geosinais_p4, dtb_p5, realtime_causal) |
 | Callbacks Keras | 17+ |
+| **Simulador Fortran** | 6.859 LOC (6 módulos F08) + gerador Python (~900 LOC) |
+| **Documentação Simulador** | 2.311 LOC (15 seções, v2.0 com PT-BR acentuado) |
 | Métricas customizadas | 3 (R2Score, PerComponentMetric, AnisotropyRatioError) |
 | Formatos de exportação | 3 (SavedModel, TFLite, ONNX) |
 
@@ -623,15 +625,33 @@ As seguintes requisições podem ser utilizadas em futuras sessões de desenvolv
 ```
 
 ### F7 — Simulador Python Otimizado (Médio-Longo Prazo)
+
+**Contexto**: O simulador Fortran `PerfilaAnisoOmp` (6.859 LOC, 6 módulos) resolve o forward EM 1D TIV
+via decomposição TE/TM + transformada de Hankel (filtro Werthmuller 201 pts) + coeficientes de reflexão
+recursivos. A análise de viabilidade (doc v2.0) demonstra que o gargalo computacional está em
+`commonarraysMD` (propagação) e na convolução de Hankel — ambos altamente paralelizáveis.
+
 ```
-"Implementar protótipo NumPy vetorizado do PerfilaAnisoOmp — validar contra Fortran"
-"Reescrever kernels críticos (commonarraysMD, Hankel) com Numba @njit + prange"
-"Implementar CUDA kernels via Numba CUDA para propagação e convolução Hankel"
-"Integrar simulador Python como geosteering_ai/simulation/ — geração on-the-fly"
-"Benchmark throughput Python (Numba CPU/GPU) vs Fortran (OpenMP)"
+"F7.1 — Protótipo NumPy vetorizado: commonarraysMD + hmd_TIV + vmd — validar vs Fortran (erro < 1e-10)"
+"F7.2 — Numba @njit + prange: kernels críticos com compilação JIT paralela (target: ~1.2× Fortran)"
+"F7.3 — CUDA kernels via Numba: 201 threads/bloco para propagação + redução para Hankel (target: ~20× Fortran)"
+"F7.4 — JAX/XLA: diferenciação automática para backpropagation through physics (PINNs cenário surrogate)"
+"F7.5 — Integrar como geosteering_ai/simulation/ com interface PipelineConfig — geração on-the-fly"
+"F7.6 — Benchmark throughput: NumPy vs Numba CPU vs Numba CUDA vs Fortran OpenMP"
 ```
 
-Ref: `docs/reference/documentacao_simulador_fortran.md` — documentação completa do simulador Fortran com análise de viabilidade Python, CUDA e otimização OpenMP.
+**Estimativas de desempenho** (doc seção 12.6):
+| Implementação | Tempo/modelo | vs Fortran |
+|:-------------|:------------|:-----------|
+| NumPy vetorizado | ~4 s | 10× mais lento |
+| Numba CPU (JIT) | ~0.5 s | ~1.2× mais lento |
+| Numba CUDA | ~0.02 s | ~20× mais rápido |
+| JAX (XLA) | ~0.05 s | ~8× mais rápido |
+
+**Módulos propostos** (doc seção 12.8):
+`geosteering_ai/simulation/`: forward.py, propagation.py, dipoles.py, hankel.py, rotation.py, filters.py, geometry.py, cuda_kernels.py, validation.py
+
+Ref: `docs/reference/documentacao_simulador_fortran.md` (2.311 LOC, v2.0) — documentação completa com análise de viabilidade Python, CUDA, OpenMP, skin depth, decoupling e integração com pipeline v2.0.
 
 ---
 
