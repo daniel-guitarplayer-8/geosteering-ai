@@ -42,7 +42,7 @@
 | Presets YAML | 7 (baseline, robusto, nstage_n2, nstage_n3, geosinais_p4, dtb_p5, realtime_causal) |
 | Callbacks Keras | 17+ |
 | **Simulador Fortran** | 6.859 LOC (6 módulos F08) + gerador Python (~900 LOC) |
-| **Documentação Simulador** | 3.348 LOC (17 seções, v3.0 com formulação Hertz + OpenMP avançado) |
+| **Documentação Simulador** | 6.558 LOC (17 seções + 6 pipelines, v4.0 com pipelines Fortran A+B e Python A+B+C+D) |
 | **Formulação Teórica TeX** | `Tex_Projects/TatuAniso/FormulaçãoTatuAnisoTIV.tex` (~960 LOC TeX) |
 | Métricas customizadas | 3 (R2Score, PerComponentMetric, AnisotropyRatioError) |
 | Formatos de exportação | 3 (SavedModel, TFLite, ONNX) |
@@ -652,7 +652,7 @@ recursivos. A análise de viabilidade (doc v2.0) demonstra que o gargalo computa
 **Módulos propostos** (doc seção 12.8):
 `geosteering_ai/simulation/`: forward.py, propagation.py, dipoles.py, hankel.py, rotation.py, filters.py, geometry.py, cuda_kernels.py, validation.py
 
-Ref: `docs/reference/documentacao_simulador_fortran.md` (3.348 LOC, v3.0) — documentação completa incluindo formulação teórica via Potenciais de Hertz (Moran & Gianzero 1979), análise avançada de paralelismo OpenMP (3-level collapse, NUMA), viabilidade CUDA/Python, e seção de sugestões de melhorias.
+Ref: `docs/reference/documentacao_simulador_fortran.md` (6.558 LOC, v4.0) — documentação completa incluindo formulação teórica via Potenciais de Hertz (Moran & Gianzero 1979), análise avançada de paralelismo OpenMP (3-level collapse, NUMA), viabilidade CUDA/Python, **Pipeline A Fortran** (otimização CPU+GPU em 3 fases), **Pipeline B Fortran** (novos recursos), **Pipeline A Python** (conversão Numba JIT CPU+GPU), **Pipeline B Python** (novos recursos), **Pipeline C Python** (vantagens sobre Fortran), e **Pipeline D Python** (avaliação comparativa Fortran vs Python).
 Ref: `Tex_Projects/TatuAniso/FormulaçãoTatuAnisoTIV.tex` — artigo com a formulação matemática fundamental do simulador.
 
 ---

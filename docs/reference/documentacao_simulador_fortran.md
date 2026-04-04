@@ -6,7 +6,7 @@
 **Autor do Simulador:** Daniel Leal
 **Linguagem:** Fortran 2008 (gfortran) com extensões OpenMP
 **Localização:** `Fortran_Gerador/`
-**Versão do Documento:** 2.0 (Abril 2026)
+**Versão do Documento:** 4.0 (Abril 2026)
 
 ---
 
@@ -24,7 +24,13 @@
 10. [Gerador de Modelos Geológicos (Python)](#10-gerador-de-modelos-geológicos-python)
 11. [Paralelismo OpenMP — Análise e Otimização](#11-paralelismo-openmp--análise-e-otimização)
 12. [Análise de Viabilidade CUDA (GPU)](#12-análise-de-viabilidade-cuda-gpu)
+    - 12.7 [Pipeline A — Roteiro de Otimização do Código Fortran](#127-pipeline-a--roteiro-de-otimização-do-código-fortran)
+    - 12.8 [Pipeline B — Roteiro de Novos Recursos para o Simulador Fortran](#128-pipeline-b--roteiro-de-novos-recursos-para-o-simulador-fortran)
 13. [Análise de Reimplementação em Python Otimizado](#13-análise-de-reimplementação-em-python-otimizado)
+    - 13.9 [Pipeline A — Conversão Fortran→Python Otimizado](#139-pipeline-a--conversão-fortranpython-otimizado-numba-jit)
+    - 13.10 [Pipeline B — Novos Recursos da Versão Python](#1310-pipeline-b--novos-recursos-da-versão-python)
+    - 13.11 [Pipeline C — Vantagens sobre a Versão Fortran](#1311-pipeline-c--vantagens-da-versão-python-sobre-o-fortran)
+    - 13.12 [Pipeline D — Avaliação Comparativa Fortran vs Python](#1312-pipeline-d--avaliação-comparativa-fortran-vs-python-otimizado)
 14. [Integração com o Pipeline Geosteering AI v2.0](#14-integração-com-o-pipeline-geosteering-ai-v20)
 15. [Referências Bibliográficas](#15-referências-bibliográficas)
 16. [Sugestões de Melhorias e Novos Recursos](#16-sugestões-de-melhorias-e-novos-recursos)
@@ -2621,6 +2627,1456 @@ pois o overhead de transferência CPU→GPU é amortizado e a ocupação dos SMs
 
 **Recomendação:** Para prototipagem rápida, **OpenACC** com `nvfortran` (NVIDIA HPC SDK). Para produção, **CUDA C** com wrappers Fortran.
 
+
+### 12.7 Pipeline A — Roteiro de Otimização do Código Fortran
+
+#### 12.7.1 Visão Geral do Pipeline A
+
+O Pipeline A concentra-se em extrair o máximo desempenho do código Fortran existente sem alterar a física implementada. A estratégia é dividida em três fases progressivas: otimizações CPU com OpenMP (retorno imediato, risco mínimo), implementação GPU via OpenACC ou CUDA (aceleração de 10–50×, risco moderado) e validação sistemática com benchmarking quantitativo.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│              PIPELINE A — ROTEIRO DE OTIMIZAÇÃO FORTRAN                 │
+│                                                                         │
+│  ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐    │
+│  │   FASE 1 — CPU   │   │   FASE 2 — GPU   │   │  FASE 3 — VALID  │    │
+│  │  OpenMP / SIMD   │──▶│  OpenACC / CUDA  │──▶│  Benchmark / QA  │    │
+│  │  (semanas 1–3)   │   │  (semanas 4–10)  │   │  (semanas 11–12) │    │
+│  └──────────────────┘   └──────────────────┘   └──────────────────┘    │
+│         │                       │                       │               │
+│  Speedup alvo: 3–5×      Speedup alvo: 20–50×   Erro rel. < 1e-6       │
+│  Baseline: ~2.4 s/mod    Alvo: ~0.05–0.12 s/mod  por componente Hxx    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Métricas de sucesso globais do Pipeline A:**
+
+| Métrica | Baseline atual | Meta Fase 1 | Meta Fase 2 |
+|:--------|:--------------:|:-----------:|:-----------:|
+| Tempo por modelo (1 ângulo, 2 freq, 600 med.) | ~2,4 s | < 0,7 s | < 0,12 s |
+| Throughput (modelos/hora, 16 threads) | ~24.000 | ~80.000 | ~500.000 |
+| Erro relativo vs. código original | — | < 1×10⁻¹² | < 1×10⁻⁶ |
+| Uso de memória por thread | ~150 MB | < 80 MB | ~500 MB (GPU) |
+| Escalabilidade (efficiency Amdahl) | — | > 70% | > 80% |
+
+---
+
+#### 12.7.2 Fase 1 — Otimizações CPU com OpenMP (Prioridade Inicial)
+
+Esta fase ataca os gargalos identificados na análise OpenMP (Seção 11) sem introduzir dependências externas ou risco de divergência numérica. Todas as modificações são feitas no módulo `DManisoTIV` (`PerfilaAnisoOmp.f08`) e no módulo `magneticdipoles` (`magneticdipoles.f08`).
+
+---
+
+##### Passo 1.1 — Pré-alocação de Workspace por Thread (Eliminar `allocate` no Laço Paralelo)
+
+**Problema identificado:** A sub-rotina `fieldsinfreqs` é chamada dentro do laço paralelo `!$omp parallel do` sobre medições (`j = 1, nmed(k)`). Internamente, `hmd_TIV_optimized` e `vmd_optimized` alocam dinamicamente arrays `Tudw`, `Txdw`, `Tuup`, `Txup`, `TEdwz`, `TEupz` em cada chamada. Com 600 medições × 2 frequências, isso resulta em até **2.400 chamadas a `allocate/deallocate`** por modelo no laço interno, gerando contenção de heap e fragmentação de memória.
+
+**O que modificar:** Sub-rotinas `hmd_TIV_optimized` e `vmd_optimized` em `magneticdipoles.f08`; laço externo em `perfila1DanisoOMP` em `PerfilaAnisoOmp.f08`.
+
+**Speedup esperado:** 1,4–1,8× (redução de 30–40% no tempo de execução medido por `gprof`).
+
+**Risco/Complexidade:** Baixo/Médio — requer refatoração das assinaturas das sub-rotinas para aceitar buffers pré-alocados.
+
+**Implementação — mudança em `perfila1DanisoOMP`:**
+
+```fortran
+! ANTES (situação atual): allocate/deallocate ocorrem dentro de hmd/vmd
+! a cada chamada no laço paralelo j = 1, nmed(k)
+
+! DEPOIS: pré-alocar workspace por thread antes do laço paralelo
+! Tamanho máximo: (npt, n) onde npt=201, n=número máximo de camadas
+integer :: tid, nthreads_actual
+integer, parameter :: MAX_N = 50  ! dimensão máxima esperada de camadas
+complex(dp), allocatable :: ws_Tudw(:,:,:), ws_Txdw(:,:,:)
+complex(dp), allocatable :: ws_Tuup(:,:,:), ws_Txup(:,:,:)
+complex(dp), allocatable :: ws_TEdwz(:,:,:), ws_TEupz(:,:,:)
+
+nthreads_actual = omp_get_max_threads()
+
+! Pré-alocar: dimensão extra é o índice da thread (0:nthreads-1)
+allocate(ws_Tudw (npt, MAX_N, 0:nthreads_actual-1))
+allocate(ws_Txdw (npt, MAX_N, 0:nthreads_actual-1))
+allocate(ws_Tuup (npt, MAX_N, 0:nthreads_actual-1))
+allocate(ws_Txup (npt, MAX_N, 0:nthreads_actual-1))
+allocate(ws_TEdwz(npt, MAX_N, 0:nthreads_actual-1))
+allocate(ws_TEupz(npt, MAX_N, 0:nthreads_actual-1))
+
+!$omp parallel do schedule(dynamic) num_threads(num_threads_j) &
+!$omp   private(j, x, y, z, Tx, Ty, Tz, posTR, zrho, cH, tid)
+do j = 1, nmed(k)
+  tid = omp_get_thread_num()
+  ! Passa workspace pré-alocado para evitar malloc interno:
+  call fieldsinfreqs_ws(ang, nf, freq, posTR, dipolo, npt, krwJ0J1, n, h, prof, resist, &
+                        zrho, cH, &
+                        ws_Tudw(:,:,tid), ws_Txdw(:,:,tid), &
+                        ws_Tuup(:,:,tid), ws_Txup(:,:,tid), &
+                        ws_TEdwz(:,:,tid), ws_TEupz(:,:,tid))
+  z_rho1(j,:,:) = zrho
+  c_H1(j,:,:) = cH
+end do
+!$omp end parallel do
+
+deallocate(ws_Tudw, ws_Txdw, ws_Tuup, ws_Txup, ws_TEdwz, ws_TEupz)
+```
+
+---
+
+##### Passo 1.2 — Cache de Resultados de `commonarraysMD` por `(camadT, freq)`
+
+**Problema identificado:** A sub-rotina `commonarraysMD` calcula os coeficientes de reflexão TE/TM (`RTEdw`, `RTEup`, `RTMdw`, `RTMup`) e as constantes de propagação (`u`, `s`, `uh`, `sh`) que dependem apenas de `(r, freq, eta, zeta)` — onde `r` é a distância transmissor-receptor. Na perfilagem em poço, `r = dTR` (distância T-R fixa = 1,0 m), portanto **`r` e `freq` são invariantes por frequência e modelo geológico**. Para um dado modelo, com 2 frequências e 600 medições, `commonarraysMD` é chamada 1.200 vezes com os mesmos argumentos `(r, freq_i)`.
+
+**O que modificar:** Sub-rotina `fieldsinfreqs` em `PerfilaAnisoOmp.f08`.
+
+**Speedup esperado:** 1,6–2,2× (a sub-rotina `commonarraysMD` representa ~45% do tempo total, segundo análise de profiling com `gprof -l`).
+
+**Risco/Complexidade:** Médio — requer reestruturação do laço sobre frequências, pré-computação fora do laço de medições.
+
+**Implementação — reestruturação de `fieldsinfreqs`:**
+
+```fortran
+! ANTES: commonarraysMD chamada dentro do laço do j (medições)
+! para cada (j, freq_i) — repetição desnecessária quando r é fixo
+
+! DEPOIS: pré-computar commonarraysMD para cada frequência UMA VEZ
+! e reutilizar para todas as nmed(k) medições do mesmo ângulo k
+
+subroutine precompute_common_arrays(nf, freqs, r, npt, krJ0J1, n, h, eta, &
+                                    u_all, s_all, uh_all, sh_all, &
+                                    RTEdw_all, RTEup_all, RTMdw_all, RTMup_all, &
+                                    AdmInt_all)
+  implicit none
+  integer, intent(in) :: nf, npt, n
+  real(dp), intent(in) :: freqs(nf), r, krJ0J1(npt), h(n), eta(n,2)
+  ! Arrays pré-computados: dimensão extra nf para frequências
+  complex(dp), intent(out) :: u_all(npt,n,nf), s_all(npt,n,nf)
+  complex(dp), intent(out) :: uh_all(npt,n,nf), sh_all(npt,n,nf)
+  complex(dp), intent(out) :: RTEdw_all(npt,n,nf), RTEup_all(npt,n,nf)
+  complex(dp), intent(out) :: RTMdw_all(npt,n,nf), RTMup_all(npt,n,nf)
+  complex(dp), intent(out) :: AdmInt_all(npt,n,nf)
+
+  integer :: i
+  real(dp) :: freq, omega
+  complex(dp) :: zeta
+
+  do i = 1, nf
+    freq = freqs(i)
+    omega = 2.d0 * pi * freq
+    zeta = cmplx(0.d0, 1.d0, kind=dp) * omega * mu
+    call commonarraysMD(n, npt, r, krJ0J1, zeta, h, eta, &
+                        u_all(:,:,i), s_all(:,:,i), uh_all(:,:,i), sh_all(:,:,i), &
+                        RTEdw_all(:,:,i), RTEup_all(:,:,i), &
+                        RTMdw_all(:,:,i), RTMup_all(:,:,i), AdmInt_all(:,:,i))
+  end do
+end subroutine precompute_common_arrays
+```
+
+Dentro do laço de medições `j`, as chamadas a `commonarraysMD` são substituídas por referências diretas a `u_all(:,:,i)`, `RTEdw_all(:,:,i)`, etc. A pré-computação é realizada uma única vez por ângulo `k`, antes do laço `!$omp parallel do` sobre `j`.
+
+---
+
+##### Passo 1.3 — Collapse de Laços com `collapse(3)` para Ângulos × Frequências × Medições
+
+**Problema identificado:** O laço paralelo externo (`k = 1, ntheta`) tipicamente tem `ntheta = 1` em simulações de ângulo único (caso 0°), o que impede qualquer benefício do paralelismo de nível 1. O laço interno (`j = 1, nmed(k)`) tem `nmed = 600`, que é paralelizado com `num_threads_j = maxthreads - ntheta` threads. A combinação aninhada gera overhead de fork/join para apenas uma iteração do laço externo.
+
+**O que modificar:** Estrutura de laços em `perfila1DanisoOMP`; requer linearização do índice de medições.
+
+**Speedup esperado:** 1,2–1,5× para `ntheta = 1`; sem ganho para `ntheta > 4` (já paralelizado de forma eficiente).
+
+**Risco/Complexidade:** Médio — exige cálculo de `k` e `j` a partir do índice linearizado.
+
+**Implementação:**
+
+```fortran
+! ANTES: laços aninhados com OpenMP nested
+!$omp parallel do schedule(dynamic) num_threads(num_threads_k) ...
+do k = 1, ntheta
+  !$omp parallel do schedule(dynamic) num_threads(num_threads_j) ...
+  do j = 1, nmed(k)
+    ...
+  end do
+  !$omp end parallel do
+end do
+!$omp end parallel do
+
+! DEPOIS: laço único colapsado (válido quando nmed é uniforme ou
+! quando se usa nmmax para dimensionar o espaço de iterações)
+integer :: kj, k_idx, j_idx, total_iter
+
+total_iter = ntheta * nmmax  ! limite superior conservador
+
+!$omp parallel do schedule(dynamic,8) num_threads(maxthreads) &
+!$omp   private(kj, k_idx, j_idx, ang, seno, coss, px, pz, &
+!$omp           Lsen, Lcos, x, y, z, Tx, Ty, Tz, posTR, zrho, cH)
+do kj = 1, total_iter
+  k_idx = (kj - 1) / nmmax + 1
+  j_idx = mod(kj - 1, nmmax) + 1
+  if (j_idx > nmed(k_idx)) cycle  ! pula iterações fora do alcance
+  ! ... corpo do laço original ...
+end do
+!$omp end parallel do
+```
+
+---
+
+##### Passo 1.4 — Vetorização SIMD da Convolução de Hankel
+
+**Problema identificado:** O núcleo computacional de `hmd_TIV_optimized` e `vmd_optimized` são somas sobre 201 pontos do filtro de Hankel de Werthmuller:
+
+```fortran
+kernelHxJ1 = (twox2_r2m1 * sum(Ktedz_J1) - kh2(camadR) * twoy2_r2m1 * sum(Ktm_J1)) / r
+kernelHxJ0 = x2_r2 * sum(Ktedz_J0 * kr) - kh2(camadR) * y2_r2 * sum(Ktm_J0 * kr)
+```
+
+Com `npt = 201` pontos e aritmética complexa de precisão dupla, cada `sum()` é uma redução sobre vetores complexos de 201 elementos. O compilador `gfortran` com `-O3 -march=native` pode vetorizar automaticamente, mas a presença de `sum()` intrínseco sobre arrays complexos frequentemente impede a geração de instruções AVX-512 ou AVX2.
+
+**O que modificar:** Sub-rotinas `hmd_TIV_optimized` e `vmd_optimized` em `magneticdipoles.f08`; adicionar diretivas `!DIR$ VECTOR` ou usar laço explícito com `!$omp simd`.
+
+**Speedup esperado:** 1,3–2,0× nas reduções de Hankel (que representam ~25% do tempo total).
+
+**Risco/Complexidade:** Baixo — diretivas de compilação não alteram a semântica do código.
+
+**Implementação:**
+
+```fortran
+! Substituir sum() implícito por laço explícito com diretiva SIMD
+! para garantir vetorização com AVX2/AVX-512 em arquiteturas modernas
+
+! ANTES:
+kernelHxJ1 = (twox2_r2m1 * sum(Ktedz_J1) - kh2(camadR) * twoy2_r2m1 * sum(Ktm_J1)) / r
+
+! DEPOIS: redução explícita com SIMD
+complex(dp) :: acc_KtedzJ1, acc_KtmJ1
+integer :: ip
+acc_KtedzJ1 = (0.d0, 0.d0)
+acc_KtmJ1   = (0.d0, 0.d0)
+
+!$omp simd reduction(+:acc_KtedzJ1, acc_KtmJ1)
+do ip = 1, npt
+  acc_KtedzJ1 = acc_KtedzJ1 + Ktedz_J1(ip)
+  acc_KtmJ1   = acc_KtmJ1   + Ktm_J1(ip)
+end do
+!$omp end simd
+
+kernelHxJ1 = (twox2_r2m1 * acc_KtedzJ1 - kh2(camadR) * twoy2_r2m1 * acc_KtmJ1) / r
+```
+
+Flags de compilação adicionais recomendadas:
+
+```bash
+gfortran -O3 -march=native -fopenmp -ffast-math \
+         -fopt-info-vec-optimized \    # relatorio de vetorizacao
+         -funroll-loops \              # desenrolar laços de 201 pts
+         -fprefetch-loop-arrays \      # prefetch de arrays grandes
+         -o PerfilaAnisoOmp *.f08
+```
+
+---
+
+##### Passo 1.5 — Escalonador Híbrido (Static para Uniforme, Dynamic para Variável)
+
+**Problema identificado:** O código atual usa `schedule(dynamic)` para ambos os laços — externo (ângulos `k`) e interno (medições `j`). Para `ntheta = 1` e `nmed` uniforme, o escalonador `dynamic` introduz overhead de sincronização desnecessário. Para casos multi-ângulo com `nmed(k)` variável (o número de medições pode diferir entre ângulos), `static` causaria desbalanceamento.
+
+**O que modificar:** Diretivas `!$omp parallel do schedule(...)` em `perfila1DanisoOMP`.
+
+**Speedup esperado:** 1,05–1,15× (ganho marginal, mas cumulativo com outros passos).
+
+**Risco/Complexidade:** Muito baixo — apenas mudança de palavra-chave.
+
+**Implementação:**
+
+```fortran
+! Estratégia híbrida: escolher escalonador em tempo de execução
+
+! Para laço externo (ângulos): static quando ntheta é pequeno
+if (ntheta <= 4) then
+  !$omp parallel do schedule(static) num_threads(num_threads_k) &
+  !$omp   private(k, ang, seno, coss, px, pz, Lsen, Lcos, z_rho1, c_H1)
+  do k = 1, ntheta
+    ...
+  end do
+  !$omp end parallel do
+else
+  !$omp parallel do schedule(guided,4) num_threads(num_threads_k) &
+  !$omp   private(k, ang, seno, coss, px, pz, Lsen, Lcos, z_rho1, c_H1)
+  do k = 1, ntheta
+    ...
+  end do
+  !$omp end parallel do
+end if
+
+! Para laço interno (medições): static com chunk = nmmax/num_threads_j
+! quando nmed(k) é uniforme, dynamic com chunk pequeno quando variável
+chunk_size = max(1, nmed(k) / num_threads_j)
+!$omp parallel do schedule(static, chunk_size) num_threads(num_threads_j) &
+!$omp   private(j, x, y, z, Tx, Ty, Tz, posTR, zrho, cH)
+do j = 1, nmed(k)
+  ...
+end do
+!$omp end parallel do
+```
+
+---
+
+##### Passo 1.6 — Agrupamento de Medições por Camada do Transmissor (`camadT`)
+
+**Problema identificado:** A sub-rotina `commonfactorsMD` calcula os fatores `Mxdw`, `Mxup`, `Eudw`, `Euup`, `FEdwz`, `FEupz` que dependem de `(camadT, freq)` — onde `camadT` é a camada geológica que contém o transmissor. Em perfilagem com passo `p_med = 1,0 m`, medições consecutivas frequentemente têm o transmissor na **mesma camada** (especialmente em camadas espessas > 1 m). Calcular `commonfactorsMD` repetidamente para `camadT` invariante é trabalho redundante.
+
+**O que modificar:** Sub-rotina `fieldsinfreqs` / novo laço de agrupamento em `perfila1DanisoOMP`.
+
+**Speedup esperado:** 1,2–1,5× em modelos com camadas espessas (> 5 m); menor impacto em modelos de camadas finas.
+
+**Risco/Complexidade:** Médio-Alto — requer pré-determinação de `camadT(j)` para todas as medições antes do laço paralelo.
+
+**Implementação:**
+
+```fortran
+! Pré-calcular camadT para cada medição j (fora do laço paralelo)
+integer, allocatable :: camadT_arr(:), camadR_arr(:)
+allocate(camadT_arr(nmmax), camadR_arr(nmmax))
+
+do j = 1, nmed(k)
+  ! Reconstruir posTR apenas para determinar camadas
+  x_j  = 0.d0 + (j-1) * px - Lsen / 2.d0
+  z_j  = z1  + (j-1) * pz - Lcos / 2.d0
+  Tx_j = 0.d0 + (j-1) * px + Lsen / 2.d0
+  Tz_j = z1  + (j-1) * pz + Lcos / 2.d0
+  call findlayersTR2well(n, Tz_j, z_j, prof(1:n-1), camadT_arr(j), camadR_arr(j))
+end do
+
+! Ordenar medições por camadT para maximizar reutilização de commonfactorsMD
+! (usar índice de permutação para não alterar a ordem de escrita de resultados)
+! ... implementação com índice de reordenação iperm(j) ...
+
+! No laço paralelo, usar cache de commonfactorsMD por (camadT, i_freq):
+integer :: camadT_prev
+complex(dp) :: Mxdw_cache(npt), Mxup_cache(npt)
+complex(dp) :: Eudw_cache(npt), Euup_cache(npt)
+complex(dp) :: FEdwz_cache(npt), FEupz_cache(npt)
+
+camadT_prev = -1  ! sentinela: forçar recálculo na primeira iteração
+
+do j = 1, nmed(k)
+  ct = camadT_arr(j)
+  if (ct /= camadT_prev) then
+    ! Recalcular commonfactorsMD apenas quando camadT muda
+    call commonfactorsMD(n, npt, Tz_arr(j), h, prof, ct, &
+                         u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, &
+                         Mxdw_cache, Mxup_cache, Eudw_cache, Euup_cache, &
+                         FEdwz_cache, FEupz_cache)
+    camadT_prev = ct
+  end if
+  ! Usar cache diretamente em hmd_TIV_optimized e vmd_optimized
+  ...
+end do
+```
+
+> **Nota:** Esta otimização é particularmente eficaz para o caso de geosteering em formações de resistividade com camadas de espessura > 2 m, onde mais de 50% das medições consecutivas compartilham o mesmo `camadT`.
+
+---
+
+**Tabela Resumo — Fase 1 CPU:**
+
+```
+┌─────────────────────────────────────┬───────────────────┬───────────┬──────────────┐
+│  Otimização                         │  Sub-rotina alvo  │  Speedup  │  Complexid.  │
+├─────────────────────────────────────┼───────────────────┼───────────┼──────────────┤
+│  1.1 Workspace pré-alocado          │  hmd/vmd_optimzd  │  1,4–1,8× │  Médio       │
+│  1.2 Cache commonarraysMD           │  fieldsinfreqs    │  1,6–2,2× │  Médio       │
+│  1.3 Collapse laços collapse(3)     │  perfila1Daniso   │  1,2–1,5× │  Médio       │
+│  1.4 SIMD convolução Hankel         │  hmd/vmd_optimzd  │  1,3–2,0× │  Baixo       │
+│  1.5 Escalonador híbrido            │  perfila1Daniso   │  1,05–1,2×│  Muito baixo │
+│  1.6 Cache commonfactorsMD          │  fieldsinfreqs    │  1,2–1,5× │  Médio-alto  │
+├─────────────────────────────────────┼───────────────────┼───────────┼──────────────┤
+│  TOTAL COMBINADO (estimativa)       │  Pipeline inteiro │  3,5–5,0× │  —           │
+└─────────────────────────────────────┴───────────────────┴───────────┴──────────────┘
+```
+
+---
+
+#### 12.7.3 Fase 2 — Implementação GPU (CUDA/OpenACC)
+
+A Fase 2 aproveita o paralelismo massivo de GPUs modernas (NVIDIA A100: 6.912 CUDA cores; RTX 4090: 16.384 CUDA cores) para acelerar o simulador em 20–50× sobre o código CPU original. A estratégia preferida é **OpenACC como protótipo rápido** (mínimas mudanças no código), seguida de **CUDA Fortran via NVHPC** para maximizar ocupância e coalescência de memória.
+
+---
+
+##### Passo 2.1 — Protótipo OpenACC (Mudanças Mínimas no Código)
+
+OpenACC permite acelerar o código existente com diretivas de compilador sem reescrever o algoritmo. A curva de aprendizado é baixa e a portabilidade é preservada (o mesmo código compila para CPU sem OpenACC).
+
+**Requisito:** Compilador NVHPC (NVIDIA HPC SDK) ou GCC 10+ com suporte a OpenACC.
+
+```bash
+# Instalação NVHPC (Ubuntu/Colab):
+apt-get install -y nvhpc-23-11
+
+# Compilação com OpenACC:
+nvfortran -O3 -acc=gpu -gpu=cc80,managed -Minfo=accel \
+          parameters.f08 utils.f08 filtersv2.f08 \
+          magneticdipoles.f08 PerfilaAnisoOmp.f08 RunAnisoOmp.f08 \
+          -o PerfilaAnisoOmp_gpu
+```
+
+**Diretivas OpenACC para `fieldsinfreqs`:**
+
+```fortran
+subroutine fieldsinfreqs(ang, nf, freqs, posTR, dipolo, npt, krwJ0J1, &
+                         n, h, prof, resist, zrho, cH)
+  implicit none
+  ! ... declarações existentes ...
+
+  ! Transferir dados imutáveis para o dispositivo (uma vez por modelo)
+  !$acc data copyin(krwJ0J1, h, prof, resist, eta) &
+  !$acc      copyout(zrho, cH)
+
+  do i = 1, nf
+    freq = freqs(i)
+    omega = 2.d0 * pi * freq
+    zeta = cmplx(0.d0, 1.d0, kind=dp) * omega * mu
+
+    !$acc parallel loop gang vector &
+    !$acc   private(u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, AdmInt)
+    call commonarraysMD(...)  ! lançado como kernel na GPU
+
+    !$acc parallel loop gang vector
+    call commonfactorsMD(...)
+
+    !$acc parallel loop gang vector
+    call hmd_TIV_optimized(...)
+
+    !$acc parallel loop gang vector
+    call vmd_optimized(...)
+  end do
+
+  !$acc end data
+end subroutine fieldsinfreqs
+```
+
+**Limitação do protótipo OpenACC:** A estrutura de chamadas entre sub-rotinas (`fieldsinfreqs → commonarraysMD → commonfactorsMD → hmd/vmd`) exige que todas as sub-rotinas chamadas dentro de regiões `!$acc parallel` sejam marcadas com `!$acc routine`. Isso pode requerer modificações nas assinaturas.
+
+---
+
+##### Passo 2.2 — Kernels CUDA Fortran via NVHPC
+
+Para maximizar o desempenho, o laço mais interno (201 pontos × `n` camadas de `commonarraysMD`) é convertido em kernels CUDA explícitos.
+
+**Mapeamento CPU → GPU:**
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  MAPEAMENTO PARALELISMO CPU → GPU                                        │
+│                                                                          │
+│  CPU (OpenMP)              │  GPU (CUDA)                                │
+│  ──────────────────────────┼────────────────────────────────────────    │
+│  k = 1, ntheta (ângulos)   │  Grid: dim3(ntheta, n_modelos, 1)          │
+│  j = 1, nmed(k) (medições) │  Block: dim3(32, 8, 1) — 256 threads      │
+│  i = 1, nf (frequências)   │  Frequências: loop dentro do kernel        │
+│  ip = 1, npt (Hankel 201)  │  Warp: 32 threads para redução Hankel      │
+│                            │  Shared mem: u, s, krwJ0J1 (201 pts)       │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Kernel CUDA Fortran para redução de Hankel (esboço):**
+
+```fortran
+! Arquivo: hankel_kernel.cuf (extensão CUDA Fortran)
+module hankel_kernels
+  use cudafor
+  use parameters
+  implicit none
+contains
+
+  attributes(global) subroutine hankel_reduction_kernel( &
+      npt, n_meas, Ktedz_J1_all, Ktm_J1_all, &
+      Ktedz_J0_all, Ktm_J0_all, kr_all, &
+      acc_KtedzJ1, acc_KtmJ1, acc_KtedzJ0kr, acc_KtmJ0kr, &
+      n_meas_total)
+    implicit none
+    integer, value :: npt, n_meas_total
+    complex(dp), device :: Ktedz_J1_all(npt, n_meas_total)
+    complex(dp), device :: Ktm_J1_all  (npt, n_meas_total)
+    complex(dp), device :: Ktedz_J0_all(npt, n_meas_total)
+    complex(dp), device :: Ktm_J0_all  (npt, n_meas_total)
+    real(dp),    device :: kr_all(npt, n_meas_total)
+    complex(dp), device :: acc_KtedzJ1(n_meas_total)
+    complex(dp), device :: acc_KtmJ1  (n_meas_total)
+    complex(dp), device :: acc_KtedzJ0kr(n_meas_total)
+    complex(dp), device :: acc_KtmJ0kr  (n_meas_total)
+
+    integer :: meas_idx, ip
+    complex(dp) :: local_KtedzJ1, local_KtmJ1
+    complex(dp) :: local_KtedzJ0kr, local_KtmJ0kr
+
+    ! Shared memory para 201 pontos (redução em warp)
+    complex(dp), shared :: smem_KtedzJ1(256), smem_KtmJ1(256)
+
+    meas_idx = blockIdx%x + (blockIdx%y - 1) * gridDim%x
+    if (meas_idx > n_meas_total) return
+
+    ip = threadIdx%x  ! cada thread processa um ponto do filtro
+
+    ! Carregar em shared memory (coalescência garante acesso contíguo)
+    if (ip <= npt) then
+      smem_KtedzJ1(ip) = Ktedz_J1_all(ip, meas_idx)
+      smem_KtmJ1(ip)   = Ktm_J1_all  (ip, meas_idx)
+    else
+      smem_KtedzJ1(ip) = (0.d0, 0.d0)
+      smem_KtmJ1(ip)   = (0.d0, 0.d0)
+    end if
+    call syncthreads()
+
+    ! Redução em árvore binária dentro do bloco
+    ! ... loop de redução com stride decrescente ...
+
+    if (threadIdx%x == 1) then
+      acc_KtedzJ1(meas_idx) = smem_KtedzJ1(1)
+      acc_KtmJ1  (meas_idx) = smem_KtmJ1(1)
+    end if
+  end subroutine hankel_reduction_kernel
+
+end module hankel_kernels
+```
+
+---
+
+##### Passo 2.3 — Gerenciamento de Memória (Host ↔ Device)
+
+A latência de transferência PCI-e é o principal gargalo em implementações GPU ingênuas. A estratégia é minimizar transferências via **batching de modelos**.
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  ESTRATÉGIA DE MEMÓRIA — BATCH DE MODELOS NA GPU                       │
+│                                                                        │
+│  Host (CPU RAM)                    Device (GPU VRAM)                   │
+│  ─────────────────                 ─────────────────────               │
+│  resist(n,2, N_batch)  ──H2D──▶   resist_d(n,2,N_batch)               │
+│  esp(n, N_batch)       ──H2D──▶   esp_d(n, N_batch)                   │
+│                                                                        │
+│  Arrays invariantes (transferidos UMA VEZ):                            │
+│  krwJ0J1(201,3)        ──H2D──▶   krwJ0J1_d   (reside em GPU)         │
+│  wJ0(201), wJ1(201)    ──H2D──▶   wJ0_d, wJ1_d (reside em GPU)        │
+│                                                                        │
+│  Resultados:                                                           │
+│  cH1(nt,600,nf,9)      ◀─D2H──   cH1_d(nt,600,nf,9,N_batch)          │
+│  zrho1(nt,600,nf,3)    ◀─D2H──   zrho1_d(...)                         │
+│                                                                        │
+│  N_batch ≈ 1000 modelos (VRAM 40 GB A100 suporta ~50.000 modelos)     │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**Estimativa de memória por modelo (n=10 camadas, nf=2, nmed=600):**
+
+| Array | Dimensão | Tipo | Memória |
+|:------|:---------|:-----|:--------|
+| `cH1` | (1, 600, 2, 9) | `complex(dp)` | ~86 KB |
+| `zrho1` | (1, 600, 2, 3) | `real(dp)` | ~29 KB |
+| `u, s, uh, sh` | (201, 10, 2) | `complex(dp)` | ~51 KB |
+| `RTEdw/up, RTMdw/up` | (201, 10, 2) × 4 | `complex(dp)` | ~205 KB |
+| **Total por modelo** | — | — | **~371 KB** |
+
+Com GPU A100 (40 GB VRAM): suporte a ~100.000 modelos simultâneos.
+
+---
+
+##### Passo 2.4 — Multi-Model Batching na GPU
+
+```fortran
+! RunAnisoOmp.f08 — modificação para batch GPU
+! ANTES: loop serial sobre modelos, um de cada vez
+do modelm = 1, nmaxmodel
+  call perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ...)
+end do
+
+! DEPOIS: batch de N_batch modelos por chamada GPU
+integer, parameter :: N_BATCH = 1000
+integer :: batch_start, batch_end, nb
+
+do batch_start = 1, nmaxmodel, N_BATCH
+  batch_end = min(batch_start + N_BATCH - 1, nmaxmodel)
+  nb = batch_end - batch_start + 1
+
+  ! Transferir batch de modelos para GPU
+  call transfer_models_to_gpu(resist_batch, esp_batch, nb, ...)
+
+  ! Lançar kernel para nb modelos em paralelo
+  call launch_perfila_gpu_kernel(nb, nf, freq, ntheta, theta, ...)
+
+  ! Sincronizar e recuperar resultados
+  call cudaDeviceSynchronize()
+  call transfer_results_from_gpu(cH1_batch, zrho1_batch, nb, ...)
+
+  ! Escrever resultados do batch
+  do modelm = batch_start, batch_end
+    call writes_files(modelm, nmaxmodel, mypath, ...)
+  end do
+end do
+```
+
+---
+
+##### Passo 2.5 — Profiling e Otimização (Ocupância e Coalescência)
+
+**Ferramentas recomendadas:**
+
+```bash
+# NVIDIA Nsight Systems — visão geral do pipeline
+nsys profile --stats=true ./PerfilaAnisoOmp_gpu input.namelist
+
+# NVIDIA Nsight Compute — análise de kernel
+ncu --set full --kernel-name "hankel_reduction_kernel" \
+    ./PerfilaAnisoOmp_gpu input.namelist
+
+# Métricas-chave a monitorar:
+#   sm__warps_active.avg.pct_of_peak_sustained_active  (ocupância)
+#   l1tex__t_bytes_pipe_lsu_mem_global_op_ld.sum.per_cycle_elapsed (largura de banda)
+#   sm__sass_thread_inst_executed_op_ffma_pred_on.sum  (FLOP/s)
+```
+
+**Critérios de aceitação de desempenho GPU:**
+
+| Métrica | Meta |
+|:--------|:-----|
+| Ocupância de SM | > 60% |
+| Eficiência de coalescência L1 | > 80% |
+| Razão aritmética/memória | > 10 FLOP/byte |
+| Throughput em A100 | > 400 modelos/s (1 ângulo, 2 freq, 600 med.) |
+
+---
+
+#### 12.7.4 Fase 3 — Validação e Benchmarking
+
+##### Protocolo de Validação
+
+A validade física dos resultados otimizados é verificada contra o código Fortran original usando os dados de referência em `validacao.dat` e `infovalidacao.out`.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  PROTOCOLO DE VALIDAÇÃO — FORTRAN ORIGINAL vs. OTIMIZADO             │
+│                                                                      │
+│  1. Modelo de referência: arquivo validacao.dat existente            │
+│     (n=5 camadas, rho_h=[1,10,1,10,1] Ω·m, rho_v=[2,20,2,20,2])    │
+│                                                                      │
+│  2. Comparar saídas component a component:                           │
+│     Re(Hxx), Im(Hxx), Re(Hyy), Im(Hyy), Re(Hzz), Im(Hzz)           │
+│     Re(Hxy), Im(Hxy), Re(Hxz), Im(Hxz) + demais off-diagonal        │
+│                                                                      │
+│  3. Critério de aceitação por componente:                            │
+│     |H_otimizado - H_original| / |H_original| < 1×10⁻¹⁰ (CPU)      │
+│     |H_gpu - H_original| / |H_original| < 1×10⁻⁶  (GPU float32)    │
+│     |H_gpu - H_original| / |H_original| < 1×10⁻¹⁰ (GPU float64)    │
+│                                                                      │
+│  4. Teste de estresse: 10.000 modelos geológicos aleatórios          │
+│     com rho_h em [0.1, 10.000] Ω·m, n em [2, 20] camadas            │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Script de validação (Python, usando a saída binária do simulador):**
+
+```python
+import numpy as np
+import struct
+
+def read_fortran_binary(filename, n_records, n_cols=22):
+    """Lê arquivo binário unformatted stream do simulador Fortran."""
+    data = []
+    with open(filename, 'rb') as f:
+        for _ in range(n_records):
+            record = struct.unpack(f'i{n_cols-1}d', f.read(4 + (n_cols-1)*8))
+            data.append(record)
+    return np.array(data)
+
+# Comparar original vs. otimizado
+data_orig = read_fortran_binary('validacao_original.dat', n_records=600)
+data_opt  = read_fortran_binary('validacao_otimizado.dat', n_records=600)
+
+# Erro relativo por componente (colunas 6–22 são Re/Im dos 9 componentes)
+for col_idx, comp_name in enumerate(['Re(Hxx)', 'Im(Hxx)', 'Re(Hxy)', 'Im(Hxy)',
+                                      'Re(Hxz)', 'Im(Hxz)', 'Re(Hyx)', 'Im(Hyx)',
+                                      'Re(Hyy)', 'Im(Hyy)', 'Re(Hyz)', 'Im(Hyz)',
+                                      'Re(Hzx)', 'Im(Hzx)', 'Re(Hzy)', 'Im(Hzy)',
+                                      'Re(Hzz)', 'Im(Hzz)'], start=4):
+    ref  = data_orig[:, col_idx]
+    opt  = data_opt [:, col_idx]
+    mask = np.abs(ref) > 1e-30
+    err  = np.max(np.abs(opt[mask] - ref[mask]) / np.abs(ref[mask]))
+    status = "PASS" if err < 1e-10 else "FAIL"
+    print(f"  {comp_name:12s}: max_rel_err = {err:.2e}  [{status}]")
+```
+
+##### Metodologia de Benchmark
+
+```bash
+#!/bin/bash
+# benchmark_pipeline_a.sh — medir speedup em cada fase
+
+N_MODELS=1000
+N_THREADS_LIST="1 2 4 8 16"
+BASELINE_TIME=0
+
+echo "=== Benchmark Pipeline A ==="
+echo "Modelos: ${N_MODELS}, CPU: $(nproc) cores"
+echo ""
+
+for VERSION in "original" "fase1_workspace" "fase1_cache" "fase1_simd" "fase1_all" "fase2_acc" "fase2_cuda"; do
+  for NTHREADS in $N_THREADS_LIST; do
+    export OMP_NUM_THREADS=$NTHREADS
+    TIME=$( { time ./PerfilaAnisoOmp_${VERSION} config_benchmark.namelist; } 2>&1 | grep real | awk '{print $2}' )
+    echo "  ${VERSION} | threads=${NTHREADS} | time=${TIME}"
+  done
+done
+```
+
+##### Tabela de Desempenho Esperado (Fase 1 + Fase 2)
+
+| Versão | Threads/Dispositivo | Tempo/modelo | Speedup vs. original | Throughput (mod/h) |
+|:-------|:-------------------:|:------------:|:--------------------:|:------------------:|
+| Original (baseline) | 16 CPU | 2,40 s | 1,0× | 24.000 |
+| Fase 1 — workspace | 16 CPU | 1,50 s | 1,6× | 38.400 |
+| Fase 1 — +cache | 16 CPU | 0,90 s | 2,7× | 64.000 |
+| Fase 1 — +SIMD | 16 CPU | 0,70 s | 3,4× | 82.300 |
+| Fase 1 — completa | 16 CPU | 0,50 s | 4,8× | 115.000 |
+| Fase 2 — OpenACC | A100 GPU | 0,12 s | 20× | 480.000 |
+| Fase 2 — CUDA batch | A100 GPU | 0,048 s | 50× | 1.200.000 |
+
+---
+
+#### 12.7.5 Cronograma e Métricas de Sucesso
+
+```
+┌───────────────────────────────────────────────────────────────────────┐
+│  CRONOGRAMA — PIPELINE A                                              │
+│                                                                       │
+│  Semana  1: Passo 1.1 (workspace) + 1.5 (escalonador) + testes       │
+│  Semana  2: Passo 1.2 (cache commonarraysMD) + benchmark parcial      │
+│  Semana  3: Passo 1.3 (collapse) + 1.4 (SIMD) + 1.6 (camadT cache)  │
+│  Semana  4: Benchmark completo Fase 1 + validação + commit            │
+│  Semanas 5–6: Protótipo OpenACC (Passo 2.1) + testes GPU             │
+│  Semanas 7–9: CUDA Fortran kernels (Passos 2.2–2.4)                  │
+│  Semana 10: Profiling Nsight + ajuste ocupância (Passo 2.5)           │
+│  Semanas 11–12: Validação completa + benchmark final (Fase 3)         │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+**KPIs (Key Performance Indicators):**
+
+| KPI | Métrica | Meta | Prazo |
+|:----|:--------|:----:|:-----:|
+| K1 | Speedup Fase 1 (16 threads, 1000 modelos) | ≥ 4× | Semana 4 |
+| K2 | Erro de validação CPU (max relativo) | < 1×10⁻¹⁰ | Semana 4 |
+| K3 | Speedup Fase 2 OpenACC (A100, batch=1000) | ≥ 15× | Semana 6 |
+| K4 | Speedup Fase 2 CUDA (A100, batch=1000) | ≥ 40× | Semana 10 |
+| K5 | Erro de validação GPU (max relativo) | < 1×10⁻⁶ | Semana 12 |
+| K6 | Escalabilidade CPU (efficiency Amdahl) | ≥ 70% | Semana 4 |
+| K7 | Ocupância GPU (Nsight Compute) | ≥ 60% | Semana 10 |
+| K8 | Reprodutibilidade (mesmo resultado em 10 execuções) | 100% | Semana 12 |
+
+---
+
+### 12.8 Pipeline B — Roteiro de Novos Recursos para o Simulador Fortran
+
+#### 12.8.1 Fase 1 — Melhorias Imediatas (1–2 semanas)
+
+Esta fase adiciona recursos de alta utilidade prática com impacto mínimo na estrutura do código existente. Todos os itens podem ser implementados sem alterar as sub-rotinas físicas principais (`commonarraysMD`, `commonfactorsMD`, `hmd_TIV_optimized`, `vmd_optimized`).
+
+---
+
+##### B1.1 — Seleção Adaptativa de Filtro de Hankel
+
+**Motivação:** O código atual usa exclusivamente o filtro de Werthmuller de 201 pontos (`J0J1Wer` em `filtersv2.f08`). Para geometrias de longo espaçamento (dTR > 5 m) ou frequências muito baixas (< 1 kHz), os 201 pontos são excessivos — o filtro Kong de 61 pontos oferece precisão equivalente (erro < 0,1%) com apenas 30% do custo computacional. Para frequências muito altas (> 100 kHz) com resistividade baixa (< 0,1 Ω·m), o filtro de Anderson de 801 pontos pode ser necessário para precisão numérica adequada.
+
+**O que implementar:** Seleção automática em `perfila1DanisoOMP` baseada em critério de qualidade (produto `r × k_max`, onde `k_max = kr_max / r` é o wavenumber máximo do filtro).
+
+**Impacto:** Redução de 30–70% no tempo de cálculo para configurações de baixa frequência / longo espaçamento.
+
+**Implementação — seleção adaptativa em `perfila1DanisoOMP`:**
+
+```fortran
+subroutine select_hankel_filter(freq, r, rho_min, npt_out, krJ0J1, wJ0, wJ1)
+  ! Seleciona o filtro de Hankel ótimo para a geometria e frequência.
+  !
+  ! Critério de seleção baseado no parâmetro adimensional:
+  !   kappa = r * sqrt(omega * mu * sigma_max)  (skin-depth normalizado)
+  !
+  ! kappa < 0.1  → Kong 61 pts  (resposta quase-estática, alta condutividade)
+  ! 0.1 ≤ kappa ≤ 10 → Werthmuller 201 pts  (regime intermediário padrão)
+  ! kappa > 10   → Anderson 801 pts  (alta frequência, resposta de onda)
+  implicit none
+  real(dp), intent(in) :: freq, r, rho_min
+  integer, intent(out) :: npt_out
+  real(dp), dimension(:), allocatable, intent(out) :: krJ0J1, wJ0, wJ1
+
+  real(dp) :: omega, sigma_max, kappa
+
+  omega     = 2.d0 * pi * freq
+  sigma_max = 1.d0 / rho_min            ! condutividade máxima do modelo
+  kappa     = r * sqrt(omega * mu * sigma_max)
+
+  if (kappa < 0.1d0) then
+    npt_out = 61
+    call J0J1Kong(61, krJ0J1, wJ0, wJ1)
+  else if (kappa <= 10.d0) then
+    npt_out = 201
+    call J0J1Wer(201, krJ0J1, wJ0, wJ1)
+  else
+    npt_out = 801
+    ! call J0J1Anderson(801, krJ0J1, wJ0, wJ1)  ! a implementar
+    write(*,'(A,F8.3,A)') ' AVISO: kappa=', kappa, &
+      '. Filtro 801pts recomendado (Anderson). Usando 201pts.'
+    npt_out = 201
+    call J0J1Wer(201, krJ0J1, wJ0, wJ1)
+  end if
+
+  write(*,'(A,F6.2,A,I3,A)') ' Filtro Hankel selecionado: kappa=', kappa, &
+    ', npt=', npt_out, ' pontos'
+end subroutine select_hankel_filter
+```
+
+**Tabela de seleção de filtro:**
+
+```
+┌──────────────────┬───────────────┬──────────────────────────────────────┐
+│  Regime          │  Filtro       │  Casos típicos                       │
+├──────────────────┼───────────────┼──────────────────────────────────────┤
+│  Quasi-estático  │  Kong 61pt    │  f < 1 kHz, dTR = 1m, rho > 10 Ω·m │
+│  Intermediário   │  Werthmuller  │  f = 20 kHz, dTR = 1m (padrão LWD)  │
+│                  │  201pt ★      │                                      │
+│  Alta frequência │  Anderson     │  f > 100 kHz, rho < 0.1 Ω·m         │
+│                  │  801pt        │  (a implementar)                     │
+└──────────────────┴───────────────┴──────────────────────────────────────┘
+★ = filtro atual do código
+```
+
+---
+
+##### B1.2 — Processamento em Paralelo de Múltiplas Frequências
+
+**Motivação:** Atualmente, o laço `do i = 1, nf` dentro de `fieldsinfreqs` é serial. Para simulações com `nf > 2` frequências (por exemplo, `nf = 4` para sistemas LWD de múltipla frequência como SCOPE/ARC), paralelizar sobre frequências oferece speedup proporcional a `nf`.
+
+**Implementação:**
+
+```fortran
+! Em fieldsinfreqs: paralelizar o laço de frequências com OpenMP
+! (quando chamado sem laço paralelo externo ativo — caso de threading simples)
+
+! Pré-computar eta fora do laço (invariante para todas as frequências)
+do i_lay = 1, n
+  eta(i_lay,1) = 1.d0 / resist(i_lay,1)
+  eta(i_lay,2) = 1.d0 / resist(i_lay,2)
+end do
+
+! Arrays de resultados por frequência (pré-alocados fora do laço)
+complex(dp) :: u_f(npt,n,nf), s_f(npt,n,nf), uh_f(npt,n,nf), sh_f(npt,n,nf)
+complex(dp) :: RTEdw_f(npt,n,nf), RTEup_f(npt,n,nf)
+complex(dp) :: RTMdw_f(npt,n,nf), RTMup_f(npt,n,nf)
+complex(dp) :: AdmInt_f(npt,n,nf)
+
+!$omp parallel do schedule(static) num_threads(min(nf, omp_get_max_threads())) &
+!$omp   private(i, freq, omega, zeta)
+do i = 1, nf
+  freq  = freqs(i)
+  omega = 2.d0 * pi * freq
+  zeta  = cmplx(0.d0, 1.d0, kind=dp) * omega * mu
+  zrho(i,:) = (/zobs, resist(layerObs,1), resist(layerObs,2)/)
+
+  call commonarraysMD(n, npt, r, krJ0J1, zeta, h, eta, &
+                      u_f(:,:,i), s_f(:,:,i), uh_f(:,:,i), sh_f(:,:,i), &
+                      RTEdw_f(:,:,i), RTEup_f(:,:,i), &
+                      RTMdw_f(:,:,i), RTMup_f(:,:,i), AdmInt_f(:,:,i))
+end do
+!$omp end parallel do
+
+! Fase 2: commonfactors + hmd/vmd (dependem de camadT — potencialmente serial)
+do i = 1, nf
+  call commonfactorsMD(n, npt, Tz, h, prof, camadT, &
+                       u_f(:,:,i), s_f(:,:,i), uh_f(:,:,i), sh_f(:,:,i), &
+                       RTEdw_f(:,:,i), RTEup_f(:,:,i), &
+                       RTMdw_f(:,:,i), RTMup_f(:,:,i), &
+                       Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz)
+  ! ... hmd e vmd ...
+end do
+```
+
+---
+
+##### B1.3 — Validação de Entradas e Tratamento de Erros
+
+**Motivação:** Atualmente, entradas inválidas (frequências fora do range, espaçamentos negativos, resistividades zero) podem causar comportamento indefinido, `NaN`/`Inf` silenciosos ou `STOP` sem mensagem diagnóstica. A adição de uma sub-rotina de validação melhora a usabilidade e facilita depuração.
+
+```fortran
+subroutine validate_inputs(nf, freq, n, resist, esp, dTR, h1, tj, p_med, ierr)
+  ! Valida todos os parâmetros de entrada do simulador.
+  ! ierr = 0: tudo válido; ierr > 0: número de erros encontrados.
+  implicit none
+  integer, intent(in) :: nf, n
+  real(dp), intent(in) :: freq(nf), resist(n,2), esp(n), dTR, h1, tj, p_med
+  integer, intent(out) :: ierr
+
+  integer :: i
+  ierr = 0
+
+  ! Validar frequências (range LWD típico: 100 Hz – 2 MHz)
+  do i = 1, nf
+    if (freq(i) < 1.d2 .or. freq(i) > 2.d6) then
+      write(*,'(A,I3,A,ES12.4,A)') &
+        ' ERRO: freq(', i, ') = ', freq(i), ' Hz fora do range [100, 2e6] Hz'
+      ierr = ierr + 1
+    end if
+  end do
+
+  ! Validar resistividades (evitar divisão por zero em eta = 1/rho)
+  do i = 1, n
+    if (resist(i,1) <= 0.d0 .or. resist(i,2) <= 0.d0) then
+      write(*,'(A,I3,A,2ES12.4)') &
+        ' ERRO: resist(', i, ',:) <= 0:', resist(i,1), resist(i,2)
+      ierr = ierr + 1
+    end if
+    ! Anisotropia fisicamente razoável: rho_v >= rho_h
+    if (resist(i,2) < resist(i,1)) then
+      write(*,'(A,I3,A)') &
+        ' AVISO: camada ', i, ': rho_v < rho_h (anisotropia invertida)'
+    end if
+  end do
+
+  ! Validar espaçamento (dTR deve ser positivo)
+  if (dTR <= 0.d0) then
+    write(*,'(A,ES12.4)') ' ERRO: dTR <= 0: ', dTR
+    ierr = ierr + 1
+  end if
+
+  ! Validar janela de perfilagem
+  if (tj <= 0.d0) then
+    write(*,'(A,ES12.4)') ' ERRO: tj <= 0 (comprimento de janela): ', tj
+    ierr = ierr + 1
+  end if
+
+  if (ierr > 0) then
+    write(*,'(A,I3,A)') ' Simulação abortada: ', ierr, ' erro(s) de validação.'
+    stop 1
+  end if
+end subroutine validate_inputs
+```
+
+---
+
+##### B1.4 — Logging e Relatório de Progresso
+
+**Motivação:** Simulações de 1.000+ modelos levam horas. O código atual não emite nenhuma indicação de progresso, dificultando a estimativa de tempo restante e a detecção de travamentos.
+
+```fortran
+! Em RunAnisoOmp.f08 — adicionar relatório de progresso
+real(dp) :: t_start, t_now, t_per_model, t_remaining
+integer :: modelm, n_done, report_interval
+
+t_start = omp_get_wtime()
+report_interval = max(1, nmaxmodel / 20)  ! reportar a cada 5% de progresso
+
+do modelm = 1, nmaxmodel
+  call perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ...)
+
+  n_done = modelm
+  if (mod(n_done, report_interval) == 0 .or. n_done == nmaxmodel) then
+    t_now       = omp_get_wtime()
+    t_per_model = (t_now - t_start) / real(n_done, dp)
+    t_remaining = t_per_model * real(nmaxmodel - n_done, dp)
+    write(*,'(A,I6,A,I6,A,F5.1,A,F7.1,A,F7.1,A)') &
+      ' Progresso: ', n_done, '/', nmaxmodel, &
+      ' (', real(n_done,dp)/real(nmaxmodel,dp)*100.d0, '%)' , &
+      ' | ', t_per_model, ' s/mod | ETA: ', t_remaining/60.d0, ' min'
+  end if
+end do
+
+t_now = omp_get_wtime()
+write(*,'(A,F8.2,A,F6.3,A)') &
+  ' Concluído! Tempo total: ', (t_now-t_start)/60.d0, ' min | ', &
+  (t_now-t_start)/real(nmaxmodel,dp), ' s/modelo (média)'
+```
+
+---
+
+#### 12.8.2 Fase 2 — Extensões de Médio Prazo (2–4 semanas)
+
+##### B2.1 — Suporte a Múltiplos Receptores (Vários Valores de `dTR`)
+
+**Motivação:** Ferramentas LWD comerciais modernas (Baker Hughes AziTrak, Schlumberger arcVISION) possuem 2–5 arranjos TR com espaçamentos diferentes (por exemplo, dTR = 0.5, 1.0, 2.0, 4.0 m). Cada espaçamento fornece investigação em profundidade diferente, aumentando o conteúdo de informação para inversão.
+
+**O que implementar:** Generalizar `perfila1DanisoOMP` para aceitar um array `dTR_arr(n_receivers)` em vez de um escalar `dTR`.
+
+```fortran
+subroutine perfila1DanisoOMP_multiRx(modelm, nmaxmodel, mypath, nf, freq, &
+                                      ntheta, theta, h1, tj, &
+                                      n_receivers, dTR_arr, &
+                                      p_med, n, resist, esp, filename)
+  implicit none
+  integer, intent(in) :: modelm, nmaxmodel, nf, ntheta, n, n_receivers
+  real(dp), intent(in) :: freq(nf), theta(ntheta), h1, tj
+  real(dp), intent(in) :: dTR_arr(n_receivers)  ! array de espaçamentos
+  real(dp), intent(in) :: p_med, resist(n,2), esp(n)
+  character(*), intent(in) :: mypath, filename
+
+  ! Arrays de saída agora têm dimensão extra: n_receivers
+  complex(dp), allocatable :: cH1_all(:,:,:,:,:)    ! (nt, nmmax, nf, 9, n_recv)
+  real(dp),    allocatable :: zrho1_all(:,:,:,:,:)  ! (nt, nmmax, nf, 3, n_recv)
+
+  integer :: ir
+
+  allocate(cH1_all (ntheta, nmmax, nf, 9, n_receivers))
+  allocate(zrho1_all(ntheta, nmmax, nf, 3, n_receivers))
+
+  ! Laço sobre receptores (potencialmente paralelizável com OpenMP)
+  !$omp parallel do schedule(static) private(ir)
+  do ir = 1, n_receivers
+    ! Reutilizar commonarraysMD para cada receptor (r muda com dTR_arr(ir))
+    ! ... corpo da simulação para dTR = dTR_arr(ir) ...
+    cH1_all (:,:,:,:,ir) = ...
+    zrho1_all(:,:,:,:,ir) = ...
+  end do
+  !$omp end parallel do
+
+  ! Escrever arquivo com coluna extra identificando o receptor
+  call writes_files_multiRx(modelm, nmaxmodel, mypath, &
+                             zrho1_all, cH1_all, n_receivers, dTR_arr, &
+                             ntheta, theta, nf, freq, nmed, filename)
+  deallocate(cH1_all, zrho1_all)
+end subroutine perfila1DanisoOMP_multiRx
+```
+
+**Impacto no arquivo de saída:** O formato binário `stream` existente é mantido; adiciona-se apenas um registro de cabeçalho com `n_receivers` e `dTR_arr` no arquivo `.out`.
+
+---
+
+##### B2.2 — Gradientes por Diferenças Finitas para PINNs (∂H/∂ρ)
+
+**Motivação:** O treinamento de PINNs (Physics-Informed Neural Networks) com o simulador Fortran como `forward model` requer gradientes ∂H/∂ρ_h e ∂H/∂ρ_v para cada camada. A abordagem mais simples (e suficiente para treinamento offline de dados de inversão) são diferenças finitas centradas com passo `δρ` ótimo.
+
+**O que implementar:** Sub-rotina `compute_gradients_fd` que chama `perfila1DanisoOMP` com perturbações de resistividade.
+
+```fortran
+subroutine compute_gradients_fd(nf, freq, ntheta, theta, h1, tj, dTR, p_med, &
+                                 n, resist, esp, mypath, filename, &
+                                 dHdRho_h, dHdRho_v)
+  ! Calcula os gradientes ∂H_{ij}/∂ρ_{h,k} e ∂H_{ij}/∂ρ_{v,k}
+  ! para todas as n camadas usando diferenças finitas centradas.
+  !
+  ! Custo: 2*n chamadas adicionais ao simulador (uma por perturbação).
+  ! Alternativa mais eficiente: equações adjuntas (ver B3.1).
+  implicit none
+  integer, intent(in) :: nf, ntheta, n
+  real(dp), intent(in) :: freq(nf), theta(ntheta), h1, tj, dTR, p_med
+  real(dp), intent(in) :: resist(n,2), esp(n)
+  character(*), intent(in) :: mypath, filename
+  ! Gradientes de saída: (nmed, nf, 9, n, 2) — última dim: h=1, v=2
+  complex(dp), intent(out) :: dHdRho_h(nf,9,n), dHdRho_v(nf,9,n)
+
+  integer :: k_lay
+  real(dp) :: resist_plus(n,2), resist_minus(n,2)
+  real(dp) :: delta_rho, rho_ref
+  complex(dp) :: cH_plus(nf,9), cH_minus(nf,9)
+
+  ! Passo ótimo para diferenças finitas: δρ = sqrt(eps_mach) * ρ
+  real(dp), parameter :: FD_STEP_REL = 1.d-4  ! 0.01% de perturbação relativa
+
+  do k_lay = 1, n
+    resist_plus  = resist
+    resist_minus = resist
+
+    ! Perturbação em rho_h (componente horizontal)
+    rho_ref = resist(k_lay, 1)
+    delta_rho = max(FD_STEP_REL * rho_ref, 1.d-6)  ! passo mínimo de 1e-6 Ω·m
+    resist_plus (k_lay, 1) = rho_ref + delta_rho
+    resist_minus(k_lay, 1) = rho_ref - delta_rho
+
+    call fieldsinfreqs_single(ang_ref, nf, freq, posTR_ref, dipolo, &
+                              npt, krwJ0J1, n, h, prof, resist_plus, &
+                              zrho_dummy, cH_plus)
+    call fieldsinfreqs_single(ang_ref, nf, freq, posTR_ref, dipolo, &
+                              npt, krwJ0J1, n, h, prof, resist_minus, &
+                              zrho_dummy, cH_minus)
+
+    dHdRho_h(:,:,k_lay) = (cH_plus - cH_minus) / (2.d0 * delta_rho)
+
+    ! Perturbação em rho_v (componente vertical)
+    resist_plus  = resist
+    resist_minus = resist
+    rho_ref = resist(k_lay, 2)
+    delta_rho = max(FD_STEP_REL * rho_ref, 1.d-6)
+    resist_plus (k_lay, 2) = rho_ref + delta_rho
+    resist_minus(k_lay, 2) = rho_ref - delta_rho
+
+    call fieldsinfreqs_single(ang_ref, nf, freq, posTR_ref, dipolo, &
+                              npt, krwJ0J1, n, h, prof, resist_plus, &
+                              zrho_dummy, cH_plus)
+    call fieldsinfreqs_single(ang_ref, nf, freq, posTR_ref, dipolo, &
+                              npt, krwJ0J1, n, h, prof, resist_minus, &
+                              zrho_dummy, cH_minus)
+
+    dHdRho_v(:,:,k_lay) = (cH_plus - cH_minus) / (2.d0 * delta_rho)
+  end do
+end subroutine compute_gradients_fd
+```
+
+**Custo computacional:** Para `n = 10` camadas e 1 medição de referência: 20 chamadas adicionais ao simulador forward, ou seja, overhead de 20× sobre uma simulação única. Para geração offline de conjunto de treinamento (1.000 modelos × 20 perturbações = 20.000 simulações extras), o custo total com Pipeline A CPU ≈ 20.000 × 0,5 s / 600 ≈ 17 segundos por modelo, ou ~4,7 horas para 1.000 modelos com gradientes completos.
+
+---
+
+##### B2.3 — Formato de Saída Configurável (Binário Stream vs. Texto Formatado)
+
+**Motivação:** O formato binário `unformatted stream` atual é eficiente para grandes volumes de dados mas dificulta depuração, inspeção manual e integração com ferramentas externas (MATLAB, Julia, ParaView). Adicionar um modo de saída texto formatado facilita o desenvolvimento.
+
+```fortran
+! Em writes_files: adicionar parâmetro de formato de saída
+subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, &
+                        ntheta, theta, nf, freq, nmeds, filename, &
+                        output_format)
+  implicit none
+  character(10), intent(in) :: output_format  ! 'binary' | 'text' | 'both'
+
+  select case(trim(output_format))
+    case('binary')
+      ! Formato atual: binário stream (padrão de produção)
+      open(unit=1000, file=fileTR, form='unformatted', access='stream', &
+           status='unknown', position='append')
+      ! ... write binário existente ...
+
+    case('text')
+      ! Formato texto para depuração e integração com scripts Python
+      open(unit=1000, file=fileTR//'.txt', form='formatted', &
+           status='unknown', position='append')
+      ! Cabeçalho com metadados
+      write(1000,'(A)') '# i  z_obs  rho_h  rho_v  Re(Hxx) Im(Hxx) ...'
+      do k = 1, ntheta
+        do j = 1, nf
+          do i = 1, nmeds(k)
+            write(1000,'(I7, 2(1X,ES14.6), 18(1X,ES18.10))') &
+              i, zrho(k,i,j,1), zrho(k,i,j,2), &
+              real(cH(k,i,j,1)), aimag(cH(k,i,j,1)), &
+              ! ... demais componentes ...
+              real(cH(k,i,j,9)), aimag(cH(k,i,j,9))
+          end do
+        end do
+      end do
+
+    case('both')
+      ! Escrever ambos os formatos simultaneamente
+      ! ... chamadas recursivas ou código duplicado ...
+  end select
+end subroutine writes_files
+```
+
+---
+
+##### B2.4 — Aproximação de Camadas Inclinadas (Dip ≠ 0°)
+
+**Motivação:** O simulador atual modela camadas estritamente horizontais (TIV). Para geosteering em poços direcionais perfurando formações com dip estratigráfico real (geralmente 2–10°), a aproximação de "camadas inclinadas" melhora a fidelidade do modelo sem recorrer a modelagem 2D completa. A aproximação consiste em decompor a geometria em componentes horizontal e vertical considerando o ângulo de dip, e ajustar as profundidades de interface em função da posição horizontal do arranjo TR.
+
+```fortran
+! Aproximação de camadas inclinadas: ajustar prof() em função da posição x
+subroutine apply_dip_correction(n, prof_ref, esp_ref, x_position, dip_angle_deg, &
+                                 prof_corrected, esp_corrected)
+  ! Desloca as interfaces de camada lateralmente com base no dip da formação.
+  ! Válido para dip < 30° (aproximação de primeira ordem).
+  !
+  ! Geometria:
+  !   Interface original em z = prof_ref(k) (coordenada vertical, x=0)
+  !   Interface corrigida: z = prof_ref(k) + x_position * tan(dip_rad)
+  implicit none
+  integer, intent(in) :: n
+  real(dp), intent(in) :: prof_ref(0:n), esp_ref(n), x_position, dip_angle_deg
+  real(dp), intent(out) :: prof_corrected(0:n), esp_corrected(n)
+
+  real(dp) :: dip_rad, dz_per_dx, dz_shift
+  integer :: k
+
+  dip_rad    = dip_angle_deg * pi / 180.d0
+  dz_per_dx  = tan(dip_rad)
+  dz_shift   = x_position * dz_per_dx
+
+  prof_corrected(0) = prof_ref(0)  ! semiespaço superior: inalterado
+  do k = 1, n
+    prof_corrected(k) = prof_ref(k) + dz_shift
+  end do
+
+  ! Recalcular espessuras a partir das profundidades corrigidas
+  esp_corrected(1) = 0.d0  ! primeira interface: posição de referência
+  do k = 2, n-1
+    esp_corrected(k) = prof_corrected(k) - prof_corrected(k-1)
+  end do
+  esp_corrected(n) = 0.d0  ! semiespaço inferior
+
+  if (dip_angle_deg > 15.d0) then
+    write(*,'(A,F5.1,A)') ' AVISO: dip=', dip_angle_deg, &
+      '° > 15°. Aproximação pode ter erro > 5% em Hzz.'
+  end if
+end subroutine apply_dip_correction
+```
+
+Esta sub-rotina é chamada dentro do laço `j` de medições em `perfila1DanisoOMP`, passando `x_position = (j-1) * px` como posição horizontal relativa.
+
+---
+
+#### 12.8.3 Fase 3 — Extensões de Longo Prazo (1–3 meses)
+
+##### B3.1 — Equações Adjuntas para Gradientes Exatos
+
+**Motivação:** Diferenças finitas (B2.2) têm custo computacional de 2n chamadas forward por ponto de medição, e sofrem de cancelamento numérico para passos muito pequenos. As equações adjuntas permitem calcular **todos os gradientes** ∂H/∂ρ_k (para todas as `n` camadas simultaneamente) com o custo de apenas **2 soluções de problema adjunto** (forward + adjoint), independentemente de `n`.
+
+**Princípio:** Para a resposta escalar `J = <H, W>` (H = campo, W = vetor de pesos), o gradiente em relação a `m` (vetor de parâmetros do modelo) é:
+
+```
+∂J/∂m = Re( λ^H ∂A/∂m u )
+```
+
+onde `u` é a solução forward (`A u = s`), `λ` é a solução adjunta (`A^H λ = W`), e `A` é a matriz do sistema linear EM (coeficientes de reflexão acoplados).
+
+**Roadmap de implementação:**
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  IMPLEMENTAÇÃO EQUAÇÕES ADJUNTAS (3 etapas)                          │
+│                                                                      │
+│  Etapa 3.1.a (semana 1–2): Derivar equações adjuntas analíticas      │
+│    para os coeficientes de reflexão RTEdw, RTEup, RTMdw, RTMup       │
+│    em função de ρ_h e ρ_v (ver Habashy & Groom, 2004)               │
+│                                                                      │
+│  Etapa 3.1.b (semana 3–5): Implementar sub-rotina adjoint_solve()   │
+│    que resolve o problema transposto-conjugado usando os mesmos      │
+│    arrays de propagação (u, s, uh, sh) calculados no forward         │
+│                                                                      │
+│  Etapa 3.1.c (semana 6–8): Validar gradientes adjuntos contra        │
+│    diferenças finitas centradas para modelos simples (n ≤ 5)         │
+│    Critério: |grad_adj - grad_fd| / |grad_fd| < 0.1%                 │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Assinatura prevista:**
+
+```fortran
+subroutine adjoint_solve(n, npt, nf, camadT, camadR, &
+                         u_all, s_all, uh_all, sh_all, &
+                         RTEdw_all, RTEup_all, RTMdw_all, RTMup_all, &
+                         weight_H, eta, &
+                         dJdRho_h, dJdRho_v)
+  ! Calcula gradientes de funcional J = <H, weight_H> em relação a
+  ! rho_h(1:n) e rho_v(1:n) via solução adjunta.
+  ! Custo: equivalente a 2 avaliações forward (independente de n).
+  implicit none
+  integer, intent(in) :: n, npt, nf, camadT, camadR
+  complex(dp), intent(in) :: u_all(npt,n,nf), s_all(npt,n,nf)
+  complex(dp), intent(in) :: uh_all(npt,n,nf), sh_all(npt,n,nf)
+  complex(dp), intent(in) :: RTEdw_all(npt,n,nf), RTEup_all(npt,n,nf)
+  complex(dp), intent(in) :: RTMdw_all(npt,n,nf), RTMup_all(npt,n,nf)
+  complex(dp), intent(in) :: weight_H(nf,9)   ! pesos da funcional
+  real(dp),    intent(in) :: eta(n,2)
+  real(dp), intent(out) :: dJdRho_h(n), dJdRho_v(n)
+  ! ... implementação a desenvolver ...
+end subroutine adjoint_solve
+```
+
+---
+
+##### B3.2 — Aproximação de Born para Perturbações 2D
+
+**Motivação:** A aproximação de Born de primeira ordem permite modelar perturbações de resistividade em 2D (variação lateral) como integral de volume sobre o campo de background 1D. Esta extensão é fundamental para geosteering look-ahead — onde heterogeneidades laterais (falhas, bordas de camada) precisam ser detectadas antes de serem alcançadas pela broca.
+
+**Formulação:**
+
+```
+H_Born(r) = H_background(r) + ∫∫ G(r, r') · δσ(r') · E_background(r') d²r'
+```
+
+onde `G(r, r')` é o tensor Green EM 1D (calculado pelo simulador atual) e `δσ(r')` é a perturbação de condutividade 2D.
+
+**Implementação (esboço):**
+
+```fortran
+subroutine born_approximation_2D(nf, freq, n_background, resist_bg, esp_bg, &
+                                   dTR, h1, tj, p_med, &
+                                   n_pert, x_pert, z_pert, delta_sigma, &
+                                   H_born)
+  ! Calcula resposta EM de perturbação 2D usando aproximação de Born.
+  ! background = modelo 1D definido por resist_bg, esp_bg
+  ! perturbação = n_pert células 2D em posições (x_pert, z_pert)
+  !              com variação de condutividade delta_sigma
+  implicit none
+  integer, intent(in) :: nf, n_background, n_pert
+  real(dp), intent(in) :: freq(nf), resist_bg(n_background,2), esp_bg(n_background)
+  real(dp), intent(in) :: dTR, h1, tj, p_med
+  real(dp), intent(in) :: x_pert(n_pert), z_pert(n_pert), delta_sigma(n_pert)
+  complex(dp), intent(out) :: H_born(nf,9)
+
+  ! 1. Calcular campo E no background usando campo de campo elétrico
+  !    (requer extensão de hmd_TIV para calcular E além de H)
+  ! 2. Calcular tensor Green G(r_obs, r') para cada célula de perturbação
+  ! 3. Integrar: H_born = H_bg + sum_j G(r_obs, r'_j) * delta_sigma_j * E_bg(r'_j)
+  ! ... implementação progressiva em 4–6 semanas ...
+end subroutine born_approximation_2D
+```
+
+---
+
+##### B3.3 — Anisotropia Biaxial (σ_x ≠ σ_y ≠ σ_z)
+
+**Motivação:** O código atual modela anisotropia TIV (transversalmente isotrópica na vertical), com σ_h = σ_x = σ_y e σ_v = σ_z. Formações geológicas com acamamento inclinado ou estruturas sedimentares cruzadas podem exibir anisotropia ortorrômbica completa (biaxial): σ_x ≠ σ_y ≠ σ_z. Isso altera os coeficientes de reflexão TE/TM e a estrutura da transformada de Hankel.
+
+**Impacto na física:** Os modos TE e TM acoplam-se quando σ_x ≠ σ_y (o sistema deixa de ser diagonal no espaço de Hankel), exigindo solução de sistema 4×4 em vez do sistema 2×2 atual.
+
+**Estimativa de esforço:** 3–6 semanas para implementação completa, incluindo derivação das equações de propagação e validação analítica.
+
+---
+
+##### B3.4 — Paralelismo MPI para Execução em Cluster
+
+**Motivação:** Para a geração de conjuntos de dados de treinamento com >100.000 modelos geológicos, a execução em cluster de computadores (HPC) oferece speedup quase-linear com o número de nós. MPI divide os modelos entre nós, com cada nó usando OpenMP para paralelismo interno.
+
+**Estratégia híbrida MPI + OpenMP:**
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  ESTRATÉGIA HÍBRIDA MPI + OpenMP                                    │
+│                                                                     │
+│  Nível 1 (MPI): cada processo MPI recebe um subconjunto de modelos  │
+│    Processo 0: modelos 1–1000                                       │
+│    Processo 1: modelos 1001–2000                                    │
+│    ...                                                              │
+│    Processo P-1: modelos (P-1)*1000 – P*1000                        │
+│                                                                     │
+│  Nível 2 (OpenMP): cada processo usa N threads para paralelizar     │
+│    ângulos × medições (código existente em perfila1DanisoOMP)        │
+│                                                                     │
+│  Coleta: MPI_Reduce ou escrita independente por processo            │
+│  (sem comunicação MPI durante cálculo EM — zero dependência)        │
+│                                                                     │
+│  Escalabilidade esperada: > 95% efficiency até 100 nós              │
+│  (problema embaraçosamente paralelo por modelo)                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Implementação mínima em `RunAnisoOmp.f08`:**
+
+```fortran
+program RunAnisoOmpMPI
+  use mpi_f08  ! Fortran 2008 MPI interface (requer MPICH ou OpenMPI)
+  use DManisoTIV
+  implicit none
+
+  integer :: rank, nprocs, ierr
+  integer :: model_start, model_end, n_local
+
+  call MPI_Init(ierr)
+  call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
+  call MPI_Comm_size(MPI_COMM_WORLD, nprocs, ierr)
+
+  ! Distribuição de modelos: divisão estática por processo
+  n_local    = (nmaxmodel + nprocs - 1) / nprocs
+  model_start = rank * n_local + 1
+  model_end   = min(model_start + n_local - 1, nmaxmodel)
+
+  ! Cada processo simula seu subconjunto de modelos de forma independente
+  do modelm = model_start, model_end
+    call perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ...)
+  end do
+
+  ! Concatenar arquivos de saída (opcional: usar MPI-IO para escrita coletiva)
+  call MPI_Barrier(MPI_COMM_WORLD, ierr)
+  if (rank == 0) call concatenate_output_files(nprocs, mypath, filename)
+
+  call MPI_Finalize(ierr)
+end program RunAnisoOmpMPI
+```
+
+**Compilação com MPI + OpenMP:**
+
+```bash
+mpif90 -O3 -fopenmp -ffast-math \
+       parameters.f08 utils.f08 filtersv2.f08 \
+       magneticdipoles.f08 PerfilaAnisoOmp.f08 RunAnisoOmpMPI.f08 \
+       -o PerfilaAnisoOmp_mpi
+
+# Execução em cluster (SLURM):
+# srun --nodes=10 --ntasks-per-node=1 --cpus-per-task=16 \
+#      ./PerfilaAnisoOmp_mpi
+```
+
+---
+
+#### 12.8.4 Cronograma Integrado Pipelines A+B
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│  CRONOGRAMA INTEGRADO — PIPELINES A (OTIMIZAÇÃO) + B (NOVOS RECURSOS)           │
+│                                                                                  │
+│  Semana   Pipeline A (Otimização)            Pipeline B (Novos Recursos)         │
+│  ───────  ─────────────────────────────────  ─────────────────────────────────   │
+│     1     A1.1 workspace + A1.5 scheduler    B1.3 validação de entradas          │
+│     2     A1.2 cache commonarraysMD          B1.4 logging de progresso           │
+│     3     A1.3 collapse + A1.4 SIMD          B1.1 filtro adaptativo              │
+│     4     A1.6 cache camadT + benchmark F1   B1.2 multi-freq paralelo            │
+│     5     A2.1 protótipo OpenACC             B2.3 formato saída configurável     │
+│     6     A2.1 testes + validação GPU        B2.1 múltiplos receptores (dTR)     │
+│     7     A2.2 CUDA kernels Hankel           B2.2 gradientes FD (B2.2)           │
+│     8     A2.2 CUDA kernels coef. reflexão   B2.4 dip approximation              │
+│     9     A2.3 gerenciamento memória GPU     B2.4 testes dip + validação         │
+│    10     A2.4 batch models + A2.5 profiling  —                                  │
+│    11     A3 validação completa              B3.1 equações adjuntas (início)     │
+│    12     A3 benchmark final + documentação  B3.1 adjuntas (continuação)         │
+│    13–16  —                                  B3.2 Born 2D + B3.3 biaxial        │
+│    17–20  —                                  B3.4 MPI cluster                   │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Tabela de prioridade e dependências:**
+
+| Item | Fase | Prioridade | Depende de | Impacto para IA |
+|:-----|:----:|:----------:|:----------:|:----------------|
+| A1.1 Workspace pré-alocado | A1 | Alta | — | Reduz tempo de geração de dados |
+| A1.2 Cache commonarraysMD | A1 | Alta | — | Idem |
+| A1.4 SIMD Hankel | A1 | Alta | — | Idem |
+| B1.3 Validação entradas | B1 | Alta | — | Evita dados corrompidos no dataset |
+| B1.4 Logging progresso | B1 | Média | — | Monitoramento de simulações longas |
+| B1.1 Filtro adaptativo | B1 | Alta | — | Reduz custo em freq. baixas |
+| B2.1 Multi-receptor | B2 | Alta | B1.3 | Mais features para inversão |
+| B2.2 Gradientes FD | B2 | Alta | B1.3, B1.1 | Treinamento de PINNs |
+| A2.1 OpenACC | A2 | Média | A1 completo | 15–20× speedup no Colab GPU |
+| A2.2 CUDA Fortran | A2 | Média | A2.1 | 40–50× speedup no Colab GPU |
+| B2.4 Dip approximation | B2 | Média | B2.1 | Geosteering em poços direcionais |
+| B3.1 Adjuntas | B3 | Alta | B2.2 | Treinamento PINNs 20× mais rápido |
+| B3.4 MPI cluster | B3 | Média | A1 completo | Dataset >1M modelos viável |
+| B3.2 Born 2D | B3 | Baixa | B3.1 | Look-ahead geosteering |
+| B3.3 Biaxial | B3 | Baixa | B3.1 | Extensão física futura |
+
+**Estimativa de ROI (Retorno por Esforço) para geração de dataset de IA:**
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  ROI ESTIMADO — IMPACTO NO PIPELINE DE GERAÇÃO DE DADOS PARA IA    │
+│                                                                    │
+│  Cenário base:  1.000 modelos, 1 ângulo, 2 freq, 600 med           │
+│  Tempo atual:   ~40 minutos (16 threads, 2.4 s/mod)                │
+│                                                                    │
+│  Após Pipeline A Fase 1 (4 semanas de trabalho):                   │
+│    Tempo: ~8 min (0.5 s/mod, 16 threads)                           │
+│    Speedup: 4,8× | Dataset de 10.000 modelos: ~80 min             │
+│                                                                    │
+│  Após Pipeline A Fase 2 + B1 + B2 (12 semanas):                   │
+│    Tempo GPU: ~1.5 min (0.09 s/mod, A100 batch=1000)               │
+│    Speedup: 26× | Dataset de 100.000 modelos: ~2.5 horas          │
+│    + Gradientes FD: dataset com ∂H/∂ρ para PINNs                  │
+│                                                                    │
+│  Após Pipeline A Fase 2 + B3 MPI (20 semanas):                    │
+│    Cluster 10 nós × A100: ~1.000 modelos/min                       │
+│    Dataset de 1.000.000 modelos: ~16 horas                         │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+**Documentos de referência para as implementações acima:**
+
+- Werthmuller, D. (2017). "An open-source full 3D electromagnetic modeler for 1D VTI media in Python: empymod." *Geophysics*, 82(6), WB9–WB19. — filtro de 201 pontos e critérios de precisão.
+- Kong, F.N. (2007). "Hankel transform filters for dipole antenna radiation in a conductive medium." *Geophysical Prospecting*, 55(1), 83–89. — filtro de 61 pontos.
+- Anderson, W.L. (1979). "Numerical integration of related Hankel transforms of orders 0 and 1 by adaptive digital filtering." *Geophysics*, 44(7), 1287–1305. — filtro de 801 pontos.
+- Habashy, T.M. & Groom, R. (2004). "Adjoint method for computing electromagnetic sensitivities in layered anisotropic media." *Geophysical Journal International*, 159(2), 698–712. — base teórica para B3.1.
+- OpenMP Architecture Review Board (2023). "OpenMP 5.2 Specification." — `collapse`, `simd`, `schedule(guided)`.
+- NVIDIA Corporation (2023). "CUDA Fortran Programming Guide." — kernels CUDA para Fortran via NVHPC.
+
 ---
 
 ## 13. Análise de Reimplementação em Python Otimizado
@@ -2843,6 +4299,1759 @@ geosteering_ai/simulation/
 ├── cuda_kernels.py   ← Kernels CUDA (Numba CUDA) [opcional]
 └── validation.py     ← Comparação com Fortran
 ```
+
+
+### 13.9 Pipeline A — Conversão Fortran→Python Otimizado (Numba JIT)
+
+
+#### 13.9.1 Visão Geral do Pipeline A
+
+O Pipeline A cobre a conversão sistemática do código Fortran `PerfilaAnisoOmp` para Python otimizado com Numba JIT (CPU) e Numba CUDA (GPU). O objetivo é igualar ou superar o desempenho do Fortran compilado com OpenMP, mantendo exatamente a mesma física implementada — sem simplificações matemáticas — e expondo uma interface unificada compatível com `PipelineConfig`.
+
+**Diagrama de conversão:**
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                    PIPELINE A — CONVERSÃO FORTRAN → PYTHON                       │
+│                                                                                  │
+│  ┌─────────────────────────┐                                                     │
+│  │  Fortran (PerfilaAnisoOmp)│                                                   │
+│  │  commonarraysMD          │                                                     │
+│  │  hmd_TIV                 │◄── subroutines → Python functions                 │
+│  │  vmd_TIV                 │                                                     │
+│  │  convol1D (Hankel 201pt) │                                                     │
+│  │  rotate_tensor           │                                                     │
+│  └─────────────────────────┘                                                     │
+│             │                                                                    │
+│             ▼                                                                    │
+│  ┌────────────────────────────────────────────────────────────────┐              │
+│  │  FASE 1 — Protótipo NumPy                                      │              │
+│  │  Validação funcional: erro relativo < 1e-10 vs Fortran         │              │
+│  │  Tempo/modelo: ~4 s (10x mais lento que Fortran OpenMP)        │              │
+│  └────────────────────────────────────────────────────────────────┘              │
+│             │                                                                    │
+│             ▼                                                                    │
+│  ┌────────────────────────────────────────────────────────────────┐              │
+│  │  FASE 2 — Numba JIT CPU                                        │              │
+│  │  @njit(parallel=True) + prange sobre 201 pontos do filtro      │              │
+│  │  Tempo/modelo: ~0.4 s (equivalente ao Fortran OMP 8 cores)     │              │
+│  └────────────────────────────────────────────────────────────────┘              │
+│             │                                                                    │
+│             ▼                                                                    │
+│  ┌────────────────────────────────────────────────────────────────┐              │
+│  │  FASE 3 — Numba CUDA GPU                                       │              │
+│  │  CUDA kernels + batching de múltiplos modelos                  │              │
+│  │  Throughput: ~50 modelos/s (RTX 3090) vs ~2.5 modelos/s (OMP) │              │
+│  └────────────────────────────────────────────────────────────────┘              │
+│             │                                                                    │
+│             ▼                                                                    │
+│  ┌────────────────────────────────────────────────────────────────┐              │
+│  │  ForwardSimulator(config, backend='cpu'|'gpu')                 │              │
+│  │  Interface unificada — seleção via PipelineConfig              │              │
+│  └────────────────────────────────────────────────────────────────┘              │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Metas de desempenho (modelo típico: 20 camadas, 600 medições, 1 frequência):**
+
+| Backend | Tempo/modelo | Throughput | Quando usar |
+|:--------|:------------|:-----------|:------------|
+| Fortran (single-core) | ~2.4 s | ~0.4 mod/s | Referência |
+| Fortran (OMP 8 cores) | ~0.4 s | ~2.5 mod/s | Referência |
+| Numba CPU (8 cores) | ~0.4 s | ~2.5 mod/s | Sem GPU disponível |
+| Numba CUDA (batch=32) | ~0.02 s | ~50 mod/s | Colab Pro+ GPU |
+
+**Mecanismo de seleção CPU vs GPU via `PipelineConfig`:**
+
+```python
+from geosteering_ai.config import PipelineConfig
+
+# Seleção via preset:
+config = PipelineConfig.geosinais_p4()      # default: backend='cpu'
+config = PipelineConfig.robusto()           # default: backend='cpu'
+
+# Seleção explícita no YAML:
+# configs/gpu_training.yaml:
+#   simulation_backend: "gpu"
+#   simulation_batch_size: 32
+#   simulation_fallback_to_cpu: true
+
+config = PipelineConfig.from_yaml("configs/gpu_training.yaml")
+```
+
+---
+
+#### 13.9.2 Fase 1 — Protótipo NumPy Vetorizado (Validação Funcional)
+
+A Fase 1 converte cada sub-rotina Fortran para uma função Python usando NumPy puro, vetorizando sobre as 201 posições do filtro de Hankel. O objetivo não é desempenho, mas **correção física verificável** contra a saída de referência do Fortran.
+
+**Tabela de mapeamento Fortran → Python:**
+
+| Sub-rotina Fortran | Função Python | Módulo | Operação Principal |
+|:-------------------|:--------------|:-------|:-------------------|
+| `commonarraysMD` | `compute_propagation_constants()` | `propagation.py` | Constantes u, s; coeficientes TE/TM por recursão |
+| `hmd_TIV` | `compute_hmd_fields()` | `dipoles.py` | Montagem dos campos HMD (6 componentes do tensor H) |
+| `vmd_TIV` | `compute_vmd_fields()` | `dipoles.py` | Montagem dos campos VMD (3 componentes diagonais) |
+| `convol1D` | `hankel_transform()` | `hankel.py` | Convolução discreta com filtro de 201 pontos (J0/J1) |
+| `rotate_tensor` | `rotate_tensor_tiv()` | `rotation.py` | Rotação do tensor H(3×3) para coordenadas do poço |
+| `geometry_setup` | `build_tr_geometry()` | `geometry.py` | Posições T-R para 600 medições |
+| *(carregamento de filtros)* | `load_filter_coefficients()` | `filters.py` | Tabela de 201 coeficientes (Werthmuller 2006) |
+
+**Protocolo de validação contra a saída Fortran:**
+
+```python
+# validation.py — protocolo de validação Fase 1
+import numpy as np
+from geosteering_ai.simulation.forward import ForwardSimulator
+from geosteering_ai.simulation.validation import load_fortran_reference
+
+def validate_phase1(config, reference_dat_path: str) -> dict:
+    """Compara saída Python (NumPy) contra arquivo .dat do Fortran.
+
+    Critério de aceitação:
+        max_rel_error < 1e-10   (Re e Im de todas as componentes)
+        mean_rel_error < 1e-12  (valor esperado: ~1e-14 com float64)
+
+    Args:
+        config: PipelineConfig com parâmetros do modelo de teste.
+        reference_dat_path: Caminho para o arquivo .dat gerado pelo Fortran.
+
+    Returns:
+        Dicionário com métricas de validação por componente do tensor H.
+    """
+    sim = ForwardSimulator(config, backend='numpy')
+    H_python = sim.simulate_model(config.test_model)   # (600, 9) complexo
+
+    H_fortran = load_fortran_reference(reference_dat_path)  # (600, 9) complexo
+
+    results = {}
+    component_names = ['Hxx','Hxy','Hxz','Hyx','Hyy','Hyz','Hzx','Hzy','Hzz']
+    for k, name in enumerate(component_names):
+        ref = H_fortran[:, k]
+        pred = H_python[:, k]
+        # Erro relativo: |pred - ref| / (|ref| + eps) para evitar divisão por zero
+        rel_err = np.abs(pred - ref) / (np.abs(ref) + 1e-30)
+        results[name] = {
+            'max_rel_error':  float(rel_err.max()),
+            'mean_rel_error': float(rel_err.mean()),
+            'passed': bool(rel_err.max() < 1e-10),
+        }
+    return results
+```
+
+**Estratégia de vetorização NumPy para os 201 pontos do filtro:**
+
+Os coeficientes do filtro de Hankel de 201 pontos — que no Fortran são iterados em um laço `do i=1,npt` (com `npt=201`) — são totalmente vetorizados em NumPy usando broadcasting:
+
+```python
+import numpy as np
+
+def hankel_transform(f_kr: np.ndarray, kr: np.ndarray,
+                     filter_j0: np.ndarray, filter_j1: np.ndarray,
+                     r: float) -> tuple:
+    """Transformada de Hankel discreta via filtro de 201 pontos.
+
+    Implementação vetorizada NumPy do laço Fortran convol1D.
+
+    Física:
+        F_J0(r) = (1/r) * sum_i[ f(kr_i) * J0(kr_i * r) * w_i ]
+        F_J1(r) = (1/r) * sum_i[ f(kr_i) * J1(kr_i * r) * w_i ]
+
+        Os pesos w_i estão pré-incorporados nos coeficientes do filtro
+        (Werthmuller 2006), então a convolução é simplesmente um produto
+        interno entre f(kr) e os coeficientes interpolados na posição r.
+
+    Args:
+        f_kr: Array (201,) complexo — integrando avaliado em cada kr_i.
+        kr: Array (201,) float64 — nós de wavenumber do filtro.
+        filter_j0: Array (201,) float64 — coeficientes para J0.
+        filter_j1: Array (201,) float64 — coeficientes para J1.
+        r: float — distância radial T-R (metros), igual a spacing_meters.
+
+    Returns:
+        Tupla (F_J0, F_J1): escalares complexos — integrais de Hankel.
+
+    Note:
+        Ref: Werthmuller D. (2006) — filtros de 201 pontos J0/J1.
+             No Fortran: loop `do i=1,npt; soma += f(i)*coef(i); end do`.
+             Aqui substituído por produto interno NumPy (sem loop Python).
+    """
+    # ── Vetorização do laço de 201 pontos ──────────────────────────────────
+    # No Fortran: `do i=1,201; field_j0 += f_kr(i)*fj0(i); enddo`
+    # Aqui: produto interno vetorizado — equivalente mas sem laço Python.
+    # Shape: f_kr=(201,) complexo, filter_j0=(201,) real → escalar complexo.
+    F_J0 = np.dot(filter_j0, f_kr) / r
+    F_J1 = np.dot(filter_j1, f_kr) / r
+    return F_J0, F_J1
+```
+
+**Modelos canônicos de teste para validação (10 modelos):**
+
+| Modelo | Camadas | rho_h (Ohm.m) | rho_v (Ohm.m) | Espessura (m) | Dificuldade |
+|:-------|:-------:|:-------------|:-------------|:-------------|:------------|
+| M01 — Homogêneo isotropico | 1 | 10.0 | 10.0 | ∞ | Trivial |
+| M02 — Homogêneo TIV | 1 | 5.0 | 20.0 | ∞ | Básica |
+| M03 — 3 camadas simples | 3 | 1/10/1 | 1/10/1 | 20/20 m | Básica |
+| M04 — 5 camadas TIV | 5 | misto | misto | 10 m cada | Média |
+| M05 — Camadas finas (2 m) | 10 | alternado 1/100 | alternado | 2 m cada | Difícil |
+| M06 — Contraste extremo | 3 | 0.1/10000/0.1 | igual | 30/20 m | Difícil |
+| M07 — Anisotropia alta | 5 | 1–10 | 10–100 | 15 m cada | Difícil |
+| M08 — Muitas camadas | 40 | amostrado | amostrado | 1–5 m | Alta |
+| M09 — Camadas muito finas | 20 | alternado | alternado | 0.5 m | Extrema |
+| M10 — Máxima complexidade | 80 | Sobol | Sobol | Sobol | Extrema |
+
+---
+
+#### 13.9.3 Fase 2 — Numba JIT CPU (Performance Igual ou Superior ao Fortran)
+
+A Fase 2 reescreve as funções críticas com decoradores Numba `@njit`, habilitando compilação JIT ahead-of-time e paralelismo automático sobre os 201 pontos do filtro. O resultado esperado é desempenho equivalente ao Fortran com 8 cores OpenMP em um único processo Python.
+
+**Decoradores e configurações Numba:**
+
+```python
+from numba import njit, prange
+import numpy as np
+
+# ── Configuração padrão para kernels críticos ──────────────────────────────
+# parallel=True: habilita paralelismo automático com prange (equivalente a omp parallel do)
+# cache=True: salva bytecode compilado em disco — evita recompilação entre runs
+# fastmath=True: permite reordenação de FP para maior throughput (seguro aqui pois
+#                resultados são comparados com rtol=1e-6 apenas para desempenho)
+# nogil=True: libera GIL Python — permite paralelismo externo via threading
+_NJIT_OPTS = dict(parallel=True, cache=True, fastmath=True, nogil=True)
+```
+
+**Estratégia de pré-alocação de memória (evitar pressão no GC):**
+
+```python
+@njit(**_NJIT_OPTS)
+def compute_propagation_constants(
+    kr: np.ndarray,          # (npt=201,) float64 — wavenumbers do filtro
+    eta_h: np.ndarray,       # (n_layers,) complex128 — admitância horizontal por camada
+    eta_v: np.ndarray,       # (n_layers,) complex128 — admitância vertical por camada
+    zeta: np.ndarray,        # (n_layers,) complex128 — impedância magnética por camada
+    h: np.ndarray,           # (n_layers-1,) float64 — espessuras (m)
+    workspace: np.ndarray,   # (npt, n_layers, 6) complex128 — workspace pré-alocado
+) -> tuple:
+    """Calcula constantes de propagação u, s e coeficientes TE/TM por recursão.
+
+    Implementação Numba JIT do Fortran commonarraysMD, com paralelismo
+    sobre os 201 pontos do filtro de Hankel via prange.
+
+    Física:
+        Para cada wavenumber kr_i (i=1..201) e cada camada j (j=1..n):
+            u_j = sqrt(kr_i^2 - zeta_j * eta_h_j)   [modo TE, componente z]
+            s_j = sqrt(kr_i^2 - zeta_j * eta_v_j)   [modo TM, componente z]
+
+        Recursão de cima para baixo (interface n-1 → n-2 → ... → 1):
+            RTE_dw_j = (u_j - u_{j+1}) / (u_j + u_{j+1}) * exp(-2*u_{j+1}*h_j)
+            RTM_dw_j = analogamente com s e eta
+
+        A recursão é SEQUENCIAL em j (dependência de dados) mas PARALELA em i.
+        Isso mapeia diretamente para prange(npt) com loop interno sequencial.
+
+    Args:
+        kr: Wavenumbers do filtro de 201 pontos (espaçados logaritmicamente).
+        eta_h: Admitância horizontal: eta_h_j = sigma_h_j / (i*omega*mu0).
+        eta_v: Admitância vertical: eta_v_j = sigma_v_j / (i*omega*mu0).
+        zeta: Impedância magnética: zeta_j = i*omega*mu0 (homogêneo em mu).
+        h: Espessuras das camadas em metros (n_layers - 1 valores).
+        workspace: Array pré-alocado para u, s, RTE_dw, RTM_dw, RTE_up, RTM_up.
+                   Shape (201, n_layers, 6) — evita alocação dentro do loop JIT.
+
+    Returns:
+        Tupla (u, s, RTE_dw, RTM_dw, RTE_up, RTM_up): vistas do workspace.
+
+    Note:
+        Ref: Chew W.C. (1995) §2.4 — recursão de coeficientes de reflexão.
+        O workspace pré-alocado elimina malloc/free dentro do loop JIT,
+        reduzindo overhead de GC e fragmentação de cache L1/L2.
+    """
+    npt = kr.shape[0]
+    n   = eta_h.shape[0]
+
+    # ── Vistas nomeadas do workspace pré-alocado ──────────────────────────
+    # workspace[:,:,0] = u   | workspace[:,:,1] = s
+    # workspace[:,:,2] = RTE_dw | workspace[:,:,3] = RTM_dw
+    # workspace[:,:,4] = RTE_up | workspace[:,:,5] = RTM_up
+    u       = workspace[:, :, 0]
+    s       = workspace[:, :, 1]
+    RTE_dw  = workspace[:, :, 2]
+    RTM_dw  = workspace[:, :, 3]
+    RTE_up  = workspace[:, :, 4]
+    RTM_up  = workspace[:, :, 5]
+
+    # ── Loop paralelo sobre os 201 pontos do filtro (equivalente a omp parallel do) ──
+    # Cada thread processa um kr_i independentemente.
+    # O loop interno sobre camadas (j) é sequencial por dependência de dados.
+    for i in prange(npt):
+        kri2 = kr[i] * kr[i]
+
+        # ── Constantes de propagação por camada ────────────────────────
+        # u_j (modo TE): raiz do wavenumber vertical em cada camada.
+        # s_j (modo TM): idêntico mas com eta_v em vez de eta_h.
+        # Convenção de branch cut: Re(u) >= 0 para garantir decaimento físico.
+        for j in range(n):
+            u[i, j] = _csqrt_positive_real(kri2 - zeta[j] * eta_h[j])
+            s[i, j] = _csqrt_positive_real(kri2 - zeta[j] * eta_v[j])
+
+        # ── Recursão de baixo para cima: coeficientes de reflexão ──────
+        # Camada mais profunda: sem reflexão (meio semi-infinito).
+        RTE_dw[i, n-1] = 0.0 + 0.0j
+        RTM_dw[i, n-1] = 0.0 + 0.0j
+
+        for j in range(n-2, -1, -1):
+            exp_term = np.exp(-2.0 * u[i, j+1] * h[j])
+            denom_TE = u[i,j] + u[i,j+1] + (u[i,j] - u[i,j+1]) * RTE_dw[i,j+1] * exp_term
+            RTE_dw[i,j] = ((u[i,j] - u[i,j+1]) + (u[i,j] + u[i,j+1]) * RTE_dw[i,j+1] * exp_term) / denom_TE
+
+            # ── Modo TM: substitui u→s e eta_h→eta_v (Liu 2017, eq. 2.38) ──
+            exp_s = np.exp(-2.0 * s[i, j+1] * h[j])
+            r_s   = eta_h[j+1] * s[i,j] - eta_h[j] * s[i,j+1]
+            r_s_d = eta_h[j+1] * s[i,j] + eta_h[j] * s[i,j+1]
+            RTM_dw[i,j] = (r_s + r_s_d * RTM_dw[i,j+1] * exp_s) / (r_s_d + r_s * RTM_dw[i,j+1] * exp_s)
+
+    return u, s, RTE_dw, RTM_dw, RTE_up, RTM_up
+```
+
+**Exemplo de transformada de Hankel com Numba (função crítica):**
+
+```python
+@njit(parallel=True, cache=True, fastmath=True)
+def hankel_transform_batch(
+    f_kr_batch: np.ndarray,   # (n_meas, npt) complex128 — integrando para cada medição
+    filter_j0:  np.ndarray,   # (npt=201,) float64 — coeficientes J0
+    filter_j1:  np.ndarray,   # (npt=201,) float64 — coeficientes J1
+    r: float,                 # float64 — distância T-R em metros
+    out_j0: np.ndarray,       # (n_meas,) complex128 — resultado J0 (pré-alocado)
+    out_j1: np.ndarray,       # (n_meas,) complex128 — resultado J1 (pré-alocado)
+) -> None:
+    """Transformada de Hankel em lote para todas as medições (Numba JIT paralelo).
+
+    Vetoriza o laço Fortran convol1D sobre todas as n_meas posições T-R de forma
+    paralela. Cada thread processa uma medição independentemente (prange outer),
+    e o produto interno de 201 pontos é executado sequencialmente (inner loop).
+
+    Note:
+        In-place: resultados escritos em out_j0 e out_j1 (sem retorno).
+        O uso de arrays pré-alocados evita alocação dentro do kernel JIT.
+    """
+    n_meas = f_kr_batch.shape[0]
+    inv_r  = 1.0 / r
+
+    # ── Paralelismo externo: cada medição processada por uma thread ──────
+    for m in prange(n_meas):
+        acc_j0 = 0.0 + 0.0j
+        acc_j1 = 0.0 + 0.0j
+        # ── Loop interno sequencial: produto interno com filtro de 201 pts ──
+        for i in range(201):
+            acc_j0 += filter_j0[i] * f_kr_batch[m, i]
+            acc_j1 += filter_j1[i] * f_kr_batch[m, i]
+        out_j0[m] = acc_j0 * inv_r
+        out_j1[m] = acc_j1 * inv_r
+```
+
+**Padrão de workspace thread-local no Numba:**
+
+```python
+# ── Criação de workspace thread-local (evita race conditions) ────────────
+# No Numba, arrays criados dentro de prange são thread-local automaticamente.
+# Para arrays grandes, pré-alocar fora do loop e usar slices por thread.
+
+def build_workspace(n_layers: int, npt: int = 201) -> np.ndarray:
+    """Aloca workspace pré-inicializado para o kernel de propagação.
+
+    O workspace de shape (npt, n_layers, 6) representa 6 arrays complexos
+    [u, s, RTE_dw, RTM_dw, RTE_up, RTM_up], todos de shape (npt, n_layers).
+    A pré-alocação antes do loop JIT elimina malloc dentro do kernel.
+
+    Returns:
+        np.ndarray de shape (201, n_layers, 6), dtype=complex128, zerado.
+    """
+    return np.zeros((npt, n_layers, 6), dtype=np.complex128)
+```
+
+---
+
+#### 13.9.4 Fase 3 — Numba CUDA GPU (Alta Performance)
+
+A Fase 3 reescreve os kernels críticos como CUDA kernels via `numba.cuda.jit`, explorando o paralelismo massivo da GPU para processar múltiplos modelos geológicos simultaneamente. O mapeamento principal é: **uma thread por ponto do filtro × uma warp por camada × um block por medição × um grid por modelo**.
+
+**Design de kernels CUDA:**
+
+```python
+import numba.cuda as cuda
+import numpy as np
+import math
+
+# ── Kernel CUDA: constantes de propagação para batch de modelos ──────────
+# Grid: (n_models, n_meas_per_model)
+# Block: (npt=201,)  — 201 threads por block, uma por ponto do filtro
+# Constraint: npt=201 ≤ 1024 (max threads/block) — satisfeito.
+@cuda.jit
+def kernel_propagation_constants(
+    kr,           # (npt,) float64 — wavenumbers do filtro (constante)
+    eta_h_batch,  # (n_models, n_layers) complex128
+    eta_v_batch,  # (n_models, n_layers) complex128
+    zeta_batch,   # (n_models, n_layers) complex128
+    h_batch,      # (n_models, n_layers-1) float64
+    n_layers_arr, # (n_models,) int32 — número de camadas por modelo
+    u_out,        # (n_models, npt, n_layers_max) complex128 — saída u
+    s_out,        # (n_models, npt, n_layers_max) complex128 — saída s
+    RTE_dw_out,   # (n_models, npt, n_layers_max) complex128
+    RTM_dw_out,   # (n_models, npt, n_layers_max) complex128
+):
+    """CUDA kernel: constantes de propagação para batch de modelos.
+
+    Mapeamento thread → dado:
+        thread_x (0..200) → ponto do filtro kr_i
+        block_y           → índice do modelo geológico
+    A recursão sobre camadas permanece sequencial dentro de cada thread
+    (dependência de dados impossibilita paralelismo adicional nessa dimensão).
+    """
+    i     = cuda.threadIdx.x    # ponto do filtro (0..200)
+    m_idx = cuda.blockIdx.y     # índice do modelo
+
+    if i >= 201:
+        return
+    n = n_layers_arr[m_idx]
+    kri2 = kr[i] * kr[i]
+
+    # ── Constantes de propagação (u, s) para cada camada ─────────────
+    for j in range(n):
+        arg_u = kri2 - zeta_batch[m_idx, j] * eta_h_batch[m_idx, j]
+        arg_s = kri2 - zeta_batch[m_idx, j] * eta_v_batch[m_idx, j]
+        # Raiz quadrada com branch cut em Re >= 0 (física)
+        u_out[m_idx, i, j]  = _cuda_csqrt(arg_u)
+        s_out[m_idx, i, j]  = _cuda_csqrt(arg_s)
+
+    # ── Recursão de baixo para cima: coeficientes de reflexão ────────
+    RTE_dw_out[m_idx, i, n-1] = 0.0 + 0.0j
+    RTM_dw_out[m_idx, i, n-1] = 0.0 + 0.0j
+
+    for j in range(n-2, -1, -1):
+        u_j   = u_out[m_idx, i, j]
+        u_jp1 = u_out[m_idx, i, j+1]
+        exp_u = cuda.libdevice.cexp(-2.0 * u_jp1 * h_batch[m_idx, j])
+        num   = (u_j - u_jp1) + (u_j + u_jp1) * RTE_dw_out[m_idx, i, j+1] * exp_u
+        den   = (u_j + u_jp1) + (u_j - u_jp1) * RTE_dw_out[m_idx, i, j+1] * exp_u
+        RTE_dw_out[m_idx, i, j] = num / den
+        # ── Modo TM: análogo com s e eta_h ──────────────────────────
+        # (omitido por brevidade — estrutura idêntica ao modo TE)
+```
+
+**Estratégia de gerenciamento de memória GPU:**
+
+```python
+class CudaSimulationContext:
+    """Contexto CUDA: pré-aloca arrays no device para batch de modelos.
+
+    Evita transferências Host→Device a cada chamada, mantendo buffers
+    persistentes no device para o tamanho máximo de batch configurado.
+
+    Atributos:
+        batch_size: Número máximo de modelos por batch (default: 32).
+        n_layers_max: Número máximo de camadas (default: 80).
+        n_meas: Número de medições por modelo (= config.sequence_length).
+        npt: Pontos do filtro de Hankel (= 201).
+
+    Uso:
+        ctx = CudaSimulationContext(config)
+        with ctx:
+            H_tensor = ctx.simulate_batch(models_list)
+    """
+
+    def __init__(self, config):
+        self.batch_size   = config.simulation_batch_size    # default: 32
+        self.n_layers_max = config.max_layers               # default: 80
+        self.n_meas       = config.sequence_length          # default: 600
+        self.npt          = 201
+        self._allocate_device_buffers()
+
+    def _allocate_device_buffers(self):
+        """Pré-aloca buffers persistentes no device (GPU DRAM)."""
+        B, L, M, P = self.batch_size, self.n_layers_max, self.n_meas, self.npt
+        # ── Arrays de entrada (parâmetros geológicos por modelo) ──────
+        self.d_eta_h   = cuda.device_array((B, L), dtype=np.complex128)
+        self.d_eta_v   = cuda.device_array((B, L), dtype=np.complex128)
+        self.d_zeta    = cuda.device_array((B, L), dtype=np.complex128)
+        self.d_h       = cuda.device_array((B, L-1), dtype=np.float64)
+        self.d_nlayers = cuda.device_array((B,), dtype=np.int32)
+        # ── Arrays intermediários (propagação) ─────────────────────
+        self.d_u       = cuda.device_array((B, P, L), dtype=np.complex128)
+        self.d_s       = cuda.device_array((B, P, L), dtype=np.complex128)
+        self.d_RTE_dw  = cuda.device_array((B, P, L), dtype=np.complex128)
+        self.d_RTM_dw  = cuda.device_array((B, P, L), dtype=np.complex128)
+        # ── Array de saída (tensor H por modelo × medição) ─────────
+        self.d_H_tensor = cuda.device_array((B, M, 9), dtype=np.complex128)
+
+    def simulate_batch(self, models: list) -> np.ndarray:
+        """Simula batch de modelos geológicos na GPU.
+
+        Args:
+            models: Lista de dicionários com chaves 'rho_h', 'rho_v',
+                    'thicknesses', 'n_layers'. Comprimento <= batch_size.
+
+        Returns:
+            np.ndarray de shape (len(models), n_meas, 9) complex128 —
+            tensor H completo para cada modelo e medição.
+        """
+        n = len(models)
+        # ── Transferência Host→Device (apenas parâmetros geológicos) ──
+        self._upload_models(models)
+        # ── Lançamento dos kernels CUDA em sequência ──────────────────
+        threads_per_block = (201, 1)      # 201 threads: um por ponto do filtro
+        blocks_per_grid   = (1, n)        # n blocks: um por modelo no batch
+        kernel_propagation_constants[blocks_per_grid, threads_per_block](
+            self.d_kr, self.d_eta_h, self.d_eta_v, self.d_zeta,
+            self.d_h, self.d_nlayers, self.d_u, self.d_s,
+            self.d_RTE_dw, self.d_RTM_dw
+        )
+        # ... lançamento dos kernels HMD, VMD, Hankel, Rotation ...
+        cuda.synchronize()
+        # ── Transferência Device→Host (somente tensor H final) ────────
+        return self.d_H_tensor[:n].copy_to_host()
+```
+
+**Otimização de ocupância CUDA:**
+
+```python
+# ── Análise de ocupância para o kernel de propagação ─────────────────────
+# threads_per_block = 201  → PROBLEMA: não é múltiplo de 32 (warp size)
+# Recomendação: padear para 224 (7×32) com guard `if i >= 201: return`
+# Resultado: 7 warps × 32 threads = 224 threads/block → melhor coalescing
+
+# Para o kernel de Hankel (redução):
+# Usar 256 threads/block com shared memory para redução em árvore
+# Cada block processa uma medição, cada thread acumula 201/256 ≈ 1 ponto
+
+@cuda.jit
+def kernel_hankel_reduction(f_kr_batch, filter_j0, filter_j1, r, out_j0, out_j1):
+    """CUDA kernel de Hankel com redução em shared memory.
+
+    Usa shared memory para acumular parcialmente o produto interno de 201
+    pontos, reduzindo conflitos de banco e acessos a global memory.
+    Block: (256,) — shared: (256,) complex128 × 2 = 4 KB (dentro do limite).
+    """
+    shared_j0 = cuda.shared.array(shape=256, dtype=numba.complex128)
+    shared_j1 = cuda.shared.array(shape=256, dtype=numba.complex128)
+    tid   = cuda.threadIdx.x
+    m_idx = cuda.blockIdx.x    # uma medição por block
+
+    # ── Acumulação parcial: cada thread cobre i=tid (201 < 256) ──────
+    acc0 = 0.0 + 0.0j
+    acc1 = 0.0 + 0.0j
+    if tid < 201:
+        acc0 = filter_j0[tid] * f_kr_batch[m_idx, tid]
+        acc1 = filter_j1[tid] * f_kr_batch[m_idx, tid]
+    shared_j0[tid] = acc0
+    shared_j1[tid] = acc1
+    cuda.syncthreads()
+
+    # ── Redução em árvore (tree reduction) ───────────────────────────
+    stride = 128
+    while stride > 0:
+        if tid < stride:
+            shared_j0[tid] += shared_j0[tid + stride]
+            shared_j1[tid] += shared_j1[tid + stride]
+        cuda.syncthreads()
+        stride //= 2
+
+    if tid == 0:
+        out_j0[m_idx] = shared_j0[0] / r
+        out_j1[m_idx] = shared_j1[0] / r
+```
+
+---
+
+#### 13.9.5 Interface Unificada CPU/GPU
+
+A classe `ForwardSimulator` expõe uma API idêntica independentemente do backend, com fallback automático de GPU para CPU quando CUDA não está disponível.
+
+```python
+# geosteering_ai/simulation/forward.py
+
+from __future__ import annotations
+import logging
+from dataclasses import dataclass
+from typing import Literal
+import numpy as np
+
+from geosteering_ai.config import PipelineConfig
+
+logger = logging.getLogger("geosteering_ai.simulation.forward")
+
+
+@dataclass
+class SimulationResult:
+    """Resultado de uma simulação EM 1D para um único modelo geológico.
+
+    Atributos:
+        H_tensor: Array (n_meas, 9) complex128 — tensor H completo rotacionado.
+                  Colunas: [Hxx, Hxy, Hxz, Hyx, Hyy, Hyz, Hzx, Hzy, Hzz]
+                  em coordenadas do poço (após rotação).
+        z_obs: Array (n_meas,) float64 — profundidades de medição (m).
+        backend_used: 'numpy' | 'numba_cpu' | 'numba_cuda' — backend efetivo.
+        time_seconds: float — tempo de simulação em segundos.
+    """
+    H_tensor:     np.ndarray
+    z_obs:        np.ndarray
+    backend_used: str
+    time_seconds: float
+
+
+class ForwardSimulator:
+    """Simulador EM 1D TIV com interface unificada CPU/GPU.
+
+    Encapsula os três backends (NumPy, Numba CPU, Numba CUDA) e expõe
+    uma API consistente integrada com PipelineConfig. A seleção de backend
+    é feita via config.simulation_backend, com fallback automático.
+
+    Estrutura interna:
+      ┌─────────────────────────────────────────────────────────────────┐
+      │  ForwardSimulator(config)                                        │
+      │       │                                                          │
+      │       ├── backend='numpy'      → _NumPyBackend                  │
+      │       ├── backend='cpu'        → _NumbaCPUBackend               │
+      │       └── backend='gpu'        → _NumbaCUDABackend              │
+      │                                    │                             │
+      │                               Fallback automático               │
+      │                               se CUDA indisponível              │
+      │                               → _NumbaCPUBackend                │
+      └─────────────────────────────────────────────────────────────────┘
+
+    Exemplo de uso:
+        config = PipelineConfig.from_yaml("configs/gpu_training.yaml")
+        sim = ForwardSimulator(config)
+        result = sim.simulate(model_params)    # simulação única
+        H_batch = sim.simulate_batch(models)   # batch de modelos
+
+    Note:
+        Ref: Seção 13.9 de documentacao_simulador_fortran.md.
+        Integração com tf.data: usar simulate_batch em tf.py_function
+        dentro do map_fn do DataPipeline (Seção 13.10.1).
+    """
+
+    def __init__(
+        self,
+        config: PipelineConfig,
+        backend: Literal['auto', 'numpy', 'cpu', 'gpu'] = 'auto',
+    ):
+        self.config = config
+        # ── Seleção de backend com fallback automático ─────────────────
+        # 1. Se backend='auto', usa config.simulation_backend (default: 'cpu').
+        # 2. Se backend='gpu' mas CUDA indisponível, faz fallback para 'cpu'.
+        # 3. Se backend='numpy', usa NumPy puro (apenas para validação/debug).
+        requested = backend if backend != 'auto' else config.simulation_backend
+        self._backend = self._resolve_backend(requested)
+        self._impl    = self._build_impl(self._backend, config)
+        logger.info("ForwardSimulator iniciado: backend=%s", self._backend)
+
+    @staticmethod
+    def _resolve_backend(requested: str) -> str:
+        """Resolve backend com fallback: gpu → cpu se CUDA indisponível."""
+        if requested == 'gpu':
+            try:
+                from numba import cuda as numba_cuda
+                if not numba_cuda.is_available():
+                    raise RuntimeError("CUDA não disponível")
+                return 'gpu'
+            except Exception as e:
+                logger.warning(
+                    "Fallback GPU→CPU: %s. Usando Numba JIT CPU.", e
+                )
+                return 'cpu'
+        return requested
+
+    def simulate(self, model_params: dict) -> SimulationResult:
+        """Simula um único modelo geológico.
+
+        Args:
+            model_params: Dicionário com chaves obrigatórias:
+                'rho_h'       : np.ndarray (n_layers,) — resistividade horizontal (Ohm.m)
+                'rho_v'       : np.ndarray (n_layers,) — resistividade vertical (Ohm.m)
+                'thicknesses' : np.ndarray (n_layers-1,) — espessuras das camadas (m)
+                'dip_deg'     : float — ângulo de mergulho em graus (default: 0.0)
+
+        Returns:
+            SimulationResult com tensor H e metadados.
+        """
+        return self._impl.simulate_single(model_params)
+
+    def simulate_batch(self, models: list[dict]) -> np.ndarray:
+        """Simula batch de modelos geológicos.
+
+        Args:
+            models: Lista de dicionários (mesmo formato de simulate()).
+                    Comprimento recomendado: múltiplo de config.simulation_batch_size.
+
+        Returns:
+            np.ndarray de shape (len(models), config.sequence_length, 9) complex128.
+        """
+        return self._impl.simulate_batch(models)
+
+    @property
+    def backend(self) -> str:
+        """Backend efetivo em uso ('numpy', 'cpu' ou 'gpu')."""
+        return self._backend
+```
+
+**Integração com `PipelineConfig` (campos a adicionar):**
+
+```python
+# Em geosteering_ai/config.py — novos campos para o módulo simulation/
+
+@dataclass
+class PipelineConfig:
+    # ... campos existentes ...
+
+    # ── Configuração do Simulador Python (Seção 13) ───────────────────────
+    # simulation_backend: backend padrão para ForwardSimulator.
+    #   'cpu': Numba JIT com paralelismo OpenMP-equivalente (default).
+    #   'gpu': Numba CUDA — requer GPU com CUDA 11.x+.
+    #   'numpy': NumPy puro — apenas para validação, ~10x mais lento.
+    simulation_backend: str = "cpu"
+
+    # simulation_batch_size: número de modelos por batch na GPU.
+    #   Valor ótimo depende da VRAM disponível e n_layers_max.
+    #   GPU 8 GB (T4/Colab): batch_size=32 (modelo típico 20 camadas).
+    #   GPU 24 GB (RTX 3090): batch_size=128.
+    simulation_batch_size: int = 32
+
+    # simulation_fallback_to_cpu: se True, faz fallback automático GPU→CPU.
+    #   Recomendado: True (para compatibilidade em ambientes sem CUDA).
+    simulation_fallback_to_cpu: bool = True
+
+    # simulation_n_workers: threads Numba para backend CPU.
+    #   None = auto-detectar (usa todos os cores físicos disponíveis).
+    simulation_n_workers: int | None = None
+
+    # simulation_validate_on_init: se True, valida backend contra NumPy
+    #   durante __init__ do ForwardSimulator (aumenta tempo de inicialização ~2s).
+    simulation_validate_on_init: bool = False
+```
+
+---
+
+### 13.10 Pipeline B — Novos Recursos da Versão Python
+
+A versão Python do simulador desbloqueia capacidades fundamentalmente impossíveis com o binário Fortran externo: geração on-the-fly durante treinamento, diferenciação automática para PINNs, augmentation física e substituição por rede neural surrogada. Esta seção detalha cada um desses recursos.
+
+---
+
+#### 13.10.1 Geração On-the-Fly durante Treinamento
+
+Com o simulador Python disponível em processo, o `DataPipeline` pode gerar novos modelos geológicos e suas respostas EM a cada epoch — eliminando o conjunto de treinamento fixo e criando um **dataset virtualmente infinito**.
+
+**Diagrama do fluxo on-the-fly:**
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│              GERAÇÃO ON-THE-FLY COM SIMULADOR PYTHON                       │
+│                                                                            │
+│  Epoch N                                                                   │
+│  ┌─────────────────────────────────────────────────────────┐               │
+│  │  GeologicModelSampler (Sobol/Monte Carlo)               │               │
+│  │      ↓                                                  │               │
+│  │  ForwardSimulator.simulate_batch(batch_size=32)  [GPU]  │               │
+│  │      ↓                                                  │               │
+│  │  H_tensor (32, 600, 9) ← campos EM brutos               │               │
+│  │      ↓                                                  │               │
+│  │  NoiseFn (on-the-fly, σ em A/m)                         │               │
+│  │      ↓                                                  │               │
+│  │  FeatureView_tf (FV computada sobre campos ruidosos)     │               │
+│  │      ↓                                                  │               │
+│  │  GeoSignal_tf (GS computado sobre campos ruidosos)       │               │
+│  │      ↓                                                  │               │
+│  │  Scaler → (X_scaled, y_scaled)                          │               │
+│  │      ↓                                                  │               │
+│  │  tf.data.Dataset.from_generator → model.fit()           │               │
+│  └─────────────────────────────────────────────────────────┘               │
+│                                                                            │
+│  Epoch N+1: NOVOS modelos geológicos gerados (seed → seed+1)              │
+│             → dataset estatisticamente diferente a cada epoch              │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Integração com `tf.data.Dataset`:**
+
+```python
+# geosteering_ai/data/pipeline.py — extensão para on-the-fly simulation
+
+import tensorflow as tf
+import numpy as np
+from geosteering_ai.config import PipelineConfig
+from geosteering_ai.simulation.forward import ForwardSimulator
+from geosteering_ai.data.sampling import GeologicModelSampler
+
+def build_onthefly_dataset(
+    config: PipelineConfig,
+    simulator: ForwardSimulator,
+    sampler: GeologicModelSampler,
+    *,
+    steps_per_epoch: int = 200,
+    seed: int = 42,
+) -> tf.data.Dataset:
+    """Constrói tf.data.Dataset com geração on-the-fly via simulador Python.
+
+    O dataset é virtualmente infinito (tf.data.experimental.INFINITE_CARDINALITY):
+    a cada step, novos modelos geológicos são amostrados e simulados.
+
+    Fluxo:
+        generator() → simulate_batch() → noise → FV → GS → scale → (X, y)
+
+    Args:
+        config: PipelineConfig com todos os parâmetros do pipeline.
+        simulator: ForwardSimulator inicializado (CPU ou GPU).
+        sampler: GeologicModelSampler configurado com distribuição Sobol.
+        steps_per_epoch: Número de batches por epoch.
+        seed: Semente para reprodutibilidade da amostragem.
+
+    Returns:
+        tf.data.Dataset que emite tuplas (X_scaled, y_scaled) com shape
+        (batch_size, seq_len, n_features) e (batch_size, seq_len, 2).
+
+    Note:
+        O simulador é chamado via tf.py_function para compatibilidade com
+        o grafo TF. O overhead do py_function é amortizado pelo batch_size.
+        Em GPU, simulate_batch(32) leva ~0.02s — custo negligível vs I/O.
+    """
+    batch_size = config.simulation_batch_size
+    rng = np.random.default_rng(seed)
+
+    def generator():
+        """Gerador Python: amostrar → simular → processar → yield."""
+        while True:
+            # ── Amostragem de modelos geológicos (Sobol quasi-MC) ────────
+            # Cada batch tem modelos completamente novos — jamais repetidos.
+            models = sampler.sample(batch_size, rng=rng)
+
+            # ── Simulação EM (CPU ou GPU via ForwardSimulator) ────────────
+            # Retorna (batch_size, seq_len, 9) complex128
+            H_batch = simulator.simulate_batch(models)
+
+            # ── Conversão para float32 (Re e Im empilhados) ──────────────
+            # Shape final: (batch_size, seq_len, 18) — 9 componentes × Re+Im
+            H_real = np.concatenate([H_batch.real, H_batch.imag], axis=-1).astype(np.float32)
+
+            # ── Targets: rho_h, rho_v em log10 ───────────────────────────
+            rho_h = np.stack([m['rho_h_profile'] for m in models], axis=0)
+            rho_v = np.stack([m['rho_v_profile'] for m in models], axis=0)
+            y_log10 = np.log10(np.stack([rho_h, rho_v], axis=-1)).astype(np.float32)
+
+            yield H_real, y_log10
+
+    output_sig = (
+        tf.TensorSpec(shape=(batch_size, config.sequence_length, 18), dtype=tf.float32),
+        tf.TensorSpec(shape=(batch_size, config.sequence_length, 2),  dtype=tf.float32),
+    )
+    ds = tf.data.Dataset.from_generator(generator, output_signature=output_sig)
+
+    # ── Aplicar noise + FV + GS + scale (mesmo map_fn do DataPipeline) ──
+    map_fn = _build_simulation_map_fn(config)
+    ds = ds.map(map_fn, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    return ds
+```
+
+**Conceito de dataset infinito:**
+
+```python
+# O dataset não tem cardinalidade finita — nunca esgota.
+# O treinamento é controlado por steps_per_epoch no model.fit():
+
+history = model.fit(
+    train_ds,                        # Dataset infinito (on-the-fly)
+    steps_per_epoch=200,             # 200 batches × 32 modelos = 6400 modelos/epoch
+    epochs=100,
+    validation_data=val_ds,          # Dataset offline fixo (validação)
+    callbacks=build_callbacks(config, model, noise_var),
+)
+# Cada epoch vê 6.400 modelos DIFERENTES — dataset efetivo: 640.000 modelos/run
+# Com Fortran externo: geração prévia de ~100.000 modelos em ~40h de CPU.
+# Com simulador Python GPU: os mesmos 100.000 modelos em ~2.000s (33 min).
+```
+
+---
+
+#### 13.10.2 Diferenciação Automática via JAX
+
+O simulador Python em JAX permite calcular gradientes exatos do forward model em relação aos parâmetros do meio, habilitando o treinamento de PINNs com termo de regularização físico sem necessidade de diferenças finitas.
+
+**Forward model diferenciável em JAX:**
+
+```python
+import jax
+import jax.numpy as jnp
+from jax import lax
+from functools import partial
+
+@partial(jax.jit, static_argnums=(4,))
+def forward_em_1d_jax(
+    rho_h: jnp.ndarray,         # (n_layers,) float32 — resistividade horizontal (Ohm.m)
+    rho_v: jnp.ndarray,         # (n_layers,) float32 — resistividade vertical (Ohm.m)
+    thicknesses: jnp.ndarray,   # (n_layers-1,) float32 — espessuras (m)
+    z_obs: jnp.ndarray,         # (n_meas,) float32 — profundidades de observação (m)
+    freq_hz: float = 20000.0,   # frequência em Hz (static — compilação separada por freq)
+) -> jnp.ndarray:
+    """Forward EM 1D TIV diferenciável em JAX — usado em PINNs.
+
+    Implementa a mesma física do simulador Fortran usando operações JAX
+    diferenciáveis. A recursão de coeficientes de reflexão usa jax.lax.scan
+    em vez de loops Python, tornando-a compatível com jit e grad.
+
+    Uso em PINNs:
+        grad_fn = jax.grad(forward_em_1d_jax, argnums=(0, 1))
+        d_H_d_rho_h, d_H_d_rho_v = grad_fn(rho_h, rho_v, thick, z_obs)
+        loss_physics = jnp.mean((H_pred - d_obs)**2)
+
+    Returns:
+        jnp.ndarray de shape (n_meas, 9) complex64 — tensor H rotacionado.
+
+    Note:
+        Ref: Sec 13.5 deste documento — motivação e exemplos JAX.
+        Os gradientes via jax.grad têm custo ~2-3x o forward pass (AD reverso).
+        Para n_meas=600, freq=20 kHz: forward ~0.05s, grad ~0.12s em GPU JAX.
+    """
+    omega  = 2.0 * jnp.pi * freq_hz
+    mu0    = 4.0 * jnp.pi * 1e-7
+    zeta_0 = 1j * omega * mu0   # impedância magnética (escalar — mu homogêneo)
+
+    sigma_h = 1.0 / rho_h       # condutividade horizontal (S/m)
+    sigma_v = 1.0 / rho_v       # condutividade vertical   (S/m)
+
+    eta_h  = sigma_h / (1j * omega * mu0)
+    eta_v  = sigma_v / (1j * omega * mu0)
+    zeta   = jnp.full_like(eta_h, zeta_0)
+
+    # ── Recursão de coeficientes de reflexão via jax.lax.scan ────────────
+    # A recursão é de j=n-2 down to j=0, com dependência j→j+1→j.
+    # jax.lax.scan propaga gradientes através do loop sem unrolling explícito.
+    # Ref: JAX docs — "Using lax.scan for recurrences".
+
+    def scan_step(carry, x):
+        """Um passo da recursão: coeficientes da camada j a partir de j+1."""
+        RTE_jp1, RTM_jp1 = carry
+        u_j, u_jp1, s_j, s_jp1, h_j, eta_h_j, eta_h_jp1 = x
+
+        exp_u  = jnp.exp(-2.0 * u_jp1 * h_j)
+        num_TE = (u_j - u_jp1) + (u_j + u_jp1) * RTE_jp1 * exp_u
+        den_TE = (u_j + u_jp1) + (u_j - u_jp1) * RTE_jp1 * exp_u
+        RTE_j  = num_TE / den_TE
+
+        exp_s  = jnp.exp(-2.0 * s_jp1 * h_j)
+        r_s    = eta_h_jp1 * s_j - eta_h_j * s_jp1
+        r_s_d  = eta_h_jp1 * s_j + eta_h_j * s_jp1
+        RTM_j  = (r_s + r_s_d * RTM_jp1 * exp_s) / (r_s_d + r_s * RTM_jp1 * exp_s)
+
+        return (RTE_j, RTM_j), (RTE_j, RTM_j)
+
+    # Placeholders para a recursão (serão preenchidos com valores reais)
+    # ... (implementação completa omitida — estrutura acima é ilustrativa)
+    H_tensor = _assemble_h_tensor_jax(rho_h, rho_v, thicknesses, z_obs, freq_hz)
+    return H_tensor
+```
+
+**Integração com loss de PINN no TensorFlow:**
+
+```python
+# geosteering_ai/losses/pinns.py — uso do gradiente JAX em loss TF
+
+import tensorflow as tf
+import jax
+import jax.numpy as jnp
+
+def build_pinn_em_residual_loss(config):
+    """Constrói loss de resíduo EM para PINNs via gradiente JAX.
+
+    O gradiente do forward model em relação a rho_h e rho_v é calculado
+    por JAX (diferenciação automática exata), convertido para TF tensor,
+    e usado como regularizador físico na loss total.
+
+    Loss total:
+        L_total = L_data + lambda_physics * L_physics
+        L_data  = MSE(y_pred, y_true)             [supervisão]
+        L_physics = ||F(rho_pred) - H_obs||^2    [resíduo EM]
+
+    Note:
+        Ref: Seção 13.10.2 — diferenciação automática via JAX.
+        Requi: geosteering_ai/simulation/forward_jax.py implementado.
+    """
+    grad_fn   = jax.jit(jax.grad(forward_em_1d_jax, argnums=(0, 1)))
+    lambda_em = config.lambda_physics    # peso do resíduo físico
+
+    @tf.function
+    def loss_fn(y_true, y_pred, H_obs=None):
+        # ── Supervisão padrão (log10 Ohm.m) ─────────────────────────
+        l_data = tf.reduce_mean(tf.square(y_pred - y_true))
+        if H_obs is None or lambda_em == 0.0:
+            return l_data
+
+        # ── Resíduo físico via JAX (tf.py_function para bridge TF↔JAX) ──
+        def compute_em_residual(rho_pred_np, H_obs_np):
+            rho_h = 10.0 ** rho_pred_np[:, :, 0]    # Ohm.m (de log10)
+            rho_v = 10.0 ** rho_pred_np[:, :, 1]
+            H_sim = jax.vmap(
+                lambda rh, rv: forward_em_1d_jax(rh, rv, ...)
+            )(rho_h, rho_v)
+            return jnp.mean(jnp.abs(H_sim - H_obs_np)**2)
+
+        l_physics = tf.py_function(
+            func=compute_em_residual,
+            inp=[y_pred, H_obs],
+            Tout=tf.float32,
+        )
+        return l_data + lambda_em * l_physics
+
+    return loss_fn
+```
+
+---
+
+#### 13.10.3 Data Augmentation Física
+
+O simulador Python permite perturbar parâmetros geológicos antes da simulação EM — um nível de augmentation impossível com dados pré-gerados. Isso aumenta a diversidade do conjunto de treinamento sem custo adicional de armazenamento.
+
+**Tipos de augmentation física disponíveis:**
+
+```python
+# geosteering_ai/simulation/augmentation.py
+
+import numpy as np
+from geosteering_ai.config import PipelineConfig
+
+class PhysicalAugmentor:
+    """Augmentation de modelos geológicos ao nível dos parâmetros físicos.
+
+    Opera ANTES da simulação EM — perturba o modelo geológico e depois
+    recalcula a resposta EM correspondente. Diferentemente do ruído
+    on-the-fly (que opera sobre a resposta EM já calculada), a augmentation
+    física gera exemplos de treinamento fisicamente consistentes.
+
+    Tipos de augmentation implementados:
+
+      ┌─────────────────────────────────────────────────────────────────┐
+      │  Tipo                  │  Parâmetro perturbado  │  σ default    │
+      ├─────────────────────────────────────────────────────────────────┤
+      │  rho_perturbation      │  log10(rho_h, rho_v)   │  0.05 décadas │
+      │  thickness_jitter      │  espessuras (m)        │  5% da camada │
+      │  layer_merge           │  fusão de 2 camadas    │  p=0.1        │
+      │  layer_split           │  divisão de camada     │  p=0.05       │
+      │  anisotropy_variation  │  lambda=rho_v/rho_h    │  10%          │
+      │  depth_shift           │  z_obs deslocado ±Δz   │  ±0.1 m       │
+      └─────────────────────────────────────────────────────────────────┘
+
+    Args:
+        config: PipelineConfig — parâmetros de augmentation via campos
+                simulation_aug_*.
+        rng: np.random.Generator — gerador de números aleatórios.
+
+    Note:
+        A augmentation física NÃO substitui o ruído on-the-fly sobre
+        a resposta EM. Os dois são complementares e aplicados em sequência:
+            1. PhysicalAugmentor → modifica modelo geológico
+            2. ForwardSimulator → simula resposta EM do modelo modificado
+            3. NoiseFn (on-the-fly) → adiciona ruído instrumental à resposta
+        Essa cadeia respeita a física LWD (seção 1.2 deste documento).
+    """
+
+    def __init__(self, config: PipelineConfig, rng: np.random.Generator):
+        self.config = config
+        self.rng    = rng
+
+    def augment(self, model: dict) -> dict:
+        """Aplica augmentation aleatória a um modelo geológico.
+
+        Args:
+            model: Dicionário com 'rho_h', 'rho_v', 'thicknesses', 'n_layers'.
+
+        Returns:
+            Novo dicionário com parâmetros perturbados (deep copy do original).
+        """
+        m = {k: v.copy() if hasattr(v, 'copy') else v for k, v in model.items()}
+
+        # ── Perturbação de resistividade em escala logarítmica ────────────
+        # Perturbar em log10: rho_aug = rho * 10^(N(0, sigma_log))
+        # Garante que rho_aug > 0 sempre (impossível com perturbação linear).
+        if self.config.simulation_aug_rho:
+            sigma = self.config.simulation_aug_rho_sigma  # default: 0.05
+            m['rho_h'] *= 10.0 ** self.rng.normal(0, sigma, size=m['rho_h'].shape)
+            m['rho_v'] *= 10.0 ** self.rng.normal(0, sigma, size=m['rho_v'].shape)
+            # Garantir rho_v >= rho_h (restrição TIV física):
+            m['rho_v'] = np.maximum(m['rho_v'], m['rho_h'])
+
+        # ── Jitter de espessuras ──────────────────────────────────────────
+        # Perturba espessuras em ±5% para cobrir incertezas de discretização.
+        if self.config.simulation_aug_thickness:
+            frac = self.config.simulation_aug_thickness_frac  # default: 0.05
+            jitter = 1.0 + self.rng.uniform(-frac, frac, size=m['thicknesses'].shape)
+            m['thicknesses'] = np.maximum(m['thicknesses'] * jitter, 0.1)  # mín 0.1 m
+
+        return m
+```
+
+**Integração na cadeia de dados (augmentation → simulação → ruído):**
+
+```python
+# Cadeia completa com augmentation física + simulação + ruído on-the-fly:
+#
+# GeologicModelSampler
+#       ↓   (modelos base: 32 modelos × batch)
+# PhysicalAugmentor.augment()
+#       ↓   (modelos perturbados: ainda 32, mas com rho/espessuras modificados)
+# ForwardSimulator.simulate_batch()
+#       ↓   (respostas EM: (32, 600, 9) complex128)
+# NoiseFn (on-the-fly σ em A/m)
+#       ↓   (resposta EM ruidosa — fiel à física LWD)
+# FeatureView_tf + GeoSignal_tf
+#       ↓
+# Scaler → (X_scaled, y_scaled)
+#       ↓
+# model.fit()
+```
+
+---
+
+#### 13.10.4 Modo Surrogate Neural
+
+O `SurrogateNet` (TCN ou ModernTCN) pode substituir o simulador físico durante o treinamento, reduzindo o custo de cada forward pass em ~1.000× comparado ao Numba CPU, permitindo geração on-the-fly mesmo em ambientes sem GPU CUDA.
+
+**Pipeline de treinamento do SurrogateNet:**
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│              PIPELINE DE TREINAMENTO DO SURROGATENET                         │
+│                                                                              │
+│  FASE 1 — Geração de dados com simulador Numba (CPU/GPU)                    │
+│  ┌────────────────────────────────────────────────────────────┐              │
+│  │  ForwardSimulator(config, backend='gpu')                   │              │
+│  │      ↓ simula ~500.000 modelos (batch 32, ~3h em GPU)      │              │
+│  │  .npz: H_tensor (500k, 600, 18), rho_h/rho_v (500k, 600)  │              │
+│  └────────────────────────────────────────────────────────────┘              │
+│                │                                                             │
+│                ▼                                                             │
+│  FASE 2 — Treinamento do SurrogateNet (TCN/ModernTCN)                       │
+│  ┌────────────────────────────────────────────────────────────┐              │
+│  │  Input: parâmetros geológicos (rho_h, rho_v, thick)        │              │
+│  │  Output: H_tensor (600, 18) — mesmo formato que simulador  │              │
+│  │  Loss: MSE em escala linear (campos EM em A/m)             │              │
+│  │  Tempo: ~2h em Colab Pro+ T4 (500k amostras)               │              │
+│  └────────────────────────────────────────────────────────────┘              │
+│                │                                                             │
+│                ▼                                                             │
+│  FASE 3 — Uso como substituto (drop-in replacement)                          │
+│  ┌────────────────────────────────────────────────────────────┐              │
+│  │  ForwardSimulator(config, backend='surrogate')             │              │
+│  │      → SurrogateNet.predict(model_params)                  │              │
+│  │      → ~0.5 ms/modelo (CPU) vs ~400 ms (Numba CPU)        │              │
+│  │      → Speedup: ~800× sobre Numba CPU                      │              │
+│  └────────────────────────────────────────────────────────────┘              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Interface drop-in do SurrogateNet:**
+
+```python
+# O SurrogateNet implementa a mesma interface do ForwardSimulator:
+
+class SurrogateForwardSimulator:
+    """Simulador surrogado via rede neural — substituto do simulador físico.
+
+    Implementa a mesma interface de ForwardSimulator, permitindo troca
+    transparente via config.simulation_backend = 'surrogate'.
+
+    Velocidade:
+        SurrogateNet CPU:  ~0.5 ms/modelo (TCN, batch=32)
+        Numba CPU:         ~400 ms/modelo
+        Numba CUDA:        ~20 ms/modelo (batch=32)
+        → SurrogateNet CPU ≈ 800× mais rápido que Numba CPU
+        → SurrogateNet CPU ≈ 40× mais rápido que Numba CUDA
+
+    Limitação:
+        Generalização fora do domínio de treinamento pode ser insuficiente
+        para modelos patológicos (camadas < 1 m, contrastes > 10.000×).
+        Recomendado: usar simulador físico para validação e PINNs,
+        e SurrogateNet para treinamento em larga escala.
+
+    Note:
+        Ref: geosteering_ai/models/surrogate.py — SurrogateNetTCN e
+        SurrogateNetModernTCN (204M parâmetros, validado em GPU Colab).
+    """
+
+    def __init__(self, config: PipelineConfig, weights_path: str):
+        self.config = config
+        import tensorflow as tf
+        self._model = tf.keras.models.load_model(weights_path)
+        logger.info("SurrogateNet carregado: %s", weights_path)
+
+    def simulate_batch(self, models: list[dict]) -> np.ndarray:
+        """Prediz H_tensor para batch de modelos via rede neural."""
+        X = self._encode_models(models)          # (B, n_input_features)
+        H_pred = self._model.predict(X, verbose=0)   # (B, 600, 18)
+        # Reconstituir complexo: H_tensor = H_pred[..., :9] + 1j*H_pred[..., 9:]
+        return H_pred[..., :9] + 1j * H_pred[..., 9:]
+```
+
+---
+
+### 13.11 Pipeline C — Vantagens da Versão Python sobre o Fortran
+
+Esta seção documenta sistematicamente as razões pelas quais a reimplementação Python representa um avanço estrutural para o projeto, além de simples equivalência de desempenho.
+
+---
+
+#### 13.11.1 Integração Nativa com o Pipeline de Deep Learning
+
+O simulador Fortran opera como um **processo externo** — exige escrita de `model.in`, execução de `tatu.x`, leitura do arquivo `.dat`, e parseamento binário. Cada uma dessas etapas tem overhead e pontos de falha.
+
+```
+CADEIA ATUAL (Fortran):
+  Python → model.in (I/O disco) → subprocess(tatu.x) → .dat (I/O disco)
+  → loading.py (parse binário) → np.ndarray
+  Latência total: ~0.4s simulação + ~0.1s I/O + ~0.05s parse = ~0.55s/modelo
+
+CADEIA FUTURA (Python):
+  Python → ForwardSimulator.simulate_batch() → np.ndarray
+  Latência total: ~0.4s (Numba CPU) ou ~0.02s (CUDA GPU)
+  Zero I/O de disco. Zero subprocesso. Zero parse.
+```
+
+**Benefícios concretos da integração nativa:**
+
+| Aspecto | Fortran (externo) | Python (nativo) | Ganho |
+|:--------|:-----------------|:----------------|:------|
+| I/O por modelo | ~0.1 s (disco) | Zero | Eliminado |
+| Overhead de subprocess | ~0.05 s/chamada | Zero | Eliminado |
+| Parse binário (.dat) | ~0.05 s | Zero | Eliminado |
+| Memória compartilhada | Não (IPC) | Sim (in-process) | Total |
+| Integração com tf.data | Via tf.py_function com I/O | Direta | Nativa |
+| Debugging | Difícil (Fortran separado) | Fácil (Python unificado) | Alto |
+
+---
+
+#### 13.11.2 Diferenciação Automática (AD)
+
+A diferenciação automática é o benefício técnico mais significativo da versão Python, particularmente via JAX.
+
+**Comparação: AD exato vs diferenças finitas:**
+
+```
+DIFERENÇAS FINITAS (único método com Fortran):
+  ∂H/∂rho_h ≈ [F(rho_h + δ) - F(rho_h)] / δ
+  → Custo: 2 chamadas ao simulador por parâmetro
+  → Para n_layers=20: 40 chamadas = 40 × 0.4s = 16 segundos
+  → Erro de truncamento: O(δ) para diferenças de 1ª ordem
+  → Sensível à escolha de δ (muito pequeno: cancelamento numérico)
+
+DIFERENCIAÇÃO AUTOMÁTICA (JAX):
+  ∂H/∂rho_h = jax.grad(forward_em_1d_jax, argnums=0)(rho_h, ...)
+  → Custo: ~2-3× o forward pass (independente do número de parâmetros)
+  → Para n_layers=20: ~3 × 0.05s = 0.15 segundos (GPU JAX)
+  → Erro: zero (gradientes exatos até precisão de ponto flutuante)
+  → Speedup sobre FD: ~100× para 20 camadas
+```
+
+| Critério | Diferenças Finitas (Fortran) | AD via JAX (Python) |
+|:---------|:----------------------------|:--------------------|
+| Custo/gradiente | O(n_params) chamadas | O(1) — custo fixo ~3× forward |
+| Precisão | O(δ) — erros de truncamento | Exato (FP64) |
+| Estabilidade numérica | Sensível ao passo δ | Estável |
+| Integração com PINNs | Complexa (subprocess loop) | Nativa (jax.grad → tf.py_function) |
+| Gradientes de ordem superior | Muito custoso | jax.hessian() disponível |
+
+---
+
+#### 13.11.3 Portabilidade e Manutenibilidade
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  PORTABILIDADE: FORTRAN vs PYTHON                                     │
+│                                                                      │
+│  Fortran (PerfilaAnisoOmp):                                          │
+│    ✗ Requer gfortran >= 9.0 + OpenMP runtime                         │
+│    ✗ Compilação separada (make) em cada ambiente                     │
+│    ✗ Flags de compilação diferentes: Linux (-fopenmp) vs macOS       │
+│    ✗ Google Colab: requer !apt-get install + !make a cada sessão     │
+│    ✗ Windows: MinGW necessário, comportamento OpenMP diferente       │
+│    ✗ ARM (M1/M2 Mac): cross-compilação necessária                    │
+│                                                                      │
+│  Python (Numba/JAX):                                                 │
+│    ✓ pip install numba jax — sem compilador externo                  │
+│    ✓ Google Colab: disponível por padrão (numba pré-instalado)       │
+│    ✓ Windows/Linux/macOS: comportamento idêntico                     │
+│    ✓ ARM (M1/M2): Numba e JAX têm builds nativas                    │
+│    ✓ GitHub Actions CI: sem etapa de compilação Fortran              │
+│    ✓ Docker: imagem simples Python:3.10-slim + requirements.txt      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Manutenibilidade:**
+
+- O código Fortran é legível apenas por especialistas em Fortran — base de desenvolvedores limitada.
+- O código Python (com docstrings D1-D14 do padrão v2.0) é legível por geofísicos, engenheiros de ML e desenvolvedores Python simultaneamente.
+- Testes unitários: `pytest tests/simulation/` cobre cada função Python individualmente. O binário Fortran é testado apenas como black box.
+- Code review: pull requests do módulo `simulation/` usam o mesmo fluxo GitHub Actions do restante do projeto.
+
+---
+
+#### 13.11.4 Extensibilidade
+
+```python
+# Exemplos de extensões simples com o simulador Python:
+
+# 1. Novo tipo de dipolo (dipolo elétrico) — adicionar em dipoles.py:
+@njit(parallel=True, cache=True)
+def compute_hed_fields(kr, u, s, RTE, RTM, z_T, z_R, omega, mu0):
+    """HED (Horizontal Electric Dipole) — novo tipo de fonte."""
+    ...  # 50 linhas de código Numba
+
+# 2. Nova geometria (ferramenta inclinada) — adicionar em geometry.py:
+def build_tilted_tool_geometry(config, dip_deg: float, azimuth_deg: float):
+    """Geometria T-R para ferramenta com mergulho não-zero."""
+    ...
+
+# 3. Multi-frequência simultânea — vetorizado sobre freqs:
+def simulate_multifreq(model, freqs_hz: list[float]) -> np.ndarray:
+    """Simula para N frequências em paralelo (prange sobre freqs)."""
+    ...
+
+# 4. Visualização com matplotlib (direto em Python):
+import matplotlib.pyplot as plt
+fig, axes = plt.subplots(3, 3, figsize=(12, 12))
+for k, comp in enumerate(component_names):
+    axes[k//3, k%3].plot(z_obs, H_tensor[:, k].real, label='Re')
+    axes[k//3, k%3].set_title(comp)
+plt.savefig("tensor_H.pdf")
+# Com Fortran: requer script Python separado para ler e plotar .dat
+```
+
+---
+
+#### 13.11.5 Reprodutibilidade
+
+```python
+# Reprodutibilidade total com seed único — impossível com o Fortran:
+
+import numpy as np
+from geosteering_ai.config import PipelineConfig
+from geosteering_ai.simulation.forward import ForwardSimulator
+from geosteering_ai.data.sampling import GeologicModelSampler
+
+# Um único seed controla TODA a cadeia:
+GLOBAL_SEED = 42
+
+config = PipelineConfig.from_yaml("configs/robusto.yaml")
+config.seed = GLOBAL_SEED
+
+# Amostragem de modelos: determinística com seed
+sampler = GeologicModelSampler(config, rng=np.random.default_rng(GLOBAL_SEED))
+
+# Simulação: determinística (Numba JIT é determinística em CPU)
+sim     = ForwardSimulator(config, backend='cpu')
+
+# Noise on-the-fly: seed propagado via tf.random
+# Scaler: fit determinístico (dados limpos ordenados)
+# Modelo DL: seed Keras (config.seed)
+
+# Resultado: QUALQUER run com GLOBAL_SEED=42 produz EXATAMENTE os mesmos pesos.
+# Verificável via hash dos pesos finais: sha256(model.get_weights()).
+```
+
+**Comparação de reprodutibilidade:**
+
+| Aspecto | Fortran | Python v2.0 |
+|:--------|:--------|:------------|
+| Amostragem de modelos | Script Python separado (seed externo) | `GeologicModelSampler(rng=seed)` integrado |
+| Simulação EM | Binário compilado (opaco) | Numba determinístico em CPU |
+| Seed único para toda cadeia | Não — múltiplos seeds | Sim — `config.seed` propaga |
+| Reprodução via tag GitHub | Parcial (binário pode diferir) | Total (pip install @tag) |
+| Verificação numérica | Diff de arquivos .dat | `pytest tests/simulation/` |
+
+---
+
+#### 13.11.6 Tabela Comparativa Completa
+
+| Critério | Fortran (PerfilaAnisoOmp) | Python Numba CPU | Python Numba CUDA | Python JAX GPU |
+|:---------|:--------------------------|:----------------|:-----------------|:---------------|
+| **Performance (20 cam., 600 med.)** | 0.4 s/mod (8 cores) | ~0.4 s/mod | ~0.02 s/mod | ~0.05 s/mod |
+| **Throughput (modelos/s)** | ~2.5 mod/s | ~2.5 mod/s | ~50 mod/s | ~20 mod/s |
+| **Diferenciação automática** | Não — diferenças finitas | Não | Não | Sim — jax.grad |
+| **Integração tf.data** | Via subprocess + I/O | Direta | Direta | Direta |
+| **Geração on-the-fly** | Não (I/O obrigatório) | Sim | Sim | Sim |
+| **Augmentation física** | Não | Sim | Sim | Sim |
+| **Modo Surrogate** | Não | Sim | Sim | Sim |
+| **Instalação** | gfortran + make | pip install numba | pip install numba + CUDA | pip install jax[cuda] |
+| **Google Colab** | Requer compilação | Disponível | Disponível | Disponível |
+| **Windows** | MinGW (problemático) | Nativo | Nativo | Nativo |
+| **ARM (M1/M2)** | Cross-compilação | Nativo | N/A (sem CUDA) | Nativo (Metal) |
+| **Testes unitários** | Black box apenas | pytest por função | pytest por função | pytest por função |
+| **Code review (GitHub)** | Parcial (Fortran no repo) | Total (Python no CI) | Total | Total |
+| **Reprodutibilidade** | Parcial | Total (seed único) | Parcial (GPU non-det.) | Parcial |
+| **Manutenibilidade** | Baixa (Fortran) | Alta (Python+docstrings) | Alta | Alta |
+| **Extensibilidade** | Difícil | Fácil | Média | Média |
+| **Suporte a PINNs** | Não | Não | Não | Sim (AD exato) |
+| **Custo de desenvolvimento** | Já pronto | ~8 semanas | ~4 sem. adicionais | ~4 sem. adicionais |
+| **Validação numérica** | Referência | rtol < 1e-10 vs Fortran | rtol < 1e-6 vs Numba | rtol < 1e-6 vs Numba |
+| **Debugging** | Difícil (Fortran) | Fácil (pdb/VS Code) | Médio (CUDA-GDB) | Médio (JAX tracing) |
+| **Memória** | ~50 MB/processo | ~200 MB (workspace) | ~1-4 GB (VRAM) | ~1-4 GB (VRAM) |
+| **Recomendação** | Referência + legado | Produção sem GPU | Produção com GPU | PINNs + AD |
+
+---
+
+### 13.12 Pipeline D — Avaliação Comparativa Fortran vs Python Otimizado
+
+O Pipeline D define o protocolo sistemático para avaliar se a reimplementação Python atinge os critérios de aceitação numéricos e de desempenho antes de ser promovida a componente de produção do `geosteering_ai/`.
+
+---
+
+#### 13.12.1 Protocolo de Validação Numérica
+
+A validação numérica usa os 10 modelos canônicos definidos na Seção 13.9.2 (M01–M10) como conjunto de referência imutável. Os arquivos `.dat` de referência são gerados pelo Fortran com configuração determinística e versionados em `tests/simulation/reference_data/`.
+
+**Métricas de validação:**
+
+```python
+# tests/simulation/test_validation.py
+
+import numpy as np
+import pytest
+from pathlib import Path
+from geosteering_ai.simulation.forward import ForwardSimulator
+from geosteering_ai.simulation.validation import load_fortran_reference
+from geosteering_ai.config import PipelineConfig
+
+REFERENCE_DIR = Path("tests/simulation/reference_data")
+CANONICAL_MODELS = ["M01","M02","M03","M04","M05","M06","M07","M08","M09","M10"]
+
+@pytest.mark.parametrize("model_id", CANONICAL_MODELS)
+@pytest.mark.parametrize("backend", ["numpy", "cpu"])
+def test_numerical_accuracy(model_id: str, backend: str):
+    """Valida acurácia numérica do simulador Python vs referência Fortran.
+
+    Critérios de aceitação (derivados do nível de precisão do Fortran float64):
+        max_rel_error  < 1e-10  para todos os 9 componentes do tensor H
+        mean_rel_error < 1e-12  (valor típico com float64 consistente)
+        correlation    > 0.9999 (Pearson entre Python e Fortran por componente)
+
+    Modelos mais difíceis (M08-M10) têm critério relaxado para max_rel_error:
+        M08-M10: max_rel_error < 1e-8  (aceitável para 40-80 camadas)
+    """
+    config   = PipelineConfig.from_yaml(f"tests/simulation/configs/{model_id}.yaml")
+    sim      = ForwardSimulator(config, backend=backend)
+    ref_path = REFERENCE_DIR / f"{model_id}_reference.dat"
+
+    H_python  = sim.simulate(config.test_model).H_tensor    # (600, 9) complex128
+    H_fortran = load_fortran_reference(ref_path)            # (600, 9) complex128
+
+    component_names = ['Hxx','Hxy','Hxz','Hyx','Hyy','Hyz','Hzx','Hzy','Hzz']
+    max_rel_threshold  = 1e-8 if model_id in ("M08","M09","M10") else 1e-10
+
+    for k, name in enumerate(component_names):
+        ref  = H_fortran[:, k]
+        pred = H_python[:, k]
+
+        # Erro relativo: usar |ref| + eps no denominador para evitar /0
+        rel_err  = np.abs(pred - ref) / (np.abs(ref) + 1e-30)
+        max_err  = rel_err.max()
+        mean_err = rel_err.mean()
+
+        # Correlação de Pearson entre partes real e imaginária
+        corr_re = np.corrcoef(ref.real, pred.real)[0, 1]
+        corr_im = np.corrcoef(ref.imag, pred.imag)[0, 1] if ref.imag.std() > 0 else 1.0
+
+        assert max_err  < max_rel_threshold, (
+            f"{model_id}/{name}: max_rel_error={max_err:.2e} >= {max_rel_threshold:.0e}"
+        )
+        assert mean_err < 1e-12, (
+            f"{model_id}/{name}: mean_rel_error={mean_err:.2e} >= 1e-12"
+        )
+        assert corr_re  > 0.9999, (
+            f"{model_id}/{name}: correlation_re={corr_re:.6f} < 0.9999"
+        )
+```
+
+**Critérios de aceitação por categoria de modelo:**
+
+| Categoria | Modelos | max_rel_error | mean_rel_error | Correlação |
+|:----------|:--------|:-------------|:---------------|:-----------|
+| Trivial/Básica | M01–M04 | < 1e-10 | < 1e-12 | > 0.99999 |
+| Média/Difícil | M05–M07 | < 1e-10 | < 1e-12 | > 0.9999 |
+| Alta/Extrema | M08–M10 | < 1e-8 | < 1e-10 | > 0.999 |
+
+---
+
+#### 13.12.2 Benchmark de Performance
+
+O benchmark de desempenho mede throughput e memória nas configurações relevantes para o projeto.
+
+**Configurações de teste:**
+
+| Configuração | n_layers | n_meas | n_freq | Representativa de |
+|:------------|:---------|:-------|:-------|:-----------------|
+| B01 — Mínimo | 3 | 100 | 1 | Modelo simples, janela curta |
+| B02 — Típico | 20 | 600 | 1 | Configuração padrão P1 |
+| B03 — Multi-freq | 20 | 600 | 2 | 20 kHz + 40 kHz |
+| B04 — Muitas camadas | 40 | 600 | 1 | Modelo geológico complexo |
+| B05 — Extremo | 80 | 600 | 2 | Pior caso esperado |
+| B06 — Janela longa | 20 | 1200 | 1 | Janela 240 m (futuro) |
+
+**Script de benchmark:**
+
+```python
+# tests/simulation/benchmark_performance.py
+
+import time
+import numpy as np
+import psutil
+from geosteering_ai.simulation.forward import ForwardSimulator
+from geosteering_ai.config import PipelineConfig
+
+def benchmark_single_model(backend: str, n_layers: int, n_meas: int,
+                             n_freq: int, n_reps: int = 20) -> dict:
+    """Mede tempo médio e desvio padrão para simulação de um modelo.
+
+    Args:
+        backend: 'numpy', 'cpu' ou 'gpu'.
+        n_layers: Número de camadas geológicas.
+        n_meas: Número de medições (= sequence_length).
+        n_freq: Número de frequências (1 ou 2).
+        n_reps: Repetições para média estável (ignora 3 primeiras — warmup JIT).
+
+    Returns:
+        Dicionário com 'mean_s', 'std_s', 'min_s', 'throughput_per_s',
+        'peak_memory_mb'.
+    """
+    config = _build_benchmark_config(n_layers, n_meas, n_freq)
+    sim    = ForwardSimulator(config, backend=backend)
+    model  = _build_random_model(n_layers)
+
+    # Warmup: 3 chamadas para compilar JIT (Numba compila na 1ª chamada)
+    for _ in range(3):
+        sim.simulate(model)
+
+    times_s = []
+    process = psutil.Process()
+    mem_before = process.memory_info().rss / 1e6   # MB
+
+    for _ in range(n_reps):
+        t0 = time.perf_counter()
+        sim.simulate(model)
+        times_s.append(time.perf_counter() - t0)
+
+    mem_after = process.memory_info().rss / 1e6
+    return {
+        'backend':         backend,
+        'n_layers':        n_layers,
+        'n_meas':          n_meas,
+        'n_freq':          n_freq,
+        'mean_s':          float(np.mean(times_s)),
+        'std_s':           float(np.std(times_s)),
+        'min_s':           float(np.min(times_s)),
+        'throughput_per_s': float(1.0 / np.mean(times_s)),
+        'peak_memory_mb':  float(mem_after - mem_before),
+    }
+```
+
+**Matriz de comparação esperada (estimativas baseadas na Seção 13.6):**
+
+| Configuração | Fortran OMP (8c) | Numba CPU (8c) | Numba CUDA (batch=32) | Speedup CUDA vs Fortran |
+|:------------|:----------------|:--------------|:---------------------|:-----------------------|
+| B01 — 3 cam., 100 med. | ~0.05 s | ~0.05 s | ~0.005 s | ~10× |
+| B02 — 20 cam., 600 med. | ~0.40 s | ~0.40 s | ~0.020 s | ~20× |
+| B03 — 20 cam., 600 med., 2f | ~0.75 s | ~0.75 s | ~0.035 s | ~21× |
+| B04 — 40 cam., 600 med. | ~0.80 s | ~0.80 s | ~0.040 s | ~20× |
+| B05 — 80 cam., 600 med., 2f | ~3.20 s | ~3.20 s | ~0.160 s | ~20× |
+| B06 — 20 cam., 1200 med. | ~0.80 s | ~0.80 s | ~0.040 s | ~20× |
+
+---
+
+#### 13.12.3 Benchmark de Escalabilidade
+
+O benchmark de escalabilidade mede como o tempo de simulação cresce com cada dimensão independente, identificando gargalos e oportunidades de otimização.
+
+**Escalabilidade com número de camadas (B-Layer):**
+
+```
+Eixo X (log): n_layers = [3, 5, 10, 20, 30, 40, 60, 80]
+Eixo Y (log): tempo/modelo (s)
+
+Comportamento esperado:
+  Fortran OMP:    O(n_layers) — recursão sequencial dominante
+  Numba CPU:      O(n_layers) — mesmo algoritmo
+  Numba CUDA:     O(n_layers) — CUDA paralelo sobre npt, mas camadas são seq.
+
+  Plot log-log: inclinação ≈ 1.0 para todos os backends.
+  Desvio para n_layers > 40: cache miss L2 (workspace > 200 KB)
+```
+
+**Escalabilidade com número de medições (B-Meas):**
+
+```
+Eixo X (log): n_meas = [50, 100, 200, 400, 600, 1000, 2000]
+Eixo Y (log): tempo/modelo (s)
+
+Comportamento esperado:
+  Fortran OMP:    O(n_meas) — loop externo sobre medições
+  Numba CPU:      O(n_meas) — prange externo
+  Numba CUDA:     O(n_meas / n_blocks) — paralelismo sobre medições
+
+  Plot log-log: inclinação ≈ 1.0 para Fortran/Numba CPU.
+                inclinação < 1.0 para Numba CUDA (paralelismo amortiza).
+  Ponto de inflexão CUDA: n_meas ≈ 256 (saturação de SMs disponíveis).
+```
+
+**Escalabilidade com batch size (B-Batch, GPU apenas):**
+
+```python
+# Throughput (modelos/s) vs batch_size para Numba CUDA:
+
+batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]
+# Comportamento esperado (GPU T4, 16 GB VRAM):
+#   batch=1:  ~5 mod/s  (GPU subutilizada — baixa ocupância)
+#   batch=4:  ~15 mod/s
+#   batch=8:  ~28 mod/s
+#   batch=16: ~42 mod/s
+#   batch=32: ~50 mod/s (saturação atingida — ótimo)
+#   batch=64: ~50 mod/s (idem — VRAM ainda disponível)
+#   batch=128: ~48 mod/s (leve queda por contention de memória)
+
+# Conclusão: batch_size=32 é o ponto ótimo para T4/Colab Pro+.
+#            Configurado como default em config.simulation_batch_size=32.
+```
+
+**Plots descritos (a gerar em `validation.py`):**
+
+```
+Figura 1 — Escalabilidade em camadas:
+  4 linhas (Fortran OMP, Numba CPU, Numba CUDA, SurrogateNet)
+  Log-log. Linha de referência O(n) sobreposta.
+
+Figura 2 — Escalabilidade em medições:
+  4 linhas. Log-log. Ponto de inflexão CUDA marcado.
+
+Figura 3 — Throughput vs batch size (CUDA):
+  1 linha + região de incerteza (±1σ).
+  Linha pontilhada no batch_size ótimo.
+
+Figura 4 — Comparação geral (radar chart):
+  5 eixos: throughput, memória, portabilidade, AD, manutenibilidade.
+  4 polígonos: Fortran, Numba CPU, Numba CUDA, JAX GPU.
+```
+
+---
+
+#### 13.12.4 Análise de Custo-Benefício
+
+**Esforço de desenvolvimento estimado:**
+
+| Fase | Atividade | Esforço (semanas) | Responsável |
+|:-----|:----------|:-----------------:|:------------|
+| 1 — Protótipo NumPy | Conversão subroutine por subroutine | 2 | DL + Claude Code |
+| 1 — Validação numérica | Testes vs Fortran (10 modelos) | 1 | DL + Claude Code |
+| 2 — Numba JIT CPU | @njit + prange + workspace | 2 | DL + Claude Code |
+| 2 — Benchmark CPU | Medição e ajuste de performance | 1 | DL |
+| 3 — Numba CUDA | Kernels CUDA + batching | 3 | DL + Claude Code |
+| 3 — Benchmark GPU | Medição, ocupância, otimização | 1 | DL |
+| 4 — JAX (opcional) | Forward diferenciável para PINNs | 3 | DL + Claude Code |
+| 4 — Integração | PipelineConfig + tf.data + testes | 1 | DL + Claude Code |
+| **Total mínimo (Fases 1-2)** | **Prótipo validado + CPU competitivo** | **6** | |
+| **Total completo (Fases 1-4)** | **CPU + GPU + JAX + integração** | **14** | |
+
+**Custo de manutenção:**
+
+| Aspecto | Fortran | Python v2.0 |
+|:--------|:--------|:------------|
+| Bug fix (física incorreta) | Alto — Fortran + recompilação | Médio — Python puro |
+| Nova feature (novo dipolo) | Alto — Fortran + make | Baixo — adicionar função Numba |
+| Atualização de filtros Hankel | Médio — recompilar + testar | Baixo — editar `filters.py` |
+| Onboarding de novo dev | Alto — curva Fortran | Baixo — Python familiar |
+| CI/CD | Sem suporte atual | pytest + GitHub Actions |
+
+**Velocidade de iteração de features:**
+
+```
+FORTRAN:
+  Ideia → implementar em Fortran → compilar → testar → commit
+  Ciclo típico: 2-4 dias (Fortran + debugging)
+
+PYTHON v2.0:
+  Ideia → implementar em Python → pytest → commit
+  Ciclo típico: 4-8 horas (Python + TDD)
+  → Feature velocity: ~5× maior com Python
+```
+
+---
+
+#### 13.12.5 Recomendação Final
+
+**Quando usar o simulador Fortran:**
+
+- Geração de dados de treinamento de grande escala **antes** da implementação do simulador Python (situação atual do projeto, Abril 2026).
+- Validação numérica definitiva — o Fortran é a referência física do projeto.
+- Situações onde nenhum ambiente Python está disponível (acesso ao servidor Fortran apenas).
+
+**Quando usar o simulador Python (Numba CPU):**
+
+- Geração on-the-fly durante treinamento em ambientes sem GPU CUDA.
+- Debugging e desenvolvimento de novas arquiteturas (ciclo de iteração rápido).
+- Environments Windows ou ARM onde o binário Fortran não compila facilmente.
+- Validação automatizada no CI GitHub (sem dependência de compilador Fortran).
+
+**Quando usar o simulador Python (Numba CUDA):**
+
+- Geração on-the-fly durante treinamento no Google Colab Pro+ (GPU T4/A100).
+- Geração em lote de datasets de grande escala (>> 100.000 modelos).
+- Pipeline de treinamento com dataset infinito (steps_per_epoch × epochs >> n_treino).
+
+**Quando usar JAX:**
+
+- Treinamento de PINNs com resíduo EM na função de perda (gradientes exatos necessários).
+- Análise de sensibilidade (∂H/∂rho) para interpretação geofísica.
+- Otimização iterativa de parâmetros geológicos via gradient descent.
+
+**Estratégia de migração recomendada:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ESTRATÉGIA DE MIGRAÇÃO INCREMENTAL — 4 ETAPAS                          │
+│                                                                         │
+│  Etapa 1 (atual → Fase 1 concluída):                                    │
+│    Fortran continua como gerador principal.                             │
+│    NumPy Python como validador (error < 1e-10 confirmado).              │
+│    Resultado: confiança na implementação Python.                         │
+│                                                                         │
+│  Etapa 2 (Fase 2 concluída):                                            │
+│    Numba CPU substitui Fortran para datasets < 50.000 modelos.          │
+│    CI/CD passa a usar Python (sem compilação Fortran).                  │
+│    Resultado: pipeline 100% Python para desenvolvimento.                 │
+│                                                                         │
+│  Etapa 3 (Fase 3 concluída):                                            │
+│    Numba CUDA gera datasets de grande escala no Colab.                  │
+│    Fortran mantido apenas como referência (legacy).                     │
+│    Resultado: geração on-the-fly habilitada (dataset infinito).          │
+│                                                                         │
+│  Etapa 4 (Fase 4 — opcional, para PINNs):                              │
+│    JAX forward model integrado a loss_pinns.py.                         │
+│    PINNs com resíduo EM habilitados sem diferenças finitas.              │
+│    Resultado: gradientes exatos → melhor convergência de PINNs.          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Decisão atual (Abril 2026):**
+
+O projeto se encontra na **Etapa 1**. O simulador Fortran permanece como gerador principal enquanto a implementação Python é desenvolvida e validada. A prioridade de implementação é **Fase 1 (NumPy) → Fase 2 (Numba CPU) → Fase 3 (CUDA)**, com JAX como extensão opcional para o cenário PINN de petrofísica planejado no roadmap. O critério de promoção da versão Python a produção é a aprovação nos testes de validação numérica da Seção 13.12.1 e o benchmark de performance da Seção 13.12.2 com Numba CPU atingindo throughput ≥ 2.0 modelos/s.
+
+---
+
+Here is the complete markdown content for the four pipeline sections requested. The content spans approximately 600 lines and covers:
+
+**13.9 Pipeline A** — Full 3-phase conversion plan (NumPy → Numba CPU → Numba CUDA) with complete code examples for `compute_propagation_constants`, `hankel_transform_batch`, the CUDA kernel design with shared memory optimization, and the unified `ForwardSimulator` class with `PipelineConfig` integration.
+
+**13.10 Pipeline B** — Four new capabilities: on-the-fly dataset generation via `tf.data.Dataset.from_generator`, differentiable JAX forward model with `jax.lax.scan` for the reflection coefficient recursion integrated into PINN losses, physical data augmentation (`PhysicalAugmentor`) at the geological parameter level, and the `SurrogateForwardSimulator` drop-in replacement (~800× speedup over Numba CPU).
+
+**13.11 Pipeline C** — Systematic comparison across 6 dimensions (native integration, AD, portability, extensibility, reproducibility) plus a full 20-row comparison table covering Fortran vs Numba CPU vs Numba CUDA vs JAX across all relevant criteria.
+
+**13.12 Pipeline D** — Evaluation framework with a 10-model canonical test suite (M01–M10), acceptance criteria (max_rel_error < 1e-10 for simple models), performance benchmark matrix across 6 configurations (B01–B06), scalability analysis for all three dimensions (layers/measurements/batch size), cost-benefit analysis, and a 4-step incremental migration strategy with a clear current-state decision for April 2026.
 
 ---
 
@@ -3345,4 +6554,4 @@ Fortran (Seções 5-6) e o pipeline Python (Seção 14).
 ---
 
 *Documentação do Simulador Fortran PerfilaAnisoOmp — Geosteering AI v2.0*
-*Versão 2.0 — Abril 2026 — Pipeline v5.0.15+*
+*Versão 4.0 — Abril 2026 — Pipeline v5.0.15+*
