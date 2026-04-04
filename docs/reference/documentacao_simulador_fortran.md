@@ -93,7 +93,9 @@ Constraint fisico: rho_v >= rho_h (SEMPRE em rochas sedimentares TIV)
 
 Coeficiente de anisotropia:
   lambda = sqrt(sigma_h / sigma_v) = sqrt(rho_v / rho_h)
-  Range tipico: 1.0 <= lambda <= sqrt(2) ~ 1.414
+  Range no dataset do projeto: 1.0 <= lambda <= sqrt(2) ~ 1.414
+  (Em formacoes reais, lambda pode exceder sqrt(2); o range acima
+   reflete a distribuicao de treinamento do gerador fifthBuildTIVModels.py)
 ```
 
 **Implicacao no codigo Fortran:** Cada camada `i` possui dois valores de resistividade `resist(i,1) = rho_h` e `resist(i,2) = rho_v`, e as condutividades sao calculadas como `eta(i,1) = 1/rho_h`, `eta(i,2) = 1/rho_v`.
@@ -126,7 +128,8 @@ O meio e composto por `n` camadas horizontais planas, empilhadas verticalmente:
 
 **Convencao de fronteiras no codigo:**
 - `prof(0) = -1e300` (sentinela para semi-espaco superior)
-- `prof(k) = prof(k-1) + h(k)` para `k = 1, ..., n-1`
+- `prof(1) = h(1) = 0` (primeira interface, atribuido diretamente)
+- `prof(k) = prof(k-1) + h(k)` para `k = 2, ..., n-1`
 - `prof(n) = +1e300` (sentinela para semi-espaco inferior)
 
 A utilizacao de sentinelas `+/-1e300` elimina condicionais nos limites das exponenciais, evitando divisoes por zero e garantindo estabilidade numerica.
@@ -162,21 +165,21 @@ O poco possui inclinacao `theta` em relacao a vertical. A ferramenta percorre o 
                          θ (angulo de inclinacao)
                         /
                        /
-    z1 = -h1   ◯ T  /  (transmissor, inicio da janela)
+    z1 = -h1   ◯ R  /  (receptor, inicio da janela, acima de T)
                   |/
-                  ◯ R  (receptor, dTR metros abaixo do T)
+                  ◯ T  (transmissor, dTR metros abaixo do R)
                  /|
                 / |
                /  |  pz = p_med * cos(θ)  (passo vertical)
               /   |  px = p_med * sin(θ)  (passo horizontal)
              /    |
-    ◯ T+1  /     |
-          ◯ R+1  |
+    ◯ R+1  /     |
+          ◯ T+1  |
          .       |
          .       |
          .       |
-    z1 + tj ◯ T_final
-              ◯ R_final
+    z1 + tj ◯ R_final
+              ◯ T_final
 
   nmed = ceil(tj / pz)  (numero de medicoes por angulo)
 ```
@@ -184,13 +187,13 @@ O poco possui inclinacao `theta` em relacao a vertical. A ferramenta percorre o 
 **Posicoes do Transmissor e Receptor para a j-esima medicao:**
 
 ```
-Transmissor:
+Receptor (variavel `x`, `z` no codigo):
+  x = 0 + (j-1) * px - Lsen/2
+  z = z1 + (j-1) * pz - Lcos/2
+
+Transmissor (variavel `Tx`, `Tz` no codigo):
   Tx = 0 + (j-1) * px + Lsen/2
   Tz = z1 + (j-1) * pz + Lcos/2
-
-Receptor:
-  Rx = 0 + (j-1) * px - Lsen/2
-  Rz = z1 + (j-1) * pz - Lcos/2
 
 Onde:
   Lsen = dTR * sin(theta)
@@ -308,8 +311,8 @@ Os coeficientes de reflexao sao calculados recursivamente das fronteiras mais ex
 Admitancia aparente descendente:
   AdmAp_dw(n) = AdmInt(n)    (semi-espaco inferior: sem reflexao)
 
-  AdmAp_dw(i) = AdmInt(i) * [AdmAp_dw(i+1) + AdmInt(i) * tanh(u*h)]
-                              / [AdmInt(i) + AdmAp_dw(i+1) * tanh(u*h)]
+  AdmAp_dw(i) = AdmInt(i) * [AdmAp_dw(i+1) + AdmInt(i) * tanh(u(i)*h(i))]
+                              / [AdmInt(i) + AdmAp_dw(i+1) * tanh(u(i)*h(i))]
 
 Coeficiente de reflexao TE descendente:
   RTEdw(n) = 0    (sem reflexao na ultima camada)
@@ -334,8 +337,8 @@ tghuh(:,i) = (1.d0 - exp(-2.d0 * uh(:,i))) / (1.d0 + exp(-2.d0 * uh(:,i)))
 Admitancia aparente ascendente:
   AdmAp_up(1) = AdmInt(1)    (semi-espaco superior: sem reflexao)
 
-  AdmAp_up(i) = AdmInt(i) * [AdmAp_up(i-1) + AdmInt(i) * tanh(u*h)]
-                              / [AdmInt(i) + AdmAp_up(i-1) * tanh(u*h)]
+  AdmAp_up(i) = AdmInt(i) * [AdmAp_up(i-1) + AdmInt(i) * tanh(u(i)*h(i))]
+                              / [AdmInt(i) + AdmAp_up(i-1) * tanh(u(i)*h(i))]
 
 Coeficiente de reflexao TE ascendente:
   RTEup(1) = 0    (sem reflexao na primeira camada)
@@ -518,7 +521,7 @@ O simulador e composto por 6 arquivos-fonte Fortran organizados em modulos com d
   │    ├── RtHR (rotacao tensor)                            │
   │    └── layer2z_inwell, int2str, real2str, etc.          │
   ├─────────────────────────────────────────────────────────┤
-  │  filtersv2.f08 (Filtros Digitais)                       │
+  │  filtersv2.f08 (module filterscommonbase)                 │
   │    ├── J0J1Kong (61 pontos)                             │
   │    ├── J0J1Key                                          │
   │    ├── J0J1Wer (201 pontos) ← USADO                    │
@@ -537,6 +540,7 @@ parameters.f08
       ├──────────────────────┐
       v                      v
 filtersv2.f08          magneticdipoles.f08
+(filterscommonbase)
       │                      │
       v                      │
    utils.f08 ◄───────────────┘
@@ -610,17 +614,21 @@ Modulo minimo que define constantes fundamentais com precisao dupla (`dp = kind(
 
 | Variavel | Valor | Tipo | Descricao |
 |:---------|:------|:-----|:----------|
+| `sp` | `kind(1.e0)` | `integer, parameter` | Precisao simples (~7 digitos) |
 | `dp` | `kind(1.d0)` | `integer, parameter` | Precisao dupla (~15 digitos) |
-| `qp` | `selected_real_kind(30)` | `integer, parameter` | Precisao quádrupla (disponivel, nao usado) |
+| `qp` | `selected_real_kind(30)` | `integer, parameter` | Precisao quadrupla (disponivel, nao usado) |
 | `pi` | 3.14159265... | `real(dp), parameter` | Pi com 37 digitos decimais |
 | `mu` | 4e-7 * pi | `real(dp), parameter` | Permeabilidade do vacuo (H/m) |
 | `epsilon` | 8.85e-12 | `real(dp), parameter` | Permissividade do vacuo (F/m) |
 | `eps` | 1e-9 | `real(dp), parameter` | Tolerancia numerica para singularidades |
 | `del` | 0.1 | `real(dp), parameter` | Tolerancia angular (graus) |
 | `Iw` | 1.0 | `real(dp), parameter` | Corrente do dipolo (A) |
-| `mx, my, mz` | 1.0 | `real(dp), parameter` | Momentos dipolares (A.m^2) |
+| `dsx, dsy, dsz` | 1.0 | `real(dp), parameter` | Area dos dipolos eletricos (m^2, nao utilizado) |
+| `mx, my, mz` | 1.0 | `real(dp), parameter` | Momentos dipolares magneticos (A.m^2) |
 
-### 5.2 filtersv2.f08 — Filtros Digitais para Transformada de Hankel
+### 5.2 filtersv2.f08 (module filterscommonbase) — Filtros Digitais para Transformada de Hankel
+
+**Nota:** O arquivo chama-se `filtersv2.f08`, mas o modulo Fortran declarado dentro dele e `module filterscommonbase`. O modulo principal (`PerfilaAnisoOmp.f08`) o referencia via `use filterscommonbase`.
 
 Modulo que armazena os coeficientes tabelados de 4 filtros digitais para transformadas de Hankel. Cada filtro fornece:
 - `absc(npt)`: Abscissas (pontos de amostragem no dominio espectral)
@@ -844,7 +852,7 @@ Inv0_15Dip1000_t5    ! nome dos arquivos de saida
 
 ### 6.3 Observacoes Importantes
 
-1. **Espessuras:** As camadas 1 e ncam sao semi-espacos (espessura infinita), entao `esp(1) = esp(ncam) = 0` e atribuido automaticamente no codigo.
+1. **Espessuras:** As camadas 1 e ncam sao semi-espacos (espessura infinita), entao `esp(1) = esp(ncam) = 0` e atribuido em `RunAnisoOmp.f08` (programa principal) antes de chamar `perfila1DanisoOMP`.
 
 2. **Frequencias:** O simulador padrao usa 2 frequencias (20 kHz e 40 kHz). A primeira e a mesma do pipeline (`FREQUENCY_HZ = 20000.0`).
 
@@ -911,10 +919,10 @@ Arquivo binario no formato Fortran `stream` (sem registros fixos), escrito em mo
 
 ### 7.3 Leitura no Pipeline Python (geosteering_ai)
 
-O pipeline Python (`geosteering_ai/data/loading.py`) le o .dat usando numpy:
+O pipeline Python (`geosteering_ai/data/loading.py`) le o .dat interpretando os registros binarios de 172 bytes. O pseudocodigo ilustrativo abaixo mostra a logica conceitual (a implementacao real em `loading.py` utiliza `np.frombuffer` com mapeamento `COL_MAP_22`):
 
 ```python
-# Formato de leitura do .dat:
+# Pseudocodigo ilustrativo (NAO e o codigo real de loading.py):
 dtype = np.dtype([
     ('meds', np.int32),       # Col 0: indice de medicao
     ('values', np.float64, 21) # Cols 1-21: zobs, rho_h, rho_v, 18 EM
@@ -959,6 +967,16 @@ O Makefile segue a convencao padrao de projetos Fortran com:
 | TARGETS | `$(binary)`, `run_python`, `all`, `clean`, `cleanall` |
 
 ### 8.2 Flags de Compilacao
+
+**Flags de desenvolvimento (comentadas, para debug):**
+
+```makefile
+-g             # Simbolos de debug
+-fcheck=all    # Verificacao de bounds, overflow, etc.
+-fbacktrace    # Stack trace em caso de erro
+```
+
+Para ativar o modo de desenvolvimento, descomente `flags = $(development_flags_gfortran)` e comente `flags = $(production_flags_gfortran)` no Makefile.
 
 **Flags de producao (ativas):**
 
