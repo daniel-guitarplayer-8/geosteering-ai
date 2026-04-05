@@ -1679,6 +1679,66 @@ Na perfilagem inclinada, `alpha = theta` (inclinação do poço), `beta = gamma 
 
 ### 6.4 magneticdipoles.f08 — Campos Dipolares
 
+#### 6.4.-1 Fase 4 — Cache de `commonarraysMD` por `(r, freq)` ✅ Implementada (2026-04-05)
+
+A partir da **Fase 4**, o simulador elimina **99,83 %** das chamadas a `commonarraysMD` por modelo, explorando a invariância matemática do argumento `r = dTR × |sin(theta_k)|` (constante por ângulo devido à translação rígida da ferramenta LWD na janela de perfilagem).
+
+**Estrutura**:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  perfila1DanisoOMP (serial, dentro do loop k sobre ângulos):           │
+│    ① r_k = dTR × |sin(theta_k)|                                         │
+│    ② do i = 1, nf                                                       │
+│         call commonarraysMD(n, npt, r_k, ..., u_cache(:,:,i), ...)     │
+│       end do                                                            │
+│                                                                        │
+│  Loop !$omp parallel do (cada thread lê os caches shared):             │
+│    tid = omp_get_ancestor_thread_num(1) * num_threads_j +              │
+│          omp_get_thread_num()                                          │
+│    call fieldsinfreqs_cached_ws(ws_pool(tid), ..., u_cache, ...)       │
+│      ├── commonfactorsMD (ainda inline — depende de camadT variável)   │
+│      ├── hmd_TIV_optimized_ws(ws, ..., u_cache(:,:,i), ...)            │
+│      └── vmd_optimized_ws(ws, ..., u_cache(:,:,i), ...)                │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**Caches pré-computados** (9 arrays em `perfila1DanisoOMP`, shared entre threads):
+
+| Cache | Dimensão | Conteúdo físico |
+|:------|:--------:|:----------------|
+| `u_cache` | `(npt, n, nf)` | Constante de propagação horizontal por camada |
+| `s_cache` | `(npt, n, nf)` | Constante de propagação vertical × lambda |
+| `uh_cache` | `(npt, n, nf)` | `u × h` (para exponenciais de reflexão) |
+| `sh_cache` | `(npt, n, nf)` | `s × h` |
+| `RTEdw_cache` | `(npt, n, nf)` | Coef. reflexão TE descendente |
+| `RTEup_cache` | `(npt, n, nf)` | Coef. reflexão TE ascendente |
+| `RTMdw_cache` | `(npt, n, nf)` | Coef. reflexão TM descendente |
+| `RTMup_cache` | `(npt, n, nf)` | Coef. reflexão TM ascendente |
+| `AdmInt_cache` | `(npt, n, nf)` | Admitância intrínseca (`u/zeta`) |
+
+**Memória total** (n=29, nf=2, npt=201): `9 × 201 × 29 × 2 × 16 bytes ≈ 1,68 MB` no heap, alocado/desalocado uma única vez por modelo.
+
+**Resultados empíricos** (Intel i9-9980HK, 8 threads, `model.in` n=29):
+
+| Thread count | Fase 3 (s/modelo) | Fase 4 (s/modelo) | Speedup | Throughput Fase 4 |
+|:------------:|:-----------------:|:-----------------:|:-------:|:-----------------:|
+| 1 | 1,3690 | **0,2393** | **5,72×** | 15.042 mod/h |
+| 4 | 0,4617 | **0,0820** | **5,63×** | 43.902 mod/h |
+| 8 | 0,3433 | **0,0620** | **5,54×** | **58.064 mod/h** |
+
+**Validação numérica**: `max|Δ| = 3,97 × 10⁻¹³` vs Fase 3 (três ordens de magnitude abaixo do critério `1 × 10⁻¹⁰`). MD5 determinístico em 1/2/4/8 threads.
+
+**Rotina associada**: `fieldsinfreqs_cached_ws` em [`PerfilaAnisoOmp.f08`](../../Fortran_Gerador/PerfilaAnisoOmp.f08) recebe os 9 caches + `eta_in` como `intent(in)` e delega para `hmd_TIV_optimized_ws`/`vmd_optimized_ws` passando slices `cache(:,:,i)` (contíguas em column-major, sem cópia temporária). A rotina original `fieldsinfreqs_ws` é **preservada intacta** para rollback.
+
+**Débito B2 resolvido nesta fase**: `eta = 1/resist` foi hoisted para `eta_shared` no escopo de `perfila1DanisoOMP`, evitando `n × nf × nmed` divisões redundantes por modelo.
+
+**Meta do roteiro atingida**: 24.000 mod/h (documentada em `analise_paralelismo §6.4`) — Fase 4 atinge **58.064 mod/h**, **242 %** da meta.
+
+**Detalhes completos**: [`relatorio_fase4_fortran.md`](relatorio_fase4_fortran.md).
+
+---
+
 #### 6.4.0 type :: thread_workspace — Pré-alocação de Workspace (Fase 3)
 
 A partir da **Fase 3 — Workspace Pre-allocation** (2026-04-05), o módulo `magneticdipoles.f08` define um tipo derivado `thread_workspace` com seis componentes `allocatable` que agregam os arrays anteriormente alocados/desalocados dinamicamente dentro de `hmd_TIV_optimized` e `vmd_optimized` a cada chamada. O objetivo é eliminar a contenção no mutex do heap entre threads paralelas, uma vez que cada chamada às rotinas originais fazia entre 6 e 8 pares `allocate/deallocate` — totalizando ~7.200 chamadas por modelo × 8 threads, saturando o alocador do sistema.

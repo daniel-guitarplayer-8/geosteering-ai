@@ -43,6 +43,31 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !=============================================================================
   type(thread_workspace), allocatable :: ws_pool(:)
   integer :: t, tid
+
+  !=============================================================================
+  ! Fase 4 — Cache de commonarraysMD por (r, freq)
+  !
+  ! Pré-computa o resultado de commonarraysMD uma única vez por ângulo/frequência
+  ! em vez de chamá-la nf × nmed = 1.200 vezes por modelo. A redundância é 100%
+  ! porque commonarraysMD(n, npt, r, freq, h, eta, ...) depende apenas de
+  ! (r, freq, n, h, eta) — invariantes em j dentro de um modelo.
+  !
+  ! Os 9 arrays abaixo são alocados no heap uma única vez por modelo (em
+  ! perfila1DanisoOMP, fora de qualquer loop), preenchidos no início de cada
+  ! iteração k, e lidos pelos threads no inner parallel via shared clause.
+  !
+  ! Tamanho: 9 × (npt × n × nf) × 16 bytes ≈ 1,68 MB para n=29, nf=2, npt=201.
+  ! Ref: docs/reference/analise_paralelismo_cpu_fortran.md §7 Fase 4
+  !=============================================================================
+  complex(dp), allocatable :: u_cache(:,:,:), s_cache(:,:,:)
+  complex(dp), allocatable :: uh_cache(:,:,:), sh_cache(:,:,:)
+  complex(dp), allocatable :: RTEdw_cache(:,:,:), RTEup_cache(:,:,:)
+  complex(dp), allocatable :: RTMdw_cache(:,:,:), RTMup_cache(:,:,:)
+  complex(dp), allocatable :: AdmInt_cache(:,:,:)
+  real(dp)    :: r_k, omega_i
+  complex(dp) :: zeta_i
+  real(dp), allocatable :: eta_shared(:,:)  ! (n, 2) — hoisted de fieldsinfreqs (B2)
+  integer     :: ii
   ! real(dp) :: wtime
 
   ! wtime = omp_get_wtime( )
@@ -151,6 +176,27 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     allocate(ws_pool(t)%TEupz(npt, n))
   end do
 
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Fase 4 — Alocação dos caches de commonarraysMD (shared entre threads)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  allocate(u_cache     (npt, n, nf))
+  allocate(s_cache     (npt, n, nf))
+  allocate(uh_cache    (npt, n, nf))
+  allocate(sh_cache    (npt, n, nf))
+  allocate(RTEdw_cache (npt, n, nf))
+  allocate(RTEup_cache (npt, n, nf))
+  allocate(RTMdw_cache (npt, n, nf))
+  allocate(RTMup_cache (npt, n, nf))
+  allocate(AdmInt_cache(npt, n, nf))
+
+  ! Fase 4 — eta hoisted para escopo de perfila1DanisoOMP (era recomputado em
+  ! cada chamada de fieldsinfreqs antes). Invariante durante todo o modelo.
+  allocate(eta_shared(n, 2))
+  do ii = 1, n
+    eta_shared(ii, 1) = 1.d0 / resist(ii, 1)
+    eta_shared(ii, 2) = 1.d0 / resist(ii, 2)
+  end do
+
   ! Exibir configuração de threads apenas no primeiro modelo do lote
   if (modelm == 1) then
     write(*,'(A,I0,A,I0,A,I0,A,I0)') &
@@ -193,10 +239,39 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     Lsen = dTR * seno
     Lcos = dTR * coss
 
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    ! Fase 4 — Pré-cômputo de commonarraysMD (serial, uma vez por ângulo k)
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    ! commonarraysMD depende apenas de (r, freq, n, h, eta) — todos invariantes
+    ! em j. Por construção r = dTR × |sin(theta_k)| é a distância horizontal
+    ! T-R, constante durante a janela de perfilagem (translação rígida da
+    ! ferramenta). A sub-rotina commonarraysMD internamente aplica sanitização
+    ! if (hordist < eps) hordist = 1.d-2 para o caso theta = 0 (perfilagem
+    ! vertical). Aqui passamos r_k direto sem sanitizar — a bit-equivalência
+    ! com a versão pré-Fase-4 fica garantida pela sanitização interna.
+    !
+    ! Redução: nf × nmed = 1.200 chamadas/modelo → nf = 2 chamadas/modelo.
+    ! Os caches são lidos (read-only) pelos threads no inner parallel abaixo.
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    r_k = dTR * dabs(seno)
+    do ii = 1, nf
+      omega_i = 2.d0 * pi * freq(ii)
+      zeta_i  = cmplx(0.d0, 1.d0, kind=dp) * omega_i * mu
+      call commonarraysMD(n, npt, r_k, krwJ0J1(:,1), zeta_i, h, eta_shared,   &
+                          u_cache(:,:,ii),  s_cache(:,:,ii),                   &
+                          uh_cache(:,:,ii), sh_cache(:,:,ii),                  &
+                          RTEdw_cache(:,:,ii), RTEup_cache(:,:,ii),            &
+                          RTMdw_cache(:,:,ii), RTMup_cache(:,:,ii),            &
+                          AdmInt_cache(:,:,ii))
+    end do
+
     ! Schedule static: iterações têm custo uniforme (mesmos n, npt, nf, nlayers)
     ! Fase 3: cada thread usa ws_pool(tid) para eliminar allocate/deallocate no
     !         hot path (ver magneticdipoles.f08 type :: thread_workspace).
+    ! Fase 4: caches compartilhados u_cache,...,AdmInt_cache são lidos por todas
+    !         as threads (read-only ⇒ sem race, sem locks).
     !$omp parallel do schedule(static) num_threads(num_threads_j) &
+    !$omp&        default(shared) &
     !$omp&        private(j, x, y, z, Tx, Ty, Tz, posTR, zrho, cH, tid)
     do j = 1, nmed(k)
       !----------------------------------------------------
@@ -214,8 +289,14 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
       ! Com num_threads_k==1 (ntheta=1 produção), ancestor(1)==0 ⇒ tid == inner_tid.
       ! Com num_threads_k>1 (multi-ângulo futuro), tid percorre [0, maxthreads-1].
       tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()
-      call fieldsinfreqs_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt, &
-                            krwJ0J1, n, h, prof, resist, zrho, cH)
+      ! Fase 4: chamada usa os caches pré-computados (shared) em vez de
+      ! recalcular commonarraysMD a cada iteração j.
+      call fieldsinfreqs_cached_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt, &
+                                    krwJ0J1, n, h, prof, resist, eta_shared,        &
+                                    u_cache, s_cache, uh_cache, sh_cache,           &
+                                    RTEdw_cache, RTEup_cache,                        &
+                                    RTMdw_cache, RTMup_cache, AdmInt_cache,          &
+                                    zrho, cH)
       z_rho1(j,:,:) = zrho
       c_H1(j,:,:) = cH
     end do
@@ -242,6 +323,18 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     if (allocated(ws_pool(t)%TEupz)) deallocate(ws_pool(t)%TEupz)
   end do
   deallocate(ws_pool)
+
+  ! Fase 4 — Liberação dos caches de commonarraysMD
+  if (allocated(u_cache))      deallocate(u_cache)
+  if (allocated(s_cache))      deallocate(s_cache)
+  if (allocated(uh_cache))     deallocate(uh_cache)
+  if (allocated(sh_cache))     deallocate(sh_cache)
+  if (allocated(RTEdw_cache))  deallocate(RTEdw_cache)
+  if (allocated(RTEup_cache))  deallocate(RTEup_cache)
+  if (allocated(RTMdw_cache))  deallocate(RTMdw_cache)
+  if (allocated(RTMup_cache))  deallocate(RTMup_cache)
+  if (allocated(AdmInt_cache)) deallocate(AdmInt_cache)
+  if (allocated(eta_shared))   deallocate(eta_shared)
   !-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
   ! write(*,*)'Passando para a escrita dos arquivos'
   call writes_files(modelm, nmaxmodel, mypath, zrho1, cH1, ntheta, theta, nf, freq, nmed, filename)
@@ -413,6 +506,114 @@ subroutine fieldsinfreqs_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0J1, n, 
     cH(i,:) = (/ tH(1,1), tH(1,2), tH(1,3), tH(2,1), tH(2,2), tH(2,3), tH(3,1), tH(3,2), tH(3,3) /)
   end do
 end subroutine fieldsinfreqs_ws
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+! Fase 4 — fieldsinfreqs_cached_ws: usa caches pré-computados de commonarraysMD
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+!
+! Variante de fieldsinfreqs_ws que, em vez de chamar commonarraysMD a cada
+! invocação, recebe os 9 arrays de cache pré-computados (um por frequência)
+! como argumentos intent(in). As slices u_c(:,:,i), s_c(:,:,i), ... são
+! passadas para as rotinas hmd_TIV_optimized_ws e vmd_optimized_ws sem cópia
+! (contíguas em column-major Fortran).
+!
+! Redução efetiva: 1.200 chamadas/modelo de commonarraysMD → nf chamadas
+! (executadas fora de fieldsinfreqs_cached_ws, no pré-cômputo serial do loop k).
+!
+! commonfactorsMD PERMANECE inline (hot path) porque depende de camadT e Tz,
+! ambos variáveis em j. Será tratada em Fase 6 (cache por camadT).
+!
+! Ref: docs/reference/analise_paralelismo_cpu_fortran.md §7 Fase 4
+!      docs/reference/relatorio_fase4_fortran.md
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+subroutine fieldsinfreqs_cached_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0J1, &
+                                    n, h, prof, resist, eta_in,                      &
+                                    u_c, s_c, uh_c, sh_c,                            &
+                                    RTEdw_c, RTEup_c, RTMdw_c, RTMup_c, AdmInt_c,    &
+                                    zrho, cH)
+  ! INPUT:
+  !   ws        : workspace pré-alocado por thread (Fase 3)
+  !   ang, nf, freqs, posTR, dipolo, npt, krwJ0J1, n, h, prof, resist:
+  !               idênticos a fieldsinfreqs_ws
+  !   eta_in(n,2): admitividades hoisted (1/resist) — evita recomputo por chamada
+  !   u_c..AdmInt_c(npt,n,nf): arrays pré-computados por commonarraysMD no
+  !               escopo do caller (perfila1DanisoOMP), um slot por frequência
+  ! OUTPUT:
+  !   zrho(nf,3), cH(nf,9): idênticos a fieldsinfreqs_ws
+  implicit none
+  type(thread_workspace), intent(inout) :: ws
+  integer, intent(in) :: nf, npt, n
+  character(5), intent(in) :: dipolo
+  real(dp), intent(in) :: ang, freqs(nf), krwJ0J1(npt,3), posTR(6), h(n), prof(0:n)
+  real(dp), intent(in) :: resist(n,2), eta_in(n,2)
+  complex(dp), dimension(npt,n,nf), intent(in) :: u_c, s_c, uh_c, sh_c
+  complex(dp), dimension(npt,n,nf), intent(in) :: RTEdw_c, RTEup_c, RTMdw_c, RTMup_c
+  complex(dp), dimension(npt,n,nf), intent(in) :: AdmInt_c
+  real(dp), dimension(nf,3), intent(out) :: zrho
+  complex(dp), dimension(nf,9), intent(out) :: cH
+
+  integer :: i, layerObs, camadT, camadR
+  real(dp) :: freq, krJ0J1(npt), wJ0(npt), wJ1(npt)
+  real(dp) :: x, y, z, Tx, Ty, Tz, zobs, omega
+  complex(dp) :: HxHMD(1,2), HyHMD(1,2), HzHMD(1,2) !só se dipolo = 'hmdxy'
+  complex(dp) :: zeta, HxVMD, HyVMD, HzVMD, matH(3,3), tH(3,3)
+  complex(dp), dimension(npt) :: Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz
+
+  Tx = posTR(1)
+  Ty = posTR(2)
+  Tz = posTR(3)
+  x  = posTR(4)
+  y  = posTR(5)
+  z  = posTR(6)
+
+  call findlayersTR2well(n, Tz, z, prof(1:n-1), camadT, camadR)
+  ! Armazenamento da profundidade do ponto-médio do arranjo T-R1 e suas resistividades verdadeiras
+  zobs = (Tz + z) / 2.d0
+  layerObs = layer2z_inwell(n, zobs, prof(1:n-1))
+
+  ! r local nem é usado aqui — estaria redundante, pois commonarraysMD já foi
+  ! chamada pelo caller (perfila1DanisoOMP) com o r correto.
+
+  krJ0J1 = krwJ0J1(:,1)
+  wJ0    = krwJ0J1(:,2)
+  wJ1    = krwJ0J1(:,3)
+
+  do i = 1, nf
+    freq  = freqs(i)
+    omega = 2.d0 * pi * freq
+    zeta  = cmplx(0,1.d0,kind=dp) * omega * mu
+    zrho(i,:) = (/zobs, resist(layerObs,1), resist(layerObs,2)/)
+
+    ! Cálculo do tensor de indução magnética do arranjo TR triaxial
+    !===========================================================================
+    ! commonarraysMD ELIMINADO — slices dos caches passadas diretamente.
+    ! commonfactorsMD permanece (depende de camadT, variável em j).
+    call commonfactorsMD(n, npt, Tz, h, prof, camadT, &
+                         u_c(:,:,i), s_c(:,:,i), uh_c(:,:,i), sh_c(:,:,i), &
+                         RTEdw_c(:,:,i), RTEup_c(:,:,i),                    &
+                         RTMdw_c(:,:,i), RTMup_c(:,:,i),                    &
+                         Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz)
+    call hmd_TIV_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt, krJ0J1, wJ0, wJ1, h, &
+                      prof, zeta, eta_in, x, y, z,                                  &
+                      u_c(:,:,i), s_c(:,:,i), uh_c(:,:,i), sh_c(:,:,i),             &
+                      RTEdw_c(:,:,i), RTEup_c(:,:,i),                                &
+                      RTMdw_c(:,:,i), RTMup_c(:,:,i),                                &
+                      Mxdw, Mxup, Eudw, Euup, HxHMD, HyHMD, HzHMD, dipolo)
+    call vmd_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt, krJ0J1, wJ0, wJ1, h, &
+                      prof, zeta, x, y, z,                                          &
+                      u_c(:,:,i), uh_c(:,:,i), AdmInt_c(:,:,i),                     &
+                      RTEdw_c(:,:,i), RTEup_c(:,:,i),                                &
+                      FEdwz, FEupz, HxVMD, HyVMD, HzVMD)
+    !===========================================================================
+    matH(1,:) = (/HxHMD(1,1), HyHMD(1,1), HzHMD(1,1)/)
+    matH(2,:) = (/HxHMD(1,2), HyHMD(1,2), HzHMD(1,2)/)
+    matH(3,:) = (/HxVMD, HyVMD, HzVMD/)
+    tH = RtHR(ang, 0.d0, 0.d0, matH)  !tensor de indução magnética da ferramenta triaxial
+    ! Armazenamento das partes real e imaginária de Hxx, Hyy e Hzz:
+    cH(i,:) = (/ tH(1,1), tH(1,2), tH(1,3), tH(2,1), tH(2,2), tH(2,3), tH(3,1), tH(3,2), tH(3,3) /)
+  end do
+end subroutine fieldsinfreqs_cached_ws
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq, nmeds, filename)
   implicit none

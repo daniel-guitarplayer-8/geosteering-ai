@@ -801,6 +801,53 @@ Impacto: ~45% do tempo total × (1 - 1/600) ≈ 44,9% de redução no tempo
 **Speedup esperado:** 1,6–2,2× sobre código pós-Fase-3.
 **Risco:** Médio — requer reestruturação do laço de frequências dentro de `fieldsinfreqs`. Mitigação: manter `fieldsinfreqs` original e criar `fieldsinfreqs_cached` separada.
 
+#### Resultados Empíricos da Fase 4 (2026-04-05) ✅ IMPLEMENTADA
+
+A Fase 4 foi executada com sucesso no commit pós-PR1-Hygiene, criando a subrotina `fieldsinfreqs_cached_ws` que recebe 9 arrays de cache pré-computados como `intent(in)` e delega para `hmd_TIV_optimized_ws`/`vmd_optimized_ws` passando slices contíguas `u_cache(:,:,i)` etc. As rotinas anteriores (`fieldsinfreqs`, `fieldsinfreqs_ws`) permanecem preservadas para rollback.
+
+**Ambiente de medição** (idêntico às Fases 0–3):
+- Hardware: Intel i9-9980HK (8 cores físicos), 32 GB RAM
+- SO: macOS Darwin 25.4, gfortran 15.2.0 Homebrew, `ld-classic`
+- Config: `model.in` com 29 camadas, 2 frequências, 600 medidas/modelo
+- Compilação: `-O3 -march=native -ffast-math -funroll-loops -fopenmp -std=f2008`
+
+**Resultados a 8 threads (60 iterações):**
+
+| Métrica | Fase 3 | **Fase 4** | Delta |
+|:--------|:------:|:----------:|:-----:|
+| Tempo médio (s/modelo) | 0,3433 | **0,0620** | **−81,9 %** |
+| Throughput (modelos/h) | 10.485 | **58.064** | **+453,8 %** |
+| Speedup | 1,00× (ref.) | **5,54×** | — |
+
+**Escalabilidade 1 → 8 threads (30 iterações por ponto):**
+
+| Threads | Fase 3 tempo (s) | Fase 4 tempo (s) | Fase 4 thput (mod/h) | Speedup 4 vs 3 |
+|:-------:|:----------------:|:----------------:|:--------------------:|:--------------:|
+| **1**   | 1,3690 | **0,2393** | 15.042 | **5,72×** |
+| **2**   | 0,7500 | **0,1390** | 25.899 | 5,40× |
+| **4**   | 0,4617 | **0,0820** | 43.902 | **5,63×** |
+| **8**   | 0,3433 | **0,0620** | **58.064** | 5,54× |
+
+**Validação numérica:**
+- `-O3 -ffast-math` vs Fase 3 `c213b66`: `max|Δ| = 3,97 × 10⁻¹³`, `RMS(Δ) = 2,02 × 10⁻¹⁴`, `max rel Δ = 1,01 × 10⁻⁸`. **Três ordens de magnitude abaixo do critério `1 × 10⁻¹⁰`** do plano.
+- MD5 determinístico em 1/2/4/8 threads: `1e4f36fa8f0bcd21f3700dc445c2894d`.
+- A diferença sub-ULP é explicada por reordenamento associativo + mudança no pressure de registradores pelo `-O3`.
+
+**Contagem de chamadas a commonarraysMD:**
+
+| Momento | Chamadas/modelo | Redução |
+|:--------|:---------------:|:-------:|
+| Fase 3 | `nf × nmed = 1.200` | — |
+| Fase 4 | `ntheta × nf = 2` | **99,83 %** |
+
+**Análise vs meta do plano:** O plano projetava speedup de **1,6–2,2×**. O obtido foi **5,54× em 8 threads** (até 5,72× em 1 thread), muito acima da meta. A explicação é que o profile gprof inicial subestimava o custo relativo de `commonarraysMD`: assumia-se ~45 % do tempo total, mas os ganhos observados indicam que a sub-rotina dominava ~82 %. O simulador agora processa **~16 modelos/segundo em 8 threads**, atingindo **242 %** da meta original do roteiro (24.000 modelos/h).
+
+**Novo gargalo remanescente:** Com `commonarraysMD` eliminada, `commonfactorsMD` passa a dominar (~40–50 % do tempo restante) — alvo natural da Fase 6.
+
+**Débito B2 resolvido nesta fase:** `eta = 1/resist` era recomputado a cada chamada de `fieldsinfreqs`; foi hoisted para `eta_shared` no escopo de `perfila1DanisoOMP`, eliminando `n × nf × nmed` divisões redundantes.
+
+**Relatório completo:** [`docs/reference/relatorio_fase4_fortran.md`](relatorio_fase4_fortran.md)
+
 ---
 
 ### FASE 5 — Colapso de Laços com `collapse(3)` (Passo 1.3) — Semana 3

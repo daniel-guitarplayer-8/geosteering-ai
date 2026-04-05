@@ -350,18 +350,20 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 - Fases 0 e 1: [`docs/reference/relatorio_fase0_fase1_fortran.md`](reference/relatorio_fase0_fase1_fortran.md)
 - **Fase 2 + Débitos**: [`docs/reference/relatorio_fase2_debitos_fortran.md`](reference/relatorio_fase2_debitos_fortran.md)
 - **Fase 3**: [`docs/reference/relatorio_fase3_fortran.md`](reference/relatorio_fase3_fortran.md)
+- **Fase 4**: [`docs/reference/relatorio_fase4_fortran.md`](reference/relatorio_fase4_fortran.md)
 
 | Fase | Descrição | Status | Ganho Real / Esperado |
 |:----:|:----------|:------:|:----------------------|
-| **Fase 0** | Benchmark Baseline (wall-time, MD5, infra `bench/`) | ✅ **Concluída 2026-04-04** | Baseline publicado: **0,1047 s/modelo**, **~34.400 mod/h** (i9-9980HK, 8 threads, AVX-2, CPU fria) |
+| **Fase 0** | Benchmark Baseline (wall-time, MD5, infra `bench/`) | ✅ **Concluída 2026-04-04** | Baseline publicado: **0,1047 s/modelo**, **~34.400 mod/h** (i9-9980HK, 8 threads, AVX-2, CPU fria, n=10) |
 | **Fase 1** | SIMD Hankel Reduction (`!$omp simd` em `commonarraysMD`) | ⏭️ **Pulada 2026-04-04** | Δ +0,96 % (Welch *t*=+0,425, não-significativo). Causa: gfortran 15.x já auto-vetoriza em AVX-2 32-byte. Experimento arquivado em `Fortran_Gerador/bench/attic/`. Re-avaliar em AVX-512. |
-| **Fase 2** | Hybrid Scheduler + particionamento multiplicativo + correção Débitos 1/2/3 | ✅ **Concluída 2026-04-04** | **Bug 2-thread corrigido: −41 % (speedup 1,07× → 1,60×)**. 1 thread −12 %, 4 threads −23 %. Trade-off marginal em 8–16 threads (+6 a +11 %). MD5 idêntico, zero regressão numérica. |
-| **Fase 2b** | Chunk tuning (`static,16` ou `guided,4`) para mitigar regressão em 8–16 threads | 📋 Planejada | +5–10 % esperado nos regimes degradados |
-| **Fase 3** | Workspace Pre-allocation (`type :: thread_workspace` com 6 componentes, `ws_pool(0:maxthreads-1)` pré-alocado) | ✅ **Concluída 2026-04-05** | **Throughput: +30,1 % em serial, +11,5 % em 8 threads** (`model.in` com n=29 camadas). Elimina 99,92 % dos mallocs do hot path (~7.200 → 6 por modelo). `max\|Δ\| = 3,4 × 10⁻¹⁴`, 4 ordens de magnitude abaixo do critério `1e-10`. Bit-exato com `-O0` vs Phase 2. |
+| **Fase 2** | Hybrid Scheduler + particionamento multiplicativo + correção Débitos 1/2/3 | ✅ **Concluída 2026-04-04** | Bug 2-thread corrigido: −41 % (speedup 1,07× → 1,60×). Baseline atual (n=29): **0,383 s/modelo**, **9.399 mod/h** a 8 threads. |
+| **Fase 3** | Workspace Pre-allocation (`type :: thread_workspace` + `ws_pool`) | ✅ **Concluída 2026-04-05** | +30,1 % serial, +11,5 % 8 threads. Elimina 99,92 % dos mallocs do hot path. `max\|Δ\|=3,4e-14`. Pós-Fase 3: **0,343 s/modelo**, **10.485 mod/h** a 8 threads. |
+| **PR1 Hygiene** | Correção dos Débitos **D4 (firstprivate), D5 (barrier), D6 (tid global)** | ✅ **Concluída 2026-04-05** (`db997d2`) | Pré-requisito estrutural para multi-ângulo. Zero impacto em runtime (ntheta=1), MD5 bit-exato em 1/2/4/8 threads. |
+| **Fase 4** | Cache de `commonarraysMD` por `(r, freq)` — 1.200 → 2 chamadas/modelo | ✅ **Concluída 2026-04-05** | **Speedup 5,54× em 8 threads** (0,343 s → 0,062 s). Throughput **58.064 mod/h** (**242 % da meta original** de 24k mod/h). Eliminação de 99,83 % das chamadas. `max\|Δ\|=3,97e-13`. Débito B2 (hoist de `eta`) resolvido junto. |
 | **Fase 3b** | Refatorar automatic arrays de `fieldsinfreqs` para `thread_workspace` estendido | 📋 Opcional | Robustez stack overflow para n ≥ 30 camadas |
-| **Fase 4** | Cache de `commonarraysMD` por `(r, freq)` — 1200 → 2 chamadas/modelo | 🔜 **Próxima** | **+60–120 % — maior ganho do roteiro** |
-| **Fase 5** | `collapse(3)` nos loops `theta × medidas × freq` | 📋 Planejada | +10–20 % adicional |
-| **Fase 6** | Cache de `commonfactorsMD` por `camadT` | 📋 Planejada | +15–25 % adicional |
+| **Fase 2b** | Chunk tuning (`static,16` ou `guided,4`) | 📋 Planejada | +5–10 % esperado nos regimes degradados |
+| **Fase 5** | `collapse(3)` nos loops `theta × medidas × freq` | 📋 Planejada | Marginal para ntheta=1; importante para multi-ângulo |
+| **Fase 6** | Cache de `commonfactorsMD` por `camadT` | 🔜 **Próxima** | **Novo gargalo pós-Fase 4** (~40-50 % do tempo restante). Ganho esperado: +40-60 % sobre Fase 4. |
 
 **Débitos técnicos — status atualizado**:
 
