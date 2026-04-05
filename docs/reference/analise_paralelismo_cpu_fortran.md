@@ -663,6 +663,57 @@ deallocate(ws_pool)
 **Speedup esperado:** 1,4–1,8× (30–40% de redução no tempo total medido por `gprof`).
 **Risco:** Médio — refatoração de assinaturas de 4 sub-rotinas. Mitigação: versões `_ws` paralelas sem alteração do código original.
 
+#### Resultados Empíricos da Fase 3 (2026-04-05) ✅ IMPLEMENTADA
+
+A Fase 3 foi executada com sucesso, preservando integralmente as rotinas originais (`hmd_TIV_optimized`, `vmd_optimized`, `fieldsinfreqs`) e criando as variantes `_ws` (`hmd_TIV_optimized_ws`, `vmd_optimized_ws`, `fieldsinfreqs_ws`) em paralelo, conforme estratégia de implementação segura. O `type :: thread_workspace` foi adicionado a `magneticdipoles.f08` com **6 componentes** (`Tudw, Txdw, Tuup, Txup, TEdwz, TEupz`), não os ~30 originalmente sugeridos na §5.2 desta análise — a revisão do código atual mostrou que os demais arrays (`u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, AdmInt, Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz`) já eram `automatic arrays` no stack, não alocados dinamicamente. A refatoração deles foi postergada para **Fase 3b** (opcional).
+
+**Ambiente de medição:**
+- Hardware: Intel Core i9-9980HK (8 cores físicos, 16 lógicos), 32 GB RAM
+- SO: macOS Darwin 25.4 (macOS 26) · gfortran 15.2.0 Homebrew · `ld-classic` (workaround macOS 26)
+- Config do `model.in`: **29 camadas**, 2 frequências (20/40 kHz), `ntheta=1`, 600 medidas × 2 freq = 1.200 registros
+- Compilação: `-O3 -march=native -ffast-math -funroll-loops -fopenmp -std=f2008`
+
+**Resultados a 8 threads (60 iterações):**
+
+| Métrica | Fase 2 (HEAD) | Fase 3 | Delta |
+|:--------|:-------------:|:------:|:-----:|
+| Tempo médio (s/modelo) | 0,3830 | **0,3433** | −10,4 % |
+| Desvio-padrão (s) | 0,0355 | 0,0278 | −21,7 % |
+| Throughput (modelos/h) | 9.399 | **10.485** | **+11,5 %** |
+
+**Escalabilidade 1 → 8 threads (30 iterações por ponto):**
+
+| Threads | Fase 2 tempo (s) | Fase 3 tempo (s) | Fase 2 thput | Fase 3 thput | Speedup 3 vs 2 |
+|:-------:|:----------------:|:----------------:|:------------:|:------------:|:--------------:|
+| **1**   | 1,7800 | **1,3690** | 2.023 | **2.630** | **1,30×** |
+| **2**   | 0,8073 | **0,7500** | 4.459 | **4.800** | 1,08× |
+| **4**   | 0,5873 | **0,4617** | 6.129 | **7.798** | **1,27×** |
+| **8**   | 0,3830 | **0,3433** | 9.399 | **10.485** | 1,12× |
+
+**Validação numérica:**
+- Phase 3 vs HEAD com `-O0` (sem `-ffast-math`): **MD5 binário idêntico** (`8aa4aeee...`) — prova de equivalência matemática bit-exata.
+- Phase 3 vs HEAD com `-O3 -ffast-math`: `max|Δ| = 3,4 × 10⁻¹⁴`, `RMS(Δ) = 1,7 × 10⁻¹⁵`, `max rel Δ = 1,2 × 10⁻⁹` — diferença dentro do ULP de `double`, explicada por reordenamento associativo de FP autorizado por `-ffast-math`. **Quatro ordens de magnitude abaixo do critério de aceite `1×10⁻¹⁰`**.
+
+**Contagem de malloc eliminados:**
+
+| Localização | Chamadas antes | Chamadas depois | Redução |
+|:------------|:--------------:|:---------------:|:-------:|
+| `hmd_TIV_optimized` (4 arrays) | ~4.800/modelo | 0 | 100 % |
+| `vmd_optimized` (2 arrays) | ~2.400/modelo | 0 | 100 % |
+| **Total no hot path** | **~7.200/modelo** | **6 (1 vez por modelo)** | **99,92 %** |
+
+**Análise vs meta do plano:** O plano projetava +40 % a +80 % de throughput. O obtido empiricamente foi **+30,1 % em serial** (onde só conta o overhead de `malloc/free` sem contenção de mutex) e **+11,5 % em 8 threads** (onde a contenção é mitigada mas o custo matemático domina). A diferença vs o plano decorre de o `model.in` atual usar `n = 29` camadas, enquanto o plano foi calibrado para `n = 10`. Para `n` maior, o custo matemático cresce linearmente enquanto o custo do malloc permanece ~constante — o ratio `(malloc cost)/(total cost)` cai, reduzindo o impacto relativo. Em `n = 10`, o ganho esperado seria próximo dos +40-80%.
+
+**Débitos técnicos identificados (não corrigidos nesta fase, fora de escopo):**
+
+| # | Descrição | Impacto | Correção sugerida |
+|:-:|:----------|:-------|:------------------|
+| **D4** | `private(z_rho1, c_H1)` com `allocatable` — copias privadas têm status de alocação indefinido por spec OpenMP | Latente (só manifesta com `num_threads_k > 1`) | Trocar por `firstprivate` ou alocar dentro da região paralela |
+| **D5** | `!$omp barrier` órfão na linha 206 de `PerfilaAnisoOmp.f08`, fora de região paralela e redundante com barreira implícita do `end parallel do` | Ignorado pelo gfortran, mas semanticamente inválido | Remover a linha |
+| **D6** | `omp_get_thread_num()` dentro do inner team retorna `tid` local, não global. Race em `ws_pool(0)` se `num_threads_k > 1` | Latente (só manifesta com multi-ângulo) | Usar `omp_get_ancestor_thread_num(1)*num_threads_j + omp_get_ancestor_thread_num(2)` |
+
+**Relatório completo:** [`docs/reference/relatorio_fase3_fortran.md`](relatorio_fase3_fortran.md)
+
 ---
 
 ### FASE 4 — Cache de `commonarraysMD` por `(r, freq)` (Passo 1.2) — Semanas 2–3

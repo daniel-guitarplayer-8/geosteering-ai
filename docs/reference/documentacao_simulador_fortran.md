@@ -1679,6 +1679,67 @@ Na perfilagem inclinada, `alpha = theta` (inclinação do poço), `beta = gamma 
 
 ### 6.4 magneticdipoles.f08 — Campos Dipolares
 
+#### 6.4.0 type :: thread_workspace — Pré-alocação de Workspace (Fase 3)
+
+A partir da **Fase 3 — Workspace Pre-allocation** (2026-04-05), o módulo `magneticdipoles.f08` define um tipo derivado `thread_workspace` com seis componentes `allocatable` que agregam os arrays anteriormente alocados/desalocados dinamicamente dentro de `hmd_TIV_optimized` e `vmd_optimized` a cada chamada. O objetivo é eliminar a contenção no mutex do heap entre threads paralelas, uma vez que cada chamada às rotinas originais fazia entre 6 e 8 pares `allocate/deallocate` — totalizando ~7.200 chamadas por modelo × 8 threads, saturando o alocador do sistema.
+
+**Definição do tipo:**
+
+```fortran
+type :: thread_workspace
+  complex(dp), allocatable :: Tudw(:,:)   ! (npt, 1:n) — coef. transmissão TE descendente
+  complex(dp), allocatable :: Txdw(:,:)   ! (npt, 1:n) — coef. transmissão TM descendente
+  complex(dp), allocatable :: Tuup(:,:)   ! (npt, 1:n) — coef. transmissão TE ascendente
+  complex(dp), allocatable :: Txup(:,:)   ! (npt, 1:n) — coef. transmissão TM ascendente
+  complex(dp), allocatable :: TEdwz(:,:)  ! (npt, 1:n) — potencial VMD TE z descendente
+  complex(dp), allocatable :: TEupz(:,:)  ! (npt, 1:n) — potencial VMD TE z ascendente
+end type thread_workspace
+```
+
+**Fluxo de uso (implementado em `perfila1DanisoOMP`):**
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  perfila1DanisoOMP (serial, antes do loop paralelo):                   │
+│    ① allocate(ws_pool(0:maxthreads-1))                                 │
+│    ② allocate dos 6 componentes em cada slot com dimensão (npt, n)    │
+│                                                                        │
+│  Loop !$omp parallel do (cada thread acessa seu próprio workspace):   │
+│    tid = omp_get_thread_num()                                          │
+│    call fieldsinfreqs_ws(ws_pool(tid), ang, nf, freq, ..., zrho, cH)  │
+│      ├── commonarraysMD  (automatic arrays no stack — intocado)       │
+│      ├── commonfactorsMD (automatic arrays no stack — intocado)       │
+│      ├── hmd_TIV_optimized_ws(ws, ...) → ws%Tudw/Txdw/Tuup/Txup       │
+│      └── vmd_optimized_ws(ws, ...)    → ws%TEdwz/ws%TEupz             │
+│                                                                        │
+│  Após o loop (serial):                                                │
+│    ③ desalocar componentes e ws_pool (explícito, defensivo)           │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**Memória utilizada por thread (config padrão `n=10`, `npt=201`):**
+- 6 arrays × `(201 × 10 × 16 bytes)` = **193 KB/thread**
+- Para 8 threads: ~1,5 MB total — cabe confortavelmente na L3 de CPUs modernas
+
+**Thread safety:** cada thread acessa exclusivamente `ws_pool(tid)`. Não há aliasing, locks ou race conditions. Ver débito D6 em [`relatorio_fase3_fortran.md §5`](relatorio_fase3_fortran.md) para discussão do caso `num_threads_k > 1`.
+
+**Rotinas `_ws` disponíveis** (preservam as originais intactas para rollback):
+
+| Rotina original | Rotina `_ws` | Workspace usado |
+|:----------------|:-------------|:----------------|
+| `hmd_TIV_optimized` | `hmd_TIV_optimized_ws` | `ws%Tudw, ws%Txdw, ws%Tuup, ws%Txup` |
+| `vmd_optimized` | `vmd_optimized_ws` | `ws%TEdwz, ws%TEupz` |
+| `fieldsinfreqs` | `fieldsinfreqs_ws` | Delega para as duas acima |
+
+**Resultados empíricos** (60 iter, `model.in` com n=29, `-O3 -march=native -ffast-math`):
+
+| Threads | Fase 2 (s) | Fase 3 (s) | Speedup |
+|:-------:|:----------:|:----------:|:-------:|
+| 1 | 1,7800 | **1,3690** | **1,30×** |
+| 8 | 0,3830 | **0,3433** | 1,12× |
+
+**Validação numérica:** `max|Δ| = 3,4 × 10⁻¹⁴` vs HEAD Phase 2 com `-O3 -ffast-math`; bit-exato (`8aa4aee...`) com `-O0`. Detalhes em [`relatorio_fase3_fortran.md`](relatorio_fase3_fortran.md) e [`analise_paralelismo_cpu_fortran.md §7.3`](analise_paralelismo_cpu_fortran.md).
+
 #### 6.4.1 hmd_TIV_optimized — Dipolo Magnético Horizontal
 
 Sub-rotina principal para o cálculo do campo do HMD em meio TIV. Trata 6 configurações geométricas:

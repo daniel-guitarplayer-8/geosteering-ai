@@ -35,6 +35,14 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   complex(dp), dimension(:,:,:,:), allocatable :: cH1
   integer :: maxthreads, num_threads_k, num_threads_j !, nrows
   logical :: nested_enabled
+  !=============================================================================
+  ! Fase 3 — Workspace pool pré-alocado por thread (ver magneticdipoles.f08)
+  ! Elimina todas as chamadas allocate/deallocate dentro do loop paralelo de
+  ! hmd_TIV_optimized e vmd_optimized, removendo a contenção no mutex do heap.
+  ! Ref: docs/reference/analise_paralelismo_cpu_fortran.md §7 Fase 3
+  !=============================================================================
+  type(thread_workspace), allocatable :: ws_pool(:)
+  integer :: t, tid
   ! real(dp) :: wtime
 
   ! wtime = omp_get_wtime( )
@@ -111,6 +119,40 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   num_threads_k = max(1, min(ntheta, maxthreads))
   num_threads_j = max(1, maxthreads / num_threads_k)
 
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Fase 3 — Alocação do ws_pool (Workspace Pre-allocation)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Aloca um workspace exclusivo por thread ANTES do loop paralelo. Cada
+  ! thread acessa ws_pool(tid) dentro do inner parallel via
+  ! omp_get_thread_num(), eliminando a necessidade de allocate/deallocate
+  ! dentro de hmd_TIV_optimized_ws e vmd_optimized_ws.
+  !
+  ! Observação sobre o índice tid (Débito 6, a tratar em fase futura):
+  !   Enquanto num_threads_k == 1 (caso da produção atual com ntheta=1),
+  !   omp_get_thread_num() dentro do inner team coincide com o tid global.
+  !   Se num_threads_k > 1 for ativado, múltiplos teams internos terão
+  !   threads com o mesmo tid local, causando race em ws_pool. A solução
+  !   futura será usar (outer_tid * num_threads_j + inner_tid) como índice.
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  allocate(ws_pool(0:maxthreads-1))
+  do t = 0, maxthreads-1
+    allocate(ws_pool(t)%Tudw (npt, n))
+    allocate(ws_pool(t)%Txdw (npt, n))
+    allocate(ws_pool(t)%Tuup (npt, n))
+    allocate(ws_pool(t)%Txup (npt, n))
+    allocate(ws_pool(t)%TEdwz(npt, n))
+    allocate(ws_pool(t)%TEupz(npt, n))
+  end do
+
+  ! Exibir configuração de threads apenas no primeiro modelo do lote
+  if (modelm == 1) then
+    write(*,'(A,I0,A,I0,A,I0,A,I0)') &
+      '[OpenMP] maxthreads=', maxthreads, &
+      '  threads_angulos(k)=', num_threads_k, &
+      '  threads_medidas(j)=', num_threads_j, &
+      '  produto=', num_threads_k * num_threads_j
+  end if
+
   allocate(zrho1(ntheta,nmmax,nf,3), cH1(ntheta,nmmax,nf,9))
   allocate(zrho(nf,3), cH(nf,9))
   zrho1 = 0.d0
@@ -138,13 +180,15 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     Lcos = dTR * coss
 
     ! Schedule static: iterações têm custo uniforme (mesmos n, npt, nf, nlayers)
+    ! Fase 3: cada thread usa ws_pool(tid) para eliminar allocate/deallocate no
+    !         hot path (ver magneticdipoles.f08 type :: thread_workspace).
     !$omp parallel do schedule(static) num_threads(num_threads_j) &
-    !$omp&        private(j, x, y, z, Tx, Ty, Tz, posTR, zrho, cH)
+    !$omp&        private(j, x, y, z, Tx, Ty, Tz, posTR, zrho, cH, tid)
     do j = 1, nmed(k)
       !----------------------------------------------------
       ! Arranjo TR1:
       !----------------------------------------------------
-      ! Quanto o transmissor estiver abaixo dos receptores (configuração dos arranjos de dados da Petrobrás): 
+      ! Quanto o transmissor estiver abaixo dos receptores (configuração dos arranjos de dados da Petrobrás):
       x = 0.d0 + (j-1) * px - Lsen / 2    !considerando-se Tx inicial como sendo 0
       y = 0.d0                             !considerando-se Ty sempre no plano XZ
       z = z1 + (j-1) * pz - Lcos / 2
@@ -152,7 +196,9 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
       Ty = 0.d0
       Tz = z1 + (j-1) * pz + Lcos / 2
       posTR = (/Tx, Ty, Tz, x, y, z/)
-      call fieldsinfreqs(ang, nf, freq, posTR, dipolo, npt, krwJ0J1, n, h, prof, resist, zrho, cH)
+      tid = omp_get_thread_num()   ! identifica o workspace exclusivo desta thread
+      call fieldsinfreqs_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt, &
+                            krwJ0J1, n, h, prof, resist, zrho, cH)
       z_rho1(j,:,:) = zrho
       c_H1(j,:,:) = cH
     end do
@@ -163,6 +209,19 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !$omp end parallel do
   !$omp barrier
   deallocate(zrho,cH,z_rho1,c_H1)
+
+  ! Fase 3 — Liberação do ws_pool após o loop paralelo
+  ! Desalocação explícita dos 6 campos por slot + array mestre, mais defensiva
+  ! que confiar no deallocate recursivo automático do Fortran 2003.
+  do t = 0, maxthreads-1
+    if (allocated(ws_pool(t)%Tudw))  deallocate(ws_pool(t)%Tudw)
+    if (allocated(ws_pool(t)%Txdw))  deallocate(ws_pool(t)%Txdw)
+    if (allocated(ws_pool(t)%Tuup))  deallocate(ws_pool(t)%Tuup)
+    if (allocated(ws_pool(t)%Txup))  deallocate(ws_pool(t)%Txup)
+    if (allocated(ws_pool(t)%TEdwz)) deallocate(ws_pool(t)%TEdwz)
+    if (allocated(ws_pool(t)%TEupz)) deallocate(ws_pool(t)%TEupz)
+  end do
+  deallocate(ws_pool)
   !-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
   ! write(*,*)'Passando para a escrita dos arquivos'
   call writes_files(modelm, nmaxmodel, mypath, zrho1, cH1, ntheta, theta, nf, freq, nmed, filename)
@@ -239,6 +298,101 @@ subroutine fieldsinfreqs(ang, nf, freqs, posTR, dipolo, npt, krwJ0J1, n, h, prof
     cH(i,:) = (/ tH(1,1), tH(1,2), tH(1,3), tH(2,1), tH(2,2), tH(2,3), tH(3,1), tH(3,2), tH(3,3) /)
   end do
 end subroutine fieldsinfreqs
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+! Fase 3 — Workspace Pre-allocation (fieldsinfreqs_ws)
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+!
+! Variante de fieldsinfreqs que recebe um thread_workspace pré-alocado e
+! delega as chamadas a hmd_TIV_optimized_ws e vmd_optimized_ws, eliminando
+! completamente os allocate/deallocate do hot path paralelo.
+!
+! Fluxo:
+!   ┌──────────────────────────────────────────────────────────────────┐
+!   │  perfila1DanisoOMP: !$omp parallel do                            │
+!   │    └── tid = omp_get_thread_num()                                │
+!   │    └── call fieldsinfreqs_ws(ws_pool(tid), ...)                  │
+!   │         ├── commonarraysMD (sem workspace, stack arrays locais)  │
+!   │         ├── commonfactorsMD                                      │
+!   │         ├── hmd_TIV_optimized_ws(ws, ...)                        │
+!   │         └── vmd_optimized_ws(ws, ...)                            │
+!   └──────────────────────────────────────────────────────────────────┘
+!
+! Arrays locais (u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, AdmInt, Mxdw,
+! Mxup, Eudw, Euup, FEdwz, FEupz) permanecem como automatic arrays no stack
+! do thread — não contribuem para contenção de malloc e não foram migrados
+! para o workspace nesta fase. Ver Fase 3b (opcional, futura) para refatorar
+! esses arrays caso modelos com n ≥ 30 camadas causem stack overflow.
+!
+! Preservação de fieldsinfreqs original: intencional (rollback instantâneo).
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+subroutine fieldsinfreqs_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0J1, n, h, prof, resist, zrho, cH)
+  implicit none
+  type(thread_workspace), intent(inout) :: ws
+  integer, intent(in) :: nf, npt, n
+  character(5), intent(in) :: dipolo
+  real(dp), intent(in) :: ang, freqs(nf), krwJ0J1(npt,3), posTR(6), h(n), prof(0:n), resist(n,2)
+  real(dp), dimension(nf,3), intent(out) :: zrho
+  complex(dp), dimension(nf,9), intent(out) :: cH
+
+  integer :: i, layerObs, camadT, camadR
+  real(dp) :: freq, krJ0J1(npt), wJ0(npt), wJ1(npt)
+  real(dp) :: x, y, z, Tx, Ty, Tz, zobs, r, eta(n,2), omega
+  complex(dp) :: HxHMD(1,2), HyHMD(1,2), HzHMD(1,2) !só se dipolo = 'hmdxy'
+  complex(dp) :: zeta, HxVMD, HyVMD, HzVMD, matH(3,3), tH(3,3)
+  complex(dp), dimension(npt,1:n) :: u, uh, s, sh, RTEdw, RTEup, RTMdw, RTMup, AdmInt
+  complex(dp), dimension(npt) :: Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz
+
+  Tx = posTR(1)
+  Ty = posTR(2)
+  Tz = posTR(3)
+  x  = posTR(4)
+  y  = posTR(5)
+  z  = posTR(6)
+
+  call findlayersTR2well(n, Tz, z, prof(1:n-1), camadT, camadR)
+  ! Armazenamento da profundidade do ponto-médio do arranjo T-R1 e suas resistividades verdadeiras
+  zobs = (Tz + z) / 2.d0
+  layerObs = layer2z_inwell(n, zobs, prof(1:n-1))
+
+  r = sqrt((x - Tx)**2 + (y - Ty)**2)
+
+  krJ0J1 = krwJ0J1(:,1)
+  wJ0 = krwJ0J1(:,2)
+  wJ1 = krwJ0J1(:,3)
+
+  do i = 1,n
+    eta(i,1)  = 1.d0 / resist(i,1)
+    eta(i,2)  = 1.d0 / resist(i,2)
+  end do
+
+  do i = 1, nf
+    freq = freqs(i)
+    omega = 2.d0 * pi * freq
+    zeta = cmplx(0,1.d0,kind=dp) * omega * mu
+    zrho(i,:) = (/zobs, resist(layerObs,1), resist(layerObs,2)/)
+
+    ! Cálculo do tensor de indução magnética do arranjo TR triaxial
+    !===========================================================================
+    call commonarraysMD(n, npt, r, krJ0J1, zeta, h, eta, u, s, uh, sh, &
+                      RTEdw, RTEup, RTMdw, RTMup, AdmInt)
+    call commonfactorsMD(n, npt, Tz, h, prof, camadT, u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, &
+                      Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz)
+    call hmd_TIV_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt, krJ0J1, wJ0, wJ1, h, &
+                      prof, zeta, eta, x, y, z, u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, &
+                      Mxdw, Mxup, Eudw, Euup, HxHMD, HyHMD, HzHMD, dipolo)
+    call vmd_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt, krJ0J1, wJ0, wJ1, h, &
+                      prof, zeta, x, y, z, u, uh, AdmInt, RTEdw, RTEup, FEdwz, FEupz, HxVMD, HyVMD, HzVMD)
+    !===========================================================================
+    matH(1,:) = (/HxHMD(1,1), HyHMD(1,1), HzHMD(1,1)/)
+    matH(2,:) = (/HxHMD(1,2), HyHMD(1,2), HzHMD(1,2)/)
+    matH(3,:) = (/HxVMD, HyVMD, HzVMD/)
+    tH = RtHR(ang, 0.d0, 0.d0, matH)  !tensor de indução magnética da ferramenta triaxial
+    ! Armazenamento das partes real e imaginária de Hxx, Hyy e Hzz:
+    cH(i,:) = (/ tH(1,1), tH(1,2), tH(1,3), tH(2,1), tH(2,2), tH(2,3), tH(3,1), tH(3,2), tH(3,3) /)
+  end do
+end subroutine fieldsinfreqs_ws
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq, nmeds, filename)
   implicit none

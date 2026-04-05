@@ -349,6 +349,7 @@ geosteering_ai/                           # 73 arquivos, 44.762 LOC
 Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/reference/analise_paralelismo_cpu_fortran.md`](reference/analise_paralelismo_cpu_fortran.md) §7. Relatórios de execução:
 - Fases 0 e 1: [`docs/reference/relatorio_fase0_fase1_fortran.md`](reference/relatorio_fase0_fase1_fortran.md)
 - **Fase 2 + Débitos**: [`docs/reference/relatorio_fase2_debitos_fortran.md`](reference/relatorio_fase2_debitos_fortran.md)
+- **Fase 3**: [`docs/reference/relatorio_fase3_fortran.md`](reference/relatorio_fase3_fortran.md)
 
 | Fase | Descrição | Status | Ganho Real / Esperado |
 |:----:|:----------|:------:|:----------------------|
@@ -356,8 +357,9 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 | **Fase 1** | SIMD Hankel Reduction (`!$omp simd` em `commonarraysMD`) | ⏭️ **Pulada 2026-04-04** | Δ +0,96 % (Welch *t*=+0,425, não-significativo). Causa: gfortran 15.x já auto-vetoriza em AVX-2 32-byte. Experimento arquivado em `Fortran_Gerador/bench/attic/`. Re-avaliar em AVX-512. |
 | **Fase 2** | Hybrid Scheduler + particionamento multiplicativo + correção Débitos 1/2/3 | ✅ **Concluída 2026-04-04** | **Bug 2-thread corrigido: −41 % (speedup 1,07× → 1,60×)**. 1 thread −12 %, 4 threads −23 %. Trade-off marginal em 8–16 threads (+6 a +11 %). MD5 idêntico, zero regressão numérica. |
 | **Fase 2b** | Chunk tuning (`static,16` ou `guided,4`) para mitigar regressão em 8–16 threads | 📋 Planejada | +5–10 % esperado nos regimes degradados |
-| **Fase 3** | Workspace Pre-allocation (`thread_workspace` tipo) | 🔜 **Próxima** | +40–80 % esperado. Pré-requisito estrutural para GPU. |
-| **Fase 4** | Cache de `commonarraysMD` por `(r, freq)` — 1200 → 2 chamadas/modelo | 📋 Planejada | **+60–120 % — maior ganho do roteiro** |
+| **Fase 3** | Workspace Pre-allocation (`type :: thread_workspace` com 6 componentes, `ws_pool(0:maxthreads-1)` pré-alocado) | ✅ **Concluída 2026-04-05** | **Throughput: +30,1 % em serial, +11,5 % em 8 threads** (`model.in` com n=29 camadas). Elimina 99,92 % dos mallocs do hot path (~7.200 → 6 por modelo). `max\|Δ\| = 3,4 × 10⁻¹⁴`, 4 ordens de magnitude abaixo do critério `1e-10`. Bit-exato com `-O0` vs Phase 2. |
+| **Fase 3b** | Refatorar automatic arrays de `fieldsinfreqs` para `thread_workspace` estendido | 📋 Opcional | Robustez stack overflow para n ≥ 30 camadas |
+| **Fase 4** | Cache de `commonarraysMD` por `(r, freq)` — 1200 → 2 chamadas/modelo | 🔜 **Próxima** | **+60–120 % — maior ganho do roteiro** |
 | **Fase 5** | `collapse(3)` nos loops `theta × medidas × freq` | 📋 Planejada | +10–20 % adicional |
 | **Fase 6** | Cache de `commonfactorsMD` por `camadT` | 📋 Planejada | +15–25 % adicional |
 
@@ -366,6 +368,9 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 1. ✅ **Débito 1 — `writes_files` append bug** — **CORRIGIDO na Fase 2**. Abertura condicional com `inquire()` + detecção de `modelm==1` OR arquivo ausente. Ver [`PerfilaAnisoOmp.f08:230-258`](../Fortran_Gerador/PerfilaAnisoOmp.f08).
 2. ✅ **Débito 2 — `omp_set_nested` depreciado** — **CORRIGIDO na Fase 2**. Migração para `omp_set_max_active_levels(2)` (OpenMP 5.0+). Ver [`PerfilaAnisoOmp.f08:100-103`](../Fortran_Gerador/PerfilaAnisoOmp.f08).
 3. ✅ **Débito 3 — `num_threads_j` degenera em 2 threads** — **CORRIGIDO na Fase 2**. Particionamento multiplicativo `num_threads_k × num_threads_j`. Ver [`PerfilaAnisoOmp.f08:105-109`](../Fortran_Gerador/PerfilaAnisoOmp.f08). Validado empiricamente: speedup em 2 threads 1,07× → 1,60× (+41 %).
+4. ⚠ **Débito 4 — `private(z_rho1, c_H1)` com `allocatable`** — **IDENTIFICADO na Fase 3, não corrigido**. Arrays `allocatable` privativados em OpenMP têm status de alocação indefinido por spec. Latente — só manifesta com `num_threads_k > 1`. Correção: trocar por `firstprivate` ou alocar dentro da região paralela. Ver [`relatorio_fase3_fortran.md §5`](reference/relatorio_fase3_fortran.md).
+5. ⚠ **Débito 5 — `!$omp barrier` órfão** — **IDENTIFICADO na Fase 3, não corrigido**. Linha 206 de `PerfilaAnisoOmp.f08` fora de região paralela, redundante com barreira implícita do `end parallel do`. Silenciosamente ignorado pelo gfortran.
+6. ⚠ **Débito 6 — `tid` local do inner team** — **IDENTIFICADO na Fase 3, não corrigido**. `omp_get_thread_num()` dentro do inner team retorna tid local, não global. Race em `ws_pool(0)` se `num_threads_k > 1`. Correção: `omp_get_ancestor_thread_num(1)*num_threads_j + omp_get_ancestor_thread_num(2)` como índice. Pré-requisito para ativar multi-ângulo.
 
 **Verificação**: Notebooks executam sem erro no Colab Pro+ (T4/A100). SurrogateNet Mode A converge com val_loss decrescente. Simulador Fortran com **Fase 2 em produção**: compilação limpa, sanity test MD5 idêntico ao baseline, scaling test confirma fix do bug 2-thread. Infra `bench/` operacional com validador numérico automatizado.
 
