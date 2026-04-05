@@ -144,27 +144,44 @@ O plano projetava +40% a +80% de ganho. O obtido foi +11,5% a +30,1% (por thread
 
 ---
 
-## 5. Bugs e Débitos Identificados
+## 5. Bugs e Débitos Identificados — todos resolvidos na PR1-Hygiene
 
-Durante a execução da Fase 3, foram identificados três débitos técnicos de OpenMP hygiene que **não foram corrigidos** nesta fase (mantidos fora de escopo para preservar delta mínimo e facilitar bissecção em caso de regressão). Registrados aqui para tratamento em fase futura:
+Durante a execução da Fase 3, foram identificados três débitos técnicos de OpenMP hygiene que **não foram corrigidos** naquela fase (mantidos fora de escopo para preservar delta mínimo e facilitar bissecção). **Todos foram corrigidos em uma PR subsequente (PR1-Hygiene, 2026-04-05)**, pré-requisito estrutural para habilitar multi-ângulo (`ntheta > 1`).
 
-### Débito 4 — `private(z_rho1, c_H1)` com `allocatable`
+### Débito 4 — `private(z_rho1, c_H1)` com `allocatable` ✅ RESOLVIDO
 
-Nas linhas 137–138 de [`PerfilaAnisoOmp.f08`](../../Fortran_Gerador/PerfilaAnisoOmp.f08), a cláusula `private(z_rho1, c_H1)` é aplicada a arrays `allocatable` alocados pelo master thread. Por especificação OpenMP 4.5+, arrays `allocatable` privativados recebem cópias com **status de alocação indefinido** (não herdado do master). Com `firstprivate` a alocação seria replicada. Atualmente não manifesta bug porque `num_threads_k = 1` com `ntheta = 1` (único thread = master), mas torna-se latente se multi-ângulo for ativado.
+Na diretiva `!$omp parallel do` externa de [`PerfilaAnisoOmp.f08`](../../Fortran_Gerador/PerfilaAnisoOmp.f08), a cláusula `private(z_rho1, c_H1)` era aplicada a arrays `allocatable` alocados pelo master thread. Por especificação OpenMP 4.5+, arrays `allocatable` privativados recebem cópias com **status de alocação indefinido** (não herdado do master). Com `ntheta = 1 ⇒ num_threads_k = 1`, o único thread é o master e não havia manifestação, mas o código se tornaria incorreto ao ativar multi-ângulo.
 
-**Correção recomendada**: trocar `private` por `firstprivate` para esses arrays **ou** mover a alocação para dentro da região paralela.
+**Correção aplicada**: migração para `firstprivate(z_rho1, c_H1)`. Cópias herdam alocação **e** valores do master (inicializados em `0.d0`). Custo: ~32 KB copiados por thread uma vez por região paralela — irrelevante para throughput. Semântica portável e idiomática para OpenMP 5.x.
 
-### Débito 5 — `!$omp barrier` órfão
+### Débito 5 — `!$omp barrier` órfão ✅ RESOLVIDO
 
-Na linha 206 de [`PerfilaAnisoOmp.f08`](../../Fortran_Gerador/PerfilaAnisoOmp.f08), um `!$omp barrier` aparece **fora de qualquer região paralela** (após `!$omp end parallel do`). Diretivas `barrier` fora de regiões paralelas são silenciosamente ignoradas pelo gfortran mas são semanticamente inválidas por spec. Ademais, `!$omp end parallel do` já contém uma barreira implícita — o barrier explícito é redundante mesmo que estivesse dentro da região.
+Um `!$omp barrier` aparecia **fora de qualquer região paralela** (após o `!$omp end parallel do` do loop externo). Diretivas `barrier` fora de regiões paralelas são silenciosamente ignoradas pelo gfortran mas são semanticamente inválidas por spec OpenMP. Ademais, `!$omp end parallel do` já contém uma barreira implícita — o `barrier` explícito era redundante mesmo que estivesse dentro da região.
 
-**Correção recomendada**: remover a linha.
+**Correção aplicada**: linha removida.
 
-### Débito 6 — `tid` global vs `tid` do team interno
+### Débito 6 — `tid` global vs `tid` do team interno ✅ RESOLVIDO
 
-Em `omp_get_thread_num()` chamado dentro do inner `!$omp parallel do`, o valor retornado é o `tid` **do team interno** (0 a `num_threads_j − 1`), não um `tid` global. Com `num_threads_k > 1`, múltiplos teams internos teriam threads com `tid = 0` acessando o mesmo `ws_pool(0)` simultaneamente, causando race condition. Atualmente seguro porque `ntheta = 1 ⇒ num_threads_k = 1`, mas torna-se bug se multi-ângulo for ativado.
+Em `omp_get_thread_num()` chamado dentro do inner `!$omp parallel do`, o valor retornado é o `tid` **do team interno** (`0..num_threads_j-1`), não um `tid` global. Com `num_threads_k > 1`, múltiplos teams internos teriam threads com `tid = 0` acessando o mesmo `ws_pool(0)` simultaneamente, causando race condition.
 
-**Correção recomendada**: calcular `tid_global = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_ancestor_thread_num(2)` e usar como índice em `ws_pool`. Dimensão de `ws_pool` deve ser `maxthreads` (= `num_threads_k × num_threads_j`).
+**Correção aplicada**: substituição por
+```fortran
+tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()
+```
+onde `omp_get_ancestor_thread_num(1)` retorna o tid do team de nível 1 (outer, que executa o loop `k`) e `omp_get_thread_num()` retorna o tid do team interno. O produto percorre `[0, num_threads_k * num_threads_j - 1] ⊆ [0, maxthreads - 1]`, nunca estourando o range de `ws_pool`. **Backward-compat**: com `num_threads_k = 1`, `ancestor(1) = 0` ⇒ `tid == inner_tid`, idêntico ao cálculo anterior.
+
+### Validação da PR1-Hygiene
+
+MD5 da saída binária bit-exato vs baseline Fase 3 (`aadbc86be2af5e1fd300f535d7e80e3b`) em todos os thread counts testados:
+
+| Threads | MD5 | Esperado |
+|:-------:|:---:|:--------:|
+| 1 | `aadbc86be2af5e1fd300f535d7e80e3b` | ✅ |
+| 2 | `aadbc86be2af5e1fd300f535d7e80e3b` | ✅ |
+| 4 | `aadbc86be2af5e1fd300f535d7e80e3b` | ✅ |
+| 8 | `aadbc86be2af5e1fd300f535d7e80e3b` | ✅ |
+
+Semanticamente, as três correções são no-op em runtime para `ntheta = 1`, confirmando que a PR é estritamente uma melhoria de correção OpenMP sem efeito sobre produção atual. Impacto esperado quando multi-ângulo for ativado: eliminação de race condition potencial em `ws_pool(0)` (D6) e comportamento portável para `z_rho1/c_H1` entre compiladores (D4).
 
 ---
 

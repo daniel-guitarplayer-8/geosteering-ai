@@ -704,13 +704,15 @@ A Fase 3 foi executada com sucesso, preservando integralmente as rotinas origina
 
 **Análise vs meta do plano:** O plano projetava +40 % a +80 % de throughput. O obtido empiricamente foi **+30,1 % em serial** (onde só conta o overhead de `malloc/free` sem contenção de mutex) e **+11,5 % em 8 threads** (onde a contenção é mitigada mas o custo matemático domina). A diferença vs o plano decorre de o `model.in` atual usar `n = 29` camadas, enquanto o plano foi calibrado para `n = 10`. Para `n` maior, o custo matemático cresce linearmente enquanto o custo do malloc permanece ~constante — o ratio `(malloc cost)/(total cost)` cai, reduzindo o impacto relativo. Em `n = 10`, o ganho esperado seria próximo dos +40-80%.
 
-**Débitos técnicos identificados (não corrigidos nesta fase, fora de escopo):**
+**Débitos técnicos identificados e resolvidos na PR1-Hygiene (pós-Fase 3, 2026-04-05):**
 
-| # | Descrição | Impacto | Correção sugerida |
-|:-:|:----------|:-------|:------------------|
-| **D4** | `private(z_rho1, c_H1)` com `allocatable` — copias privadas têm status de alocação indefinido por spec OpenMP | Latente (só manifesta com `num_threads_k > 1`) | Trocar por `firstprivate` ou alocar dentro da região paralela |
-| **D5** | `!$omp barrier` órfão na linha 206 de `PerfilaAnisoOmp.f08`, fora de região paralela e redundante com barreira implícita do `end parallel do` | Ignorado pelo gfortran, mas semanticamente inválido | Remover a linha |
-| **D6** | `omp_get_thread_num()` dentro do inner team retorna `tid` local, não global. Race em `ws_pool(0)` se `num_threads_k > 1` | Latente (só manifesta com multi-ângulo) | Usar `omp_get_ancestor_thread_num(1)*num_threads_j + omp_get_ancestor_thread_num(2)` |
+| # | Descrição | Status | Correção aplicada |
+|:-:|:----------|:------:|:------------------|
+| **D4** | `private(z_rho1, c_H1)` com `allocatable` — copias privadas têm status de alocação indefinido por spec OpenMP | ✅ **RESOLVIDO** | Trocado por `firstprivate(z_rho1, c_H1)` — cópias herdam alocação+valores do master |
+| **D5** | `!$omp barrier` órfão fora de região paralela, redundante com barreira implícita do `end parallel do` | ✅ **RESOLVIDO** | Linha removida |
+| **D6** | `omp_get_thread_num()` dentro do inner team retorna `tid` local, não global — race em `ws_pool(0)` se `num_threads_k > 1` | ✅ **RESOLVIDO** | Substituído por `tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()`. Backward-compat: com `num_threads_k=1`, `ancestor(1)=0` e `tid` permanece igual |
+
+**Impacto da PR1-Hygiene em runtime**: zero para `ntheta=1` (produção atual) — validado por MD5 bit-exato em 1/2/4/8 threads (`aadbc86be2af5e1fd300f535d7e80e3b`). Pré-requisito estrutural para ativar multi-ângulo (`ntheta > 1`).
 
 **Relatório completo:** [`docs/reference/relatorio_fase3_fortran.md`](relatorio_fase3_fortran.md)
 

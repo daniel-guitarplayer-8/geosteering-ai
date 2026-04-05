@@ -123,16 +123,23 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! Fase 3 — Alocação do ws_pool (Workspace Pre-allocation)
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! Aloca um workspace exclusivo por thread ANTES do loop paralelo. Cada
-  ! thread acessa ws_pool(tid) dentro do inner parallel via
-  ! omp_get_thread_num(), eliminando a necessidade de allocate/deallocate
+  ! thread acessa ws_pool(tid) dentro do inner parallel via cálculo de um
+  ! tid GLOBAL (ver D6 abaixo), eliminando a necessidade de allocate/deallocate
   ! dentro de hmd_TIV_optimized_ws e vmd_optimized_ws.
   !
-  ! Observação sobre o índice tid (Débito 6, a tratar em fase futura):
-  !   Enquanto num_threads_k == 1 (caso da produção atual com ntheta=1),
-  !   omp_get_thread_num() dentro do inner team coincide com o tid global.
-  !   Se num_threads_k > 1 for ativado, múltiplos teams internos terão
-  !   threads com o mesmo tid local, causando race em ws_pool. A solução
-  !   futura será usar (outer_tid * num_threads_j + inner_tid) como índice.
+  ! Débito 6 (RESOLVIDO em PR1-Hygiene pós-Fase 3):
+  !   omp_get_thread_num() dentro do inner team retorna o tid do time INTERNO
+  !   ([0, num_threads_j-1]), não um tid global. Com num_threads_k > 1, múltiplos
+  !   teams internos teriam threads com tid=0 causando race em ws_pool(0). A
+  !   correção adotada é calcular o tid global como:
+  !
+  !     tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()
+  !
+  !   onde omp_get_ancestor_thread_num(1) retorna o tid do time de nível 1 (outer,
+  !   que executa o loop k) e omp_get_thread_num() retorna o tid do time interno.
+  !   Com num_threads_k = 1 (produção atual), ancestor(1) == 0 e o tid permanece
+  !   backward-compatible com o cálculo antigo. Para multi-ângulo, o índice
+  !   percorre [0, num_threads_k*num_threads_j - 1] ⊆ [0, maxthreads-1], seguro.
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   allocate(ws_pool(0:maxthreads-1))
   do t = 0, maxthreads-1
@@ -168,8 +175,15 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !     com custo aproximadamente constante (mesmo n, npt, nf). Carga uniforme
   !     favorece `schedule(static)`, que elimina o overhead de sincronização do
   !     dynamic sem penalidade de balanceamento.
+  ! Fase 3/PR1-Hygiene: z_rho1 e c_H1 migrados de private → firstprivate (D4).
+  ! OpenMP spec 5.x define que cópias private de arrays allocatable têm status
+  ! de alocação indefinido. Com firstprivate, cada thread herda a alocação e
+  ! os valores do master (inicializados em 0.d0 nas linhas ~158 acima),
+  ! garantindo semântica portável. Custo: ~32 KB copiados por thread uma vez
+  ! por região paralela — irrelevante para throughput.
   !$omp parallel do schedule(dynamic) num_threads(num_threads_k) &
-  !$omp&        private(k,ang,seno,coss,px,pz,Lsen,Lcos,z_rho1,c_H1)
+  !$omp&        private(k,ang,seno,coss,px,pz,Lsen,Lcos) &
+  !$omp&        firstprivate(z_rho1,c_H1)
   do k = 1, ntheta
     ang = theta(k) * pi / 18.d1
     seno = sin(ang)
@@ -196,7 +210,10 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
       Ty = 0.d0
       Tz = z1 + (j-1) * pz + Lcos / 2
       posTR = (/Tx, Ty, Tz, x, y, z/)
-      tid = omp_get_thread_num()   ! identifica o workspace exclusivo desta thread
+      ! Fase 3 + D6 corrigido (PR1-Hygiene): tid GLOBAL do workspace pool.
+      ! Com num_threads_k==1 (ntheta=1 produção), ancestor(1)==0 ⇒ tid == inner_tid.
+      ! Com num_threads_k>1 (multi-ângulo futuro), tid percorre [0, maxthreads-1].
+      tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()
       call fieldsinfreqs_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt, &
                             krwJ0J1, n, h, prof, resist, zrho, cH)
       z_rho1(j,:,:) = zrho
@@ -207,7 +224,10 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     cH1(k,1:nmed(k),:,:) = c_H1
   end do
   !$omp end parallel do
-  !$omp barrier
+  ! Fase 3/PR1-Hygiene: removido !$omp barrier órfão que estava fora de região
+  ! paralela (débito D5 da Fase 3). O !$omp end parallel do acima já contém
+  ! uma barreira implícita — a diretiva explícita era redundante e semanticamente
+  ! inválida fora de uma região parallel ativa.
   deallocate(zrho,cH,z_rho1,c_H1)
 
   ! Fase 3 — Liberação do ws_pool após o loop paralelo
