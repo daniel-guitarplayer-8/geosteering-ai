@@ -1,0 +1,30 @@
+2                 !número de frequências
+20000.0           !frequência 1
+40000.0           !frequência 2
+1                 !número de ângulos de inclinação
+0.0               !ângulo 1
+10.0              !altura do primeiro ponto-médio T-R, acima da primeira interface de camadas
+120.0             !tamanho da janela de investigação
+0.2               !passo entre as medidas
+1.0               !distância T-R do arranjo
+Inv0_10Dip1000_t5              !nome dos arquivos de saída
+10                !número de camadas
+500.0    510.0    !resistividades horizontal e vertical (camada 1 — arenito)
+10.0     10.1     !(camada 2 — folhelho)
+200.0    205.0    !(camada 3 — arenito)
+5.0      5.1      !(camada 4 — folhelho)
+1000.0   1020.0   !(camada 5 — carbonato)
+15.0     15.2     !(camada 6 — folhelho)
+300.0    305.0    !(camada 7 — arenito)
+8.0      8.1      !(camada 8 — folhelho)
+2000.0   2050.0   !(camada 9 — carbonato)
+20.0     20.3     !(camada 10 — folhelho)
+5.0               !espessuras das n-2 camadas (camada 2)
+12.0              !(camada 3)
+8.0               !(camada 4)
+15.0              !(camada 5)
+6.0               !(camada 6)
+20.0              !(camada 7)
+10.0              !(camada 8)
+18.0              !(camada 9)
+1000 1000         !modelo atual e o número máximo de modelos

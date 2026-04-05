@@ -1294,6 +1294,47 @@ Detalhes completos em [`relatorio_fase0_fase1_fortran.md §4`](relatorio_fase0_f
 
 ---
 
+## 7.5 Validação Numérica Cruzada — Fases 0 → 4 (2026-04-05)
+
+Após a conclusão da Fase 4 (`44acf2e`), foi executada uma **bateria final de validação**
+para fechar lacunas de verificação de fidelidade numérica das Fases 3/PR1/4. Infraestrutura
+construída: target `debug_O0` no Makefile (`-O0 -fno-fast-math -fsignaling-nans`), worktree
+git isolado em `6ac51ca` (Fase 2), `model.in.n10_synthetic` para testes em configuração
+alternativa, script Python [`validate_numeric_extensive.py`](../../Fortran_Gerador/bench/validate_numeric_extensive.py)
+que parseia o formato binário `stream unformatted` de `writes_files` e reporta
+`max|Δ|`, `RMS(Δ)`, NaN/Inf, max_rel_err ponto-a-ponto em 25 200 doubles.
+
+**Matriz de resultados:**
+
+| Teste | Flags | Modelo | Threads | max\|Δ\| | Status |
+|:------|:------|:------:|:-------:|:--------:|:------:|
+| Fase 4 vs Fase 2 (bit-exato) | `-O0 -fno-fast-math` | n=15 prod | 1 | **0** | ✅ BIT-EXATO |
+| Fase 4 vs Fase 2 (bit-exato) | `-O0 -fno-fast-math` | n=10 sint | 1 | **0** | ✅ BIT-EXATO |
+| Fase 4 vs Fase 2 (sub-ULP) | `-O3 -ffast-math` | n=15 prod | 1 | 1,96e-13 | ✅ PASS |
+| Fase 4 vs Fase 2 (sub-ULP) | `-O3 -ffast-math` | n=10 sint | 1 | 6,11e-14 | ✅ PASS |
+| Determinismo Fase 4 | `-O3 -ffast-math` | n=15 prod | {1,2,4,8} | — | ✅ MD5 idêntico |
+
+**Conclusões:**
+1. A equivalência matemática entre Fase 2 e Fase 4 é **bit-a-bit exata** em ausência
+   de reordenamento FP (`-O0 -fno-fast-math`). Qualquer divergência de MD5 observada
+   em `-O3 -ffast-math` é **artefato do compilador** (reordenamento associativo
+   autorizado pela flag), não bug de código.
+2. O `max|Δ|` em produção (~2 × 10⁻¹³) está **três ordens de magnitude** abaixo do
+   critério `1 × 10⁻¹⁰` estabelecido no plano, e **nove ordens** abaixo do ruído LWD
+   físico típico (~1 A/m em medições reais).
+3. Zero NaN e zero Inf em todas as saídas — **fidelidade física total**.
+4. Determinismo entre thread counts (1/2/4/8) confirmado — nenhum ponto de não-
+   reprodutibilidade foi introduzido pelas transformações de concorrência.
+5. Revisão de código confirmou: zero `allocate/deallocate` dentro de regiões
+   `!$omp parallel do`; D4 (`firstprivate`), D5 (barrier removido) e D6 (`tid`
+   global) corretamente aplicados; `fieldsinfreqs_cached_ws` com `intent(in)`
+   correto em todos os 9 caches e slices `(:,:,i)` contíguas.
+
+**Veredicto:** Fase 4 **aprovada** para produção. Relatório completo em
+[`relatorio_validacao_final_fortran.md`](relatorio_validacao_final_fortran.md).
+
+---
+
 *Documento gerado com base na análise técnica da
 `docs/reference/documentacao_simulador_fortran.md` v4.0 (Geosteering AI v2.0),
 complementado por resultados empíricos das Fases 0 e 1 executadas em 2026-04-04

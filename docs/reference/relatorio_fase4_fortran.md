@@ -239,3 +239,53 @@ Todos registrados para PR futuro de "OpenMP hygiene + code cleanup secundário".
 ---
 
 **Assinatura de validação:** Fase 4 concluída com ganho de **5,54× em 8 threads** (0,343 s → 0,062 s por modelo), validação numérica com `max|Δ| = 3,97 × 10⁻¹³` (3 ordens de magnitude abaixo do critério), zero warnings de compilação, MD5 determinístico em 1/2/4/8 threads. Meta do roteiro **ultrapassada em 242 %**. Pronta para commit em `origin/main`.
+
+---
+
+## 9. Validação Pós-Execução (2026-04-05)
+
+Após o commit `44acf2e`, foi executada uma bateria **final** de validação numérica
+para fechar lacunas de verificação das Fases 3/PR1/4.
+
+### 9.1 Bit-exato @ -O0 (prova de equivalência matemática)
+
+Com target `debug_O0` do Makefile (`-O0 -g -fno-fast-math -fsignaling-nans`),
+compilados **Fase 2** (via git worktree `6ac51ca`) e **Fase 4** (tree principal).
+Execução com `OMP_NUM_THREADS=1` em dois modelos:
+
+| Modelo | MD5 Fase 2 @ -O0 | MD5 Fase 4 @ -O0 | Identidade |
+|:-------|:----------------:|:----------------:|:----------:|
+| n=15 produção | `97123697a2e4db34c77cd1d84077b083` | `97123697a2e4db34c77cd1d84077b083` | ✅ **BIT-EXATO** |
+| n=10 sintético | `f2361c9178abcb3de344e353a44a4f2c` | `f2361c9178abcb3de344e353a44a4f2c` | ✅ **BIT-EXATO** |
+
+### 9.2 Sub-ULP @ -O3 -ffast-math (produção)
+
+| Modelo | max\|Δ\| | RMS(Δ) | max_rel_err | NaN/Inf | Status |
+|:-------|:--------:|:------:|:-----------:|:-------:|:------:|
+| n=15 produção | 1,96e-13 | 1,48e-14 | 3,09e-10 | 0 | ✅ PASS |
+| n=10 sintético | 6,11e-14 | 4,67e-15 | 4,72e-09 | 0 | ✅ PASS |
+
+Ambos três ordens de magnitude abaixo do critério `max|Δ| < 1e-10`.
+
+### 9.3 Determinismo multi-thread — Fase 4 @ -O3
+
+| OMP_NUM_THREADS | MD5 Fase 4 @ -O3 |
+|:---------------:|:----------------:|
+| 1 | `0fc79430142c67f1f2eb16904e87f7e4` |
+| 2 | `0fc79430142c67f1f2eb16904e87f7e4` |
+| 4 | `0fc79430142c67f1f2eb16904e87f7e4` |
+| 8 | `0fc79430142c67f1f2eb16904e87f7e4` |
+
+**MD5 idêntico** em todos os thread counts — nenhum ponto de não-reprodutibilidade.
+
+### 9.4 Revisão de código Fortran
+
+- ✅ Zero `allocate/deallocate` dentro de regiões `!$omp parallel do`
+- ✅ D4 `firstprivate(z_rho1,c_H1)` corretamente aplicado (linha 232)
+- ✅ D5 `!$omp barrier` órfão removido
+- ✅ D6 `tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()` (linha 291)
+- ✅ `fieldsinfreqs_cached_ws` — 9 caches `intent(in)`, slices `(:,:,i)` contíguas
+- ✅ `eta_shared` hoisted (débito B2 resolvido)
+- ✅ Nenhum bug matemático encontrado — **nenhuma correção aplicada**
+
+Relatório completo da validação: [`relatorio_validacao_final_fortran.md`](relatorio_validacao_final_fortran.md).

@@ -1727,7 +1727,7 @@ A partir da **Fase 4**, o simulador elimina **99,83 %** das chamadas a `commonar
 | 4 | 0,4617 | **0,0820** | **5,63×** | 43.902 mod/h |
 | 8 | 0,3433 | **0,0620** | **5,54×** | **58.064 mod/h** |
 
-**Validação numérica**: `max|Δ| = 3,97 × 10⁻¹³` vs Fase 3 (três ordens de magnitude abaixo do critério `1 × 10⁻¹⁰`). MD5 determinístico em 1/2/4/8 threads.
+**Validação numérica**: `max|Δ| = 3,97 × 10⁻¹³` vs Fase 3 (três ordens de magnitude abaixo do critério `1 × 10⁻¹⁰`). MD5 determinístico em 1/2/4/8 threads. **Bateria de validação final (2026-04-05)**: Fase 4 vs Fase 2 **bit-a-bit exata** compilando com `-O0 -fno-fast-math` nos modelos n=15 produção e n=10 sintético — comprovando **equivalência matemática pura** sem reordenamento de ponto flutuante. Em `-O3 -ffast-math`: `max|Δ| = 1,96 × 10⁻¹³` (n=15) e `6,11 × 10⁻¹⁴` (n=10), zero NaN/Inf. Ver [`relatorio_validacao_final_fortran.md`](relatorio_validacao_final_fortran.md).
 
 **Rotina associada**: `fieldsinfreqs_cached_ws` em [`PerfilaAnisoOmp.f08`](../../Fortran_Gerador/PerfilaAnisoOmp.f08) recebe os 9 caches + `eta_in` como `intent(in)` e delega para `hmd_TIV_optimized_ws`/`vmd_optimized_ws` passando slices `cache(:,:,i)` (contíguas em column-major, sem cópia temporária). A rotina original `fieldsinfreqs_ws` é **preservada intacta** para rollback.
 

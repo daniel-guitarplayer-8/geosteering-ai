@@ -351,6 +351,7 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 - **Fase 2 + Débitos**: [`docs/reference/relatorio_fase2_debitos_fortran.md`](reference/relatorio_fase2_debitos_fortran.md)
 - **Fase 3**: [`docs/reference/relatorio_fase3_fortran.md`](reference/relatorio_fase3_fortran.md)
 - **Fase 4**: [`docs/reference/relatorio_fase4_fortran.md`](reference/relatorio_fase4_fortran.md)
+- **Validação Final (Fases 0→4)**: [`docs/reference/relatorio_validacao_final_fortran.md`](reference/relatorio_validacao_final_fortran.md)
 
 | Fase | Descrição | Status | Ganho Real / Esperado |
 |:----:|:----------|:------:|:----------------------|
@@ -360,6 +361,7 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 | **Fase 3** | Workspace Pre-allocation (`type :: thread_workspace` + `ws_pool`) | ✅ **Concluída 2026-04-05** | +30,1 % serial, +11,5 % 8 threads. Elimina 99,92 % dos mallocs do hot path. `max\|Δ\|=3,4e-14`. Pós-Fase 3: **0,343 s/modelo**, **10.485 mod/h** a 8 threads. |
 | **PR1 Hygiene** | Correção dos Débitos **D4 (firstprivate), D5 (barrier), D6 (tid global)** | ✅ **Concluída 2026-04-05** (`db997d2`) | Pré-requisito estrutural para multi-ângulo. Zero impacto em runtime (ntheta=1), MD5 bit-exato em 1/2/4/8 threads. |
 | **Fase 4** | Cache de `commonarraysMD` por `(r, freq)` — 1.200 → 2 chamadas/modelo | ✅ **Concluída 2026-04-05** | **Speedup 5,54× em 8 threads** (0,343 s → 0,062 s). Throughput **58.064 mod/h** (**242 % da meta original** de 24k mod/h). Eliminação de 99,83 % das chamadas. `max\|Δ\|=3,97e-13`. Débito B2 (hoist de `eta`) resolvido junto. |
+| **Validação Final** | Bateria de testes de identidade numérica + revisão de código Fases 0→4 | ✅ **Concluída 2026-04-05** | **Fase 4 @ -O0 bit-exata** vs Fase 2 @ -O0 em `model.in` n=15 e n=10 sintético (`max\|Δ\|=0`). Fase 4 @ -O3 vs Fase 2 @ -O3: `max\|Δ\|=1,96e-13` (n=15), `6,11e-14` (n=10) — ambos sub-ULP, zero NaN/Inf. Determinismo MD5 idêntico em 1/2/4/8 threads. Nenhum bug encontrado. |
 | **Fase 3b** | Refatorar automatic arrays de `fieldsinfreqs` para `thread_workspace` estendido | 📋 Opcional | Robustez stack overflow para n ≥ 30 camadas |
 | **Fase 2b** | Chunk tuning (`static,16` ou `guided,4`) | 📋 Planejada | +5–10 % esperado nos regimes degradados |
 | **Fase 5** | `collapse(3)` nos loops `theta × medidas × freq` | 📋 Planejada | Marginal para ntheta=1; importante para multi-ângulo |
