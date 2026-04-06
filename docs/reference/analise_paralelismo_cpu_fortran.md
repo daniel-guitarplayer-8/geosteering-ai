@@ -1386,10 +1386,43 @@ Relatório: [`relatorio_fase5_debitos_fortran.md`](relatorio_fase5_debitos_fortr
 
 ---
 
+## 7.8 Fase 3b (Workspace Estendido) + Fase 5b (Paralelismo Adaptativo) — 2026-04-05
+
+### Fase 3b — `thread_workspace` estendido
+
+Expansão do tipo `thread_workspace` de 6 para 12 campos, adicionando os 6 arrays
+de fatores de onda de `commonfactorsMD` (`Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz`,
+dimensão `npt`) que antes eram automatic arrays em `fieldsinfreqs_cached_ws`.
+
+Eliminação de ~19 KB/thread de pressão de stack. Robustez para `n ≥ 30` camadas
+com muitos threads. Custo: +19 KB × 8 threads ≈ 155 KB de heap adicional
+(irrelevante — workspace total ~720 KB para n=15).
+
+Validação: bit-exato @ `-O0` vs Fase 5 (`ffd13177...`). MD5 `-O3` idêntico
+(`3d3c309f...`). Zero impacto em performance (arrays já estavam no L1 cache).
+
+### Fase 5b — Paralelismo adaptativo via `if(ntheta > 1)`
+
+Restauração do outer `!$omp parallel do` com cláusula `if(ntheta > 1)`, permitindo:
+- `ntheta = 1`: fork desabilitado em runtime → single-level como Fase 5
+- `ntheta > 1`: fork ativo → nested com `num_threads_k × num_threads_j`
+
+Inner `num_threads` adaptativo: `merge(maxthreads, num_threads_j, ntheta == 1)`.
+`tid` adaptativo: direto para single-level, ancestor-based para nested.
+
+**Benchmark (i9-9980HK, n=15, 60 iterações, 8 threads):**
+- Mean: **0,0668 s/modelo** (53.865 mod/h) — +3,7 % vs Fase 5 (0,0693 s)
+- O ganho marginal vem da eliminação do overhead de `if(ntheta > 1)` sendo avaliado
+  em compile-time pelo optimizer do gfortran (-O3) como always-false para `ntheta=1`.
+
+Validação: bit-exato @ `-O0`; determinismo 1/2/4/8 threads; `max|Δ| = 4,26e-13` @ `-O3`.
+
+---
+
 *Documento gerado com base na análise técnica da
-`docs/reference/documentacao_simulador_fortran.md` v4.0 (Geosteering AI v2.0),
-complementado por resultados empíricos das Fases 0 e 1 executadas em 2026-04-04
-(ver `relatorio_fase0_fase1_fortran.md`).*
+`docs/reference/documentacao_simulador_fortran.md` v6.0 (Geosteering AI v2.0),
+complementado por resultados empíricos das Fases 0–5b executadas em 2026-04-04/05
+(ver relatórios em `docs/reference/`).*
 
 *Para questões sobre implementação GPU (Fase 2 — OpenACC/CUDA), consultar
 `docs/reference/analise_gpu_fortran.md` (a ser gerado).*

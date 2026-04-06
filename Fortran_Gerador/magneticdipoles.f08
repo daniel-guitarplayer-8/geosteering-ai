@@ -67,16 +67,27 @@ module magneticdipoles
   !             docs/reference/relatorio_fase3_fortran.md
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   type :: thread_workspace
+    ! ── Fase 3 — arrays de transmissão/potencial (npt × n) ──────────────
     complex(dp), allocatable :: Tudw(:,:)   ! (npt, 1:n) — coef. transmissão TE descendente
     complex(dp), allocatable :: Txdw(:,:)   ! (npt, 1:n) — coef. transmissão TM descendente
     complex(dp), allocatable :: Tuup(:,:)   ! (npt, 1:n) — coef. transmissão TE ascendente
     complex(dp), allocatable :: Txup(:,:)   ! (npt, 1:n) — coef. transmissão TM ascendente
     complex(dp), allocatable :: TEdwz(:,:)  ! (npt, 1:n) — potencial VMD TE z descendente
     complex(dp), allocatable :: TEupz(:,:)  ! (npt, 1:n) — potencial VMD TE z ascendente
+    ! ── Fase 3b — fatores de onda de commonfactorsMD (npt) ──────────────
+    ! Antes eram automatic arrays em fieldsinfreqs_cached_ws (~19 KB/thread).
+    ! Para n ≥ 30 camadas e muitos threads, a pressão de stack acumula-se.
+    ! Movidos para heap via workspace para robustez e suporte a n grande.
+    complex(dp), allocatable :: Mxdw(:)    ! (npt) — fator reflexão TM descendente
+    complex(dp), allocatable :: Mxup(:)    ! (npt) — fator reflexão TM ascendente
+    complex(dp), allocatable :: Eudw(:)    ! (npt) — fator reflexão TE descendente
+    complex(dp), allocatable :: Euup(:)    ! (npt) — fator reflexão TE ascendente
+    complex(dp), allocatable :: FEdwz(:)   ! (npt) — fator TE z-potencial descendente (VMD)
+    complex(dp), allocatable :: FEupz(:)   ! (npt) — fator TE z-potencial ascendente (VMD)
   end type thread_workspace
 
 contains
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§��§§§§§§§
 subroutine hmd_TIV_optimized(Tx, Ty, h0, n, camadR, camadT, npt, krJ0J1, wJ0, wJ1, h, prof, zeta, eta, &
                               cx, cy, z, u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, Mxdw, Mxup, Eudw, Euup, &
                               Hx_p, Hy_p, Hz_p, dipolo)

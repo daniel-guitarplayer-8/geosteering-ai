@@ -6365,7 +6365,7 @@ O simulador utiliza fixamente o filtro Werthmuller de 201 pontos. No entanto, a
 precisão necessária varia conforme a configuração:
 
 ```
-  ┌─────────────────────────────────────────────────────────────────┐
+  ┌���────────────────────────────────────────────────────────────────┐
   │  Cenário                      │  Filtro Recomendado   │  npt   │
   ├───────────────────────────────┼───────────────────────┼────────┤
   │  Geração de treinamento       │  Kong (61 pts)        │  61    │
@@ -6708,8 +6708,26 @@ Fortran (Seções 5-6) e o pipeline Python (Seção 14).
 - **Fase 6** (cache `commonfactorsMD` por `camadT`) **suspensa**: análise revelou erro conceitual na proposta — `commonfactorsMD` depende de `h0` (profundidade do transmissor, variável em `j`), não apenas de `camadT`. Proposta corrigida (Fase 6b) requer fatoração dos termos invariantes em `h0`.
 - **Validação numérica**: Fase 5 vs Fase 4 bit-exato @ `-O0`; `max|Δ| = 4,26e-13` @ `-O3`; determinismo 1/2/4/8 threads; zero NaN/Inf.
 
+**Fase 3b (`thread_workspace` estendido — aplicada em `magneticdipoles.f08` e `PerfilaAnisoOmp.f08`)**:
+
+- `thread_workspace` expandido de 6 para 12 campos: adicionados `Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz` (fatores de onda de `commonfactorsMD`, dimensão `npt`).
+- Arrays movidos de automatic (stack) em `fieldsinfreqs_cached_ws` para heap via workspace.
+- Eliminação de ~19 KB/thread de pressão de stack — robustez para `n ≥ 30` camadas.
+- Alocação/desalocação explícita dos 6 novos campos em `perfila1DanisoOMP`.
+- **Validação numérica**: bit-exato @ `-O0` vs Fase 5; `max|Δ| = 4,26e-13` @ `-O3`; determinismo 1/2/4/8 threads.
+
+**Fase 5b (Paralelismo adaptativo — aplicada em `PerfilaAnisoOmp.f08`)**:
+
+- Outer `!$omp parallel do` restaurado com cláusula `if(ntheta > 1)`, controlando nested em runtime.
+- `ntheta=1`: runtime desabilita fork do outer, inner parallel usa `maxthreads` (single-level).
+- `ntheta>1`: outer fork distribui ângulos entre `num_threads_k` threads, inner usa `num_threads_j`.
+- Inner `num_threads` adaptativo: `merge(maxthreads, num_threads_j, ntheta == 1)`.
+- `tid` adaptativo: `omp_get_thread_num()` direto para `ntheta=1`, `omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()` para `ntheta>1`.
+- **Benchmark**: 0,0668 s/modelo, 53.865 mod/h (8 threads) — +3,7 % vs Fase 5.
+- **Validação numérica**: bit-exato @ `-O0`; determinismo 1/2/4/8 threads.
+
 ---
 
 *Documentação do Simulador Fortran PerfilaAnisoOmp — Geosteering AI v2.0*
-*Versão 5.0 — Abril 2026 — Pipeline v5.0.15+*
-*Última atualização: 2026-04-05 (Fase 5 + Débitos B1/B3/B5/B7 concluídos)*
+*Versão 6.0 — Abril 2026 — Pipeline v5.0.15+*
+*Última atualização: 2026-04-05 (Fase 3b + Fase 5b concluídas)*

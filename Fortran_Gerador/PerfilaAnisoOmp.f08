@@ -168,12 +168,20 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   allocate(ws_pool(0:maxthreads-1))
   do t = 0, maxthreads-1
+    ! Fase 3 — arrays de transmissão/potencial (npt × n)
     allocate(ws_pool(t)%Tudw (npt, n))
     allocate(ws_pool(t)%Txdw (npt, n))
     allocate(ws_pool(t)%Tuup (npt, n))
     allocate(ws_pool(t)%Txup (npt, n))
     allocate(ws_pool(t)%TEdwz(npt, n))
     allocate(ws_pool(t)%TEupz(npt, n))
+    ! Fase 3b — fatores de onda de commonfactorsMD (npt)
+    allocate(ws_pool(t)%Mxdw (npt))
+    allocate(ws_pool(t)%Mxup (npt))
+    allocate(ws_pool(t)%Eudw (npt))
+    allocate(ws_pool(t)%Euup (npt))
+    allocate(ws_pool(t)%FEdwz(npt))
+    allocate(ws_pool(t)%FEupz(npt))
   end do
 
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
@@ -228,22 +236,36 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! garantindo semântica portável. Custo: ~32 KB copiados por thread uma vez
   ! por região paralela — irrelevante para throughput.
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Fase 5 — Eliminação do nested parallelism para ntheta=1
+  ! Fase 5/5b — Paralelismo adaptativo: single-level (ntheta=1) ou nested (ntheta>1)
   !
-  ! Com ntheta=1 (caso de produção: perfilagem a 0°), o loop externo k executa
-  ! apenas 1 iteração — o overhead de OpenMP aninhado (2 fork/join em série) é
-  ! desperdiçado. A Fase 5 remove o !$omp parallel do externo (que forçava
-  ! nested) e usa apenas o inner parallel com maxthreads threads.
-  ! O loop k continua existindo (serial) para compatibilidade com ntheta>1.
+  ! Estratégia de particionamento de threads:
   !
-  ! Com ntheta=1: single fork/join com maxthreads threads.
-  ! Com ntheta>1 (futuro multi-ângulo): loop serial em k, inner parallel em j.
-  !   Nota: para ntheta>1 eficiente, seria necessário restaurar nested ou
-  !   implementar collapse(2) — planejado como Fase 5b.
+  !   ┌────────────────────────────────────────────────────────────────────────┐
+  !   │  ntheta = 1 (produção: perfilagem a 0°)                              │
+  !   │    → Loop k serial (1 iteração), inner parallel j com maxthreads     │
+  !   │    → tid = omp_get_thread_num() direto                               │
+  !   │    → Sem overhead de nested fork/join                                │
+  !   │                                                                      │
+  !   │  ntheta > 1 (multi-ângulo: geosteering)                              │
+  !   │    → Outer parallel k com num_threads_k threads (schedule dynamic)   │
+  !   │    → Inner parallel j com num_threads_j threads (schedule static)    │
+  !   │    → tid = omp_get_ancestor_thread_num(1) * num_threads_j            │
+  !   │           + omp_get_thread_num()                                     │
+  !   │    → Pré-cômputo commonarraysMD serial dentro de cada k              │
+  !   │    → firstprivate(z_rho1, c_H1) para cópias por ângulo              │
+  !   └────────────────────────────────────────────────────────────────────────┘
   !
-  ! Eliminação de firstprivate(z_rho1, c_H1): sem outer parallel, z_rho1 e c_H1
-  ! são variáveis do master thread (não precisam de cópias por thread).
+  ! A Fase 3b garante que ws_pool tem 12 campos (6 transmissão + 6 fatores de
+  ! onda), eliminando toda pressão de stack mesmo com ntheta > 1 × maxthreads.
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Fase 5b: outer parallel com cláusula if(ntheta > 1).
+  ! Quando ntheta=1, o runtime desabilita o fork do outer (executa serial no master).
+  ! Quando ntheta>1, o outer fork distribui ângulos entre num_threads_k threads.
+  ! A cláusula if() do OpenMP é avaliada em runtime e controla se o fork ocorre.
+  !$omp parallel do schedule(dynamic) num_threads(num_threads_k) &
+  !$omp&        if(ntheta > 1) &
+  !$omp&        private(k,ang,seno,coss,px,pz,Lsen,Lcos,r_k,omega_i,zeta_i,ii) &
+  !$omp&        firstprivate(z_rho1,c_H1)
   do k = 1, ntheta
     ang = theta(k) * pi / 18.d1
     seno = sin(ang)
@@ -266,7 +288,7 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     !
     ! Redução: nf × nmed = 1.200 chamadas/modelo → nf = 2 chamadas/modelo.
     ! Os caches são lidos (read-only) pelos threads no inner parallel abaixo.
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§��§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
     r_k = dTR * dabs(seno)
     do ii = 1, nf
       omega_i = 2.d0 * pi * freq(ii)
@@ -288,10 +310,11 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     ! define status de alocação indefinido para cópias private de allocatables.
     ! Migração para firstprivate garante herança de alocação + valores do master.
     ! Mesmo padrão aplicado a z_rho1/c_H1 em D4 (outer parallel, linha 232).
-    ! Fase 5: single-level parallel com maxthreads (sem nested).
-    ! tid = omp_get_thread_num() direto (nível único, sem ancestor).
-    ! B3/D7 corrigido: zrho/cH com firstprivate (allocatable portável).
-    !$omp parallel do schedule(static) num_threads(maxthreads) &
+    ! Fase 5/5b: inner parallel com threads adaptativas.
+    ! ntheta=1: maxthreads (single-level), ntheta>1: num_threads_j (nested).
+    ! B3/D7: firstprivate(zrho, cH) — allocatable portável.
+    !$omp parallel do schedule(static) &
+    !$omp&        num_threads(merge(maxthreads, num_threads_j, ntheta == 1)) &
     !$omp&        default(shared) &
     !$omp&        private(j, x, y, z, Tx, Ty, Tz, posTR, tid) &
     !$omp&        firstprivate(zrho, cH)
@@ -307,9 +330,13 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
       Ty = 0.d0
       Tz = z1 + (j-1) * pz + Lcos / 2
       posTR = (/Tx, Ty, Tz, x, y, z/)
-      ! Fase 5: tid direto (single-level parallel, sem nested).
-      ! Com ntheta=1, não há outer parallel — tid = omp_get_thread_num().
-      tid = omp_get_thread_num()
+      ! Fase 5/5b: tid adaptativo.
+      ! ntheta=1: tid direto (single-level). ntheta>1: tid global (nested, D6).
+      if (ntheta == 1) then
+        tid = omp_get_thread_num()
+      else
+        tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()
+      end if
       ! Fase 4: chamada usa os caches pré-computados (shared) em vez de
       ! recalcular commonarraysMD a cada iteração j.
       call fieldsinfreqs_cached_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt, &
@@ -325,8 +352,7 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     zrho1(k,1:nmed(k),:,:) = z_rho1
     cH1(k,1:nmed(k),:,:) = c_H1
   end do
-  ! Fase 5: loop k é serial (sem !$omp parallel do externo). O inner parallel
-  ! do loop j usa maxthreads diretamente — eliminando o overhead de nested.
+  !$omp end parallel do
   deallocate(zrho,cH,z_rho1,c_H1)
 
   ! Débito B5 corrigido: krwJ0J1 alocado na linha ~99 e nunca desalocado.
@@ -337,12 +363,20 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! Desalocação explícita dos 6 campos por slot + array mestre, mais defensiva
   ! que confiar no deallocate recursivo automático do Fortran 2003.
   do t = 0, maxthreads-1
+    ! Fase 3 — campos (npt × n)
     if (allocated(ws_pool(t)%Tudw))  deallocate(ws_pool(t)%Tudw)
     if (allocated(ws_pool(t)%Txdw))  deallocate(ws_pool(t)%Txdw)
     if (allocated(ws_pool(t)%Tuup))  deallocate(ws_pool(t)%Tuup)
     if (allocated(ws_pool(t)%Txup))  deallocate(ws_pool(t)%Txup)
     if (allocated(ws_pool(t)%TEdwz)) deallocate(ws_pool(t)%TEdwz)
     if (allocated(ws_pool(t)%TEupz)) deallocate(ws_pool(t)%TEupz)
+    ! Fase 3b — campos (npt)
+    if (allocated(ws_pool(t)%Mxdw))  deallocate(ws_pool(t)%Mxdw)
+    if (allocated(ws_pool(t)%Mxup))  deallocate(ws_pool(t)%Mxup)
+    if (allocated(ws_pool(t)%Eudw))  deallocate(ws_pool(t)%Eudw)
+    if (allocated(ws_pool(t)%Euup))  deallocate(ws_pool(t)%Euup)
+    if (allocated(ws_pool(t)%FEdwz)) deallocate(ws_pool(t)%FEdwz)
+    if (allocated(ws_pool(t)%FEupz)) deallocate(ws_pool(t)%FEupz)
   end do
   deallocate(ws_pool)
 
@@ -585,7 +619,9 @@ subroutine fieldsinfreqs_cached_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0
   real(dp) :: x, y, z, Tx, Ty, Tz, zobs, omega
   complex(dp) :: HxHMD(1,2), HyHMD(1,2), HzHMD(1,2) !só se dipolo = 'hmdxy'
   complex(dp) :: zeta, HxVMD, HyVMD, HzVMD, matH(3,3), tH(3,3)
-  complex(dp), dimension(npt) :: Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz
+  ! Fase 3b: Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz movidos de automatic (stack)
+  ! para ws%Mxdw etc. (heap, via thread_workspace). Eliminação de ~19 KB/thread
+  ! de pressão de stack. Robustez para n ≥ 30 camadas + muitos threads.
 
   Tx = posTR(1)
   Ty = posTR(2)
@@ -613,20 +649,20 @@ subroutine fieldsinfreqs_cached_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0
                          u_c(:,:,i), s_c(:,:,i), uh_c(:,:,i), sh_c(:,:,i), &
                          RTEdw_c(:,:,i), RTEup_c(:,:,i),                    &
                          RTMdw_c(:,:,i), RTMup_c(:,:,i),                    &
-                         Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz)
+                         ws%Mxdw, ws%Mxup, ws%Eudw, ws%Euup, ws%FEdwz, ws%FEupz)
     call hmd_TIV_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt,       &
                       krwJ0J1(:,1), krwJ0J1(:,2), krwJ0J1(:,3), h,        &
                       prof, zeta, eta_in, x, y, z,                         &
                       u_c(:,:,i), s_c(:,:,i), uh_c(:,:,i), sh_c(:,:,i),   &
                       RTEdw_c(:,:,i), RTEup_c(:,:,i),                      &
                       RTMdw_c(:,:,i), RTMup_c(:,:,i),                      &
-                      Mxdw, Mxup, Eudw, Euup, HxHMD, HyHMD, HzHMD, dipolo)
+                      ws%Mxdw, ws%Mxup, ws%Eudw, ws%Euup, HxHMD, HyHMD, HzHMD, dipolo)
     call vmd_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt,         &
                       krwJ0J1(:,1), krwJ0J1(:,2), krwJ0J1(:,3), h,        &
                       prof, zeta, x, y, z,                                 &
                       u_c(:,:,i), uh_c(:,:,i), AdmInt_c(:,:,i),            &
                       RTEdw_c(:,:,i), RTEup_c(:,:,i),                      &
-                      FEdwz, FEupz, HxVMD, HyVMD, HzVMD)
+                      ws%FEdwz, ws%FEupz, HxVMD, HyVMD, HzVMD)
     !===========================================================================
     matH(1,:) = (/HxHMD(1,1), HyHMD(1,1), HzHMD(1,1)/)
     matH(2,:) = (/HxHMD(1,2), HyHMD(1,2), HzHMD(1,2)/)
