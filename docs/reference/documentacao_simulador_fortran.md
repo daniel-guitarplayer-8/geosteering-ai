@@ -6698,8 +6698,18 @@ Fortran (Seções 5-6) e o pipeline Python (Seção 14).
 - **Validação numérica**: MD5 idêntico ao baseline, `max|Δ| = 0,0000e+00` em todas as 21 colunas.
 - **Scaling test**: bug 2-thread corrigido (−41 %, speedup 1,07× → 1,60×), 1 thread −12 %, 4 threads −23 %, trade-off marginal em 8–16 threads (+6 a +11 %).
 
+**Fase 5 (Single-Level Parallel + PR Débitos B1/B3/B5/B7 — aplicada em `PerfilaAnisoOmp.f08` e `magneticdipoles.f08`)**:
+
+- **Débito B1** — Cópia redundante `krJ0J1/wJ0/wJ1 = krwJ0J1(:,1..3)` eliminada em `fieldsinfreqs_cached_ws`. Slices passadas diretamente para `hmd/vmd_optimized_ws`.
+- **Débito B3/D7** — `private(zrho, cH)` migrado para `firstprivate(zrho, cH)` no inner `!$omp parallel do`. Garante herança de alocação OpenMP allocatable.
+- **Débito B5** — `if (allocated(krwJ0J1)) deallocate(krwJ0J1)` adicionado. Eliminação de leak ~4,8 KB/modelo.
+- **Débito B7** — Atributo `contiguous` adicionado a dummy arguments `krJ0J1(:)`, `wJ0(:)`, `wJ1(:)`, `Mxdw(:)`, `Mxup(:)`, `Eudw(:)`, `Euup(:)`, `FEdwz(:)`, `FEupz(:)` em `hmd_TIV_optimized_ws` e `vmd_optimized_ws`.
+- **Fase 5** — Eliminação do nested parallelism: outer `!$omp parallel do` removido, inner parallel usa `maxthreads` diretamente, `tid = omp_get_thread_num()` sem `ancestor`. Para `ntheta=1`, elimina overhead de fork/join aninhado.
+- **Fase 6** (cache `commonfactorsMD` por `camadT`) **suspensa**: análise revelou erro conceitual na proposta — `commonfactorsMD` depende de `h0` (profundidade do transmissor, variável em `j`), não apenas de `camadT`. Proposta corrigida (Fase 6b) requer fatoração dos termos invariantes em `h0`.
+- **Validação numérica**: Fase 5 vs Fase 4 bit-exato @ `-O0`; `max|Δ| = 4,26e-13` @ `-O3`; determinismo 1/2/4/8 threads; zero NaN/Inf.
+
 ---
 
 *Documentação do Simulador Fortran PerfilaAnisoOmp — Geosteering AI v2.0*
-*Versão 4.0 — Abril 2026 — Pipeline v5.0.15+*
-*Última atualização: 2026-04-04 (Fase 2 + Débitos 1/2/3 concluídos)*
+*Versão 5.0 — Abril 2026 — Pipeline v5.0.15+*
+*Última atualização: 2026-04-05 (Fase 5 + Débitos B1/B3/B5/B7 concluídos)*

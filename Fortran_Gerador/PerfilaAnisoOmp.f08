@@ -227,9 +227,23 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! os valores do master (inicializados em 0.d0 nas linhas ~158 acima),
   ! garantindo semântica portável. Custo: ~32 KB copiados por thread uma vez
   ! por região paralela — irrelevante para throughput.
-  !$omp parallel do schedule(dynamic) num_threads(num_threads_k) &
-  !$omp&        private(k,ang,seno,coss,px,pz,Lsen,Lcos) &
-  !$omp&        firstprivate(z_rho1,c_H1)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Fase 5 — Eliminação do nested parallelism para ntheta=1
+  !
+  ! Com ntheta=1 (caso de produção: perfilagem a 0°), o loop externo k executa
+  ! apenas 1 iteração — o overhead de OpenMP aninhado (2 fork/join em série) é
+  ! desperdiçado. A Fase 5 remove o !$omp parallel do externo (que forçava
+  ! nested) e usa apenas o inner parallel com maxthreads threads.
+  ! O loop k continua existindo (serial) para compatibilidade com ntheta>1.
+  !
+  ! Com ntheta=1: single fork/join com maxthreads threads.
+  ! Com ntheta>1 (futuro multi-ângulo): loop serial em k, inner parallel em j.
+  !   Nota: para ntheta>1 eficiente, seria necessário restaurar nested ou
+  !   implementar collapse(2) — planejado como Fase 5b.
+  !
+  ! Eliminação de firstprivate(z_rho1, c_H1): sem outer parallel, z_rho1 e c_H1
+  ! são variáveis do master thread (não precisam de cópias por thread).
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   do k = 1, ntheta
     ang = theta(k) * pi / 18.d1
     seno = sin(ang)
@@ -270,9 +284,17 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     !         hot path (ver magneticdipoles.f08 type :: thread_workspace).
     ! Fase 4: caches compartilhados u_cache,...,AdmInt_cache são lidos por todas
     !         as threads (read-only ⇒ sem race, sem locks).
-    !$omp parallel do schedule(static) num_threads(num_threads_j) &
+    ! Débito B3/D7 corrigido: zrho e cH são allocatable com private — OpenMP spec
+    ! define status de alocação indefinido para cópias private de allocatables.
+    ! Migração para firstprivate garante herança de alocação + valores do master.
+    ! Mesmo padrão aplicado a z_rho1/c_H1 em D4 (outer parallel, linha 232).
+    ! Fase 5: single-level parallel com maxthreads (sem nested).
+    ! tid = omp_get_thread_num() direto (nível único, sem ancestor).
+    ! B3/D7 corrigido: zrho/cH com firstprivate (allocatable portável).
+    !$omp parallel do schedule(static) num_threads(maxthreads) &
     !$omp&        default(shared) &
-    !$omp&        private(j, x, y, z, Tx, Ty, Tz, posTR, zrho, cH, tid)
+    !$omp&        private(j, x, y, z, Tx, Ty, Tz, posTR, tid) &
+    !$omp&        firstprivate(zrho, cH)
     do j = 1, nmed(k)
       !----------------------------------------------------
       ! Arranjo TR1:
@@ -285,10 +307,9 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
       Ty = 0.d0
       Tz = z1 + (j-1) * pz + Lcos / 2
       posTR = (/Tx, Ty, Tz, x, y, z/)
-      ! Fase 3 + D6 corrigido (PR1-Hygiene): tid GLOBAL do workspace pool.
-      ! Com num_threads_k==1 (ntheta=1 produção), ancestor(1)==0 ⇒ tid == inner_tid.
-      ! Com num_threads_k>1 (multi-ângulo futuro), tid percorre [0, maxthreads-1].
-      tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()
+      ! Fase 5: tid direto (single-level parallel, sem nested).
+      ! Com ntheta=1, não há outer parallel — tid = omp_get_thread_num().
+      tid = omp_get_thread_num()
       ! Fase 4: chamada usa os caches pré-computados (shared) em vez de
       ! recalcular commonarraysMD a cada iteração j.
       call fieldsinfreqs_cached_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt, &
@@ -304,12 +325,13 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     zrho1(k,1:nmed(k),:,:) = z_rho1
     cH1(k,1:nmed(k),:,:) = c_H1
   end do
-  !$omp end parallel do
-  ! Fase 3/PR1-Hygiene: removido !$omp barrier órfão que estava fora de região
-  ! paralela (débito D5 da Fase 3). O !$omp end parallel do acima já contém
-  ! uma barreira implícita — a diretiva explícita era redundante e semanticamente
-  ! inválida fora de uma região parallel ativa.
+  ! Fase 5: loop k é serial (sem !$omp parallel do externo). O inner parallel
+  ! do loop j usa maxthreads diretamente — eliminando o overhead de nested.
   deallocate(zrho,cH,z_rho1,c_H1)
+
+  ! Débito B5 corrigido: krwJ0J1 alocado na linha ~99 e nunca desalocado.
+  ! Leak de ~9,6 KB/modelo (npt × 3 × 8 bytes = 201 × 3 × 8 ≈ 4,8 KB).
+  if (allocated(krwJ0J1)) deallocate(krwJ0J1)
 
   ! Fase 3 — Liberação do ws_pool após o loop paralelo
   ! Desalocação explícita dos 6 campos por slot + array mestre, mais defensiva
@@ -554,7 +576,12 @@ subroutine fieldsinfreqs_cached_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0
   complex(dp), dimension(nf,9), intent(out) :: cH
 
   integer :: i, layerObs, camadT, camadR
-  real(dp) :: freq, krJ0J1(npt), wJ0(npt), wJ1(npt)
+  ! Débito B1 corrigido: eliminada cópia redundante krJ0J1/wJ0/wJ1 = krwJ0J1(:,1..3).
+  ! As slices krwJ0J1(:,1), krwJ0J1(:,2), krwJ0J1(:,3) são passadas diretamente
+  ! para hmd_TIV_optimized_ws e vmd_optimized_ws abaixo. Em column-major, a
+  ! primeira dimensão (npt) é contígua — cada slice (:,k) é contígua em memória,
+  ! sem necessidade de cópia temporária pelo compilador.
+  real(dp) :: freq
   real(dp) :: x, y, z, Tx, Ty, Tz, zobs, omega
   complex(dp) :: HxHMD(1,2), HyHMD(1,2), HzHMD(1,2) !só se dipolo = 'hmdxy'
   complex(dp) :: zeta, HxVMD, HyVMD, HzVMD, matH(3,3), tH(3,3)
@@ -572,13 +599,6 @@ subroutine fieldsinfreqs_cached_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0
   zobs = (Tz + z) / 2.d0
   layerObs = layer2z_inwell(n, zobs, prof(1:n-1))
 
-  ! r local nem é usado aqui — estaria redundante, pois commonarraysMD já foi
-  ! chamada pelo caller (perfila1DanisoOMP) com o r correto.
-
-  krJ0J1 = krwJ0J1(:,1)
-  wJ0    = krwJ0J1(:,2)
-  wJ1    = krwJ0J1(:,3)
-
   do i = 1, nf
     freq  = freqs(i)
     omega = 2.d0 * pi * freq
@@ -594,16 +614,18 @@ subroutine fieldsinfreqs_cached_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0
                          RTEdw_c(:,:,i), RTEup_c(:,:,i),                    &
                          RTMdw_c(:,:,i), RTMup_c(:,:,i),                    &
                          Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz)
-    call hmd_TIV_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt, krJ0J1, wJ0, wJ1, h, &
-                      prof, zeta, eta_in, x, y, z,                                  &
-                      u_c(:,:,i), s_c(:,:,i), uh_c(:,:,i), sh_c(:,:,i),             &
-                      RTEdw_c(:,:,i), RTEup_c(:,:,i),                                &
-                      RTMdw_c(:,:,i), RTMup_c(:,:,i),                                &
+    call hmd_TIV_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt,       &
+                      krwJ0J1(:,1), krwJ0J1(:,2), krwJ0J1(:,3), h,        &
+                      prof, zeta, eta_in, x, y, z,                         &
+                      u_c(:,:,i), s_c(:,:,i), uh_c(:,:,i), sh_c(:,:,i),   &
+                      RTEdw_c(:,:,i), RTEup_c(:,:,i),                      &
+                      RTMdw_c(:,:,i), RTMup_c(:,:,i),                      &
                       Mxdw, Mxup, Eudw, Euup, HxHMD, HyHMD, HzHMD, dipolo)
-    call vmd_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt, krJ0J1, wJ0, wJ1, h, &
-                      prof, zeta, x, y, z,                                          &
-                      u_c(:,:,i), uh_c(:,:,i), AdmInt_c(:,:,i),                     &
-                      RTEdw_c(:,:,i), RTEup_c(:,:,i),                                &
+    call vmd_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt,         &
+                      krwJ0J1(:,1), krwJ0J1(:,2), krwJ0J1(:,3), h,        &
+                      prof, zeta, x, y, z,                                 &
+                      u_c(:,:,i), uh_c(:,:,i), AdmInt_c(:,:,i),            &
+                      RTEdw_c(:,:,i), RTEup_c(:,:,i),                      &
                       FEdwz, FEupz, HxVMD, HyVMD, HzVMD)
     !===========================================================================
     matH(1,:) = (/HxHMD(1,1), HyHMD(1,1), HzHMD(1,1)/)

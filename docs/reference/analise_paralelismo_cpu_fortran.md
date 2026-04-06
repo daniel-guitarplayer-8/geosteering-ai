@@ -1335,6 +1335,57 @@ que parseia o formato binário `stream unformatted` de `writes_files` e reporta
 
 ---
 
+## 7.7 PR Débitos B1/B3/B5/B7 + Fase 5 — Single-Level Parallel (2026-04-05)
+
+### Débitos corrigidos
+
+| ID | Correção | Impacto |
+|:--:|:---------|:--------|
+| B1 | Cópia redundante `krJ0J1/wJ0/wJ1 = krwJ0J1(:,1..3)` eliminada em `fieldsinfreqs_cached_ws` | -2,9 MB/modelo de cópias desnecessárias |
+| B3/D7 | `private(zrho, cH)` → `firstprivate(zrho, cH)` no inner parallel | Portabilidade OpenMP allocatable |
+| B5 | `if (allocated(krwJ0J1)) deallocate(krwJ0J1)` adicionado | Eliminação de leak ~4,8 KB/modelo |
+| B7 | Atributo `contiguous` em dummy arguments de `hmd/vmd_optimized_ws` | Previne cópia temporária do compilador |
+
+Validação: MD5 bit-exato @ -O0 vs Fase 4, `max|Δ|=0` (correções semanticamente neutras).
+
+### Fase 5 — Single-Level Parallel
+
+Eliminação do nested parallelism (outer `!$omp parallel do` + inner `!$omp parallel do`)
+em favor de loop serial `k` + single `!$omp parallel do` com `maxthreads`:
+
+- `tid = omp_get_thread_num()` direto (sem `omp_get_ancestor_thread_num`)
+- Para `ntheta=1`: mesmo efeito que o nested (gfortran 15.2 já otimizava)
+- Para `ntheta>1`: loop serial em `k` — restaurar nested/collapse planejado como Fase 5b
+
+**Validação numérica:**
+- Fase 5 vs Fase 4 @ -O0: `max|Δ| = 0` (bit-exato)
+- Fase 5 @ -O3 vs referência O0: `max|Δ| = 4,26 × 10⁻¹³` (sub-ULP)
+- Determinismo T=1,2,4,8: MD5 `3d3c309fd1aa121f8b4166268552814c`
+
+**Benchmark (i9-9980HK, model.in n=15, 60 iterações):**
+- 8 threads: 0,0693 s/modelo (51.923 mod/h) — similar à Fase 4
+
+### Fase 6 — Erro Conceitual Identificado
+
+**ATENÇÃO:** A proposta de cache por sentinela na §7.6 (linhas 906–978) contém um **erro
+conceitual**. A sub-rotina `commonfactorsMD` depende de `h0 = Tz` (profundidade do
+transmissor), que **varia a cada medida `j`**, não apenas de `camadT`. Os termos
+exponenciais `exp(-s(:,cT) * (prof(cT) - h0))`, `exp(s(:,cT) * (prof(cT-1) - h0))`,
+etc., são **todos funções de `h0`**. Portanto, copiar o resultado de `commonfactorsMD`
+da medida `j-1` para `j` quando `camadT` não muda é **matematicamente incorreto** —
+produziria `.dat` com valores errados.
+
+**Proposta corrigida (Fase 6b):** Fatorar os termos invariantes em `h0`:
+- Pré-calcular denominadores `den_TM = 1 - RTMdw(:,cT) * RTMup(:,cT) * exp(-2*sh(:,cT))`
+  e `den_TE` por `camadT` (invariantes em `h0`) → cacheable.
+- Pré-calcular 8 coeficientes exponenciais que não dependem de `h0`.
+- Na iteração `j`, calcular apenas `exp(±s*h0)` e `exp(±u*h0)` (4 `exp()` em vez de 12).
+- Ganho estimado: 30-50% no custo de `commonfactorsMD`.
+
+Relatório: [`relatorio_fase5_debitos_fortran.md`](relatorio_fase5_debitos_fortran.md).
+
+---
+
 *Documento gerado com base na análise técnica da
 `docs/reference/documentacao_simulador_fortran.md` v4.0 (Geosteering AI v2.0),
 complementado por resultados empíricos das Fases 0 e 1 executadas em 2026-04-04

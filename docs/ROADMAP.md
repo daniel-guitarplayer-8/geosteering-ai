@@ -352,6 +352,7 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 - **Fase 3**: [`docs/reference/relatorio_fase3_fortran.md`](reference/relatorio_fase3_fortran.md)
 - **Fase 4**: [`docs/reference/relatorio_fase4_fortran.md`](reference/relatorio_fase4_fortran.md)
 - **Validação Final (Fases 0→4)**: [`docs/reference/relatorio_validacao_final_fortran.md`](reference/relatorio_validacao_final_fortran.md)
+- **Fase 5 + PR Débitos B1/B3/B5/B7**: [`docs/reference/relatorio_fase5_debitos_fortran.md`](reference/relatorio_fase5_debitos_fortran.md)
 
 | Fase | Descrição | Status | Ganho Real / Esperado |
 |:----:|:----------|:------:|:----------------------|
@@ -364,8 +365,9 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 | **Validação Final** | Bateria de testes de identidade numérica + revisão de código Fases 0→4 | ✅ **Concluída 2026-04-05** | **Fase 4 @ -O0 bit-exata** vs Fase 2 @ -O0 em `model.in` n=15 e n=10 sintético (`max\|Δ\|=0`). Fase 4 @ -O3 vs Fase 2 @ -O3: `max\|Δ\|=1,96e-13` (n=15), `6,11e-14` (n=10) — ambos sub-ULP, zero NaN/Inf. Determinismo MD5 idêntico em 1/2/4/8 threads. Nenhum bug encontrado. |
 | **Fase 3b** | Refatorar automatic arrays de `fieldsinfreqs` para `thread_workspace` estendido | 📋 Opcional | Robustez stack overflow para n ≥ 30 camadas |
 | **Fase 2b** | Chunk tuning (`static,16` ou `guided,4`) | 📋 Planejada | +5–10 % esperado nos regimes degradados |
-| **Fase 5** | `collapse(3)` nos loops `theta × medidas × freq` | 📋 Planejada | Marginal para ntheta=1; importante para multi-ângulo |
-| **Fase 6** | Cache de `commonfactorsMD` por `camadT` | 🔜 **Próxima** | **Novo gargalo pós-Fase 4** (~40-50 % do tempo restante). Ganho esperado: +40-60 % sobre Fase 4. |
+| **PR Débitos B1/B3/B5/B7** | OpenMP hygiene secundária: cópia redundante eliminada (B1), `firstprivate(zrho,cH)` inner (B3/D7), `krwJ0J1` leak corrigido (B5), `contiguous` em `hmd/vmd_ws` (B7) | ✅ **Concluída 2026-04-05** | Sem impacto em performance (semanticamente neutro). MD5 bit-exato @ -O0 vs Fase 4. Código mais robusto e portável. |
+| **Fase 5** | Eliminação do nested parallelism para `ntheta=1` — single-level parallel com `maxthreads` | ✅ **Concluída 2026-04-05** | Performance neutra (gfortran já otimizava nested para `ntheta=1`). Código mais limpo e manutenível. `tid = omp_get_thread_num()` direto. Bit-exato @ -O0 vs Fase 4. `max\|Δ\|=4,26e-13` @ -O3. Determinismo 1/2/4/8 threads. |
+| **Fase 6** | Cache de `commonfactorsMD` por `camadT` | ⚠️ **Revisada** | **Erro conceitual na proposta original**: `commonfactorsMD` depende de `h0` (profundidade do transmissor) que varia a cada medida `j`, não apenas de `camadT`. O cache por sentinela proposto na §7.6 da análise de paralelismo **não preserva fidelidade física**. Implementação correta requer fatoração dos termos invariantes em `h0` (semi-cache) — complexidade alta, planejada como Fase 6b. |
 
 **Débitos técnicos — status atualizado**:
 
@@ -376,7 +378,16 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 5. ✅ **Débito 5 — `!$omp barrier` órfão** — **CORRIGIDO na PR1-Hygiene**. Diretiva redundante + fora de região paralela removida. A barreira implícita do `!$omp end parallel do` é suficiente. Ver [`PerfilaAnisoOmp.f08:217`](../Fortran_Gerador/PerfilaAnisoOmp.f08).
 6. ✅ **Débito 6 — `tid` local do inner team** — **CORRIGIDO na PR1-Hygiene**. Cálculo global `tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()`. Backward-compat: com `num_threads_k=1`, `ancestor(1)=0` e `tid` permanece idêntico. Pré-requisito para ativar multi-ângulo. Ver [`PerfilaAnisoOmp.f08:207-210`](../Fortran_Gerador/PerfilaAnisoOmp.f08).
 
-**Verificação**: Notebooks executam sem erro no Colab Pro+ (T4/A100). SurrogateNet Mode A converge com val_loss decrescente. Simulador Fortran com **Fase 2 em produção**: compilação limpa, sanity test MD5 idêntico ao baseline, scaling test confirma fix do bug 2-thread. Infra `bench/` operacional com validador numérico automatizado.
+7. ✅ **Débito B1 — Cópia redundante `krJ0J1/wJ0/wJ1 = krwJ0J1(:,1..3)`** — **CORRIGIDO na PR Débitos (2026-04-05)**. Slices passadas diretamente para `hmd_TIV_optimized_ws` e `vmd_optimized_ws`, eliminando 3 cópias de `npt` doubles por chamada.
+8. ✅ **Débito B3/D7 — `private(zrho, cH)` com `allocatable` no inner parallel** — **CORRIGIDO na PR Débitos (2026-04-05)**. Migração para `firstprivate(zrho, cH)`, mesmo padrão de D4.
+9. ✅ **Débito B5 — `krwJ0J1` alocado sem deallocate** — **CORRIGIDO na PR Débitos (2026-04-05)**. Adicionado `if (allocated(krwJ0J1)) deallocate(krwJ0J1)` após o loop paralelo. Leak de ~4,8 KB/modelo eliminado.
+10. ✅ **Débito B7 — Dummy arguments sem `contiguous`** — **CORRIGIDO na PR Débitos (2026-04-05)**. Atributo `contiguous` adicionado a `krJ0J1(:)`, `wJ0(:)`, `wJ1(:)`, `Mxdw(:)`, `Mxup(:)`, `Eudw(:)`, `Euup(:)`, `FEdwz(:)`, `FEupz(:)` em `hmd_TIV_optimized_ws` e `vmd_optimized_ws`. Garante que o compilador não gere cópia temporária para slices column-major.
+
+**Débitos pendentes:**
+- 📋 **B4** — Semântica de `deallocate(zrho, cH)` após região paralela (cleanup cosmético).
+- 📋 **B6** — Stride inconveniente em `zrho1(ntheta, nmmax, nf, 3)` para `writes_files` (otimização cache L1).
+
+**Verificação**: Notebooks executam sem erro no Colab Pro+ (T4/A100). SurrogateNet Mode A converge com val_loss decrescente. Simulador Fortran com **Fase 5 + Débitos em produção**: compilação limpa, MD5 bit-exato @ -O0 vs Fase 2, `max|Δ|=4,26e-13` @ -O3, determinismo 1/2/4/8 threads. Infra `bench/` operacional com validador numérico automatizado.
 
 ---
 
