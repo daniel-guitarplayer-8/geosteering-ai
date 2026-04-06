@@ -313,7 +313,13 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     ! Fase 5/5b: inner parallel com threads adaptativas.
     ! ntheta=1: maxthreads (single-level), ntheta>1: num_threads_j (nested).
     ! B3/D7: firstprivate(zrho, cH) — allocatable portável.
-    !$omp parallel do schedule(static) &
+    ! Fase 2b: schedule(guided, 16) — chunks iniciais grandes (~nmed/threads)
+    ! decrescentes até chunk mínimo de 16. Melhora balanceamento em:
+    !   - Regimes degradados (poucos threads, nmed grande)
+    !   - Multi-ângulo (ntheta>1) com nmed(k) variável entre ângulos
+    !   - Custo não-uniforme por iteração (commonfactorsMD varia com camadT)
+    ! Chunk=16 preserva localidade de cache L1 (~16 × 19 KB ≈ 300 KB/chunk).
+    !$omp parallel do schedule(guided, 16) &
     !$omp&        num_threads(merge(maxthreads, num_threads_j, ntheta == 1)) &
     !$omp&        default(shared) &
     !$omp&        private(j, x, y, z, Tx, Ty, Tz, posTR, tid) &

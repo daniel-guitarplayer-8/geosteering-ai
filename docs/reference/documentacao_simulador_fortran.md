@@ -6726,8 +6726,22 @@ Fortran (Seções 5-6) e o pipeline Python (Seção 14).
 - **Benchmark**: 0,0668 s/modelo, 53.865 mod/h (8 threads) — +3,7 % vs Fase 5.
 - **Validação numérica**: bit-exato @ `-O0`; determinismo 1/2/4/8 threads.
 
+**Fase 2b (Chunk Tuning — aplicada em `PerfilaAnisoOmp.f08`)**:
+
+- Inner `!$omp parallel do` migrado de `schedule(static)` para `schedule(guided, 16)`.
+- `guided` atribui chunks decrescentes (inicial ≈ nmed/nthreads, mínimo 16), melhorando balanceamento em regimes degradados e multi-ângulo.
+- Chunk mínimo 16 preserva localidade de cache L1.
+- **Benchmark**: 0,0612 s/modelo, 58.856 mod/h (+9,3 % vs Fase 5b).
+- **Validação**: bit-exato @ `-O0` (`97123697...`); determinismo 1/2/4/8 threads.
+
+**Fase 6b (Fatoração de commonfactorsMD — DESCARTADA)**:
+
+- Tentativa de separar `exp(-s*(prof-h0))` em `exp(-s*prof) × exp(s*h0)` para semi-cache por `camadT`.
+- **Resultado: instabilidade numérica fatal** — overflow nos termos separados quando `s` é grande e `prof` é profundo, gerando 21.600 NaN em 25.200 saídas.
+- `commonfactorsMD` permanece como hot path inline sem caching.
+
 ---
 
 *Documentação do Simulador Fortran PerfilaAnisoOmp — Geosteering AI v2.0*
-*Versão 6.0 — Abril 2026 — Pipeline v5.0.15+*
-*Última atualização: 2026-04-05 (Fase 3b + Fase 5b concluídas)*
+*Versão 7.0 — Abril 2026 — Pipeline v5.0.15+*
+*Última atualização: 2026-04-05 (Fase 2b concluída, Fase 6b descartada)*

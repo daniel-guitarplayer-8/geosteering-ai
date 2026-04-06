@@ -1419,9 +1419,49 @@ Validação: bit-exato @ `-O0`; determinismo 1/2/4/8 threads; `max|Δ| = 4,26e-1
 
 ---
 
+## 7.9 Fase 2b (Chunk Tuning) + Fase 6b (Descartada) — 2026-04-05
+
+### Fase 2b — `schedule(guided, 16)` no inner parallel do
+
+Migração de `schedule(static)` para `schedule(guided, 16)`. `guided` atribui chunks
+decrescentes (inicial ≈ nmed/nthreads, mínimo 16 iterações), melhorando balanceamento:
+- Regimes degradados (poucos threads, nmed grande)
+- Multi-ângulo futuro com `nmed(k)` variável
+- Custo não-uniforme por iteração (commonfactorsMD varia com posição na camada)
+
+Chunk mínimo 16 preserva localidade de cache L1 (~16 × ~19 KB = ~300 KB/chunk).
+
+**Benchmark (i9-9980HK, n=15, 60 iterações, 8 threads):**
+- Mean: **0,0612 s/modelo** (58.856 mod/h) — **+9,3 %** vs Fase 5b (0,0668 s)
+- Bit-exato @ -O0: `97123697a2e4db34c77cd1d84077b083` (idêntico ao baseline Fase 2)
+- Determinismo 1/2/4/8 threads
+
+### Fase 6b — Fatoração de `commonfactorsMD` — DESCARTADA
+
+**Tentativa de implementação:** fatorar os 14 `exp()` de `commonfactorsMD` em 10
+coeficientes invariantes (dependem de `camadT`) + 4 `exp()` variantes (dependem de `h0`),
+com sentinel por thread para detectar transição de camada.
+
+**Resultado: INSTABILIDADE NUMÉRICA FATAL.** A separação `exp(-s*(prof(cT) - h0))` →
+`exp(-s*prof(cT)) × exp(s*h0)` causa overflow individual quando `s` é grande e
+`prof(cT)` é profundo, mesmo que o argumento original `(-s*(prof(cT) - h0))` seja
+finito por cancelamento (`h0 ≈ prof(cT)` quando o transmissor está próximo da
+interface). Resultado: **21.600 NaN** em 25.200 saídas do `.dat`.
+
+**Lição aprendida:** exponenciais com argumentos de sinal oposto que se cancelam
+(`exp(-s*a) × exp(s*b)` com `a ≈ b`) NÃO podem ser separadas sem tratamento
+especial (e.g., log-sum-exp scaling, ou aritmética de ponto flutuante estendida).
+A versão original `exp(-s*(a - b))` mantém o cancelamento ANTES do `exp()`,
+preservando magnitude finita.
+
+**Status:** `commonfactorsMD` permanece como hot path inline sem caching.
+O ganho seria ~30-50 % se implementável, mas a fidelidade física é não-negociável.
+
+---
+
 *Documento gerado com base na análise técnica da
-`docs/reference/documentacao_simulador_fortran.md` v6.0 (Geosteering AI v2.0),
-complementado por resultados empíricos das Fases 0–5b executadas em 2026-04-04/05
+`docs/reference/documentacao_simulador_fortran.md` v7.0 (Geosteering AI v2.0),
+complementado por resultados empíricos das Fases 0–2b executadas em 2026-04-04/05
 (ver relatórios em `docs/reference/`).*
 
 *Para questões sobre implementação GPU (Fase 2 — OpenACC/CUDA), consultar
