@@ -1,0 +1,43 @@
+2                 !número de frequências
+20000.0           !frequência 1
+40000.0            !frequência 2
+1                 !número de ângulos de inclinação
+0.0               !ângulo 1
+10.0              !altura do primeiro ponto-médio T-R, acima da primeira interface de camadas
+120.0             !tamanho da janela de investigação
+0.2               !passo entre as medidas
+3                 !número de pares T-R
+0.5               !distância T-R 1
+1.0               !distância T-R 2
+2.0               !distância T-R 3
+Inv0_15Dip1000_t5              !nome dos arquivos de saída
+15                !número de camadas
+233.99    234.02     !resistividades horizontal e vertical
+4.74    4.74
+11.96    11.97
+79.17    79.18
+0.12    0.12
+29.26    29.27
+0.2    0.2
+0.85    0.85
+1.75    1.75
+1.81    1.81
+444.55    444.63
+101.67    101.69
+923.37    923.48
+13.4    13.4
+53.39    53.4
+0.86              !espessuras das n-2 camadas
+3.86
+19.62
+15.96
+3.45
+8.31
+7.42
+10.99
+10.37
+0.75
+5.15
+12.06
+1.21
+1000 1000         !modelo atual e o número máximo de modelos

@@ -353,6 +353,7 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 - **Fase 4**: [`docs/reference/relatorio_fase4_fortran.md`](reference/relatorio_fase4_fortran.md)
 - **Validação Final (Fases 0→4)**: [`docs/reference/relatorio_validacao_final_fortran.md`](reference/relatorio_validacao_final_fortran.md)
 - **Fase 5 + PR Débitos B1/B3/B5/B7**: [`docs/reference/relatorio_fase5_debitos_fortran.md`](reference/relatorio_fase5_debitos_fortran.md)
+- **Análise de Evolução (Fortran → Python/JAX/Numba)**: [`docs/reference/analise_evolucao_simulador_fortran_python.md`](reference/analise_evolucao_simulador_fortran_python.md)
 
 | Fase | Descrição | Status | Ganho Real / Esperado |
 |:----:|:----------|:------:|:----------------------|
@@ -369,7 +370,11 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 | **Fase 5** | Single-level parallel para `ntheta=1` | ✅ **Concluída 2026-04-05** | Performance neutra. Bit-exato @ -O0 vs Fase 4. `max\|Δ\|=4,26e-13` @ -O3. |
 | **Fase 5b** | Paralelismo adaptativo: `if(ntheta>1)` no outer `!$omp parallel do` | ✅ **Concluída 2026-04-05** | `ntheta=1`: single-level com `maxthreads`. `ntheta>1`: nested com `num_threads_k × num_threads_j`. `tid` adaptativo (`omp_get_thread_num()` vs `omp_get_ancestor_thread_num(1)*nj+omp_get_thread_num()`). Bit-exato @ -O0. **0,0668 s/modelo, 53.865 mod/h** (8 threads). Determinismo 1/2/4/8. |
 | **Fase 6** | Cache de `commonfactorsMD` por `camadT` | ⚠️ **Revisada** | **Erro conceitual na proposta original** (§7.6): `commonfactorsMD` depende de `h0` (variável em `j`), não apenas de `camadT`. Cache por sentinela **não preserva fidelidade física**. |
-| **Fase 6b** | Fatoração dos termos invariantes em `h0` (semi-cache) | ❌ **Descartada** | **Instabilidade numérica**: separar `exp(-s*(prof-h0))` em `exp(-s*prof) × exp(s*h0)` causa overflow em `exp(-s*prof)` para camadas profundas (argumentos ~10³), mesmo que o produto original `exp(-s*(prof-h0))` seja finito (cancelamento antes do exp). Tentativa gerou **21.600 NaN** em 25.200 saídas. Fatoração numericamente inviável sem tratamento especial (log-sum-exp ou scaling). |
+| **Fase 6b** | Fatoração dos termos invariantes em `h0` (semi-cache) | ❌ **Descartada** | Instabilidade numérica fatal. |
+| **Feature 1** | **Múltiplos pares T-R** (`nTR` espaçamentos simultâneos) | ✅ **Concluída 2026-04-06** | `model.in` estendido com `nTR` + lista de espaçamentos. Loop `do itr = 1, nTR` em `perfila1DanisoOMP`. Cache Fase 4 recomputado por par. Saída: `_TR{itr}.dat` separados para `nTR > 1`, sem sufixo para `nTR = 1` (backward-compatible). Bit-exato @ -O0 para `nTR=1` (`97123697...`). `_TR2.dat` com `dTR=1.0` = baseline `3d3c309f...`. Zero NaN/Inf. |
+| **Feature 2** | **Tensor completo (9 componentes)** | ✅ **Já implementado** | `cH(i,1..9)` = `tH(1,1)..tH(3,3)` — Hxx, Hxy, Hxz, Hyx, Hyy, Hyz, Hzx, Hzy, Hzz. Escrito no `.dat` como 18 valores real/imag. Documentação atualizada. |
+| **Feature 3** | **f2py wrapper** (`tatu_f2py_wrapper.f08`) | ✅ **Concluída 2026-04-06** | Módulo `tatu_wrapper` com sub-rotina `simulate()` que retorna `zrho_out(nTR, ntheta, nmmax, nf, 3)` e `cH_out(nTR, ntheta, nmmax, nf, 9)` diretamente em Python. Sem I/O de disco. Target `make f2py_wrapper` no Makefile. |
+| **Feature 4** | **Batch paralelo de modelos** (`batch_runner.py`) | ✅ **Concluída 2026-04-06** | `ProcessPoolExecutor` com N workers × M OMP threads. Cada worker em diretório temporário isolado. CLI: `--models N --workers W --omp-threads T`. `fifthBuildTIVModels.py` atualizado para formato multi-TR. |
 
 **Débitos técnicos — status atualizado**:
 

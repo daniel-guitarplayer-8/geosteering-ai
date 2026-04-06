@@ -6,12 +6,32 @@ use magneticdipoles
 use omp_lib
 contains
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta, h1, tj, dTR, p_med, &
-                             n, resist, esp, filename)
+subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta, h1, tj, &
+                             nTR, dTR, p_med, n, resist, esp, filename)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Sub-rotina principal do simulador EM 1D TIV com múltiplos pares T-R.
+  !
+  ! Versão 7.0: suporte a nTR espaçamentos T-R simultâneos.
+  !   - nTR = 1: backward-compatible (saída idêntica ao formato anterior)
+  !   - nTR > 1: loop externo sobre pares T-R, cada um com r_k = dTR(itr)*|sin(θ)|
+  !              Saída: arquivos separados por par T-R (sufixo _TR{itr})
+  !
+  ! Fluxo de execução (multi-TR):
+  !   do itr = 1, nTR
+  !     do k = 1, ntheta  (outer parallel if ntheta > 1)
+  !       r_k = dTR(itr) * |sin(θ_k)|
+  !       commonarraysMD → cache(npt, n, nf)  [1× por (itr, k)]
+  !       do j = 1, nmed(k)  (inner parallel, schedule(guided, 16))
+  !         fieldsinfreqs_cached_ws(ws_pool(tid), cache, ...)
+  !       end do
+  !     end do
+  !     writes_files(..., itr, nTR)  [1 arquivo por par T-R]
+  !   end do
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   implicit none
   character(*), intent(in) :: mypath
-  integer, intent(in) ::  modelm, nmaxmodel, nf, ntheta, n
-  real(dp), intent(in) :: freq(nf), theta(ntheta), h1, tj, dTR, p_med, resist(n,2), esp(n) !, hn
+  integer, intent(in) ::  modelm, nmaxmodel, nf, ntheta, n, nTR
+  real(dp), intent(in) :: freq(nf), theta(ntheta), h1, tj, dTR(nTR), p_med, resist(n,2), esp(n)
   character(*), intent(in) :: filename
 
   integer :: i, j, k, nmmax
@@ -42,7 +62,7 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! Ref: docs/reference/analise_paralelismo_cpu_fortran.md §7 Fase 3
   !=============================================================================
   type(thread_workspace), allocatable :: ws_pool(:)
-  integer :: t, tid
+  integer :: t, tid, itr
 
   !=============================================================================
   ! Fase 4 — Cache de commonarraysMD por (r, freq)
@@ -258,10 +278,14 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! A Fase 3b garante que ws_pool tem 12 campos (6 transmissão + 6 fatores de
   ! onda), eliminando toda pressão de stack mesmo com ntheta > 1 × maxthreads.
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Feature 1 — Loop externo sobre pares T-R.
+  ! Cada par itr tem seu próprio r_k = dTR(itr) * |sin(θ_k)| e portanto
+  ! requer recomputo do cache Fase 4 (commonarraysMD depende de r).
+  ! Para nTR=1, este loop executa uma única vez → backward compatible.
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  do itr = 1, nTR
   ! Fase 5b: outer parallel com cláusula if(ntheta > 1).
-  ! Quando ntheta=1, o runtime desabilita o fork do outer (executa serial no master).
-  ! Quando ntheta>1, o outer fork distribui ângulos entre num_threads_k threads.
-  ! A cláusula if() do OpenMP é avaliada em runtime e controla se o fork ocorre.
   !$omp parallel do schedule(dynamic) num_threads(num_threads_k) &
   !$omp&        if(ntheta > 1) &
   !$omp&        private(k,ang,seno,coss,px,pz,Lsen,Lcos,r_k,omega_i,zeta_i,ii) &
@@ -272,8 +296,8 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     coss = cos(ang)
     px = p_med * seno
     pz = p_med * coss
-    Lsen = dTR * seno
-    Lcos = dTR * coss
+    Lsen = dTR(itr) * seno
+    Lcos = dTR(itr) * coss
 
     !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
     ! Fase 4 — Pré-cômputo de commonarraysMD (serial, uma vez por ângulo k)
@@ -289,7 +313,7 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     ! Redução: nf × nmed = 1.200 chamadas/modelo → nf = 2 chamadas/modelo.
     ! Os caches são lidos (read-only) pelos threads no inner parallel abaixo.
     !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§��§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    r_k = dTR * dabs(seno)
+    r_k = dTR(itr) * dabs(seno)
     do ii = 1, nf
       omega_i = 2.d0 * pi * freq(ii)
       zeta_i  = cmplx(0.d0, 1.d0, kind=dp) * omega_i * mu
@@ -359,6 +383,9 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     cH1(k,1:nmed(k),:,:) = c_H1
   end do
   !$omp end parallel do
+  ! Feature 1: escrita de saída por par T-R (dentro do loop itr)
+  call writes_files(modelm, nmaxmodel, mypath, zrho1, cH1, ntheta, theta, nf, freq, nmed, filename, itr, nTR)
+  end do  ! end do itr = 1, nTR
   deallocate(zrho,cH,z_rho1,c_H1)
 
   ! Débito B5 corrigido: krwJ0J1 alocado na linha ~99 e nunca desalocado.
@@ -398,8 +425,6 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   if (allocated(AdmInt_cache)) deallocate(AdmInt_cache)
   if (allocated(eta_shared))   deallocate(eta_shared)
   !-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-  ! write(*,*)'Passando para a escrita dos arquivos'
-  call writes_files(modelm, nmaxmodel, mypath, zrho1, cH1, ntheta, theta, nf, freq, nmed, filename)
   deallocate(zrho1, cH1)
 
   ! wtime = omp_get_wtime() - wtime
@@ -679,18 +704,24 @@ subroutine fieldsinfreqs_cached_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0
   end do
 end subroutine fieldsinfreqs_cached_ws
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq, nmeds, filename)
+subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq, nmeds, filename, itr, nTR)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Feature 1 (Multi-TR): aceita itr (índice do par T-R) e nTR (total de pares).
+  ! Quando nTR > 1: sufixo _TR{itr} no nome do arquivo .dat
+  ! Quando nTR == 1: nome original (sem sufixo) → backward compatible
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   implicit none
   character(*), intent(in) :: mypath
-  integer, intent(in) :: modelm, nmaxmodel, nt, nf
+  integer, intent(in) :: modelm, nmaxmodel, nt, nf, itr, nTR
   integer, intent(in) :: nmeds(nt)
   real(dp), intent(in) :: theta(nt), freq(nf)
   real(dp), dimension(:,:,:,:), intent(in) :: zrho
   complex(dp), dimension(:,:,:,:), intent(in) :: cH
   character(*), intent(in) :: filename
- 
+
   integer :: k, j, i, exec
   character(len=:), allocatable :: infomodels, fileTR
+  character(len=10) :: tr_suffix
   logical :: file_exists
 
   if (modelm == nmaxmodel) then
@@ -702,8 +733,13 @@ subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq
     write(10,*)(/(nmeds(i),i=1,nt)/)
     close(10)
   end if
-  ! Arquivos:
-  fileTR = mypath//trim(adjustl(filename))//'.dat'
+  ! Arquivos: sufixo _TR{itr} para nTR > 1, sem sufixo para nTR == 1
+  if (nTR > 1) then
+    write(tr_suffix, '(A,I0)') '_TR', itr
+    fileTR = mypath//trim(adjustl(filename))//trim(tr_suffix)//'.dat'
+  else
+    fileTR = mypath//trim(adjustl(filename))//'.dat'
+  end if
 
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! Correção Débito 1 — Abertura Condicional do Arquivo de Saída

@@ -93,6 +93,20 @@ run_python: $(binary)
 
 all: $(binary) run_python
 
+# Target f2py: wrapper Python para o simulador EM 1D TIV.
+# Gera módulo tatu_f2py.so importável em Python via "import tatu_f2py".
+# Uso: make f2py_wrapper
+# Pré-requisito: f2py (parte do NumPy) e compilador Fortran com OpenMP.
+# Nota: requer compilação prévia dos objetos via "make $(binary)" para
+#       gerar os .mod necessários.
+f2py_wrapper: $(object_files)
+	cd $(build) && python3 -m numpy.f2py -c -m tatu_f2py ../tatu_f2py_wrapper.f08 \
+	    parameters.$(obj_ext) filtersv2.$(obj_ext) utils.$(obj_ext) \
+	    magneticdipoles.$(obj_ext) PerfilaAnisoOmp.$(obj_ext) \
+	    --f90flags="-fopenmp $(production_flags_gfortran)" \
+	    -lgomp $(LDFLAGS_EXTRA) \
+	    && mv tatu_f2py*.so ../
+
 # Target de validação numérica: rebuild completo com -O0 -fno-fast-math.
 # Uso: make clean && make debug_O0
 # Produz binário determinístico bit-a-bit idêntico entre versões
