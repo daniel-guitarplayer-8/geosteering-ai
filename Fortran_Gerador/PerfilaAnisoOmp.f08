@@ -456,7 +456,9 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! o cálculo de compensação após o loop principal. Necessário porque a
   ! compensação requer H_near e H_far simultaneamente — não disponíveis
   ! durante o loop itr que processa um par de cada vez.
-  ! Alocação condicional: só quando F6 está habilitado E nTR >= 2.
+  ! SEMPRE aloca (mesmo quando desabilitado) com tamanho mínimo (1,...,1)
+  ! para evitar descritor não inicializado — mesma estratégia de cH_tilted.
+  ! Custo de memória quando desabilitado: 5 arrays × 16 bytes = 80 bytes.
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   if (use_compensation == 1 .and. n_comp_pairs > 0 .and. nTR >= 2) then
     allocate(cH_all_tr(nTR, ntheta, nmmax, nf, 9))
@@ -464,12 +466,18 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     allocate(cH_comp(n_comp_pairs, ntheta, nmmax, nf, 9))
     allocate(phase_diff(n_comp_pairs, ntheta, nmmax, nf, 9))
     allocate(atten_db(n_comp_pairs, ntheta, nmmax, nf, 9))
-    cH_all_tr = (0.d0, 0.d0)
-    zrho_all_tr = 0.d0
-    cH_comp = (0.d0, 0.d0)
-    phase_diff = 0.d0
-    atten_db = 0.d0
+  else
+    allocate(cH_all_tr(1, 1, 1, 1, 1))
+    allocate(zrho_all_tr(1, 1, 1, 1, 1))
+    allocate(cH_comp(1, 1, 1, 1, 1))
+    allocate(phase_diff(1, 1, 1, 1, 1))
+    allocate(atten_db(1, 1, 1, 1, 1))
   end if
+  cH_all_tr = (0.d0, 0.d0)
+  zrho_all_tr = 0.d0
+  cH_comp = (0.d0, 0.d0)
+  phase_diff = 0.d0
+  atten_db = 0.d0
 
   ! Fase 2 — Hybrid Scheduler: escolha do schedule baseada na característica do loop
   !   • Loop externo `k` (ângulos): carga desigual porque nmed(k) varia com theta(k)
@@ -733,8 +741,8 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     end do
 
     ! Escrita dos resultados compensados — um arquivo _COMP{ipair}.dat por par
-    call writes_compensation_files(modelm, nmaxmodel, mypath, &
-      n_comp_pairs, comp_pairs, ntheta, theta, nf, freq, nmed, filename, &
+    call writes_compensation_files(modelm, mypath, &
+      n_comp_pairs, comp_pairs, ntheta, nf, nmed, filename, &
       cH_comp, phase_diff, atten_db, zrho_all_tr)
   end if
 
@@ -1183,8 +1191,8 @@ end subroutine writes_files
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 ! F6 — Sub-rotina de escrita dos resultados de compensação midpoint
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-subroutine writes_compensation_files(modelm, nmaxmodel, mypath, &
-    n_comp_pairs, comp_pairs, nt, theta, nf, freq, nmeds, filename, &
+subroutine writes_compensation_files(modelm, mypath, &
+    n_comp_pairs, comp_pairs, nt, nf, nmeds, filename, &
     cH_comp, phase_diff, atten_db, zrho_all_tr)
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! Escreve os resultados da compensação midpoint (F6) em arquivos binários.
@@ -1208,9 +1216,8 @@ subroutine writes_compensation_files(modelm, nmaxmodel, mypath, &
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   implicit none
   character(*), intent(in) :: mypath
-  integer, intent(in) :: modelm, nmaxmodel, nt, nf, n_comp_pairs
+  integer, intent(in) :: modelm, nt, nf, n_comp_pairs
   integer, intent(in) :: nmeds(nt), comp_pairs(:,:)
-  real(dp), intent(in) :: theta(nt), freq(nf)
   character(*), intent(in) :: filename
   complex(dp), dimension(:,:,:,:,:), intent(in) :: cH_comp      ! (n_comp_pairs, nt, nmmax, nf, 9)
   real(dp), dimension(:,:,:,:,:), intent(in)    :: phase_diff    ! (n_comp_pairs, nt, nmmax, nf, 9)
