@@ -24,7 +24,10 @@
 #   - Executável Fortran compilado: tatu.x (gerado por 'make' no Makefile do Fortran_Gerador)
 #
 # Uso:
-#   python buildValidamodels.py
+#   python buildValidamodels.py                       # modo padrão: simula todos os 6 modelos
+#   python buildValidamodels.py --models 0,2,4        # simula e plota apenas modelos 0, 2, 4
+#   python buildValidamodels.py --dat file.dat --out file.out              # plota .dat externo
+#   python buildValidamodels.py --dat file.dat --out file.out --models 1,3 # plota modelos 1 e 3 do .dat
 #
 # Autor: Daniel Leal
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -34,8 +37,79 @@ import time
 import os
 import math
 import shutil
+import argparse
+import sys
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+# ── ARGUMENTOS DE LINHA DE COMANDO ─────────────────────────────────────────────────────────────────────────
+# --dat FILE   : caminho para arquivo .dat externo (pula simulação Fortran)
+# --out FILE   : caminho para arquivo .out externo (obrigatório com --dat)
+# --models IDX : índices dos modelos a plotar (ex: "0,2,4" ou "0-5"). Default: todos (0..5)
+#
+# Modos de operação:
+#   1. Sem argumentos:      simula todos os 6 modelos e plota todos
+#   2. --models 0,2:        simula apenas modelos 0 e 2, plota ambos
+#   3. --dat X --out Y:     pula simulação, plota todos os modelos do .dat externo
+#   4. --dat X --out Y --models 1,3: pula simulação, plota modelos 1 e 3 do .dat
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+def _parse_models_arg(models_str, nmax):
+    """Converte string de índices para lista de inteiros.
+
+    Formatos aceitos:
+      "0,2,4"  → [0, 2, 4]
+      "0-5"    → [0, 1, 2, 3, 4, 5]
+      "3"      → [3]
+      "1,3-5"  → [1, 3, 4, 5]
+
+    Args:
+        models_str: String com índices separados por vírgula e/ou ranges.
+        nmax: Valor máximo permitido (exclusive).
+
+    Returns:
+        Lista ordenada de índices válidos (0-based).
+    """
+    indices = set()
+    for part in models_str.split(','):
+        part = part.strip()
+        if '-' in part:
+            lo, hi = part.split('-', 1)
+            lo, hi = int(lo.strip()), int(hi.strip())
+            indices.update(range(lo, hi + 1))
+        else:
+            indices.add(int(part))
+    # Validar range
+    result = sorted(i for i in indices if 0 <= i < nmax)
+    invalidos = sorted(i for i in indices if i < 0 or i >= nmax)
+    if invalidos:
+        print(f'  [AVISO] Índices ignorados (fora de [0, {nmax-1}]): {invalidos}')
+    return result
+
+parser = argparse.ArgumentParser(
+    description='Validação do simulador Fortran via modelos geológicos canônicos de referência.',
+    epilog='Exemplos:\n'
+           '  python buildValidamodels.py                           # simula e plota todos\n'
+           '  python buildValidamodels.py --models 0,2,4            # simula/plota apenas 0,2,4\n'
+           '  python buildValidamodels.py --dat X.dat --out X.out   # plota .dat externo\n',
+    formatter_class=argparse.RawDescriptionHelpFormatter
+)
+parser.add_argument('--dat', type=str, default=None, metavar='FILE',
+                    help='Caminho para arquivo .dat externo (pula simulação Fortran)')
+parser.add_argument('--out', type=str, default=None, metavar='FILE',
+                    help='Caminho para arquivo .out externo (obrigatório com --dat)')
+parser.add_argument('--models', type=str, default=None, metavar='IDX',
+                    help='Índices dos modelos a plotar (ex: "0,2,4" ou "0-5"). Default: todos')
+args = parser.parse_args()
+
+# Validação: --dat requer --out
+if args.dat and not args.out:
+    parser.error('--out é obrigatório quando --dat é fornecido')
+if args.out and not args.dat:
+    parser.error('--dat é obrigatório quando --out é fornecido')
+
+# Modo de operação: externo (--dat) ou simulação (padrão)
+MODO_EXTERNO = args.dat is not None
 
 #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
 # ── CONFIGURAÇÃO DE SIMULAÇÃO ──────────────────────────────────────────────────────────────────────────────
@@ -60,8 +134,8 @@ mypath       = os.path.dirname(os.path.realpath(__file__)) + '/'
 mymodel      = mypath + 'model.in'
 fortran_exec = mypath + 'tatu.x'
 
-# Verifica se o executável Fortran existe antes de prosseguir
-if not os.path.isfile(fortran_exec):
+# Verifica se o executável Fortran existe (só necessário no modo simulação)
+if not MODO_EXTERNO and not os.path.isfile(fortran_exec):
     raise FileNotFoundError(
         f'Executável Fortran não encontrado: {fortran_exec}\n'
         f'Execute "make" no diretório {mypath} para compilar tatu.x.'
@@ -183,176 +257,233 @@ dtyp = np.dtype([('col0', np.int32)] + [('col{}'.format(i), np.float64) for i in
 
 
 #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+# ── Parse de --models (precisa de NMODELS_VALIDA já definido) ──────────────────
+selected_models = None  # None = todos
+if args.models is not None:
+    selected_models = _parse_models_arg(args.models, NMODELS_VALIDA)
+    if not selected_models:
+        print('[ERRO] Nenhum modelo válido selecionado. Use índices de 0 a 5.')
+        sys.exit(1)
+
 # ══════════════════════════════════════════════════════════════════════════════════════════════════════════
-# EXECUÇÃO PRINCIPAL — Simulação Fortran dos 6 modelos de validação
+# EXECUÇÃO PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════════════════════════════════════════
 #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
 print('═'*89)
-print('VALIDAÇÃO — Modelos geológicos de referência (buildValidamodels.py)')
+if MODO_EXTERNO:
+    print('VALIDAÇÃO — Modo externo (.dat/.out fornecidos pelo usuário)')
+else:
+    print('VALIDAÇÃO — Modelos geológicos de referência (buildValidamodels.py)')
 print('═'*89)
+if selected_models is not None:
+    print(f'  Modelos selecionados: {selected_models} ({[NOMES_MODELOS[i] for i in selected_models]})')
+else:
+    print(f'  Modelos: todos (0..{NMODELS_VALIDA-1})')
 print(f'  Parâmetros: nf={nf}, freq={freqs} Hz | na={na}, ang={angulos}° | nTR={_nTR}, dTR={dTR} m')
 
-# ── Janela de investigação ──────────────────────────────────────────────────────────────────────────────
-# tj_v é determinada pelo modelo com a maior espessura total, acrescida de 20 m de margem
-# para garantir que as camadas semi-infinitas (superior e inferior) sejam bem amostradas.
-somas_esp_v = [np.sum(modelo_valida(mv)[1]) for mv in range(NMODELS_VALIDA)]
-tj_v = max(somas_esp_v) + 20.0
-print(f'  tj_v={tj_v:.2f} m (maior espessura={max(somas_esp_v):.2f} m + 20 m margem), pmed={pmed} m')
-print('─'*89)
-
-# ── Display de parâmetros (skin depth e DOI) ────────────────────────────────────────────────────────────
-print(f'  nf={nf}  Frequências (Hz) : {freqs}')
-for fi in freqs:
-    delta_10 = 503 * math.sqrt(10 / fi)
-    print(f'    f={int(fi):>6} Hz — skin depth (ρ=10Ω·m): δ≈{delta_10:.1f} m')
-print(f'  na={na}  Ângulos (°)      : {angulos}')
-for ai in angulos:
-    if ai == 0.:
-        print(f'    θ=0°  → poço vertical, off-diagonal = 0')
+if MODO_EXTERNO:
+    # ── Modo externo: ler .dat e .out fornecidos pelo usuário ─────────────────
+    print(f'  .dat externo: {args.dat}')
+    print(f'  .out externo: {args.out}')
+    if not os.path.isfile(args.dat):
+        print(f'[ERRO] Arquivo .dat não encontrado: {args.dat}')
+        sys.exit(1)
+    if not os.path.isfile(args.out):
+        print(f'[ERRO] Arquivo .out não encontrado: {args.out}')
+        sys.exit(1)
+    # Ler metadados do .out
+    _ext_info = ler_arquivo_com_int_float(args.out)
+    na_ext, nf_ext, nmodels_ext = int(_ext_info[0][0]), int(_ext_info[0][1]), int(_ext_info[0][2])
+    angulos_ext = [float(x) for x in _ext_info[1]]
+    freqs_ext   = [float(x) for x in _ext_info[2]]
+    nmeds_ext   = [int(x) for x in _ext_info[3]]
+    records_per_model_ext = sum(nmeds_ext) * nf_ext
+    # Sobrescrever variáveis locais para plotagem
+    nf, na = nf_ext, na_ext
+    freqs, angulos = freqs_ext, angulos_ext
+    nmeds_v = nmeds_ext
+    NMODELS_VALIDA_EFF = nmodels_ext
+    records_per_model_v = records_per_model_ext
+    # Construir valida_dat_files com o arquivo externo (1 entry)
+    valida_dat_files = [(args.dat, 'Externo', args.out)]
+    # Ajustar selected_models se necessário
+    if selected_models is not None:
+        selected_models = _parse_models_arg(args.models, NMODELS_VALIDA_EFF)
     else:
-        print(f'    θ={int(ai)}°  → poço desviado, off-diagonal ≠ 0, DOI radial = dTR×|sin({int(ai)}°)|')
-print(f'  nTR={_nTR}  Espaçamentos T-R (m): {dTR}')
-_ang_max = max(angulos)
-for dtr_i in dTR:
+        selected_models = list(range(NMODELS_VALIDA_EFF))
+    print(f'  .out: nt={na}, nf={nf}, nmodels={nmodels_ext}, nmeds={nmeds_v}')
+    print(f'  Registros/modelo: {records_per_model_v} | Total: {nmodels_ext * records_per_model_v}')
+    print('─'*89)
+
+
+if not MODO_EXTERNO:
+    # ── Janela de investigação ──────────────────────────────────────────────────────────────────────────────
+    # tj_v é determinada pelo modelo com a maior espessura total, acrescida de 20 m de margem
+    # para garantir que as camadas semi-infinitas (superior e inferior) sejam bem amostradas.
+    somas_esp_v = [np.sum(modelo_valida(mv)[1]) for mv in range(NMODELS_VALIDA)]
+    tj_v = max(somas_esp_v) + 20.0
+    print(f'  tj_v={tj_v:.2f} m (maior espessura={max(somas_esp_v):.2f} m + 20 m margem), pmed={pmed} m')
+    print('─'*89)
+
+    # ── Display de parâmetros (skin depth e DOI) ────────────────────────────────────────────────────────────
+    print(f'  nf={nf}  Frequências (Hz) : {freqs}')
     for fi in freqs:
-        delta_i = 503 * math.sqrt(10 / fi)
-        doi_est = dtr_i * abs(math.sin(math.radians(_ang_max))) if _ang_max > 0 else 0.0
-        print(f'    dTR={dtr_i}m, f={int(fi/1000)}kHz → r_k(θ={int(_ang_max)}°)={doi_est:.2f}m, δ≈{delta_i:.1f}m')
-print('─'*89)
+        delta_10 = 503 * math.sqrt(10 / fi)
+        print(f'    f={int(fi):>6} Hz — skin depth (ρ=10Ω·m): δ≈{delta_10:.1f} m')
+    print(f'  na={na}  Ângulos (°)      : {angulos}')
+    for ai in angulos:
+        if ai == 0.:
+            print(f'    θ=0°  → poço vertical, off-diagonal = 0')
+        else:
+            print(f'    θ={int(ai)}°  → poço desviado, off-diagonal ≠ 0, DOI radial = dTR×|sin({int(ai)}°)|')
+    print(f'  nTR={_nTR}  Espaçamentos T-R (m): {dTR}')
+    _ang_max = max(angulos)
+    for dtr_i in dTR:
+        for fi in freqs:
+            delta_i = 503 * math.sqrt(10 / fi)
+            doi_est = dtr_i * abs(math.sin(math.radians(_ang_max))) if _ang_max > 0 else 0.0
+            print(f'    dTR={dtr_i}m, f={int(fi/1000)}kHz → r_k(θ={int(_ang_max)}°)={doi_est:.2f}m, δ≈{delta_i:.1f}m')
+    print('─'*89)
 
-# ── Configuração OpenMP ─────────────────────────────────────────────────────────────────────────────────
-_omp_threads = os.environ.get('OMP_NUM_THREADS', None)
-if _omp_threads:
-    print(f'[OpenMP] OMP_NUM_THREADS = {_omp_threads} thread(s)  (definido pelo usuário)')
-else:
-    import multiprocessing as _mp
-    print(f'[OpenMP] OMP_NUM_THREADS não definido — OpenMP usará o padrão do sistema '
-          f'({_mp.cpu_count()} núcleos lógicos detectados)')
-print('─'*89)
-
-# ── Loop de simulação Fortran ───────────────────────────────────────────────────────────────────────────
-filename_valida_base = 'validacao'
-start_time_v = time.perf_counter()
-
-for mv in range(NMODELS_VALIDA):
-    ncam_v, esp_v, resh_v, resv_v = modelo_valida(mv)
-    soma_esp_v = np.sum(esp_v)
-    h1_v = (tj_v - soma_esp_v) / 2.0
-    print(f'  [{mv+1}/{NMODELS_VALIDA}] {NOMES_MODELOS[mv]} '
-          f'— {ncam_v} cam., soma_esp={soma_esp_v:.2f}m, h1={h1_v:.2f}m')
-
-    # ── Escrita do model.in para este modelo de validação ─────────────────────────────────────────────
-    with open(mymodel, 'w') as f_mod:
-        f_mod.write(str(nf) + '                 !número de frequências\n')
-        for _idx, _fi in enumerate(freqs, 1):
-            f_mod.write(str(_fi) + '           ' + f'!frequência {_idx}\n')
-        f_mod.write(str(na) + '                 !número de ângulos de inclinação\n')
-        for _idx, _ai in enumerate(angulos, 1):
-            f_mod.write(str(_ai) + '               ' + f'!ângulo {_idx}\n')
-        f_mod.write(str(h1_v) + '              !altura do primeiro ponto-médio T-R\n')
-        f_mod.write(str(tj_v) + '             !tamanho da janela de investigação\n')
-        f_mod.write(str(pmed)  + '               !passo entre as medidas\n')
-        f_mod.write(str(_nTR) + '                 !número de pares T-R\n')
-        for dtr_v in dTR:
-            f_mod.write(str(dtr_v) + '               !distância T-R\n')
-        f_mod.write(filename_valida_base + '              !nome dos arquivos de saída\n')
-        f_mod.write(str(ncam_v) + '                !número de camadas\n')
-        for jc in range(ncam_v):
-            myrhoh = float(resh_v[jc]);  myrhov = float(resv_v[jc])
-            if myrhov < myrhoh: myrhov = myrhoh
-            suffix = '     !resistividades horizontal e vertical' if jc == 0 else ''
-            f_mod.write(f'{round(myrhoh, 4)}    {round(myrhov, 4)}{suffix}\n')
-        for jc in range(ncam_v - 3):
-            suffix = '              !espessuras das n-2 camadas' if jc == 0 else ''
-            f_mod.write(f'{round(esp_v[jc], 4)}{suffix}\n')
-        f_mod.write(f'{round(esp_v[-1], 4)}\n')
-        f_mod.write(f'{mv+1} {NMODELS_VALIDA}         !modelo atual e o número máximo de modelos\n')
-        # ── F5/F7/F6/Filtro — Defaults desabilitados (v9.0 backward compatible) ──
-        f_mod.write('0                 !F5: use_arbitrary_freq (0=desabilitado)\n')
-        f_mod.write('0                 !F7: use_tilted_antennas (0=desabilitado)\n')
-        f_mod.write('0                 !F6: use_compensation (0=desabilitado)\n')
-        f_mod.write('0                 !Filtro: 0=Werthmuller (default)')
-
-    # ── Execução do simulador Fortran ─────────────────────────────────────────────────────────────────
-    try:
-        sub.run([fortran_exec], check=True, text=True, capture_output=True)
-    except sub.CalledProcessError as e:
-        print(f'    [ERRO Fortran]: {e.stderr[:300]}')
-
-end_time_v = time.perf_counter()
-print('─'*89)
-print(f'  Tempo de simulação Fortran (validação): {(end_time_v - start_time_v):.2f} s')
-
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-# ── Geração do .out pelo Python (garantia total, independente do Fortran) ──────────────────────────────
-# O Fortran só grava o .out quando modelm == nmaxmodel. O Python gera sempre,
-# evitando o bug de int() truncation que impedia a geração para ntmodels não múltiplo de 40.
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-out_src_v = mypath + 'info' + filename_valida_base + '.out'
-_nmeds_v  = [math.ceil(tj_v / (pmed * math.cos(math.radians(a)))) for a in angulos]
-with open(out_src_v, 'w') as _f_out_v:
-    _f_out_v.write(f' {na} {nf} {NMODELS_VALIDA}\n')
-    _f_out_v.write(' ' + ' '.join(f'{float(a):.1f}' for a in angulos) + '\n')
-    _f_out_v.write(' ' + ' '.join(f'{float(f):.1f}' for f in freqs) + '\n')
-    _f_out_v.write(' ' + ' '.join(str(n) for n in _nmeds_v) + '\n')
-print(f'  [.out validação gerado pelo Python] {out_src_v}')
-print(f'  nt={na}  nf={nf}  nmaxmodel={NMODELS_VALIDA}  nmeds_v={_nmeds_v}')
-
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-# ── Renomeação de arquivos de saída (dTR no nome + .out idêntico ao .dat) ──────────────────────────────
-# Formato do Fortran:
-#   nTR=1: {filename}.dat         (sem sufixo _TR)
-#   nTR>1: {filename}_TR{k}.dat   (com sufixo _TR por par T-R)
-# Após renomeação: {filename}_TR{k}_d{dTR}m.dat + .out idêntico
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-valida_dat_files = []
-print('  Renomeação de arquivos de validação:')
-for itr, dtr in enumerate(dTR):
-    dtr_tag    = str(dtr).replace('.', 'p')
-    _tr_suf_v  = f'_TR{itr+1}' if _nTR > 1 else ''             # nTR=1: Fortran não adiciona sufixo _TR
-    old_dat_v  = mypath + filename_valida_base + f'{_tr_suf_v}.dat'
-    new_name_v = filename_valida_base + f'_TR{itr+1}_d{dtr_tag}m'
-    new_dat_v  = mypath + new_name_v + '.dat'
-    new_out_v  = mypath + new_name_v + '.out'
-    if os.path.exists(old_dat_v):
-        os.rename(old_dat_v, new_dat_v)
-        print(f'    .dat: {os.path.basename(old_dat_v)} → {os.path.basename(new_dat_v)}')
+    # ── Configuração OpenMP ─────────────────────────────────────────────────────────────────────────────────
+    _omp_threads = os.environ.get('OMP_NUM_THREADS', None)
+    if _omp_threads:
+        print(f'[OpenMP] OMP_NUM_THREADS = {_omp_threads} thread(s)  (definido pelo usuário)')
     else:
-        print(f'    [AVISO] .dat não encontrado: {os.path.basename(old_dat_v)}')
-    if os.path.exists(out_src_v):
-        shutil.copy(out_src_v, new_out_v)
-        print(f'    .out: info{filename_valida_base}.out → {os.path.basename(new_out_v)}')
-    valida_dat_files.append((new_dat_v, f'TR{itr+1} (dTR={dtr} m) — Validação', new_out_v))
+        import multiprocessing as _mp
+        print(f'[OpenMP] OMP_NUM_THREADS não definido — OpenMP usará o padrão do sistema '
+              f'({_mp.cpu_count()} núcleos lógicos detectados)')
+    print('─'*89)
 
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-# ── Leitura e validação numérica ───────────────────────────────────────────────────────────────────────────
-# Verifica integridade dos arquivos .dat gerados: contagem de registros, NaN e Inf.
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-nmeds_v = [math.ceil(tj_v / (pmed * math.cos(math.radians(a)))) for a in angulos]
-records_per_model_v = sum(nmeds_v) * nf
-_nmeds_v_str = '+'.join(str(n) for n in nmeds_v)
-print('─'*89)
-print(f'  Registros esperados/modelo: ({_nmeds_v_str})×{nf}={records_per_model_v} '
-      f'| Total={NMODELS_VALIDA*records_per_model_v}')
-for dat_path_v, label_v, out_path_v in valida_dat_files:
-    try:
-        mydat_v   = np.fromfile(dat_path_v, dtype=dtyp)
-        myarr_v   = np.array(mydat_v.tolist())
-        nrow_v    = myarr_v.shape[0]
-        expected  = NMODELS_VALIDA * records_per_model_v
-        has_nan_v = np.isnan(myarr_v).any()
-        has_inf_v = np.isinf(myarr_v).any()
-        status_v  = 'OK' if not has_nan_v and not has_inf_v and nrow_v == expected else 'ATENÇÃO'
-        print(f'  [{status_v}] {label_v}')
-        print(f'         .dat  : {dat_path_v}')
-        print(f'         .out  : {out_path_v}')
-        print(f'         Regs  : {nrow_v} (esperado {expected}) | NaN={has_nan_v} | Inf={has_inf_v}')
-    except FileNotFoundError:
-        print(f'  [ERRO] {label_v} — arquivo não encontrado: {dat_path_v}')
-print('─'*89)
+    # ── Loop de simulação Fortran ───────────────────────────────────────────────────────────────────────────
+    filename_valida_base = 'validacao'
+    start_time_v = time.perf_counter()
 
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-# ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+    for mv in range(NMODELS_VALIDA):
+        ncam_v, esp_v, resh_v, resv_v = modelo_valida(mv)
+        soma_esp_v = np.sum(esp_v)
+        h1_v = (tj_v - soma_esp_v) / 2.0
+        print(f'  [{mv+1}/{NMODELS_VALIDA}] {NOMES_MODELOS[mv]} '
+              f'— {ncam_v} cam., soma_esp={soma_esp_v:.2f}m, h1={h1_v:.2f}m')
+
+        # ── Escrita do model.in para este modelo de validação ─────────────────────────────────────────────
+        with open(mymodel, 'w') as f_mod:
+            f_mod.write(str(nf) + '                 !número de frequências\n')
+            for _idx, _fi in enumerate(freqs, 1):
+                f_mod.write(str(_fi) + '           ' + f'!frequência {_idx}\n')
+            f_mod.write(str(na) + '                 !número de ângulos de inclinação\n')
+            for _idx, _ai in enumerate(angulos, 1):
+                f_mod.write(str(_ai) + '               ' + f'!ângulo {_idx}\n')
+            f_mod.write(str(h1_v) + '              !altura do primeiro ponto-médio T-R\n')
+            f_mod.write(str(tj_v) + '             !tamanho da janela de investigação\n')
+            f_mod.write(str(pmed)  + '               !passo entre as medidas\n')
+            f_mod.write(str(_nTR) + '                 !número de pares T-R\n')
+            for dtr_v in dTR:
+                f_mod.write(str(dtr_v) + '               !distância T-R\n')
+            f_mod.write(filename_valida_base + '              !nome dos arquivos de saída\n')
+            f_mod.write(str(ncam_v) + '                !número de camadas\n')
+            for jc in range(ncam_v):
+                myrhoh = float(resh_v[jc]);  myrhov = float(resv_v[jc])
+                if myrhov < myrhoh: myrhov = myrhoh
+                suffix = '     !resistividades horizontal e vertical' if jc == 0 else ''
+                f_mod.write(f'{round(myrhoh, 4)}    {round(myrhov, 4)}{suffix}\n')
+            for jc in range(ncam_v - 3):
+                suffix = '              !espessuras das n-2 camadas' if jc == 0 else ''
+                f_mod.write(f'{round(esp_v[jc], 4)}{suffix}\n')
+            f_mod.write(f'{round(esp_v[-1], 4)}\n')
+            f_mod.write(f'{mv+1} {NMODELS_VALIDA}         !modelo atual e o número máximo de modelos\n')
+            # ── F5/F7/F6/Filtro — Defaults desabilitados (v9.0 backward compatible) ──
+            f_mod.write('0                 !F5: use_arbitrary_freq (0=desabilitado)\n')
+            f_mod.write('0                 !F7: use_tilted_antennas (0=desabilitado)\n')
+            f_mod.write('0                 !F6: use_compensation (0=desabilitado)\n')
+            f_mod.write('0                 !Filtro: 0=Werthmuller (default)')
+
+        # ── Execução do simulador Fortran ─────────────────────────────────────────────────────────────────
+        try:
+            sub.run([fortran_exec], check=True, text=True, capture_output=True)
+        except sub.CalledProcessError as e:
+            print(f'    [ERRO Fortran]: {e.stderr[:300]}')
+
+    end_time_v = time.perf_counter()
+    print('─'*89)
+    print(f'  Tempo de simulação Fortran (validação): {(end_time_v - start_time_v):.2f} s')
+
+    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+    # ── Geração do .out pelo Python (garantia total, independente do Fortran) ──────────────────────────────
+    # O Fortran só grava o .out quando modelm == nmaxmodel. O Python gera sempre,
+    # evitando o bug de int() truncation que impedia a geração para ntmodels não múltiplo de 40.
+    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+    out_src_v = mypath + 'info' + filename_valida_base + '.out'
+    _nmeds_v  = [math.ceil(tj_v / (pmed * math.cos(math.radians(a)))) for a in angulos]
+    with open(out_src_v, 'w') as _f_out_v:
+        _f_out_v.write(f' {na} {nf} {NMODELS_VALIDA}\n')
+        _f_out_v.write(' ' + ' '.join(f'{float(a):.1f}' for a in angulos) + '\n')
+        _f_out_v.write(' ' + ' '.join(f'{float(f):.1f}' for f in freqs) + '\n')
+        _f_out_v.write(' ' + ' '.join(str(n) for n in _nmeds_v) + '\n')
+    print(f'  [.out validação gerado pelo Python] {out_src_v}')
+    print(f'  nt={na}  nf={nf}  nmaxmodel={NMODELS_VALIDA}  nmeds_v={_nmeds_v}')
+
+    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+    # ── Renomeação de arquivos de saída (dTR no nome + .out idêntico ao .dat) ──────────────────────────────
+    # Formato do Fortran:
+    #   nTR=1: {filename}.dat         (sem sufixo _TR)
+    #   nTR>1: {filename}_TR{k}.dat   (com sufixo _TR por par T-R)
+    # Após renomeação: {filename}_TR{k}_d{dTR}m.dat + .out idêntico
+    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+    valida_dat_files = []
+    print('  Renomeação de arquivos de validação:')
+    for itr, dtr in enumerate(dTR):
+        dtr_tag    = str(dtr).replace('.', 'p')
+        _tr_suf_v  = f'_TR{itr+1}' if _nTR > 1 else ''             # nTR=1: Fortran não adiciona sufixo _TR
+        old_dat_v  = mypath + filename_valida_base + f'{_tr_suf_v}.dat'
+        new_name_v = filename_valida_base + f'_TR{itr+1}_d{dtr_tag}m'
+        new_dat_v  = mypath + new_name_v + '.dat'
+        new_out_v  = mypath + new_name_v + '.out'
+        if os.path.exists(old_dat_v):
+            os.rename(old_dat_v, new_dat_v)
+            print(f'    .dat: {os.path.basename(old_dat_v)} → {os.path.basename(new_dat_v)}')
+        else:
+            print(f'    [AVISO] .dat não encontrado: {os.path.basename(old_dat_v)}')
+        if os.path.exists(out_src_v):
+            shutil.copy(out_src_v, new_out_v)
+            print(f'    .out: info{filename_valida_base}.out → {os.path.basename(new_out_v)}')
+        valida_dat_files.append((new_dat_v, f'TR{itr+1} (dTR={dtr} m) — Validação', new_out_v))
+
+    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+    # ── Leitura e validação numérica ───────────────────────────────────────────────────────────────────────────
+    # Verifica integridade dos arquivos .dat gerados: contagem de registros, NaN e Inf.
+    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+    nmeds_v = [math.ceil(tj_v / (pmed * math.cos(math.radians(a)))) for a in angulos]
+    records_per_model_v = sum(nmeds_v) * nf
+    _nmeds_v_str = '+'.join(str(n) for n in nmeds_v)
+    print('─'*89)
+    print(f'  Registros esperados/modelo: ({_nmeds_v_str})×{nf}={records_per_model_v} '
+          f'| Total={NMODELS_VALIDA*records_per_model_v}')
+    for dat_path_v, label_v, out_path_v in valida_dat_files:
+        try:
+            mydat_v   = np.fromfile(dat_path_v, dtype=dtyp)
+            myarr_v   = np.array(mydat_v.tolist())
+            nrow_v    = myarr_v.shape[0]
+            expected  = NMODELS_VALIDA * records_per_model_v
+            has_nan_v = np.isnan(myarr_v).any()
+            has_inf_v = np.isinf(myarr_v).any()
+            status_v  = 'OK' if not has_nan_v and not has_inf_v and nrow_v == expected else 'ATENÇÃO'
+            print(f'  [{status_v}] {label_v}')
+            print(f'         .dat  : {dat_path_v}')
+            print(f'         .out  : {out_path_v}')
+            print(f'         Regs  : {nrow_v} (esperado {expected}) | NaN={has_nan_v} | Inf={has_inf_v}')
+        except FileNotFoundError:
+            print(f'  [ERRO] {label_v} — arquivo não encontrado: {dat_path_v}')
+    print('─'*89)
+
+    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+    # ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    # Efetivo para plotagem no modo simulação
+    NMODELS_VALIDA_EFF = NMODELS_VALIDA
+    if selected_models is None:
+        selected_models = list(range(NMODELS_VALIDA))
+
 # PLOTAGEM — Tensor H completo + perfil de resistividade para cada modelo de validação
 # ══════════════════════════════════════════════════════════════════════════════════════════════════════════
 # Para cada combinação (TR × modelo × ângulo × frequência), gera uma figura com:
@@ -398,14 +529,24 @@ for dat_path_v, label_v, _ in valida_dat_files:
         continue
     tr_tag = os.path.splitext(os.path.basename(dat_path_v))[0].replace('validacao_', '')
 
-    for idx_m in range(NMODELS_VALIDA):
+    # Itera sobre modelos selecionados (default: todos)
+    _models_to_plot = selected_models if selected_models is not None else list(range(NMODELS_VALIDA_EFF))
+    for idx_m in _models_to_plot:
         start_r = idx_m * records_per_model_v
         if start_r + records_per_model_v > len(myarr_v):
-            break
+            print(f'  [AVISO] Modelo {idx_m} fora do range do .dat ({len(myarr_v)} registros). Pulando.')
+            continue
 
-        ncam_v2, esp_v2, _, _ = modelo_valida(idx_m)
-        interfaces = [0.0] + list(np.cumsum(esp_v2))
-        nome_safe  = NOMES_MODELOS[idx_m].replace(' ', '_').replace('.', '')
+        # Em modo externo, modelo_valida pode não ter dados para idx_m >= 6
+        if idx_m < NMODELS_VALIDA:
+            ncam_v2, esp_v2, _, _ = modelo_valida(idx_m)
+            interfaces = [0.0] + list(np.cumsum(esp_v2))
+            nome_safe  = NOMES_MODELOS[idx_m].replace(' ', '_').replace('.', '')
+        else:
+            # Modo externo com mais modelos que os 6 canônicos: sem perfil de resistividade
+            ncam_v2 = 0
+            interfaces = []
+            nome_safe = f'modelo_{idx_m}'
 
         # Offset cumulativo por ângulo (em registros dentro do modelo)
         _k_offsets = []
@@ -430,8 +571,9 @@ for dat_path_v, label_v, _ in valida_dat_files:
                 fig = plt.figure(figsize=(28, 12))
                 _gs = gridspec.GridSpec(3, 7, figure=fig,
                                         width_ratios=[1.8, 1, 1, 1, 1, 1, 1])
+                _titulo_modelo = NOMES_MODELOS[idx_m] if idx_m < len(NOMES_MODELOS) else f'Modelo {idx_m}'
                 fig.suptitle(
-                    f'Tensor H  —  {NOMES_MODELOS[idx_m]} ({ncam_v2} cam.)  |  {label_v}  |  '
+                    f'Tensor H  —  {_titulo_modelo} ({ncam_v2} cam.)  |  {label_v}  |  '
                     r'$\theta$' + f'={int(theta_val)}°,  f={int(freq_val/1000)} kHz',
                     fontsize=15, y=0.98
                 )

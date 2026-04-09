@@ -90,14 +90,19 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! real(dp) :: tj
   character(5) :: dipolo
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Filtro Adaptativo — npt determinado por filter_type (NÃO mais parameter)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Filtro Adaptativo — npt_active determinado por filter_type em runtime.
   !   filter_type == 0: Werthmuller 201pt (default, precisão 10⁻⁶)
   !   filter_type == 1: Kong 61pt (rápido, precisão 10⁻⁴, 3.3× speedup)
   !   filter_type == 2: Anderson 801pt (máxima precisão 10⁻⁸, 4× mais lento)
-  ! O custo computacional escala linearmente com npt: cada ponto adicional
-  ! do filtro requer avaliação do kernel de Hankel K(kr) × J_ν(kr·r) × kr.
+  !
+  ! PERFORMANCE: npt_active é variável runtime (não parameter) porque o filtro
+  ! é selecionável pelo usuário. Todas as alocações de workspace, caches e
+  ! arrays de filtro usam npt_active. As sub-rotinas fieldsinfreqs/fieldsinfreqs_ws
+  ! (legado, NÃO chamadas no hot path Phase 4) recebem npt como dummy argument
+  ! com intent(in) — inalteradas.
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  integer :: npt
+  integer :: npt_active
   real(dp), dimension(:), allocatable :: krJ0J1, wJ0, wJ1
   real(dp), dimension(:,:), allocatable :: krwJ0J1
   !=============================================================================
@@ -239,20 +244,20 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   select case (filter_type)
   case (1)
     ! Kong 61 pontos — geração rápida de datasets de treinamento
-    npt = 61
-    call J0J1Kong(npt, krJ0J1, wJ0, wJ1)
+    npt_active = 61
+    call J0J1Kong(npt_active, krJ0J1, wJ0, wJ1)
   case (2)
     ! Anderson 801 pontos — validação e referência (máxima precisão)
-    npt = 801
+    npt_active = 801
     call J0J1And(krJ0J1, wJ0, wJ1)
   case default
     ! Werthmuller 201 pontos — simulação padrão (backward compatible)
-    npt = 201
-    call J0J1Wer(npt, krJ0J1, wJ0, wJ1)
+    npt_active = 201
+    call J0J1Wer(npt_active, krJ0J1, wJ0, wJ1)
   end select
 
-  allocate(krwJ0J1(npt,3))
-  do i = 1, npt
+  allocate(krwJ0J1(npt_active,3))
+  do i = 1, npt_active
     krwJ0J1(i,:) = (/ krJ0J1(i), wJ0(i), wJ1(i) /)
   end do
 
@@ -323,20 +328,20 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   allocate(ws_pool(0:maxthreads-1))
   do t = 0, maxthreads-1
-    ! Fase 3 — arrays de transmissão/potencial (npt × n)
-    allocate(ws_pool(t)%Tudw (npt, n))
-    allocate(ws_pool(t)%Txdw (npt, n))
-    allocate(ws_pool(t)%Tuup (npt, n))
-    allocate(ws_pool(t)%Txup (npt, n))
-    allocate(ws_pool(t)%TEdwz(npt, n))
-    allocate(ws_pool(t)%TEupz(npt, n))
-    ! Fase 3b — fatores de onda de commonfactorsMD (npt)
-    allocate(ws_pool(t)%Mxdw (npt))
-    allocate(ws_pool(t)%Mxup (npt))
-    allocate(ws_pool(t)%Eudw (npt))
-    allocate(ws_pool(t)%Euup (npt))
-    allocate(ws_pool(t)%FEdwz(npt))
-    allocate(ws_pool(t)%FEupz(npt))
+    ! Fase 3 — arrays de transmissão/potencial (npt_active × n)
+    allocate(ws_pool(t)%Tudw (npt_active, n))
+    allocate(ws_pool(t)%Txdw (npt_active, n))
+    allocate(ws_pool(t)%Tuup (npt_active, n))
+    allocate(ws_pool(t)%Txup (npt_active, n))
+    allocate(ws_pool(t)%TEdwz(npt_active, n))
+    allocate(ws_pool(t)%TEupz(npt_active, n))
+    ! Fase 3b — fatores de onda de commonfactorsMD (npt_active)
+    allocate(ws_pool(t)%Mxdw (npt_active))
+    allocate(ws_pool(t)%Mxup (npt_active))
+    allocate(ws_pool(t)%Eudw (npt_active))
+    allocate(ws_pool(t)%Euup (npt_active))
+    allocate(ws_pool(t)%FEdwz(npt_active))
+    allocate(ws_pool(t)%FEupz(npt_active))
   end do
 
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
@@ -344,15 +349,15 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! Fase 4 — alocação com dimensão ntheta: elimina race condition no outer parallel do k.
   ! Custo de memória: ×ntheta (para ntheta=2: ~3,36 MB, era ~1,68 MB — irrelevante).
-  allocate(u_cache     (npt, n, nf, ntheta))
-  allocate(s_cache     (npt, n, nf, ntheta))
-  allocate(uh_cache    (npt, n, nf, ntheta))
-  allocate(sh_cache    (npt, n, nf, ntheta))
-  allocate(RTEdw_cache (npt, n, nf, ntheta))
-  allocate(RTEup_cache (npt, n, nf, ntheta))
-  allocate(RTMdw_cache (npt, n, nf, ntheta))
-  allocate(RTMup_cache (npt, n, nf, ntheta))
-  allocate(AdmInt_cache(npt, n, nf, ntheta))
+  allocate(u_cache     (npt_active, n, nf, ntheta))
+  allocate(s_cache     (npt_active, n, nf, ntheta))
+  allocate(uh_cache    (npt_active, n, nf, ntheta))
+  allocate(sh_cache    (npt_active, n, nf, ntheta))
+  allocate(RTEdw_cache (npt_active, n, nf, ntheta))
+  allocate(RTEup_cache (npt_active, n, nf, ntheta))
+  allocate(RTMdw_cache (npt_active, n, nf, ntheta))
+  allocate(RTMup_cache (npt_active, n, nf, ntheta))
+  allocate(AdmInt_cache(npt_active, n, nf, ntheta))
 
   ! Fase 4 — eta hoisted para escopo de perfila1DanisoOMP (era recomputado em
   ! cada chamada de fieldsinfreqs antes). Invariante durante todo o modelo.
@@ -423,11 +428,11 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     ! Filtro Adaptativo — Informações sobre o filtro selecionado
     !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
     if (filter_type == 1) then
-      write(*,'(A,I0,A)') '[FILTRO] Kong (', npt, ' pts) — modo rápido para geração de treinamento'
+      write(*,'(A,I0,A)') '[FILTRO] Kong (', npt_active, ' pts) — modo rápido para geração de treinamento'
     else if (filter_type == 2) then
-      write(*,'(A,I0,A)') '[FILTRO] Anderson (', npt, ' pts) — máxima precisão para validação'
+      write(*,'(A,I0,A)') '[FILTRO] Anderson (', npt_active, ' pts) — máxima precisão para validação'
     else
-      write(*,'(A,I0,A)') '[FILTRO] Werthmuller (', npt, ' pts) — padrão (precisão 10⁻⁶)'
+      write(*,'(A,I0,A)') '[FILTRO] Werthmuller (', npt_active, ' pts) — padrão (precisão 10⁻⁶)'
     end if
   end if
 
@@ -456,9 +461,9 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! o cálculo de compensação após o loop principal. Necessário porque a
   ! compensação requer H_near e H_far simultaneamente — não disponíveis
   ! durante o loop itr que processa um par de cada vez.
-  ! SEMPRE aloca (mesmo quando desabilitado) com tamanho mínimo (1,...,1)
-  ! para evitar descritor não inicializado — mesma estratégia de cH_tilted.
-  ! Custo de memória quando desabilitado: 5 arrays × 16 bytes = 80 bytes.
+  ! F6 — Alocação condicional: full quando habilitado, zero-size quando desabilitado.
+  ! allocate(x(0,...)) cria array alocado com 0 elementos — overhead negligível
+  ! (apenas descritor, sem dados) — silencia -Wmaybe-uninitialized do gfortran.
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   if (use_compensation == 1 .and. n_comp_pairs > 0 .and. nTR >= 2) then
     allocate(cH_all_tr(nTR, ntheta, nmmax, nf, 9))
@@ -466,18 +471,19 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     allocate(cH_comp(n_comp_pairs, ntheta, nmmax, nf, 9))
     allocate(phase_diff(n_comp_pairs, ntheta, nmmax, nf, 9))
     allocate(atten_db(n_comp_pairs, ntheta, nmmax, nf, 9))
+    cH_all_tr = (0.d0, 0.d0)
+    zrho_all_tr = 0.d0
+    cH_comp = (0.d0, 0.d0)
+    phase_diff = 0.d0
+    atten_db = 0.d0
   else
-    allocate(cH_all_tr(1, 1, 1, 1, 1))
-    allocate(zrho_all_tr(1, 1, 1, 1, 1))
-    allocate(cH_comp(1, 1, 1, 1, 1))
-    allocate(phase_diff(1, 1, 1, 1, 1))
-    allocate(atten_db(1, 1, 1, 1, 1))
+    ! Zero-size: allocated()=.true. mas size=0 — sem dados, sem inicialização.
+    allocate(cH_all_tr(0, 0, 0, 0, 0))
+    allocate(zrho_all_tr(0, 0, 0, 0, 0))
+    allocate(cH_comp(0, 0, 0, 0, 0))
+    allocate(phase_diff(0, 0, 0, 0, 0))
+    allocate(atten_db(0, 0, 0, 0, 0))
   end if
-  cH_all_tr = (0.d0, 0.d0)
-  zrho_all_tr = 0.d0
-  cH_comp = (0.d0, 0.d0)
-  phase_diff = 0.d0
-  atten_db = 0.d0
 
   ! Fase 2 — Hybrid Scheduler: escolha do schedule baseada na característica do loop
   !   • Loop externo `k` (ângulos): carga desigual porque nmed(k) varia com theta(k)
@@ -556,7 +562,7 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
       omega_i = 2.d0 * pi * freq(ii)
       zeta_i  = cmplx(0.d0, 1.d0, kind=dp) * omega_i * mu
       ! Slice (:,:,ii,k): cada ângulo k escreve em posição independente → thread-safe.
-      call commonarraysMD(n, npt, r_k, krwJ0J1(:,1), zeta_i, h, eta_shared,   &
+      call commonarraysMD(n, npt_active, r_k, krwJ0J1(:,1), zeta_i, h, eta_shared,   &
                           u_cache(:,:,ii,k),  s_cache(:,:,ii,k),               &
                           uh_cache(:,:,ii,k), sh_cache(:,:,ii,k),              &
                           RTEdw_cache(:,:,ii,k), RTEup_cache(:,:,ii,k),        &
@@ -606,10 +612,10 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
       else
         tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()
       end if
-      ! Fase 4: passa slice (:,:,:,k) — shape (npt,n,nf) — compatível com a
+      ! Fase 4: passa slice (:,:,:,k) — shape (npt_active,n,nf) — compatível com a
       ! interface de fieldsinfreqs_cached_ws (intent(in) dimension(npt,n,nf)).
       ! Thread-safe: cada k lê sua própria fatia do cache, sem conflito.
-      call fieldsinfreqs_cached_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt, &
+      call fieldsinfreqs_cached_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt_active, &
                                     krwJ0J1, n, h, prof, resist, eta_shared,        &
                                     u_cache(:,:,:,k),  s_cache(:,:,:,k),            &
                                     uh_cache(:,:,:,k), sh_cache(:,:,:,k),           &

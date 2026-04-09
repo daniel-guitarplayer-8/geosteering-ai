@@ -323,8 +323,8 @@ subroutine simulate_v8(nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, &
 
   ! Variáveis locais (idênticas a perfila1DanisoOMP)
   integer :: i, j, k, itr, it, ii, t, tid
-  ! Filtro Adaptativo — npt determinado por filter_type_in
-  integer :: npt
+  ! Filtro Adaptativo — npt_active determinado por filter_type_in em runtime
+  integer :: npt_active
   real(dp) :: thetarad, del
   real(dp) :: z1, pz, posTR(6), ang, seno, coss, px, Lsen, Lcos
   real(dp) :: Tx_l, Ty_l, Tz_l, x_l, y_l, z_l, r_k, omega_i
@@ -378,18 +378,18 @@ subroutine simulate_v8(nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, &
   ! Filtro Adaptativo — seleção do filtro de Hankel por filter_type_in
   select case (filter_type_in)
   case (1)
-    npt = 61
-    call J0J1Kong(npt, krJ0J1_l, wJ0_l, wJ1_l)
+    npt_active = 61
+    call J0J1Kong(npt_active, krJ0J1_l, wJ0_l, wJ1_l)
   case (2)
-    npt = 801
+    npt_active = 801
     call J0J1And(krJ0J1_l, wJ0_l, wJ1_l)
   case default
-    npt = 201
-    call J0J1Wer(npt, krJ0J1_l, wJ0_l, wJ1_l)
+    npt_active = 201
+    call J0J1Wer(npt_active, krJ0J1_l, wJ0_l, wJ1_l)
   end select
 
-  allocate(krwJ0J1(npt,3))
-  do i = 1, npt
+  allocate(krwJ0J1(npt_active,3))
+  do i = 1, npt_active
     krwJ0J1(i,:) = (/ krJ0J1_l(i), wJ0_l(i), wJ1_l(i) /)
   end do
 
@@ -405,20 +405,20 @@ subroutine simulate_v8(nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, &
   ! Alocação workspace pool (Fase 3 + 3b)
   allocate(ws_pool(0:maxthreads-1))
   do t = 0, maxthreads-1
-    allocate(ws_pool(t)%Tudw(npt, n), ws_pool(t)%Txdw(npt, n))
-    allocate(ws_pool(t)%Tuup(npt, n), ws_pool(t)%Txup(npt, n))
-    allocate(ws_pool(t)%TEdwz(npt, n), ws_pool(t)%TEupz(npt, n))
-    allocate(ws_pool(t)%Mxdw(npt), ws_pool(t)%Mxup(npt))
-    allocate(ws_pool(t)%Eudw(npt), ws_pool(t)%Euup(npt))
-    allocate(ws_pool(t)%FEdwz(npt), ws_pool(t)%FEupz(npt))
+    allocate(ws_pool(t)%Tudw(npt_active, n), ws_pool(t)%Txdw(npt_active, n))
+    allocate(ws_pool(t)%Tuup(npt_active, n), ws_pool(t)%Txup(npt_active, n))
+    allocate(ws_pool(t)%TEdwz(npt_active, n), ws_pool(t)%TEupz(npt_active, n))
+    allocate(ws_pool(t)%Mxdw(npt_active), ws_pool(t)%Mxup(npt_active))
+    allocate(ws_pool(t)%Eudw(npt_active), ws_pool(t)%Euup(npt_active))
+    allocate(ws_pool(t)%FEdwz(npt_active), ws_pool(t)%FEupz(npt_active))
   end do
 
   ! Caches Fase 4
-  allocate(u_cache(npt, n, nf, ntheta), s_cache(npt, n, nf, ntheta))
-  allocate(uh_cache(npt, n, nf, ntheta), sh_cache(npt, n, nf, ntheta))
-  allocate(RTEdw_cache(npt, n, nf, ntheta), RTEup_cache(npt, n, nf, ntheta))
-  allocate(RTMdw_cache(npt, n, nf, ntheta), RTMup_cache(npt, n, nf, ntheta))
-  allocate(AdmInt_cache(npt, n, nf, ntheta))
+  allocate(u_cache(npt_active, n, nf, ntheta), s_cache(npt_active, n, nf, ntheta))
+  allocate(uh_cache(npt_active, n, nf, ntheta), sh_cache(npt_active, n, nf, ntheta))
+  allocate(RTEdw_cache(npt_active, n, nf, ntheta), RTEup_cache(npt_active, n, nf, ntheta))
+  allocate(RTMdw_cache(npt_active, n, nf, ntheta), RTMup_cache(npt_active, n, nf, ntheta))
+  allocate(AdmInt_cache(npt_active, n, nf, ntheta))
   allocate(eta_shared(n, 2))
   do ii = 1, n
     eta_shared(ii, 1) = 1.d0 / resist(ii, 1)
@@ -451,7 +451,7 @@ subroutine simulate_v8(nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, &
       do ii = 1, nf
         omega_i = 2.d0 * pi * freq(ii)
         zeta_i = cmplx(0.d0, 1.d0, kind=dp) * omega_i * mu
-        call commonarraysMD(n, npt, r_k, krwJ0J1(:,1), zeta_i, h, eta_shared, &
+        call commonarraysMD(n, npt_active, r_k, krwJ0J1(:,1), zeta_i, h, eta_shared, &
                             u_cache(:,:,ii,k), s_cache(:,:,ii,k), &
                             uh_cache(:,:,ii,k), sh_cache(:,:,ii,k), &
                             RTEdw_cache(:,:,ii,k), RTEup_cache(:,:,ii,k), &
@@ -477,7 +477,7 @@ subroutine simulate_v8(nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, &
         else
           tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()
         end if
-        call fieldsinfreqs_cached_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt, &
+        call fieldsinfreqs_cached_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt_active, &
                                       krwJ0J1, n, h, prof, resist, eta_shared, &
                                       u_cache(:,:,:,k),  s_cache(:,:,:,k),    &
                                       uh_cache(:,:,:,k), sh_cache(:,:,:,k),   &
