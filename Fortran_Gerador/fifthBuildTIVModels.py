@@ -1136,15 +1136,23 @@ if __name__ == '__main__':
     pmed    = 0.2              # passo entre medidas (m)
     dTR     = [1.0]    #[8.19, 20.43]    # espaçamentos T-R (m) — investigação profunda (tipo ARC/Periscope)
 
-    # ── F5/F7 — Flags de features opcionais (v8.0) ──────────────────────────────
+    # ── F5/F7/F6/Filtro — Flags de features opcionais (v9.0) ─────────────────────
     # F5: Frequências arbitrárias — quando 1, permite nf > 2 sem aviso no Fortran.
     #     Quando 0 (default), o Fortran emite aviso se nf > 2.
     # F7: Antenas inclinadas — quando 1, calcula H_tilted(β,φ) para cada configuração.
     #     H_tilted(β,φ) = cos(β)·Hzz + sin(β)·[cos(φ)·Hxz + sin(φ)·Hyz]
     #     Saída estendida: 22 + 2×n_tilted colunas por registro binário.
+    # F6: Compensação midpoint — quando 1, calcula medições compensadas entre pares T-R.
+    #     Requer nTR ≥ 2. Gera arquivos _COMP{i}.dat e _COMP{i}_ATT.dat adicionais.
+    #     Cancelamento de efeitos ambientais (rugosidade, excentricidade, invasão).
+    # Filtro: Seleção do filtro de Hankel.
+    #     0=Werthmuller 201pt (default), 1=Kong 61pt (rápido), 2=Anderson 801pt (preciso).
     use_arbitrary_freq  = 0      # F5: 0=desabilitado (default), 1=habilitado
     use_tilted_antennas = 0      # F7: 0=desabilitado (default), 1=habilitado
     tilted_configs      = []     # F7: lista de (beta, phi) em graus — ex: [(45., 0.), (30., 90.)]
+    use_compensation    = 0      # F6: 0=desabilitado (default), 1=habilitado
+    comp_pairs          = []     # F6: lista de (near_itr, far_itr) — ex: [(1, 3)] para nTR≥3
+    filter_type         = 0      # Filtro: 0=Werthmuller, 1=Kong, 2=Anderson
 
     # Nome base dos arquivos: encoda frequências e ângulos para rastreabilidade total
     _freq_tag = '-'.join(f'{int(fi/1000)}k'  for fi in freqs)   # ex: "2k-6k"
@@ -1238,13 +1246,21 @@ if __name__ == '__main__':
                     f.write(str(round(np.array(m['thicknesses'])[j],2)) + '\n')
             f.write(str(round(np.array(m['thicknesses'])[-1],2)) + '\n')
             f.write(str(i+1) + ' ' + str(nmodels_actual) + '         ' + '!modelo atual e o número máximo de modelos' + '\n')
-            # ── F5/F7 — Flags opcionais v8.0 (backward compatible) ──────────────
+            # ── F5/F7/F6/Filtro — Flags opcionais v9.0 (backward compatible) ──
             f.write(str(use_arbitrary_freq)  + '                 ' + '!F5: use_arbitrary_freq (0=desabilitado, 1=habilitado)' + '\n')
             f.write(str(use_tilted_antennas) + '                 ' + '!F7: use_tilted_antennas (0=desabilitado, 1=habilitado)\n')
             if use_tilted_antennas == 1 and len(tilted_configs) > 0:
                 f.write(str(len(tilted_configs)) + '                 ' + '!F7: n_tilted (número de configurações tilted)\n')
                 for it_idx, (beta_t, phi_t) in enumerate(tilted_configs):
                     f.write(f'{beta_t}  {phi_t}' + '            ' + f'!F7: beta({it_idx+1}) phi({it_idx+1}) em graus\n')
+            # F6 — Compensação midpoint
+            f.write(str(use_compensation) + '                 ' + '!F6: use_compensation (0=desabilitado, 1=habilitado)\n')
+            if use_compensation == 1 and len(comp_pairs) > 0:
+                f.write(str(len(comp_pairs)) + '                 ' + '!F6: n_comp_pairs\n')
+                for cp_idx, (near_i, far_i) in enumerate(comp_pairs):
+                    f.write(f'{near_i}  {far_i}' + '              ' + f'!F6: near({cp_idx+1}) far({cp_idx+1})\n')
+            # Filtro Adaptativo
+            f.write(str(filter_type) + '                 ' + '!Filtro: 0=Werthmuller, 1=Kong, 2=Anderson\n')
         #-------------------------------------------------------------------------------------------------------------
         # Executando o programa Fortran
         try:

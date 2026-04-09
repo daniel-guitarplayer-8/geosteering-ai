@@ -1,7 +1,7 @@
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 ! tatu_f2py_wrapper.f08 — Interface f2py para o simulador PerfilaAnisoOmp
 !
-! Versão 8.0: suporte a F5 (frequências arbitrárias) e F7 (antenas inclinadas).
+! Versão 9.0: suporte a F5, F7, F6 (compensação midpoint) e Filtro Adaptativo.
 !
 ! Módulo wrapper que expõe o simulador EM 1D TIV a Python via f2py (NumPy).
 ! Retorna os arrays de saída diretamente (sem I/O de disco), permitindo
@@ -42,6 +42,10 @@ subroutine simulate(nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, &
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! Simula o campo EM 1D TIV para múltiplos pares T-R, ângulos e frequências.
   ! Retorna arrays NumPy diretamente (sem escrita em disco).
+  !
+  ! NOTA: Interface básica (v7.0 compatível). Usa SEMPRE o filtro Werthmuller
+  !   (201 pontos). Para seleção de filtro (Kong/Anderson), F5/F7, ou F6,
+  !   use simulate_v8() que aceita filter_type_in como parâmetro.
   !
   ! INPUT:
   !   nf          : número de frequências (integer)
@@ -275,11 +279,17 @@ end subroutine simulate
 !     Fórmula (receptor inclinado, transmissor axial ẑ):
 !       H_tilted(β, φ) = cos(β)·Hzz + sin(β)·[cos(φ)·Hxz + sin(φ)·Hyz]
 !     onde Hxz = cH(:,3), Hyz = cH(:,6), Hzz = cH(:,9).
+!
+! Filtro Adaptativo (v9.0):
+!   filter_type == 0 (default): Werthmuller 201pt
+!   filter_type == 1: Kong 61pt (rápido, 3.3× speedup)
+!   filter_type == 2: Anderson 801pt (máxima precisão)
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 subroutine simulate_v8(nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, &
                        n, resist, esp, nmmax, &
                        use_arb_freq, use_tilted, n_tilted, n_tilted_sz, &
                        beta_tilt, phi_tilt, &
+                       filter_type_in, &
                        zrho_out, cH_out, cH_tilted_out)
   implicit none
   ! Argumentos de entrada — modelo geológico e configuração EM
@@ -292,9 +302,13 @@ subroutine simulate_v8(nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, &
   ! beta_tilt=[0.], phi_tilt=[0.] — os valores são ignorados pelo Fortran.
   integer, intent(in) :: use_arb_freq, use_tilted, n_tilted, n_tilted_sz
   real(dp), intent(in) :: beta_tilt(n_tilted_sz), phi_tilt(n_tilted_sz)
+  ! Filtro Adaptativo — tipo de filtro de Hankel
+  ! 0=Werthmuller 201pt (default), 1=Kong 61pt (rápido), 2=Anderson 801pt (preciso)
+  integer, intent(in) :: filter_type_in
   ! Argumentos de saída
   !f2py intent(in) :: nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, n, resist, esp, nmmax
   !f2py intent(in) :: use_arb_freq, use_tilted, n_tilted, n_tilted_sz, beta_tilt, phi_tilt
+  !f2py intent(in) :: filter_type_in
   !f2py intent(out) :: zrho_out, cH_out, cH_tilted_out
   !f2py depend(nf) :: freq
   !f2py depend(ntheta) :: theta
@@ -309,7 +323,8 @@ subroutine simulate_v8(nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, &
 
   ! Variáveis locais (idênticas a perfila1DanisoOMP)
   integer :: i, j, k, itr, it, ii, t, tid
-  integer, parameter :: npt = 201
+  ! Filtro Adaptativo — npt determinado por filter_type_in
+  integer :: npt
   real(dp) :: thetarad, del
   real(dp) :: z1, pz, posTR(6), ang, seno, coss, px, Lsen, Lcos
   real(dp) :: Tx_l, Ty_l, Tz_l, x_l, y_l, z_l, r_k, omega_i
@@ -360,7 +375,19 @@ subroutine simulate_v8(nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, &
     end if
   end do
 
-  call J0J1Wer(npt, krJ0J1_l, wJ0_l, wJ1_l)
+  ! Filtro Adaptativo — seleção do filtro de Hankel por filter_type_in
+  select case (filter_type_in)
+  case (1)
+    npt = 61
+    call J0J1Kong(npt, krJ0J1_l, wJ0_l, wJ1_l)
+  case (2)
+    npt = 801
+    call J0J1And(krJ0J1_l, wJ0_l, wJ1_l)
+  case default
+    npt = 201
+    call J0J1Wer(npt, krJ0J1_l, wJ0_l, wJ1_l)
+  end select
+
   allocate(krwJ0J1(npt,3))
   do i = 1, npt
     krwJ0J1(i,:) = (/ krJ0J1_l(i), wJ0_l(i), wJ1_l(i) /)

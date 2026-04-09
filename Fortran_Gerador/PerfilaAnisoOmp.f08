@@ -8,11 +8,13 @@ contains
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta, h1, tj, &
                              nTR, dTR, p_med, n, resist, esp, filename, &
-                             use_arb_freq, use_tilted, n_tilted, beta_tilt, phi_tilt)
+                             use_arb_freq, use_tilted, n_tilted, beta_tilt, phi_tilt, &
+                             use_compensation, n_comp_pairs, comp_pairs, &
+                             filter_type)
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! Sub-rotina principal do simulador EM 1D TIV com múltiplos pares T-R.
   !
-  ! Versão 8.0: F5 (frequências arbitrárias) + F7 (antenas inclinadas).
+  ! Versão 9.0: F5 + F7 + F6 (compensação midpoint) + Filtro Adaptativo.
   !   - nTR = 1: backward-compatible (saída idêntica ao formato anterior)
   !   - nTR > 1: loop externo sobre pares T-R, cada um com r_k = dTR(itr)*|sin(θ)|
   !              Saída: arquivos separados por par T-R (sufixo _TR{itr})
@@ -22,6 +24,17 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !   Quando use_arb_freq == 1: nf arbitrário (1-16), sem restrição
   !   O código já suporta nf arbitrário via caches Phase 4: (npt, n, nf, ntheta)
   !
+  ! F6 — Compensação midpoint (use_compensation):
+  !   Quando use_compensation == 0 (default): sem compensação, saída padrão
+  !   Quando use_compensation == 1: calcula medições compensadas para pares T-R:
+  !     - Diferença de fase: Δφ = arg(H_near) − arg(H_far)
+  !     - Atenuação: Δα = 20·log₁₀(|H_near|/|H_far|)
+  !     - Tensor compensado: H_comp = (H_near + H_far) / 2
+  !   n_comp_pairs: número de pares de compensação
+  !   comp_pairs(n_comp_pairs, 2): índices (near_itr, far_itr) dos pares T-R
+  !   Requer nTR ≥ 2. Cada par gera arquivo _COMP{ipair}.dat adicional.
+  !   Ref: docs/reference/analise_novos_recursos_simulador_fortran.md §5
+  !
   ! F7 — Antenas inclinadas (use_tilted):
   !   Quando use_tilted == 0 (default): sem cálculo extra, saída inalterada (22 col)
   !   Quando use_tilted == 1: calcula H_tilted para cada configuração (β, φ):
@@ -29,6 +42,15 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !   onde β = ângulo de inclinação (0°-90°), φ = azimute (0°-360°).
   !   Saída estendida: 22 + 2×n_tilted colunas por registro.
   !   Ref: docs/reference/analise_novos_recursos_simulador_fortran.md §F7
+  !
+  ! Filtro Adaptativo (filter_type):
+  !   filter_type == 0 (default): Werthmuller 201 pontos (precisão 10⁻⁶)
+  !   filter_type == 1: Kong 61 pontos (rápido, 3.3×, precisão 10⁻⁴)
+  !   filter_type == 2: Anderson 801 pontos (máxima precisão 10⁻⁸, 4× lento)
+  !   Seleção no model.in controla trade-off velocidade × precisão.
+  !   Kong recomendado para geração de datasets de treinamento (ruído será
+  !   adicionado); Anderson para validação cruzada com empymod.
+  !   Ref: docs/reference/analise_novos_recursos_simulador_fortran.md §7.2.4
   !
   ! Fluxo de execução (multi-TR):
   !   do itr = 1, nTR
@@ -39,9 +61,11 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !         fieldsinfreqs_cached_ws(ws_pool(tid), cache, ...)
   !       end do
   !     end do
-  !     [F7: compute tilted responses from cH1 tensor — serial, O(ntheta×nmed×nf×n_tilted)]
-  !     writes_files(..., itr, nTR, use_tilted, n_tilted, beta_tilt, phi_tilt, cH_tilted)
+  !     [F7: compute tilted responses from cH1 tensor]
+  !     writes_files(...)
   !   end do
+  !   [F6: compute compensation from stored multi-TR data]
+  !   borehole_compensation(cH_all_tr, comp_pairs, ...)
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   implicit none
   character(*), intent(in) :: mypath
@@ -54,12 +78,26 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   integer, intent(in) :: n_tilted       ! F7: número de configurações tilted (0 se desabilitado)
   real(dp), intent(in) :: beta_tilt(:)  ! F7: ângulos de inclinação em graus (size n_tilted)
   real(dp), intent(in) :: phi_tilt(:)   ! F7: ângulos azimutais em graus (size n_tilted)
+  ! F6 — Compensação midpoint (borehole compensation)
+  integer, intent(in) :: use_compensation  ! F6: 0=desabilitado (default), 1=habilitado
+  integer, intent(in) :: n_comp_pairs      ! F6: número de pares de compensação (0 se desab.)
+  integer, intent(in) :: comp_pairs(:,:)   ! F6: pares (near_itr, far_itr), shape (n_comp_pairs, 2)
+  ! Filtro Adaptativo — seleção do filtro de Hankel
+  integer, intent(in) :: filter_type  ! 0=Werthmuller 201pt (default), 1=Kong 61pt, 2=Anderson 801pt
 
   integer :: i, j, k, nmmax
   real(dp) :: thetamin, thetaplu, thetarad
   ! real(dp) :: tj
   character(5) :: dipolo
-  integer, parameter :: npt = 201
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Filtro Adaptativo — npt determinado por filter_type (NÃO mais parameter)
+  !   filter_type == 0: Werthmuller 201pt (default, precisão 10⁻⁶)
+  !   filter_type == 1: Kong 61pt (rápido, precisão 10⁻⁴, 3.3× speedup)
+  !   filter_type == 2: Anderson 801pt (máxima precisão 10⁻⁸, 4× mais lento)
+  ! O custo computacional escala linearmente com npt: cada ponto adicional
+  ! do filtro requer avaliação do kernel de Hankel K(kr) × J_ν(kr·r) × kr.
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  integer :: npt
   real(dp), dimension(:), allocatable :: krJ0J1, wJ0, wJ1
   real(dp), dimension(:,:), allocatable :: krwJ0J1
   !=============================================================================
@@ -130,6 +168,29 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   real(dp) :: beta_rad, phi_rad
   integer  :: it
 
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! F6 — Variáveis para compensação midpoint (borehole compensation)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Armazena o tensor completo por par T-R para pós-processamento de compensação.
+  ! cH_all_tr(nTR, ntheta, nmmax, nf, 9): tensor H para todos os pares T-R.
+  !   Preenchido durante o loop do itr = 1, nTR.
+  !   Usado após o loop para calcular medições compensadas (phase_diff, atten).
+  ! zrho_all_tr(nTR, ntheta, nmmax, nf, 3): zobs, rho_h, rho_v por par T-R.
+  ! cH_comp(n_comp_pairs, ntheta, nmmax, nf, 9): tensor compensado por par.
+  ! phase_diff(n_comp_pairs, ntheta, nmmax, nf, 9): diferença de fase (graus).
+  ! atten_db(n_comp_pairs, ntheta, nmmax, nf, 9): atenuação (dB).
+  !
+  ! Memória: para nTR=3, ntheta=1, nmmax=600, nf=2:
+  !   cH_all_tr: 3 × 1 × 600 × 2 × 9 × 16 bytes = ~518 KB — negligível.
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  complex(dp), allocatable :: cH_all_tr(:,:,:,:,:)    ! (nTR, ntheta, nmmax, nf, 9)
+  real(dp), allocatable    :: zrho_all_tr(:,:,:,:,:)   ! (nTR, ntheta, nmmax, nf, 3)
+  complex(dp), allocatable :: cH_comp(:,:,:,:,:)       ! (n_comp_pairs, ntheta, nmmax, nf, 9)
+  real(dp), allocatable    :: phase_diff(:,:,:,:,:)    ! (n_comp_pairs, ntheta, nmmax, nf, 9)
+  real(dp), allocatable    :: atten_db(:,:,:,:,:)      ! (n_comp_pairs, ntheta, nmmax, nf, 9)
+  integer :: ipair, i_near, i_far, ic
+  real(dp) :: abs_near, abs_far
+
   ! wtime = omp_get_wtime( )
 
   ! nrows = 0 !número de linhas do arquivo de saída
@@ -155,7 +216,41 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   end do
   nmmax = maxval(nmed)
 
-  call J0J1Wer(npt, krJ0J1, wJ0, wJ1)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Filtro Adaptativo — Seleção do filtro de Hankel por filter_type
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! O filtro de Hankel discretiza a integral EM:
+  !   H(r,z,ω) = ∫₀^∞ K(kr,z,ω) · J_ν(kr·r) · kr dkr
+  ! usando npt pesos pré-computados (quadratura digital).
+  !
+  ! Seleção por cenário:
+  !   ┌────────────────────┬───────────────────┬──────┬────────────┐
+  !   │ filter_type        │ Filtro            │ npt  │ Precisão   │
+  !   ├────────────────────┼───────────────────┼──────┼────────────┤
+  !   │ 0 (default)        │ Werthmuller       │ 201  │ 10⁻⁶       │
+  !   │ 1 (rápido)         │ Kong              │  61  │ 10⁻⁴       │
+  !   │ 2 (máxima prec.)   │ Anderson          │ 801  │ 10⁻⁸       │
+  !   └────────────────────┴───────────────────┴──────┴────────────┘
+  !
+  ! Custo computacional: escala linearmente com npt.
+  !   Kong (61): ~3.3× mais rápido que Werthmuller (201)
+  !   Anderson (801): ~4× mais lento que Werthmuller (201)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  select case (filter_type)
+  case (1)
+    ! Kong 61 pontos — geração rápida de datasets de treinamento
+    npt = 61
+    call J0J1Kong(npt, krJ0J1, wJ0, wJ1)
+  case (2)
+    ! Anderson 801 pontos — validação e referência (máxima precisão)
+    npt = 801
+    call J0J1And(krJ0J1, wJ0, wJ1)
+  case default
+    ! Werthmuller 201 pontos — simulação padrão (backward compatible)
+    npt = 201
+    call J0J1Wer(npt, krJ0J1, wJ0, wJ1)
+  end select
+
   allocate(krwJ0J1(npt,3))
   do i = 1, npt
     krwJ0J1(i,:) = (/ krJ0J1(i), wJ0(i), wJ1(i) /)
@@ -309,6 +404,31 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
       end do
       write(*,'(A,I0,A)') '[F7] Saída estendida: 22 + ', 2*n_tilted, ' colunas por registro'
     end if
+
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    ! F6 — Informações sobre compensação midpoint
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    if (use_compensation == 1 .and. n_comp_pairs > 0) then
+      write(*,'(A,I0,A)') '[F6] Compensação midpoint habilitada: ', n_comp_pairs, ' par(es)'
+      do ii = 1, n_comp_pairs
+        write(*,'(A,I0,A,I0,A,I0,A)') &
+          '     comp(', ii, '): near=TR', comp_pairs(ii,1), ' far=TR', comp_pairs(ii,2), ''
+      end do
+      if (nTR < 2) then
+        write(*,'(A)') '[F6 AVISO] use_compensation=1 mas nTR < 2. Compensação desabilitada.'
+      end if
+    end if
+
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    ! Filtro Adaptativo — Informações sobre o filtro selecionado
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    if (filter_type == 1) then
+      write(*,'(A,I0,A)') '[FILTRO] Kong (', npt, ' pts) — modo rápido para geração de treinamento'
+    else if (filter_type == 2) then
+      write(*,'(A,I0,A)') '[FILTRO] Anderson (', npt, ' pts) — máxima precisão para validação'
+    else
+      write(*,'(A,I0,A)') '[FILTRO] Werthmuller (', npt, ' pts) — padrão (precisão 10⁻⁶)'
+    end if
   end if
 
   allocate(zrho1(ntheta,nmmax,nf,3), cH1(ntheta,nmmax,nf,9))
@@ -328,6 +448,29 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     allocate(cH_tilted(ntheta, nmmax, nf, 1))
   end if
   cH_tilted = (0.d0, 0.d0)
+
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! F6 — Alocação dos arrays de compensação midpoint
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! cH_all_tr armazena o tensor completo de TODOS os pares T-R para permitir
+  ! o cálculo de compensação após o loop principal. Necessário porque a
+  ! compensação requer H_near e H_far simultaneamente — não disponíveis
+  ! durante o loop itr que processa um par de cada vez.
+  ! Alocação condicional: só quando F6 está habilitado E nTR >= 2.
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  if (use_compensation == 1 .and. n_comp_pairs > 0 .and. nTR >= 2) then
+    allocate(cH_all_tr(nTR, ntheta, nmmax, nf, 9))
+    allocate(zrho_all_tr(nTR, ntheta, nmmax, nf, 3))
+    allocate(cH_comp(n_comp_pairs, ntheta, nmmax, nf, 9))
+    allocate(phase_diff(n_comp_pairs, ntheta, nmmax, nf, 9))
+    allocate(atten_db(n_comp_pairs, ntheta, nmmax, nf, 9))
+    cH_all_tr = (0.d0, 0.d0)
+    zrho_all_tr = 0.d0
+    cH_comp = (0.d0, 0.d0)
+    phase_diff = 0.d0
+    atten_db = 0.d0
+  end if
+
   ! Fase 2 — Hybrid Scheduler: escolha do schedule baseada na característica do loop
   !   • Loop externo `k` (ângulos): carga desigual porque nmed(k) varia com theta(k)
   !     (janela vertical constante mas passo vertical pz = p_med*cos(theta) muda),
@@ -512,9 +655,97 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! F7: passa cH_tilted para writes_files (condicionalmente alocado)
   call writes_files(modelm, nmaxmodel, mypath, zrho1, cH1, ntheta, theta, nf, freq, nmed, filename, &
                     itr, nTR, use_tilted, n_tilted, beta_tilt, phi_tilt, cH_tilted)
+
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! F6 — Armazenamento do tensor por par T-R para compensação posterior
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Salva cH1 e zrho1 indexados por itr. Após o loop completo, os arrays
+  ! cH_all_tr e zrho_all_tr contêm dados de TODOS os pares T-R, necessários
+  ! para calcular phase_diff e attenuation entre pares (near, far).
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  if (use_compensation == 1 .and. n_comp_pairs > 0 .and. nTR >= 2) then
+    cH_all_tr(itr, :, :, :, :) = cH1
+    zrho_all_tr(itr, :, :, :, :) = zrho1
+  end if
+
   end do  ! end do itr = 1, nTR
+
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! F6 — Cálculo da compensação midpoint (pós-processamento)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Para cada par de compensação (near_itr, far_itr), calcula:
+  !   1. Tensor compensado: H_comp = (H_near + H_far) / 2
+  !   2. Diferença de fase:  Δφ = arg(H_near) − arg(H_far)  [graus]
+  !   3. Atenuação:          Δα = 20·log₁₀(|H_near|/|H_far|)  [dB]
+  !
+  ! Custo computacional: O(n_comp_pairs × ntheta × nmmax × nf × 9) operações.
+  ! Para configuração típica (n_comp_pairs=1, ntheta=1, nmmax=600, nf=2):
+  !   ~10.800 operações × ~15 ns ≈ ~162 μs — negligível vs forward model.
+  !
+  ! Princípio físico (CDR — Compensated Dual Resistivity):
+  !   Efeitos ambientais (rugosidade, excentricidade, invasão de lama)
+  !   são simétricos em relação ao midpoint T1-T2 e se cancelam na média,
+  !   enquanto a resposta da formação (assimétrica) se preserva.
+  !   Ref: Schlumberger ARC tool, Baker Hughes OnTrak.
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  if (use_compensation == 1 .and. n_comp_pairs > 0 .and. nTR >= 2) then
+    do ipair = 1, n_comp_pairs
+      i_near = comp_pairs(ipair, 1)
+      i_far  = comp_pairs(ipair, 2)
+      ! Validação dos índices de pares T-R
+      if (i_near < 1 .or. i_near > nTR .or. i_far < 1 .or. i_far > nTR) then
+        write(*,'(A,I0,A,I0,A,I0)') &
+          '[F6 ERRO] Par de compensação ', ipair, ' com índices inválidos: near=', i_near, ' far=', i_far
+        cycle
+      end if
+      do k = 1, ntheta
+        do j = 1, nmed(k)
+          do i = 1, nf
+            do ic = 1, 9
+              ! ── Tensor compensado: média aritmética (CDR clássico) ──
+              ! Cancela efeitos de 1ª ordem simétricos ao midpoint.
+              cH_comp(ipair, k, j, i, ic) = 0.5d0 * &
+                (cH_all_tr(i_near, k, j, i, ic) + cH_all_tr(i_far, k, j, i, ic))
+
+              ! ── Diferença de fase (graus) ──
+              ! Δφ = arg(H_near) − arg(H_far), convertido para graus.
+              ! atan2 retorna [-π, π]; a diferença é a phase shift entre pares T-R.
+              phase_diff(ipair, k, j, i, ic) = &
+                (atan2(aimag(cH_all_tr(i_near, k, j, i, ic)), &
+                       real(cH_all_tr(i_near, k, j, i, ic))) - &
+                 atan2(aimag(cH_all_tr(i_far, k, j, i, ic)), &
+                       real(cH_all_tr(i_far, k, j, i, ic)))) * 18.d1 / pi
+
+              ! ── Atenuação (dB) ──
+              ! Δα = 20·log₁₀(|H_near|/|H_far|). Protegido contra divisão por zero
+              ! com max(|H_far|, 1e-20). Guard 1e-20 é fisicamente motivado:
+              ! campos EM em meios condutivos típicos variam entre 1e-6 e 1e-9 A/m²;
+              ! valores < 1e-20 são numericamente indistinguíveis de zero no contexto
+              ! da simulação. Guard 1e-30 produziria atenuações > 400 dB — não físico.
+              abs_near = abs(cH_all_tr(i_near, k, j, i, ic))
+              abs_far  = abs(cH_all_tr(i_far, k, j, i, ic))
+              atten_db(ipair, k, j, i, ic) = 20.d0 * &
+                log10(max(abs_near, 1.d-20) / max(abs_far, 1.d-20))
+            end do
+          end do
+        end do
+      end do
+    end do
+
+    ! Escrita dos resultados compensados — um arquivo _COMP{ipair}.dat por par
+    call writes_compensation_files(modelm, nmaxmodel, mypath, &
+      n_comp_pairs, comp_pairs, ntheta, theta, nf, freq, nmed, filename, &
+      cH_comp, phase_diff, atten_db, zrho_all_tr)
+  end if
+
   deallocate(zrho,cH,z_rho1,c_H1)
   if (allocated(cH_tilted)) deallocate(cH_tilted)
+  ! F6 — Liberação dos arrays de compensação
+  if (allocated(cH_all_tr))    deallocate(cH_all_tr)
+  if (allocated(zrho_all_tr))  deallocate(zrho_all_tr)
+  if (allocated(cH_comp))      deallocate(cH_comp)
+  if (allocated(phase_diff))   deallocate(phase_diff)
+  if (allocated(atten_db))     deallocate(atten_db)
 
   ! Débito B5 corrigido: krwJ0J1 alocado na linha ~99 e nunca desalocado.
   ! Leak de ~9,6 KB/modelo (npt × 3 × 8 bytes = 201 × 3 × 8 ≈ 4,8 KB).
@@ -948,6 +1179,113 @@ subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq
   
 end subroutine writes_files
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+! F6 — Sub-rotina de escrita dos resultados de compensação midpoint
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+subroutine writes_compensation_files(modelm, nmaxmodel, mypath, &
+    n_comp_pairs, comp_pairs, nt, theta, nf, freq, nmeds, filename, &
+    cH_comp, phase_diff, atten_db, zrho_all_tr)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Escreve os resultados da compensação midpoint (F6) em arquivos binários.
+  !
+  ! Para cada par de compensação (near_itr, far_itr), gera:
+  !   {filename}_COMP{ipair}.dat — arquivo binário stream
+  !
+  ! Formato do registro (29 colunas):
+  !   col 0:  i (int32) — índice da medida
+  !   col 1:  z_obs (float64) — profundidade do ponto médio
+  !   col 2:  rho_h_near (float64) — resistividade horizontal (par near)
+  !   col 3:  rho_v_near (float64) — resistividade vertical (par near)
+  !   col 4-21:  Re/Im(H_comp(1:9)) — 9 componentes do tensor compensado
+  !   col 22-30: phase_diff(1:9) — diferença de fase por componente (graus)
+  !   (total: 1 int32 + 28 float64 = 228 bytes/registro)
+  !
+  ! Nota: attenuation (dB) é armazenada num arquivo separado _COMP{ipair}_ATT.dat
+  ! para manter compatibilidade de formato com leitores existentes.
+  !
+  ! Abertura condicional: mesma lógica de writes_files (Débito 1).
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  implicit none
+  character(*), intent(in) :: mypath
+  integer, intent(in) :: modelm, nmaxmodel, nt, nf, n_comp_pairs
+  integer, intent(in) :: nmeds(nt), comp_pairs(:,:)
+  real(dp), intent(in) :: theta(nt), freq(nf)
+  character(*), intent(in) :: filename
+  complex(dp), dimension(:,:,:,:,:), intent(in) :: cH_comp      ! (n_comp_pairs, nt, nmmax, nf, 9)
+  real(dp), dimension(:,:,:,:,:), intent(in)    :: phase_diff    ! (n_comp_pairs, nt, nmmax, nf, 9)
+  real(dp), dimension(:,:,:,:,:), intent(in)    :: atten_db      ! (n_comp_pairs, nt, nmmax, nf, 9)
+  real(dp), dimension(:,:,:,:,:), intent(in)    :: zrho_all_tr   ! (nTR, nt, nmmax, nf, 3)
+
+  integer :: ipair, k, j, i, ic, exec, i_near
+  character(len=:), allocatable :: fileComp, fileAtt
+  character(len=20) :: comp_suffix
+  logical :: file_exists
+
+  do ipair = 1, n_comp_pairs
+    i_near = comp_pairs(ipair, 1)
+
+    ! ── Arquivo do tensor compensado + phase_diff ──
+    write(comp_suffix, '(A,I0)') '_COMP', ipair
+    fileComp = mypath//trim(adjustl(filename))//trim(comp_suffix)//'.dat'
+
+    inquire(file = fileComp, exist = file_exists)
+    if (modelm == 1 .or. .not. file_exists) then
+      open(unit = 1100 + ipair, iostat = exec, file = fileComp, form = 'unformatted', &
+           access = 'stream', status = 'replace', action = 'write')
+    else
+      open(unit = 1100 + ipair, iostat = exec, file = fileComp, form = 'unformatted', &
+           access = 'stream', status = 'old', position = 'append', action = 'write')
+    end if
+
+    do k = 1, nt
+      do j = 1, nf
+        do i = 1, nmeds(k)
+          ! Registro: 1 int32 + 3 float64 (zobs, rho_h, rho_v) +
+          !           18 float64 (Re/Im H_comp 9 comp) +
+          !           9 float64 (phase_diff 9 comp)
+          write(1100 + ipair) i, &
+            zrho_all_tr(i_near, k, i, j, 1), &
+            zrho_all_tr(i_near, k, i, j, 2), &
+            zrho_all_tr(i_near, k, i, j, 3), &
+            (real(cH_comp(ipair, k, i, j, ic)), aimag(cH_comp(ipair, k, i, j, ic)), ic=1,9), &
+            (phase_diff(ipair, k, i, j, ic), ic=1,9)
+        end do
+      end do
+    end do
+    close(unit = 1100 + ipair)
+
+    ! ── Arquivo de atenuação (dB) ──
+    fileAtt = mypath//trim(adjustl(filename))//trim(comp_suffix)//'_ATT.dat'
+
+    inquire(file = fileAtt, exist = file_exists)
+    if (modelm == 1 .or. .not. file_exists) then
+      open(unit = 1200 + ipair, iostat = exec, file = fileAtt, form = 'unformatted', &
+           access = 'stream', status = 'replace', action = 'write')
+    else
+      open(unit = 1200 + ipair, iostat = exec, file = fileAtt, form = 'unformatted', &
+           access = 'stream', status = 'old', position = 'append', action = 'write')
+    end if
+
+    do k = 1, nt
+      do j = 1, nf
+        do i = 1, nmeds(k)
+          ! Registro: 1 int32 + 3 float64 (zobs, rho_h, rho_v) +
+          !           9 float64 (atten_db por componente)
+          write(1200 + ipair) i, &
+            zrho_all_tr(i_near, k, i, j, 1), &
+            zrho_all_tr(i_near, k, i, j, 2), &
+            zrho_all_tr(i_near, k, i, j, 3), &
+            (atten_db(ipair, k, i, j, ic), ic=1,9)
+        end do
+      end do
+    end do
+    close(unit = 1200 + ipair)
+  end do
+
+end subroutine writes_compensation_files
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+
 subroutine write_results(results, nk, nj, ni, arq, filename)
   implicit none
   integer, dimension(:,:,:), intent(in) :: results
