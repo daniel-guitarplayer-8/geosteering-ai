@@ -7,14 +7,28 @@ use omp_lib
 contains
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta, h1, tj, &
-                             nTR, dTR, p_med, n, resist, esp, filename)
+                             nTR, dTR, p_med, n, resist, esp, filename, &
+                             use_arb_freq, use_tilted, n_tilted, beta_tilt, phi_tilt)
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! Sub-rotina principal do simulador EM 1D TIV com múltiplos pares T-R.
   !
-  ! Versão 7.0: suporte a nTR espaçamentos T-R simultâneos.
+  ! Versão 8.0: F5 (frequências arbitrárias) + F7 (antenas inclinadas).
   !   - nTR = 1: backward-compatible (saída idêntica ao formato anterior)
   !   - nTR > 1: loop externo sobre pares T-R, cada um com r_k = dTR(itr)*|sin(θ)|
   !              Saída: arquivos separados por par T-R (sufixo _TR{itr})
+  !
+  ! F5 — Frequências arbitrárias (use_arb_freq):
+  !   Quando use_arb_freq == 0 (default): emite aviso se nf > 2 (guard)
+  !   Quando use_arb_freq == 1: nf arbitrário (1-16), sem restrição
+  !   O código já suporta nf arbitrário via caches Phase 4: (npt, n, nf, ntheta)
+  !
+  ! F7 — Antenas inclinadas (use_tilted):
+  !   Quando use_tilted == 0 (default): sem cálculo extra, saída inalterada (22 col)
+  !   Quando use_tilted == 1: calcula H_tilted para cada configuração (β, φ):
+  !     H_tilted(β, φ) = cos(β)·Hzz + sin(β)·[cos(φ)·Hxz + sin(φ)·Hyz]
+  !   onde β = ângulo de inclinação (0°-90°), φ = azimute (0°-360°).
+  !   Saída estendida: 22 + 2×n_tilted colunas por registro.
+  !   Ref: docs/reference/analise_novos_recursos_simulador_fortran.md §F7
   !
   ! Fluxo de execução (multi-TR):
   !   do itr = 1, nTR
@@ -25,7 +39,8 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !         fieldsinfreqs_cached_ws(ws_pool(tid), cache, ...)
   !       end do
   !     end do
-  !     writes_files(..., itr, nTR)  [1 arquivo por par T-R]
+  !     [F7: compute tilted responses from cH1 tensor — serial, O(ntheta×nmed×nf×n_tilted)]
+  !     writes_files(..., itr, nTR, use_tilted, n_tilted, beta_tilt, phi_tilt, cH_tilted)
   !   end do
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   implicit none
@@ -33,6 +48,12 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   integer, intent(in) ::  modelm, nmaxmodel, nf, ntheta, n, nTR
   real(dp), intent(in) :: freq(nf), theta(ntheta), h1, tj, dTR(nTR), p_med, resist(n,2), esp(n)
   character(*), intent(in) :: filename
+  ! F5/F7 — Feature flags (desabilitados por padrão = 0, backward compatible)
+  integer, intent(in) :: use_arb_freq   ! F5: 0=padrão (guard nf>2), 1=nf arbitrário
+  integer, intent(in) :: use_tilted     ! F7: 0=desabilitado, 1=calcula antenas inclinadas
+  integer, intent(in) :: n_tilted       ! F7: número de configurações tilted (0 se desabilitado)
+  real(dp), intent(in) :: beta_tilt(:)  ! F7: ângulos de inclinação em graus (size n_tilted)
+  real(dp), intent(in) :: phi_tilt(:)   ! F7: ângulos azimutais em graus (size n_tilted)
 
   integer :: i, j, k, nmmax
   real(dp) :: thetamin, thetaplu, thetarad
@@ -79,16 +100,35 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! Tamanho: 9 × (npt × n × nf) × 16 bytes ≈ 1,68 MB para n=29, nf=2, npt=201.
   ! Ref: docs/reference/analise_paralelismo_cpu_fortran.md §7 Fase 4
   !=============================================================================
-  complex(dp), allocatable :: u_cache(:,:,:), s_cache(:,:,:)
-  complex(dp), allocatable :: uh_cache(:,:,:), sh_cache(:,:,:)
-  complex(dp), allocatable :: RTEdw_cache(:,:,:), RTEup_cache(:,:,:)
-  complex(dp), allocatable :: RTMdw_cache(:,:,:), RTMup_cache(:,:,:)
-  complex(dp), allocatable :: AdmInt_cache(:,:,:)
+  ! Fase 4 — cache com dimensão ntheta: u_cache(npt, n, nf, ntheta).
+  ! Necessário porque o outer !$omp parallel do if(ntheta>1) executa k=1 e k=2
+  ! em threads distintos. Sem a dimensão ntheta, thread k=1 e thread k=2
+  ! escreviam no mesmo u_cache(:,:,ii) simultaneamente → race condition que
+  ! corromperia silenciosamente os resultados de θ=30°.
+  ! Com a 4ª dimensão cada thread k escreve em u_cache(:,:,ii,k) independente.
+  complex(dp), allocatable :: u_cache(:,:,:,:), s_cache(:,:,:,:)
+  complex(dp), allocatable :: uh_cache(:,:,:,:), sh_cache(:,:,:,:)
+  complex(dp), allocatable :: RTEdw_cache(:,:,:,:), RTEup_cache(:,:,:,:)
+  complex(dp), allocatable :: RTMdw_cache(:,:,:,:), RTMup_cache(:,:,:,:)
+  complex(dp), allocatable :: AdmInt_cache(:,:,:,:)
   real(dp)    :: r_k, omega_i
   complex(dp) :: zeta_i
   real(dp), allocatable :: eta_shared(:,:)  ! (n, 2) — hoisted de fieldsinfreqs (B2)
   integer     :: ii
   ! real(dp) :: wtime
+
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! F7 — Variáveis para antenas inclinadas (tilted coils)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! A resposta de uma antena inclinada com eixo n̂ = (sinβ·cosφ, sinβ·sinφ, cosβ)
+  ! medindo o campo de um transmissor axial (ẑ) é:
+  !   H_tilted(β, φ) = cos(β)·Hzz + sin(β)·[cos(φ)·Hxz + sin(φ)·Hyz]
+  ! onde Hxz = cH(:,3), Hyz = cH(:,6), Hzz = cH(:,9) do tensor 3×3.
+  ! Custo: 5 multiplicações + 2 adições por ponto — negligível vs forward model.
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  complex(dp), allocatable :: cH_tilted(:,:,:,:)  ! (ntheta, nmmax, nf, n_tilted)
+  real(dp) :: beta_rad, phi_rad
+  integer  :: it
 
   ! wtime = omp_get_wtime( )
 
@@ -207,15 +247,17 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! Fase 4 — Alocação dos caches de commonarraysMD (shared entre threads)
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  allocate(u_cache     (npt, n, nf))
-  allocate(s_cache     (npt, n, nf))
-  allocate(uh_cache    (npt, n, nf))
-  allocate(sh_cache    (npt, n, nf))
-  allocate(RTEdw_cache (npt, n, nf))
-  allocate(RTEup_cache (npt, n, nf))
-  allocate(RTMdw_cache (npt, n, nf))
-  allocate(RTMup_cache (npt, n, nf))
-  allocate(AdmInt_cache(npt, n, nf))
+  ! Fase 4 — alocação com dimensão ntheta: elimina race condition no outer parallel do k.
+  ! Custo de memória: ×ntheta (para ntheta=2: ~3,36 MB, era ~1,68 MB — irrelevante).
+  allocate(u_cache     (npt, n, nf, ntheta))
+  allocate(s_cache     (npt, n, nf, ntheta))
+  allocate(uh_cache    (npt, n, nf, ntheta))
+  allocate(sh_cache    (npt, n, nf, ntheta))
+  allocate(RTEdw_cache (npt, n, nf, ntheta))
+  allocate(RTEup_cache (npt, n, nf, ntheta))
+  allocate(RTMdw_cache (npt, n, nf, ntheta))
+  allocate(RTMup_cache (npt, n, nf, ntheta))
+  allocate(AdmInt_cache(npt, n, nf, ntheta))
 
   ! Fase 4 — eta hoisted para escopo de perfila1DanisoOMP (era recomputado em
   ! cada chamada de fieldsinfreqs antes). Invariante durante todo o modelo.
@@ -232,6 +274,41 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
       '  threads_angulos(k)=', num_threads_k, &
       '  threads_medidas(j)=', num_threads_j, &
       '  produto=', num_threads_k * num_threads_j
+
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    ! F5 — Validação de frequências arbitrárias
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    ! Quando use_arb_freq == 0 (padrão), o código aceita qualquer nf mas emite
+    ! aviso para nf > 2 como proteção contra uso acidental. Quando habilitado,
+    ! valida nf ∈ [1, 16] e exibe as frequências configuradas.
+    ! O core já suporta nf arbitrário — caches Phase 4 têm dimensão (npt, n, nf).
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    if (use_arb_freq == 0 .and. nf > 2) then
+      write(*,'(A,I0,A)') '[F5 AVISO] nf = ', nf, ' > 2 com use_arbitrary_freq desabilitado.'
+      write(*,'(A)')      '           Para nf > 2 sem aviso, defina use_arbitrary_freq = 1 no model.in.'
+    end if
+    if (use_arb_freq == 1) then
+      if (nf < 1 .or. nf > 16) then
+        write(*,'(A,I0,A)') '[F5 ERRO] nf = ', nf, ' fora do intervalo válido [1, 16].'
+        stop '[F5] nf deve estar entre 1 e 16 com use_arbitrary_freq habilitado'
+      end if
+      write(*,'(A,I0,A)') '[F5] Frequências arbitrárias habilitadas: nf = ', nf, ' frequência(s)'
+      do ii = 1, nf
+        write(*,'(A,I0,A,F12.1,A)') '     freq(', ii, ') = ', freq(ii), ' Hz'
+      end do
+    end if
+
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    ! F7 — Informações sobre antenas inclinadas
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    if (use_tilted == 1 .and. n_tilted > 0) then
+      write(*,'(A,I0,A)') '[F7] Antenas inclinadas habilitadas: ', n_tilted, ' configuração(ões)'
+      do ii = 1, n_tilted
+        write(*,'(A,I0,A,F6.1,A,F6.1,A)') &
+          '     tilted(', ii, '): beta=', beta_tilt(ii), '° phi=', phi_tilt(ii), '°'
+      end do
+      write(*,'(A,I0,A)') '[F7] Saída estendida: 22 + ', 2*n_tilted, ' colunas por registro'
+    end if
   end if
 
   allocate(zrho1(ntheta,nmmax,nf,3), cH1(ntheta,nmmax,nf,9))
@@ -241,6 +318,16 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   allocate(z_rho1(nmmax,nf,3), c_H1(nmmax,nf,9))
   z_rho1 = 0.d0
   c_H1 = 0.d0
+  ! F7 — Alocação do array de respostas tilted
+  ! SEMPRE aloca (mesmo quando desabilitado) para evitar passar array não alocado
+  ! a writes_files. Quando n_tilted == 0, aloca com tamanho mínimo (1) — custo
+  ! de memória negligível (~ntheta × nmmax × nf × 16 bytes para n_tilted=1).
+  if (use_tilted == 1 .and. n_tilted > 0) then
+    allocate(cH_tilted(ntheta, nmmax, nf, n_tilted))
+  else
+    allocate(cH_tilted(ntheta, nmmax, nf, 1))
+  end if
+  cH_tilted = (0.d0, 0.d0)
   ! Fase 2 — Hybrid Scheduler: escolha do schedule baseada na característica do loop
   !   • Loop externo `k` (ângulos): carga desigual porque nmed(k) varia com theta(k)
   !     (janela vertical constante mas passo vertical pz = p_med*cos(theta) muda),
@@ -317,12 +404,13 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     do ii = 1, nf
       omega_i = 2.d0 * pi * freq(ii)
       zeta_i  = cmplx(0.d0, 1.d0, kind=dp) * omega_i * mu
+      ! Slice (:,:,ii,k): cada ângulo k escreve em posição independente → thread-safe.
       call commonarraysMD(n, npt, r_k, krwJ0J1(:,1), zeta_i, h, eta_shared,   &
-                          u_cache(:,:,ii),  s_cache(:,:,ii),                   &
-                          uh_cache(:,:,ii), sh_cache(:,:,ii),                  &
-                          RTEdw_cache(:,:,ii), RTEup_cache(:,:,ii),            &
-                          RTMdw_cache(:,:,ii), RTMup_cache(:,:,ii),            &
-                          AdmInt_cache(:,:,ii))
+                          u_cache(:,:,ii,k),  s_cache(:,:,ii,k),               &
+                          uh_cache(:,:,ii,k), sh_cache(:,:,ii,k),              &
+                          RTEdw_cache(:,:,ii,k), RTEup_cache(:,:,ii,k),        &
+                          RTMdw_cache(:,:,ii,k), RTMup_cache(:,:,ii,k),        &
+                          AdmInt_cache(:,:,ii,k))
     end do
 
     ! Schedule static: iterações têm custo uniforme (mesmos n, npt, nf, nlayers)
@@ -367,13 +455,16 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
       else
         tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()
       end if
-      ! Fase 4: chamada usa os caches pré-computados (shared) em vez de
-      ! recalcular commonarraysMD a cada iteração j.
+      ! Fase 4: passa slice (:,:,:,k) — shape (npt,n,nf) — compatível com a
+      ! interface de fieldsinfreqs_cached_ws (intent(in) dimension(npt,n,nf)).
+      ! Thread-safe: cada k lê sua própria fatia do cache, sem conflito.
       call fieldsinfreqs_cached_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt, &
                                     krwJ0J1, n, h, prof, resist, eta_shared,        &
-                                    u_cache, s_cache, uh_cache, sh_cache,           &
-                                    RTEdw_cache, RTEup_cache,                        &
-                                    RTMdw_cache, RTMup_cache, AdmInt_cache,          &
+                                    u_cache(:,:,:,k),  s_cache(:,:,:,k),            &
+                                    uh_cache(:,:,:,k), sh_cache(:,:,:,k),           &
+                                    RTEdw_cache(:,:,:,k), RTEup_cache(:,:,:,k),     &
+                                    RTMdw_cache(:,:,:,k), RTMup_cache(:,:,:,k),     &
+                                    AdmInt_cache(:,:,:,k),                          &
                                     zrho, cH)
       z_rho1(j,:,:) = zrho
       c_H1(j,:,:) = cH
@@ -383,10 +474,44 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     cH1(k,1:nmed(k),:,:) = c_H1
   end do
   !$omp end parallel do
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! F7 — Cálculo das respostas de antenas inclinadas (pós-processamento)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Calcula H_tilted a partir do tensor completo cH1 já computado.
+  ! Executado SERIAL fora do loop paralelo — custo negligível:
+  !   5 mul + 2 add por ponto × ntheta × nmed × nf × n_tilted
+  !   Para n_tilted=2, nf=2, nmed=600: ~2.400 operações × ~10 ns ≈ ~24 μs.
+  ! O tensor cH1(k,j,i,1:9) mapeia para H(3×3) como:
+  !   cH1(:,:,:,1)=Hxx  cH1(:,:,:,2)=Hxy  cH1(:,:,:,3)=Hxz
+  !   cH1(:,:,:,4)=Hyx  cH1(:,:,:,5)=Hyy  cH1(:,:,:,6)=Hyz
+  !   cH1(:,:,:,7)=Hzx  cH1(:,:,:,8)=Hzy  cH1(:,:,:,9)=Hzz
+  ! Fórmula (receptor inclinado, transmissor axial ẑ):
+  !   H_tilted(β,φ) = cos(β)·Hzz + sin(β)·[cos(φ)·Hxz + sin(φ)·Hyz]
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  if (use_tilted == 1 .and. n_tilted > 0) then
+    do it = 1, n_tilted
+      beta_rad = beta_tilt(it) * pi / 18.d1
+      phi_rad  = phi_tilt(it) * pi / 18.d1
+      do k = 1, ntheta
+        do j = 1, nmed(k)
+          do i = 1, nf
+            cH_tilted(k, j, i, it) = &
+              cos(beta_rad) * cH1(k, j, i, 9) + &
+              sin(beta_rad) * (cos(phi_rad) * cH1(k, j, i, 3) + &
+                               sin(phi_rad) * cH1(k, j, i, 6))
+          end do
+        end do
+      end do
+    end do
+  end if
+
   ! Feature 1: escrita de saída por par T-R (dentro do loop itr)
-  call writes_files(modelm, nmaxmodel, mypath, zrho1, cH1, ntheta, theta, nf, freq, nmed, filename, itr, nTR)
+  ! F7: passa cH_tilted para writes_files (condicionalmente alocado)
+  call writes_files(modelm, nmaxmodel, mypath, zrho1, cH1, ntheta, theta, nf, freq, nmed, filename, &
+                    itr, nTR, use_tilted, n_tilted, beta_tilt, phi_tilt, cH_tilted)
   end do  ! end do itr = 1, nTR
   deallocate(zrho,cH,z_rho1,c_H1)
+  if (allocated(cH_tilted)) deallocate(cH_tilted)
 
   ! Débito B5 corrigido: krwJ0J1 alocado na linha ~99 e nunca desalocado.
   ! Leak de ~9,6 KB/modelo (npt × 3 × 8 bytes = 201 × 3 × 8 ≈ 4,8 KB).
@@ -704,11 +829,14 @@ subroutine fieldsinfreqs_cached_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0
   end do
 end subroutine fieldsinfreqs_cached_ws
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq, nmeds, filename, itr, nTR)
+subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq, nmeds, filename, &
+                        itr, nTR, use_tilted, n_tilted_in, beta_tilt_in, phi_tilt_in, cH_tilted_in)
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Feature 1 (Multi-TR): aceita itr (índice do par T-R) e nTR (total de pares).
-  ! Quando nTR > 1: sufixo _TR{itr} no nome do arquivo .dat
-  ! Quando nTR == 1: nome original (sem sufixo) → backward compatible
+  ! Versão 8.0: escrita de saída com suporte a Feature 1 (Multi-TR) e F7 (Tilted).
+  !   - Feature 1: sufixo _TR{itr} para nTR > 1, sem sufixo para nTR == 1
+  !   - F7: quando use_tilted == 1, anexa Re/Im de H_tilted para cada configuração
+  !         ao registro binário, resultando em 22 + 2×n_tilted colunas.
+  !         O arquivo .out inclui metadados das antenas inclinadas.
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   implicit none
   character(*), intent(in) :: mypath
@@ -718,8 +846,12 @@ subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq
   real(dp), dimension(:,:,:,:), intent(in) :: zrho
   complex(dp), dimension(:,:,:,:), intent(in) :: cH
   character(*), intent(in) :: filename
+  ! F7 — Parâmetros de antenas inclinadas
+  integer, intent(in) :: use_tilted, n_tilted_in
+  real(dp), intent(in) :: beta_tilt_in(:), phi_tilt_in(:)
+  complex(dp), dimension(:,:,:,:), intent(in) :: cH_tilted_in  ! (nt, nmmax, nf, n_tilted)
 
-  integer :: k, j, i, exec
+  integer :: k, j, i, exec, it
   character(len=:), allocatable :: infomodels, fileTR
   character(len=10) :: tr_suffix
   logical :: file_exists
@@ -727,10 +859,17 @@ subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq
   if (modelm == nmaxmodel) then
     infomodels = mypath//trim('info')//trim(adjustl(filename))//'.out'
     open(unit = 10, file = infomodels, status = 'replace', action = 'write')
-    write(10,*)nt,nf,nmaxmodel
-    write(10,*)(/(theta(i),i=1,nt)/)
-    write(10,*)(/(freq(i),i=1,nf)/)
-    write(10,*)(/(nmeds(i),i=1,nt)/)
+    write(10,*) nt, nf, nmaxmodel
+    write(10,*) (/(theta(i),i=1,nt)/)
+    write(10,*) (/(freq(i),i=1,nf)/)
+    write(10,*) (/(nmeds(i),i=1,nt)/)
+    ! F7 — Metadados de antenas inclinadas no arquivo .out
+    ! Linha 5: use_tilted, n_tilted (0 0 quando desabilitado)
+    write(10,*) use_tilted, n_tilted_in
+    if (use_tilted == 1 .and. n_tilted_in > 0) then
+      write(10,*) (/(beta_tilt_in(it), it=1,n_tilted_in)/)
+      write(10,*) (/(phi_tilt_in(it), it=1,n_tilted_in)/)
+    end if
     close(10)
   end if
   ! Arquivos: sufixo _TR{itr} para nTR > 1, sem sufixo para nTR == 1
@@ -783,18 +922,22 @@ subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq
   do k = 1, nt
     do j = 1, nf
       do i = 1, nmeds(k)
-        write(1000)i, zrho(k,i,j,1), zrho(k,i,j,2), zrho(k,i,j,3), &
+        ! Registro padrão: 1 int32 + 21 float64 = 172 bytes (22 colunas)
+        write(1000) i, zrho(k,i,j,1), zrho(k,i,j,2), zrho(k,i,j,3), &
                    real(cH(k,i,j,1)), aimag(cH(k,i,j,1)), real(cH(k,i,j,2)), aimag(cH(k,i,j,2)), &
                    real(cH(k,i,j,3)), aimag(cH(k,i,j,3)), real(cH(k,i,j,4)), aimag(cH(k,i,j,4)), &
                    real(cH(k,i,j,5)), aimag(cH(k,i,j,5)), real(cH(k,i,j,6)), aimag(cH(k,i,j,6)), &
                    real(cH(k,i,j,7)), aimag(cH(k,i,j,7)), real(cH(k,i,j,8)), aimag(cH(k,i,j,8)), &
                    real(cH(k,i,j,9)), aimag(cH(k,i,j,9))
-        ! write(1000)i, freq(j), theta(k), zrho(k,i,j,1), zrho(k,i,j,2), zrho(k,i,j,3), &
-        !            real(cH(k,i,j,1)), aimag(cH(k,i,j,1)), real(cH(k,i,j,2)), aimag(cH(k,i,j,2)), &
-        !            real(cH(k,i,j,3)), aimag(cH(k,i,j,3)), real(cH(k,i,j,4)), aimag(cH(k,i,j,4)), &
-        !            real(cH(k,i,j,5)), aimag(cH(k,i,j,5)), real(cH(k,i,j,6)), aimag(cH(k,i,j,6)), &
-        !            real(cH(k,i,j,7)), aimag(cH(k,i,j,7)), real(cH(k,i,j,8)), aimag(cH(k,i,j,8)), &
-        !            real(cH(k,i,j,9)), aimag(cH(k,i,j,9))
+        ! F7 — Extensão tilted: 2×n_tilted float64 adicionais por registro
+        ! Formato binário stream: dados contíguos, sem delimitadores de registro.
+        ! Cada configuração tilted adiciona Re(H_tilted) + Im(H_tilted) = 16 bytes.
+        ! Total por registro: 172 + n_tilted × 16 bytes.
+        if (use_tilted == 1 .and. n_tilted_in > 0) then
+          do it = 1, n_tilted_in
+            write(1000) real(cH_tilted_in(k,i,j,it)), aimag(cH_tilted_in(k,i,j,it))
+          end do
+        end if
       end do
     end do
   end do

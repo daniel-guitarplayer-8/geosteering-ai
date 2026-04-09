@@ -41,8 +41,8 @@
 | Cenários PINN | 8 (oracle, surrogate, maxwell, smoothness, skin_depth, continuity, variational, self_adaptive) |
 | Presets YAML | 7 (baseline, robusto, nstage_n2, nstage_n3, geosinais_p4, dtb_p5, realtime_causal) |
 | Callbacks Keras | 17+ |
-| **Simulador Fortran** | 6.859 LOC (6 módulos F08) + gerador Python (~900 LOC) |
-| **Documentação Simulador** | 6.558 LOC (17 seções + 6 pipelines, v4.0 com pipelines Fortran A+B e Python A+B+C+D) |
+| **Simulador Fortran** | 6.859 LOC (6 módulos F08) + gerador Python (~900 LOC) + f2py wrapper + batch runner |
+| **Documentação Simulador** | ~8.000+ LOC (20 seções + 6 pipelines, v8.0 com Multi-TR + f2py + batch + análise novos recursos) |
 | **Formulação Teórica TeX** | `Tex_Projects/TatuAniso/FormulaçãoTatuAnisoTIV.tex` (~960 LOC TeX) |
 | Métricas customizadas | 3 (R2Score, PerComponentMetric, AnisotropyRatioError) |
 | Formatos de exportação | 3 (SavedModel, TFLite, ONNX) |
@@ -375,6 +375,12 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 | **Feature 2** | **Tensor completo (9 componentes)** | ✅ **Já implementado** | `cH(i,1..9)` = `tH(1,1)..tH(3,3)` — Hxx, Hxy, Hxz, Hyx, Hyy, Hyz, Hzx, Hzy, Hzz. Escrito no `.dat` como 18 valores real/imag. Documentação atualizada. |
 | **Feature 3** | **f2py wrapper** (`tatu_f2py_wrapper.f08`) | ✅ **Concluída 2026-04-06** | Módulo `tatu_wrapper` com sub-rotina `simulate()` que retorna `zrho_out(nTR, ntheta, nmmax, nf, 3)` e `cH_out(nTR, ntheta, nmmax, nf, 9)` diretamente em Python. Sem I/O de disco. Target `make f2py_wrapper` no Makefile. |
 | **Feature 4** | **Batch paralelo de modelos** (`batch_runner.py`) | ✅ **Concluída 2026-04-06** | `ProcessPoolExecutor` com N workers × M OMP threads. Cada worker em diretório temporário isolado. CLI: `--models N --workers W --omp-threads T`. `fifthBuildTIVModels.py` atualizado para formato multi-TR. |
+| **Feature 5** | **Frequências arbitrárias (nf > 2)** | 📋 **Planejada** | Suporte a 4-8 frequências (10-400 kHz) para DOI variável. Extensão do cache Fase 4 para `nf × nTR` combinações. ~50 LOC. |
+| **Feature 6** | **Compensação de poço (midpoint multi-TR)** | 📋 **Planejada** | Pós-processamento: `H_comp = (H_T1R + H_T2R) / 2` com simetrização e phase-difference/attenuation. ~300 LOC. |
+| **Feature 7** | **Antenas inclinadas (tilted coils)** | 📋 **Planejada** | Combinação linear: `H_tilted = cos(β)×H_axial + sin(β)×H_transverse`. Pós-processamento no tensor H(3×3). ~50 LOC. |
+| **Feature 8** | **Correção 1.5D (relative dip)** | 📋 **Planejada** | Modificação dos coeficientes de reflexão para camadas inclinadas. Essencial para geosteering real. ~500 LOC. |
+| **Feature 9** | **Efeito de invasão (mud filtrate)** | 📋 **Planejada** | Modelo de invasão radial step/gradient. Melhora fidelidade dos dados de treinamento. ~400 LOC. |
+| **Feature 10** | **Sensibilidades ∂H/∂ρ** | 📋 **Planejada** | Via diferenças finitas (Fortran) ou auto-diff (JAX). Essencial para PINNs e inversão Gauss-Newton. ~800 LOC (Fortran). |
 
 **Débitos técnicos — status atualizado**:
 
@@ -565,6 +571,42 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 
 ---
 
+### F7.1 — Evolução do Simulador Fortran (Curto-Médio Prazo)
+
+**Objetivo**: Expandir as capacidades físicas do simulador PerfilaAnisoOmp para gerar dados de treinamento mais realistas e diversos.
+
+**Base Técnica**: [`docs/reference/analise_novos_recursos_simulador_fortran.md`](reference/analise_novos_recursos_simulador_fortran.md)
+
+| Passo | Descrição | Complexidade | Prioridade | LOC |
+|:------|:----------|:-------------|:----------:|:---:|
+| F7.1.1 | ✅ **Frequências arbitrárias (nf > 2)** — suporte a 1-16 frequências simultâneas | Baixa | Alta | ~80 |
+| | — Flag `use_arbitrary_freq` no model.in (0=off, 1=on) | | | |
+| | — Validação nf ∈ [1, 16], guard para nf > 2 quando desabilitado | | | |
+| | — Frequências típicas: 10, 20, 40, 100, 200, 400 kHz | | | |
+| F7.1.2 | **Compensação de poço (midpoint)** — pós-processamento multi-TR | Média | Alta | ~300 |
+| | — Phase difference, attenuation, symmetrized ratios | | | |
+| | — Borehole compensation via dual-transmitter averaging | | | |
+| F7.1.3 | ✅ **Antenas inclinadas (tilted coils)** — combinação linear pós-tensor | Baixa | Média | ~120 |
+| | — Flag `use_tilted_antennas` + n_tilted configs (β, φ) no model.in | | | |
+| | — `H_tilted(β,φ) = cos(β)·Hzz + sin(β)·[cos(φ)·Hxz + sin(φ)·Hyz]` | | | |
+| | — Saída estendida: 22 + 2×n_tilted colunas, wrapper f2py `simulate_v8` | | | |
+| F7.1.4 | **Correção 1.5D (relative dip)** — camadas inclinadas | Alta | Alta | ~500 |
+| | — Modificação de coeficientes de reflexão TE/TM | | | |
+| | — Essencial para geosteering em poços horizontais | | | |
+| F7.1.5 | **Efeito de invasão (mud filtrate)** — perfil radial de resistividade | Média | Média | ~400 |
+| | — Modelo step + gradient para zona lavada | | | |
+| | — Dados mais realistas para treinamento DL | | | |
+| F7.1.6 | **Sensibilidades ∂H/∂ρ (Jacobiano)** — via diferenças finitas | Alta | Alta | ~800 |
+| | — 2×n_params forward passes para Jacobiano numérico | | | |
+| | — Integração via f2py para PINNs em Python | | | |
+| F7.1.7 | **Modelo de rocha (Archie)** no gerador Python | Média | Média | ~200 |
+| | — Input: (φ, Sw, salinidade) → output: (ρ_h, ρ_v) | | | |
+| | — fifthBuildTIVModels.py com parametrização petrofísica | | | |
+
+**Verificação**: Cada feature validada bit-exato para `nTR=1` backwards-compatible. RMSE < 1e-10 vs baseline para features que não alteram o forward pass. F5/F7 implementadas em v8.0 (Abril 2026) — desabilitadas por padrão, backward compatible.
+
+---
+
 ### v3.0 — Inversão 2D/3D (Futuro)
 
 | Área | Descrição | Base Científica |
@@ -574,6 +616,9 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 | Digital twin | Surrogate neural substitui completamente o Fortran | Li et al. (2025) — self-supervised forward |
 | Geomecânica | Integrar pressão de poros + estabilidade de poço | Extensão petrofísica além de resistividade |
 | Transfer learning | Pré-treinar em sintéticos, fine-tune em dados de campo | DomainAdapter já implementado (v2.0) |
+| Born 2D approximation | Correção 2D via integral de espalhamento sobre modelo 1D | F7.1 + 1.5D completo |
+| Anisotropia ortorrômbica | σ_x ≠ σ_y ≠ σ_z (além de TIV) | Reformulação TE/TM |
+| Inversão conjunta EM+Sônica | Multi-física: resistividade + velocidade | Dados sônicos |
 
 ---
 
@@ -787,6 +832,14 @@ Os artigos abaixo estão disponíveis localmente na pasta `PDFs/` e devem ser co
 - **CNOOC/COSL** (internal). GeoSphere vs. TatuAniso1D — Convenções de Sinais. Technical Note.
   → Arquivo: `PDFs/GeoSphereXTatu.pdf`
   → Uso: Tabela de conversão de sinais USD/UAD/U3DF entre GeoSphere e simulador TatuAniso1D — essencial para validar `data/geosignals.py`.
+
+#### 7.3.5 Novos Recursos do Simulador (Análise Abril 2026)
+
+- **Documento de Análise**: `docs/reference/analise_novos_recursos_simulador_fortran.md` — Análise detalhada de estratégias 1.5D, 2D, compensação de poço, e novos recursos para o simulador Fortran. Abril 2026.
+- **Noh, K., Pardo, D., Torres-Verdín, C.** (2021). Real-Time 2.5D Inversion of LWD Resistivity Measurements Using Deep Learning for Geosteering Applications. *Petrophysics*, 63(4), 506-524. → Base para estratégia 2.5D via DL.
+- **Rabinovich, M. B.** et al. (2004). Effect of relative dip angle on electromagnetic measurements and formation boundary detection. *Petrophysics*, 45(6), 518-532. → Efeito do dip relativo nas medições EM — motivação para Feature 8 (1.5D).
+- **Li, H. & Wang, H.** (2016). Investigation of eccentricity effect on induction response in horizontal wells using 3D FEM. *J. Pet. Sci. Eng.*, 143, 211-225. → Extensão 1.5D para poços horizontais.
+- **Frontiers** (2025). Fast forward modeling and response analysis of extra-deep azimuthal resistivity measurements in complex model. *Front. Earth Sci.* → Modelagem rápida para UDAR em modelos complexos.
 
 ### 7.4 Referências do Simulador Fortran
 
