@@ -444,15 +444,15 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   z_rho1 = 0.d0
   c_H1 = 0.d0
   ! F7 — Alocação do array de respostas tilted
-  ! SEMPRE aloca (mesmo quando desabilitado) para evitar passar array não alocado
-  ! a writes_files. Quando n_tilted == 0, aloca com tamanho mínimo (1) — custo
-  ! de memória negligível (~ntheta × nmmax × nf × 16 bytes para n_tilted=1).
+  ! Quando habilitado: tamanho completo (ntheta, nmmax, nf, n_tilted) + zerado.
+  ! Quando desabilitado: tamanho mínimo (1,1,1,1) SEM zeroing — passado como
+  ! assumed-shape a writes_files mas nunca acessado (guard use_tilted==1 interno).
   if (use_tilted == 1 .and. n_tilted > 0) then
     allocate(cH_tilted(ntheta, nmmax, nf, n_tilted))
+    cH_tilted = (0.d0, 0.d0)
   else
-    allocate(cH_tilted(ntheta, nmmax, nf, 1))
+    allocate(cH_tilted(1, 1, 1, 1))
   end if
-  cH_tilted = (0.d0, 0.d0)
 
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! F6 — Alocação dos arrays de compensação midpoint
@@ -461,9 +461,11 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! o cálculo de compensação após o loop principal. Necessário porque a
   ! compensação requer H_near e H_far simultaneamente — não disponíveis
   ! durante o loop itr que processa um par de cada vez.
-  ! F6 — Alocação condicional: full quando habilitado, zero-size quando desabilitado.
-  ! allocate(x(0,...)) cria array alocado com 0 elementos — overhead negligível
-  ! (apenas descritor, sem dados) — silencia -Wmaybe-uninitialized do gfortran.
+  ! F6 — Alocação condicional dos arrays de compensação midpoint.
+  ! Quando habilitado: tamanho completo + inicializado.
+  ! Quando desabilitado: allocate(0,...) cria descritor alocado com zero bytes
+  ! de dados — overhead negligível (~5 descritores sem dados) e silencia
+  ! -Wmaybe-uninitialized do gfortran sem impacto na performance.
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   if (use_compensation == 1 .and. n_comp_pairs > 0 .and. nTR >= 2) then
     allocate(cH_all_tr(nTR, ntheta, nmmax, nf, 9))
@@ -477,7 +479,6 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     phase_diff = 0.d0
     atten_db = 0.d0
   else
-    ! Zero-size: allocated()=.true. mas size=0 — sem dados, sem inicialização.
     allocate(cH_all_tr(0, 0, 0, 0, 0))
     allocate(zrho_all_tr(0, 0, 0, 0, 0))
     allocate(cH_comp(0, 0, 0, 0, 0))
@@ -634,21 +635,13 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! F7 — Cálculo das respostas de antenas inclinadas (pós-processamento)
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Zero cH_tilted a cada iteração itr para evitar dados residuais de itr-1
-  ! (defensivo: nmed(k) não depende de itr atualmente, mas pode mudar no futuro).
-  cH_tilted = (0.d0, 0.d0)
-  ! Calcula H_tilted a partir do tensor completo cH1 já computado.
-  ! Executado SERIAL fora do loop paralelo — custo negligível:
-  !   5 mul + 2 add por ponto × ntheta × nmed × nf × n_tilted
-  !   Para n_tilted=2, nf=2, nmed=600: ~2.400 operações × ~10 ns ≈ ~24 μs.
-  ! O tensor cH1(k,j,i,1:9) mapeia para H(3×3) como:
-  !   cH1(:,:,:,1)=Hxx  cH1(:,:,:,2)=Hxy  cH1(:,:,:,3)=Hxz
-  !   cH1(:,:,:,4)=Hyx  cH1(:,:,:,5)=Hyy  cH1(:,:,:,6)=Hyz
-  !   cH1(:,:,:,7)=Hzx  cH1(:,:,:,8)=Hzy  cH1(:,:,:,9)=Hzz
-  ! Fórmula (receptor inclinado, transmissor axial ẑ):
-  !   H_tilted(β,φ) = cos(β)·Hzz + sin(β)·[cos(φ)·Hxz + sin(φ)·Hyz]
+  ! F7 — Cálculo das respostas de antenas inclinadas.
+  ! Guard completo: zeroing + cálculo SOMENTE quando F7 habilitado.
+  ! Quando desabilitado: zero overhead (sem memset, sem loops).
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   if (use_tilted == 1 .and. n_tilted > 0) then
+    ! Zero cH_tilted a cada iteração itr para evitar dados residuais de itr-1.
+    cH_tilted = (0.d0, 0.d0)
     do it = 1, n_tilted
       beta_rad = beta_tilt(it) * pi / 18.d1
       phi_rad  = phi_tilt(it) * pi / 18.d1
