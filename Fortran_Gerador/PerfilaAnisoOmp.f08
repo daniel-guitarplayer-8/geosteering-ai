@@ -477,6 +477,9 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! F7 — Cálculo das respostas de antenas inclinadas (pós-processamento)
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Zero cH_tilted a cada iteração itr para evitar dados residuais de itr-1
+  ! (defensivo: nmed(k) não depende de itr atualmente, mas pode mudar no futuro).
+  cH_tilted = (0.d0, 0.d0)
   ! Calcula H_tilted a partir do tensor completo cH1 já computado.
   ! Executado SERIAL fora do loop paralelo — custo negligível:
   !   5 mul + 2 add por ponto × ntheta × nmed × nf × n_tilted

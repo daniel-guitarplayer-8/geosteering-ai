@@ -130,6 +130,8 @@ if (use_tilted == 1) then
     use_tilted = 0
     n_tilted = 0
     allocate(beta_tilt(0), phi_tilt(0))
+    close(11)
+    goto 900
   else
     allocate(beta_tilt(n_tilted), phi_tilt(n_tilted))
     do i = 1, n_tilted

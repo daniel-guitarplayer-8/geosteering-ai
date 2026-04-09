@@ -278,7 +278,8 @@ end subroutine simulate
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 subroutine simulate_v8(nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, &
                        n, resist, esp, nmmax, &
-                       use_arb_freq, use_tilted, n_tilted, beta_tilt, phi_tilt, &
+                       use_arb_freq, use_tilted, n_tilted, n_tilted_sz, &
+                       beta_tilt, phi_tilt, &
                        zrho_out, cH_out, cH_tilted_out)
   implicit none
   ! Argumentos de entrada — modelo geológico e configuração EM
@@ -286,22 +287,25 @@ subroutine simulate_v8(nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, &
   real(dp), intent(in) :: freq(nf), theta(ntheta), dTR(nTR), resist(n,2), esp(n)
   real(dp), intent(in) :: h1, tj, p_med
   ! Argumentos de entrada — flags F5/F7
-  integer, intent(in) :: use_arb_freq, use_tilted, n_tilted
-  real(dp), intent(in) :: beta_tilt(max(1,n_tilted)), phi_tilt(max(1,n_tilted))
+  ! n_tilted_sz: tamanho efetivo dos arrays tilted (≥ 1 para evitar zero-size).
+  ! Quando F7 desabilitado, o caller deve passar n_tilted=0, n_tilted_sz=1,
+  ! beta_tilt=[0.], phi_tilt=[0.] — os valores são ignorados pelo Fortran.
+  integer, intent(in) :: use_arb_freq, use_tilted, n_tilted, n_tilted_sz
+  real(dp), intent(in) :: beta_tilt(n_tilted_sz), phi_tilt(n_tilted_sz)
   ! Argumentos de saída
   !f2py intent(in) :: nf, freq, ntheta, theta, h1, tj, nTR, dTR, p_med, n, resist, esp, nmmax
-  !f2py intent(in) :: use_arb_freq, use_tilted, n_tilted, beta_tilt, phi_tilt
+  !f2py intent(in) :: use_arb_freq, use_tilted, n_tilted, n_tilted_sz, beta_tilt, phi_tilt
   !f2py intent(out) :: zrho_out, cH_out, cH_tilted_out
   !f2py depend(nf) :: freq
   !f2py depend(ntheta) :: theta
   !f2py depend(nTR) :: dTR
   !f2py depend(n) :: resist, esp
-  !f2py depend(n_tilted) :: beta_tilt, phi_tilt
+  !f2py depend(n_tilted_sz) :: beta_tilt, phi_tilt
   !f2py depend(nTR, ntheta, nmmax, nf) :: zrho_out, cH_out
-  !f2py depend(nTR, ntheta, nmmax, nf, n_tilted) :: cH_tilted_out
+  !f2py depend(nTR, ntheta, nmmax, nf, n_tilted_sz) :: cH_tilted_out
   real(dp), intent(out) :: zrho_out(nTR, ntheta, nmmax, nf, 3)
   complex(dp), intent(out) :: cH_out(nTR, ntheta, nmmax, nf, 9)
-  complex(dp), intent(out) :: cH_tilted_out(nTR, ntheta, nmmax, nf, max(1,n_tilted))
+  complex(dp), intent(out) :: cH_tilted_out(nTR, ntheta, nmmax, nf, n_tilted_sz)
 
   ! Variáveis locais (idênticas a perfila1DanisoOMP)
   integer :: i, j, k, itr, it, ii, t, tid

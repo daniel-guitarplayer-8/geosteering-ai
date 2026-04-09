@@ -1240,13 +1240,11 @@ if __name__ == '__main__':
             f.write(str(i+1) + ' ' + str(nmodels_actual) + '         ' + '!modelo atual e o número máximo de modelos' + '\n')
             # ── F5/F7 — Flags opcionais v8.0 (backward compatible) ──────────────
             f.write(str(use_arbitrary_freq)  + '                 ' + '!F5: use_arbitrary_freq (0=desabilitado, 1=habilitado)' + '\n')
-            f.write(str(use_tilted_antennas) + '                 ' + '!F7: use_tilted_antennas (0=desabilitado, 1=habilitado)')
+            f.write(str(use_tilted_antennas) + '                 ' + '!F7: use_tilted_antennas (0=desabilitado, 1=habilitado)\n')
             if use_tilted_antennas == 1 and len(tilted_configs) > 0:
-                f.write('\n')
-                f.write(str(len(tilted_configs)) + '                 ' + '!F7: n_tilted (número de configurações tilted)')
+                f.write(str(len(tilted_configs)) + '                 ' + '!F7: n_tilted (número de configurações tilted)\n')
                 for it_idx, (beta_t, phi_t) in enumerate(tilted_configs):
-                    f.write('\n')
-                    f.write(f'{beta_t}  {phi_t}' + '            ' + f'!F7: beta({it_idx+1}) phi({it_idx+1}) em graus')
+                    f.write(f'{beta_t}  {phi_t}' + '            ' + f'!F7: beta({it_idx+1}) phi({it_idx+1}) em graus\n')
         #-------------------------------------------------------------------------------------------------------------
         # Executando o programa Fortran
         try:
