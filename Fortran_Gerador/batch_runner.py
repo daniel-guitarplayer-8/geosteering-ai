@@ -245,16 +245,20 @@ def compute_jacobian_from_perturbations(dat_path, expanded_models,
         H = np.zeros((n_tr, n_theta, n_meds, n_freqs, 9), dtype=np.complex128)
         # Estrutura do registro: i(1) zobs(1) rho_h(1) rho_v(1) Re(H1)(1) Im(H1)(1) ... Re(H9)(1) Im(H9)(1)
         # Total = 4 + 18 = 22 colunas — col4..col21 são Re/Im alternados
+        # Ordem de leitura: (itr, kt, fi, jm) — matching Fortran writes_files:
+        #   do k=1,nt  →  do j=1,nf (freq outer)  →  do i=1,nmeds(k) (pos inner)
+        # Cada registro .dat contém TODOS os 9 componentes em col4..col21.
+        # idx incrementa 1× por (itr, kt, fi, jm) — NÃO dentro do loop ic.
         idx = 0
         for itr in range(n_tr):
             for kt in range(n_theta):
-                for fi in range(n_freqs):
-                    for jm in range(n_meds):
+                for fi in range(n_freqs):      # frequência — outer (j no Fortran)
+                    for jm in range(n_meds):   # posição   — inner (i no Fortran)
                         for ic in range(9):
                             re = slc[idx][f'col{4 + 2*ic}']
                             im = slc[idx][f'col{5 + 2*ic}']
                             H[itr, kt, jm, fi, ic] = complex(re, im)
-                        idx += 1
+                        idx += 1  # 1 registro por (itr, kt, fi, jm) — fora do ic
         return H
 
     # Reagrupa por parent_id
@@ -328,6 +332,351 @@ def compute_jacobian_from_perturbations(dat_path, expanded_models,
     print(f"[F10-B] Jacobiano salvo em {out_jac_path} | "
           f"shape=(N={n_original_models}, nTR={n_tr}, ntheta={n_theta}, "
           f"nmmax={n_meds}, nf={n_freqs}, 9, max_n={max_n})")
+
+
+def read_jac_file(path):
+    """
+    Lê arquivo binário .jac v3 gerado pelo simulador Fortran (F10 Estratégia C).
+
+    Formato stream unformatted (sem record markers Fortran):
+
+      Header (escrito UMA vez por arquivo quando modelm == 1):
+        magic        : 4 bytes  (ASCII b'JAC3')
+        version      : int32    (= 3)
+        nt           : int32    (ntheta — número de ângulos)
+        nmmax        : int32    (nmeds máximo entre ângulos)
+        nf           : int32    (número de frequências)
+        n_components : int32    (= 9, constante)
+        itr          : int32    (índice TR que gerou este arquivo, 1-based)
+        nTR          : int32    (total de pares TR no modelo.in)
+        nmaxmodel    : int32    (valor informativo — leitores contam até EOF)
+        nmeds[nt]    : int32[nt] (medidas efetivas por ângulo — ≤ nmmax)
+
+      Payload (repetido por modelo, até EOF):
+        model_id     : int32    (identificador 1-based do modelo)
+        n_layers     : int32    (número de camadas DESTE modelo — pode variar)
+        dH_dRho_h    : (Σ nmeds) × nf × 9 × n_layers pares (Re float64, Im float64)
+                       Ordem dos loops Fortran: (k, j, i, ic, layer)
+                         k=ângulo, j=posição∈[1,nmeds(k)], i=freq, ic=comp, layer
+        dH_dRho_v    : mesma estrutura que dH_dRho_h
+
+    Compatibilidade v2:
+        Também suporta arquivos v2 (magic b'JAC2') como fallback legado, desde
+        que todos os modelos tenham o mesmo n_layers fixado no header.
+
+    Estratégia de leitura v3 (duas passagens):
+        1. Primeira passagem: caminha pelo arquivo contando modelos e registrando
+           n_layers de cada um. Determina max_n_layers global.
+        2. Segunda passagem: aloca arrays de saída com dimensão max_n_layers e
+           preenche modelo-a-modelo, zero-pad onde n_layers_model < max_n_layers.
+
+    Notas:
+        - Apenas nmeds(k) posições por ângulo k são gravadas (não nmmax).
+          Os slots j > nmeds(k) do array de saída permanecem como zero (pad).
+        - Para nTR > 1 o Fortran gera arquivos separados: {filename}_TR{itr}.jac.
+          Cada arquivo deve ser lido independentemente.
+
+    Args:
+        path (str | Path): Caminho para o arquivo .jac v3 (ou v2 legado).
+
+    Returns:
+        dict com chaves:
+          'header'    : dict com nt, nmmax, nf, n_components, n_layers_max, itr,
+                        nTR, nmaxmodel, nmeds (np.int32 shape (nt,))
+          'dH_dRho_h' : np.complex128, shape (N, nt, nmmax, nf, 9, max_n_layers)
+                        onde N é o número real de modelos lidos (via EOF)
+                        zero-padded em j > nmeds(k) e layer > n_layers_model
+          'dH_dRho_v' : mesma shape que dH_dRho_h
+          'model_ids' : np.int32, shape (N,)
+          'n_layers_per_model' : np.int32, shape (N,)
+
+    Raises:
+        ValueError: Magic inválido ou versão incompatível.
+        EOFError:   Arquivo truncado no meio de um payload.
+
+    Exemplo:
+        >>> jac = read_jac_file('Inv0Dip0_1000.jac')
+        >>> jac['header']['nmaxmodel']
+        1000
+        >>> jac['dH_dRho_h'].shape
+        (1000, 1, 600, 2, 9, 30)   # max_n_layers = 30 (maior modelo)
+        >>> jac['n_layers_per_model'][:3]
+        array([ 7, 12,  5], dtype=int32)  # cada modelo pode ter tamanho diferente
+
+    Ref: docs/reference/documentacao_simulador_fortran_otimizado.md §11.9.5
+    """
+    import struct
+
+    with open(path, 'rb') as f:
+        # ── Leitura do header ────────────────────────────────────────────────
+        magic = f.read(4)
+        if magic not in (b'JAC2', b'JAC3'):
+            raise ValueError(
+                f"Magic inválido: {magic!r} — esperado b'JAC2' ou b'JAC3'. "
+                f"Verifique se o arquivo é .jac gerado por F10 Estratégia C.")
+
+        version = struct.unpack('<i', f.read(4))[0]
+        if version not in (2, 3):
+            raise ValueError(
+                f"Versão incompatível: {version} — somente v2 ou v3 suportado.")
+
+        if version == 3:
+            # v3: 7 inteiros (sem n_layers)
+            nt, nmmax, nf, n_comp, itr_hdr, nTR, nmaxmodel = \
+                struct.unpack('<7i', f.read(28))
+            n_layers_fixed = None  # determinado por-modelo
+        else:
+            # v2: 8 inteiros (n_layers fixo no header)
+            nt, nmmax, nf, n_comp, n_layers_fixed, itr_hdr, nTR, nmaxmodel = \
+                struct.unpack('<8i', f.read(32))
+
+        # nmeds por ângulo (nt valores int32)
+        nmeds = np.frombuffer(f.read(nt * 4), dtype=np.int32).copy()
+        payload_start = f.tell()
+        nmeds_sum = int(np.sum(nmeds))
+
+        # ── Passagem 1: conta modelos e registra n_layers por modelo ─────────
+        # Usa seek() para pular payloads sem lê-los — O(nmaxmodel) int32 reads.
+        n_layers_list = []
+        model_ids_list = []
+        while True:
+            raw_id = f.read(4)
+            if len(raw_id) < 4:
+                break  # EOF normal
+            model_id = struct.unpack('<i', raw_id)[0]
+
+            if version == 3:
+                raw_nl = f.read(4)
+                if len(raw_nl) < 4:
+                    raise EOFError(
+                        f"Arquivo truncado: n_layers faltando no modelo {len(n_layers_list)+1}")
+                n_layers_m = struct.unpack('<i', raw_nl)[0]
+            else:
+                n_layers_m = n_layers_fixed
+
+            # Tamanho do payload deste modelo (h + v)
+            payload_bytes = 2 * (nmeds_sum * nf * n_comp * n_layers_m) * 16
+            # Verifica se cabe antes de avançar
+            cur_pos = f.tell()
+            f.seek(0, 2)   # fim
+            remaining = f.tell() - cur_pos
+            f.seek(cur_pos)
+            if remaining < payload_bytes:
+                # Payload truncado — aborta a contagem neste modelo
+                break
+            f.seek(payload_bytes, 1)
+            model_ids_list.append(model_id)
+            n_layers_list.append(n_layers_m)
+
+        n_models_actual = len(n_layers_list)
+        if n_models_actual == 0:
+            # Retorna estrutura vazia para arquivo válido mas sem payloads
+            header = {
+                'nt': nt, 'nmmax': nmmax, 'nf': nf, 'n_components': n_comp,
+                'n_layers_max': 0, 'itr': itr_hdr, 'nTR': nTR,
+                'nmaxmodel': nmaxmodel, 'nmeds': nmeds,
+            }
+            return {
+                'header':     header,
+                'dH_dRho_h':  np.zeros((0, nt, nmmax, nf, n_comp, 0), dtype=np.complex128),
+                'dH_dRho_v':  np.zeros((0, nt, nmmax, nf, n_comp, 0), dtype=np.complex128),
+                'model_ids':  np.zeros(0, dtype=np.int32),
+                'n_layers_per_model': np.zeros(0, dtype=np.int32),
+            }
+
+        n_layers_per_model = np.array(n_layers_list, dtype=np.int32)
+        max_n_layers = int(n_layers_per_model.max())
+
+        header = {
+            'nt': nt, 'nmmax': nmmax, 'nf': nf, 'n_components': n_comp,
+            'n_layers_max': max_n_layers, 'itr': itr_hdr, 'nTR': nTR,
+            'nmaxmodel': nmaxmodel, 'nmeds': nmeds,
+        }
+
+        # ── Alocação dos arrays de saída (zero-padded em n_layers_max) ───────
+        dJ_h = np.zeros((n_models_actual, nt, nmmax, nf, n_comp, max_n_layers),
+                        dtype=np.complex128)
+        dJ_v = np.zeros_like(dJ_h)
+        model_ids = np.array(model_ids_list, dtype=np.int32)
+
+        offsets = np.concatenate(([0], np.cumsum(nmeds))).astype(np.int64)
+
+        # ── Passagem 2: leitura real dos payloads ────────────────────────────
+        f.seek(payload_start)
+        for m in range(n_models_actual):
+            # Consome model_id + n_layers (já lidos na passagem 1)
+            f.read(4)  # model_id
+            if version == 3:
+                f.read(4)  # n_layers
+            n_layers_m = int(n_layers_per_model[m])
+
+            n_cplx = nmeds_sum * nf * n_comp * n_layers_m
+
+            # dH_dRho_h: Re/Im intercalados
+            raw_bytes = f.read(n_cplx * 16)
+            if len(raw_bytes) < n_cplx * 16:
+                raise EOFError(
+                    f"Payload dH_dRho_h truncado no modelo {m+1}")
+            raw_f64 = np.frombuffer(raw_bytes, dtype=np.float64)
+            cplx_h = raw_f64[0::2] + 1j * raw_f64[1::2]
+
+            # dH_dRho_v
+            raw_bytes_v = f.read(n_cplx * 16)
+            if len(raw_bytes_v) < n_cplx * 16:
+                raise EOFError(
+                    f"Payload dH_dRho_v truncado no modelo {m+1}")
+            raw_f64_v = np.frombuffer(raw_bytes_v, dtype=np.float64)
+            cplx_v = raw_f64_v[0::2] + 1j * raw_f64_v[1::2]
+
+            # Distribui por ângulo k; layers > n_layers_m ficam zerados.
+            for k in range(nt):
+                nm_k = int(nmeds[k])
+                if nm_k == 0:
+                    continue
+                i0 = int(offsets[k]) * nf * n_comp * n_layers_m
+                cnt = nm_k * nf * n_comp * n_layers_m
+                dJ_h[m, k, :nm_k, :, :, :n_layers_m] = \
+                    cplx_h[i0: i0 + cnt].reshape(nm_k, nf, n_comp, n_layers_m)
+                dJ_v[m, k, :nm_k, :, :, :n_layers_m] = \
+                    cplx_v[i0: i0 + cnt].reshape(nm_k, nf, n_comp, n_layers_m)
+
+    return {
+        'header':              header,
+        'dH_dRho_h':           dJ_h,
+        'dH_dRho_v':           dJ_v,
+        'model_ids':           model_ids,
+        'n_layers_per_model':  n_layers_per_model,
+    }
+
+
+def merge_jac_files(chunks, output_path, total_models):
+    """
+    Mescla arquivos .jac v3 (ou v2 legado) de múltiplos workers em um único
+    arquivo unificado.
+
+    Cada worker gera um .jac parcial com os modelos do seu chunk. Esta função:
+      1. Lê o header do primeiro chunk para obter as dimensões invariantes
+         (nt, nmmax, nf, n_comp, nmeds).
+      2. Escreve um header atualizado com nmaxmodel = n_modelos_reais_lidos
+         (não confia no valor de chunk, que pode estar incorreto para workers
+         que não começam em model_id=1).
+      3. Copia sequencialmente os payloads — cada um com tamanho variável
+         ditado pelo `n_layers` do próprio payload (formato v3).
+
+    Estratégia v3: como cada modelo pode ter n_layers diferente, a cópia é
+    streaming — lê (model_id, n_layers), calcula bytes do payload, copia.
+    Em v2 legado, assume n_layers fixo do header do chunk.
+
+    A ordem dos payloads no arquivo mesclado reflete a ordem dos workers
+    (que é a mesma ordem crescente de model_id, já que chunks são gerados
+    sequencialmente por model_start).
+
+    Args:
+        chunks (list[tuple]): Lista de (worker_id, filepath_absoluto) já
+            ordenada por worker_id ascendente.
+        output_path (str): Caminho de saída do arquivo .jac mesclado.
+        total_models (int): Total de modelos ESPERADO no lote completo.
+            Usado como metadado informativo no header; o valor REAL gravado
+            é o número de modelos efetivamente lidos dos chunks.
+
+    Raises:
+        ValueError: Se o primeiro chunk tiver magic inválido.
+
+    Ref: docs/reference/documentacao_simulador_fortran_otimizado.md §11.9.5
+    """
+    import struct
+
+    if not chunks:
+        raise ValueError("merge_jac_files: lista de chunks vazia.")
+
+    # ── Lê header do primeiro chunk para obter dimensões invariantes ────────
+    first_path = chunks[0][1]
+    with open(first_path, 'rb') as f:
+        magic_first = f.read(4)
+        if magic_first not in (b'JAC2', b'JAC3'):
+            raise ValueError(
+                f"Magic inválido no primeiro chunk: {magic_first!r} — esperado b'JAC2' ou b'JAC3'.")
+        version_first = struct.unpack('<i', f.read(4))[0]
+        if version_first == 3:
+            nt, nmmax, nf, n_comp, itr_hdr, nTR, _nmaxmodel_chunk = \
+                struct.unpack('<7i', f.read(28))
+        elif version_first == 2:
+            nt, nmmax, nf, n_comp, _nlfix, itr_hdr, nTR, _nmaxmodel_chunk = \
+                struct.unpack('<8i', f.read(32))
+        else:
+            raise ValueError(f"Versão não suportada: {version_first}")
+        nmeds = np.frombuffer(f.read(nt * 4), dtype=np.int32).copy()
+
+    nmeds_sum = int(np.sum(nmeds))
+
+    # ── Escreve arquivo mesclado SEMPRE em formato v3 ───────────────────────
+    # Mesmo que os chunks sejam v2, convertemos para v3 no merge — v3 é o
+    # formato canônico. Cada payload ganha um campo n_layers explícito.
+    n_total_written = 0
+    with open(output_path, 'wb') as fout:
+        # Placeholder header (nmaxmodel = total_models — atualizado depois se diferente)
+        fout.write(b'JAC3')
+        fout.write(struct.pack('<i', 3))
+        fout.write(struct.pack('<7i',
+                               nt, nmmax, nf, n_comp,
+                               itr_hdr, nTR, total_models))
+        fout.write(nmeds.astype(np.int32).tobytes())
+
+        # Copia payloads de cada chunk em ordem
+        for wid, fpath in chunks:
+            n_copied = 0
+            with open(fpath, 'rb') as fin:
+                # Detecta versão deste chunk (pode diferir do primeiro)
+                fin.read(4)  # descarta magic
+                ver_c = struct.unpack('<i', fin.read(4))[0]
+                if ver_c == 3:
+                    fin.read(28)  # pula 7 ints
+                    nl_fixed_chunk = None
+                else:
+                    _pack = struct.unpack('<8i', fin.read(32))
+                    nl_fixed_chunk = _pack[4]
+                fin.read(nt * 4)  # pula nmeds
+
+                while True:
+                    raw_id = fin.read(4)
+                    if len(raw_id) < 4:
+                        break  # EOF normal
+                    model_id = struct.unpack('<i', raw_id)[0]
+
+                    if ver_c == 3:
+                        raw_nl = fin.read(4)
+                        if len(raw_nl) < 4:
+                            print(f"  [AVISO merge_jac] n_layers truncado em worker {wid}")
+                            break
+                        n_layers_m = struct.unpack('<i', raw_nl)[0]
+                    else:
+                        n_layers_m = nl_fixed_chunk
+
+                    payload_bytes = 2 * (nmeds_sum * nf * n_comp * n_layers_m) * 16
+                    payload = fin.read(payload_bytes)
+                    if len(payload) < payload_bytes:
+                        print(f"  [AVISO merge_jac] Payload truncado em worker {wid} "
+                              f"(modelo {model_id}): {len(payload)}/{payload_bytes} bytes")
+                        break
+
+                    # Grava no formato v3 canônico: (model_id, n_layers, payload)
+                    fout.write(struct.pack('<2i', model_id, n_layers_m))
+                    fout.write(payload)
+                    n_copied += 1
+
+            n_total_written += n_copied
+            print(f"     worker {wid}: {n_copied} modelo(s) copiado(s) de {Path(fpath).name}")
+
+        # Atualiza nmaxmodel no header se o real diferiu do esperado
+        if n_total_written != total_models:
+            print(f"  [AVISO merge_jac] n_modelos lidos ({n_total_written}) ≠ "
+                  f"total_models esperado ({total_models}) — corrigindo header.")
+            fout.seek(4 + 4 + 6 * 4)   # posição de nmaxmodel no header v3
+            fout.write(struct.pack('<i', n_total_written))
+
+    out_size_kb = os.path.getsize(output_path) / 1024
+    print(f"  [F10-C] .jac mesclado: {output_path} "
+          f"({n_total_written} modelos, {out_size_kb:.1f} KB)")
 
 
 def extract_model_in_header(model_in_path):
@@ -581,8 +930,17 @@ def run_model_batch(args):
                 #       compute_jacobian_fd (OpenMP), gerando arquivos .jac adjacentes.
                 #
                 # Para Estratégia B escrevemos use_jacobian=0 (o Fortran não precisa
-                # saber). Para Estratégia C escrevemos as três linhas F10 completas.
+                # saber). Para Estratégia C escrevemos as três linhas F10 completas
+                # PRECEDIDAS por F6=0 e filter_type=0 — a ordem de leitura do Fortran
+                # em RunAnisoOmp.f08 é estrita:  F5 → F7 → F6 → filter_type → F10.
+                # Omitir F6/filter_type faz o Fortran interpretar "1" do use_jacobian
+                # como use_compensation e abortar a cadeia sem chegar em F10.
                 if use_jacobian == 1 and jacobian_method == 1:
+                    # F6 (use_compensation) — desabilitado em modo Jacobiano.
+                    f.write(f"0                 !F6: use_compensation (0=desabilitado)\n")
+                    # Filtro Adaptativo — Werthmuller (padrão, 201 pts)
+                    f.write(f"0                 !Filtro: 0=Werthmuller (default)\n")
+                    # F10 — três linhas obrigatórias
                     f.write(f"1                 !F10: use_jacobian (Estratégia C)\n")
                     f.write(f"{jacobian_method}                 !F10: jacobian_method (1=Fortran OpenMP)\n")
                     f.write(f"{jacobian_fd_step}          !F10: jacobian_fd_step\n")
@@ -593,22 +951,32 @@ def run_model_batch(args):
             subprocess.run([tatu_dst], cwd=tmpdir, env=env,
                            capture_output=True, check=True, timeout=120)
 
-        original_dir = os.getcwd() 
+        original_dir = os.getcwd()
         results_dat = []
         results_out = []
+        results_jac = []
 
         # Salvamento Parametrizado. Protegendo as Saídas Brutas movendo-as prefixadas perante sobreposição:
         for f in Path(tmpdir).glob('*.dat'):
             new_name = f'w{worker_id}_{f.name}'
             shutil.move(str(f), os.path.join(original_dir, new_name))
             results_dat.append((f.name, new_name))
-            
+
         for f in Path(tmpdir).glob('*.out'):
             new_name = f'w{worker_id}_{f.name}'
             shutil.move(str(f), os.path.join(original_dir, new_name))
             results_out.append((f.name, new_name))
 
-        return worker_id, model_start, model_end, results_dat, results_out
+        # F10 Estratégia C — Salva arquivos .jac gerados pelo Fortran.
+        # CRÍTICO: sem este bloco os .jac são silenciosamente destruídos junto
+        # com o TemporaryDirectory. Só move quando Strategy C está ativa.
+        if use_jacobian == 1 and jacobian_method == 1:
+            for f in Path(tmpdir).glob('*.jac'):
+                new_name = f'w{worker_id}_{f.name}'
+                shutil.move(str(f), os.path.join(original_dir, new_name))
+                results_jac.append((f.name, new_name))
+
+        return worker_id, model_start, model_end, results_dat, results_out, results_jac
 
 
 # ==============================================================================
@@ -813,12 +1181,16 @@ def main():
     # Pool de Execuções e Fechamento Místico de Contextos Python. Responde Eventos Concluidos em Tempos Ociosos.
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
         futures = {pool.submit(run_model_batch, b): b for b in batches}
-        for future in as_completed(futures): 
-            wid, ms, me, res_dat, res_out = future.result()
+        for future in as_completed(futures):
+            result = future.result()
+            wid, ms, me, res_dat, res_out = result[:5]
+            res_jac = result[5] if len(result) > 5 else []
             print(f'  [✓] Nó Analítico Worker-{wid}: Compilação Estrutural {ms}-{me} fechada e exportada.')
-            
+            if res_jac:
+                print(f'       -> {len(res_jac)} arquivo(s) .jac (F10-C) movido(s).')
+
             # Ancoragem Base de Lixo para futura mesclagem indexada:
-            for base, chunkf in res_dat + res_out:
+            for base, chunkf in res_dat + res_out + res_jac:
                 if base not in chunks_to_concat:
                     chunks_to_concat[base] = []
                 chunks_to_concat[base].append((wid, chunkf))
@@ -927,6 +1299,28 @@ def main():
                 print(f"     nt={_nt} nf={_nf} nmaxmodel={total} nmeds={nmeds_from_frag}")
                 continue
 
+            # ── Merge de .jac binários (F10 Estratégia C) ─────────────────────
+            # Cada worker gera um .jac parcial. merge_jac_files lê o header
+            # do primeiro chunk, descarta headers dos demais e concatena apenas
+            # os payloads, escrevendo um .jac unificado com nmaxmodel=total.
+            if basename.endswith('.jac'):
+                print(f"  -> Mesclando {len(chunks)} fragmentos .jac → {basename}")
+                try:
+                    merge_jac_files(
+                        chunks=[(wid, os.path.join(os.getcwd(), chunkf))
+                                for wid, chunkf in chunks],
+                        output_path=final_path,
+                        total_models=total,
+                    )
+                    # Remove fragmentos após merge bem-sucedido
+                    for _, chunkf in chunks:
+                        chunk_path = os.path.join(os.getcwd(), chunkf)
+                        if os.path.exists(chunk_path):
+                            os.remove(chunk_path)
+                except Exception as _e:
+                    print(f"  [AVISO] Falha ao mesclar .jac: {_e} — fragmentos preservados.")
+                continue
+
             # ── Concatenação binária padrão (apenas para .dat) ─────────────────
             print(f"  -> Calibrando merge de {len(chunks)} sub-sinalizações particionais rumo ao Arquivo Base: {basename}")
             with open(final_path, 'wb') as outfile:
@@ -1031,6 +1425,35 @@ def main():
                 )
             except Exception as e:
                 print(f"[F10-B ERRO] Falha ao calcular Jacobiano para {basename}: {e}")
+
+    # ──────────────────────────────────────────────────────────────────
+    # Resumo final dos arquivos Jacobiano gerados (F10-B ou F10-C)
+    # ──────────────────────────────────────────────────────────────────
+    # Mostra ao usuário exatamente onde os artefatos .jac/.jac.npz ficaram,
+    # com caminho absoluto e tamanho. Facilita pipelines downstream (PINNs,
+    # inversão Gauss-Newton) que precisam abrir esses arquivos.
+    if use_jacobian_flag == 1 and not args.no_concat:
+        jac_artifacts = []
+        if jacobian_method == 1:
+            # Estratégia C: arquivos .jac binários v3 gerados pelo Fortran
+            jac_artifacts = sorted(Path(os.getcwd()).glob('*.jac'))
+            label = "F10-C (Fortran OpenMP binário v3)"
+        else:
+            # Estratégia B: arquivos .jac.npz NumPy gerados pelo Python
+            jac_artifacts = sorted(Path(os.getcwd()).glob('*.jac.npz'))
+            label = "F10-B (Python Workers NumPy)"
+
+        if jac_artifacts:
+            print("")
+            print(f"[{label}] Arquivos Jacobiano gerados:")
+            for art in jac_artifacts:
+                sz_kb = art.stat().st_size / 1024
+                sz_mb = sz_kb / 1024
+                sz_str = f"{sz_mb:.2f} MB" if sz_mb >= 1 else f"{sz_kb:.1f} KB"
+                print(f"   -> {art}  ({sz_str})")
+            print(f"   Diretório de saída: {os.getcwd()}")
+        else:
+            print(f"\n[AVISO {label}] Nenhum arquivo Jacobiano encontrado após execução.")
 
     print("="*80)
     print("Encerramento Executável com Resolução Sucesso. Datasets Inteligentes Subsequentes Disponíveis!")
