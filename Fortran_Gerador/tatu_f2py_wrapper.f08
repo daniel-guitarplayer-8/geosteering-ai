@@ -34,7 +34,7 @@ module tatu_wrapper
   use utils
   use magneticdipoles
   use omp_lib
-  use DManisoTIV, only: compute_jacobian_fd   ! F10 — reutilizado em simulate_v10_jacobian
+  use DManisoTIV, only: compute_jacobian_fd, fieldsinfreqs_cached_ws
   implicit none
 contains
 

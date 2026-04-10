@@ -3424,24 +3424,33 @@ Dimensões do Jacobiano:
   │  reutilizando caches Phase 4 e ws_pool existente. Loop paralelo sobre    │
   │  2n perturbações (n camadas × 2 componentes h/v) via !$omp parallel do.  │
   │                                                                          │
-  │  !$omp parallel do schedule(dynamic, 1) default(shared)                  │
-  │    private(kk, layer, comp, resist_p, resist_m, cH_p, cH_m, ...)         │
+  │  ! Região parallel abre UMA vez; allocate dos caches FORA do do          │
+  │  !$omp parallel default(shared)                                          │
+  │    private(kk, layer, comp, resist_p, resist_m, cH_p, cH_m,              │
+  │            u_p, s_p, ..., AdmInt_p, u_m, s_m, ..., AdmInt_m)             │
+  │  allocate(u_p(npt,n,nf), s_p(npt,n,nf), ...)   ! UMA vez/thread          │
+  │  !$omp do schedule(dynamic, 1)                                           │
   │  do kk = 1, 2*n                                                          │
   │    layer = (kk-1)/2 + 1                                                  │
   │    comp  = mod(kk-1, 2) + 1    ! 1=h, 2=v                                │
-  │    ! Aloca caches Phase 4 privados por thread                            │
+  │    ! Recomputa commonarraysMD para eta_p / eta_m (só camada perturbada)  │
   │    ! Chama fieldsinfreqs_cached_ws para +δ e −δ                          │
-  │    ! Calcula J = (H_p - H_m) / (2δ)                                      │
+  │    ! Calcula J = (H_p − H_m) / (2δ)                                      │
   │  end do                                                                  │
-  │  !$omp end parallel do                                                   │
+  │  !$omp end do                                                            │
+  │  deallocate(u_p, s_p, ..., AdmInt_p, ...)                                │
+  │  !$omp end parallel                                                      │
   │                                                                          │
   │  Vantagens:                                                              │
   │    • Zero I/O: J fica em memória                                         │
   │    • Reaproveita commonarraysMD e ws_pool existentes                     │
   │    • ~13× mais rápido que Estratégia B (relatório §9.3)                  │
   │    • Throughput ~12.900 mod+J/h                                          │
+  │    • Assumed-shape nos outputs: elimina copy-in/copy-out do caller       │
+  │    • Allocate OUT-OF-LOOP: reduz allocs em ~95% vs versão inicial        │
+  │    • Política de δ robusta (piso 1e-6, teto 10% de |ρ|)                  │
   │                                                                          │
-  │  Saída: arquivos .jac (binário stream) com shape                         │
+  │  Saída: arquivos .jac v2 (binário stream) com shape                      │
   │         (ntheta, nmmax, nf, 9, n) complex(dp) para h e v.                │
   │                                                                          │
   │  Uso: --use-jacobian 1 --jacobian-method 1                               │
@@ -3460,16 +3469,55 @@ Dimensões do Jacobiano:
 **Recomendação:** usar Estratégia C (método 1) para datasets de produção (throughput 13× maior).
 Estratégia B (método 0) é útil para validação cruzada e ambientes onde não é possível recompilar o Fortran.
 
-#### 11.9.5 Formato do arquivo `.jac` (Estratégia C, binário stream)
+#### 11.9.5 Formato do arquivo `.jac` v2 (Estratégia C, binário stream)
+
+**Versão 2 (v10.0 revisado — 2026-04-10):** O formato foi estendido com `magic`,
+`version`, `n_total_models` e `nmeds(1..nt)` para permitir leitores robustos que
+não dependam de suposições externas sobre a estrutura dos dados.
 
 ```
-Header (int32): nt, nmmax, nf, 9, n_layers, itr, nTR     (28 bytes)
-Payload:
-  Re/Im de dH_dRho_h(k, j, i, ic, layer) × nt × nmmax × nf × 9 × n_layers
-  Re/Im de dH_dRho_v(k, j, i, ic, layer) × nt × nmmax × nf × 9 × n_layers
+Header (escrito UMA vez — quando modelm=1 OU arquivo novo):
+  4 bytes  : magic = 'JAC2'                                      (ASCII)
+  4 bytes  : version = 2                                          (int32)
+  8 × 4B   : nt, nmmax, nf, 9, n_layers, itr, nTR, n_total_models (int32)
+  nt × 4B  : nmeds(1..nt)                                         (int32)
+
+Payload (repetido por modelo, append em arquivo pré-existente):
+  4 bytes : modelm                                                (int32)
+  Re/Im de dH_dRho_h(k, j, i, ic, layer) para k ∈ [1..nt],
+                                              j ∈ [1..nmeds(k)],
+                                              i ∈ [1..nf],
+                                              ic ∈ [1..9],
+                                              layer ∈ [1..n_layers]
+  Re/Im de dH_dRho_v(k, j, i, ic, layer)  — mesma ordem
 ```
+
+Cada elemento Re/Im é um par (`real(dp), real(dp)`) → 16 bytes/complexo.
+Ordem dos loops (column-major de Fortran): `(k, j, i, ic, layer)`.
+
+**Tamanho por modelo**: `4 + 2 × (sum(nmeds) × nf × 9 × n_layers) × 16` bytes.
 
 Nome: `{filename}[_TR{itr}].jac` (sufixo `_TR{itr}` apenas se nTR > 1).
+
+**Leitura em Python** (exemplo):
+```python
+import numpy as np
+with open('model.jac', 'rb') as f:
+    magic = f.read(4).decode('ascii')
+    assert magic == 'JAC2'
+    version = np.frombuffer(f.read(4), dtype=np.int32)[0]
+    header = np.frombuffer(f.read(8*4), dtype=np.int32)
+    nt, nmmax, nf, nc, n_layers, itr, nTR, n_total = header
+    nmeds = np.frombuffer(f.read(nt*4), dtype=np.int32)
+    # Payload: lê por modelo
+    payload_size_per_model = 2 * int(nmeds.sum()) * nf * nc * n_layers * 16
+    for m in range(n_total):
+        model_id = np.frombuffer(f.read(4), dtype=np.int32)[0]
+        buf = np.frombuffer(f.read(payload_size_per_model), dtype=np.float64)
+        pair = buf.reshape(-1, 2)
+        complex_data = pair[:, 0] + 1j * pair[:, 1]
+        # Shape lógico: (h, v) × nt × sum(nmeds) × nf × 9 × n_layers
+```
 
 #### 11.9.6 Formato do arquivo `.jac.npz` (Estratégia B, NumPy compactado)
 
@@ -3497,6 +3545,41 @@ zrho, cH, cH_tilted, dJ_h, dJ_v = tatu_f2py.simulate_v10_jacobian(
 assert dJ_h.shape == (1, 1, 600, 2, 9, 3)
 assert dJ_v.shape == (1, 1, 600, 2, 9, 3)
 ```
+
+#### 11.9.8 Revisão de Implementação (v10.0 — 2026-04-10)
+
+A implementação inicial de F10 passou por revisão integral que identificou e
+corrigiu 7 bugs/inconsistências. Os resultados estão resumidos abaixo.
+
+| ID | Severidade | Descrição | Arquivo | Correção |
+|:--:|:----------:|:----------|:--------|:---------|
+| **BUG 1** | Crítico (perf) | `compute_jacobian_fd` recebia slices não-contíguas (`h_all(itr, k, 1:nmed(k), :, :, :)`) como `explicit-shape`, forçando `copy-in/copy-out` de ~500 KB por ângulo. | `PerfilaAnisoOmp.f08:1486-1622`, `tatu_f2py_wrapper.f08:832-837` | Assinatura alterada para **assumed-shape** `dH_dRho_*_out(:, :, :, :)`. Fortran passa descritor (dope vector) em vez de cópia. |
+| **BUG 2** | Moderado (correção) | `delta = max(fd_step × |ρ|, 1e-6)` podia gerar `resist_m ≤ 0` para `ρ_ref < 2 × 1e-6`, causando divisão por zero em `eta_m = 1/resist_m`. | `PerfilaAnisoOmp.f08:1559` | Política 3-etapas: piso absoluto `1e-6` + teto relativo `0.1 × |ρ_ref|` garante `resist_m > 0` sempre. |
+| **BUG 3** | Moderado (perf) | `allocate`/`deallocate` de 18 caches privados dentro do `!$omp parallel do` gerava `2n × 18 × 2` allocs/thread (contenção no mutex do heap glibc). | `PerfilaAnisoOmp.f08:1570-1620` | Região `!$omp parallel` separada do `!$omp do`. Allocate movido para ANTES do `do`, deallocate após. Cada thread aloca apenas 18 arrays (redução de ~95% em allocs). |
+| **BUG 4** | Crítico (correção) | `batch_runner.py` escrevia flags F5/F7 → F10 diretamente, pulando F6 e `filter_type`. RunAnisoOmp lia F10 no lugar de F6, corrompendo o parsing e levando a `use_compensation=1` acidental. | `batch_runner.py:541-570` | Ordem corrigida: F5 → F7 → [F6 opcional] → [filter_type opcional] → F10. Comentário CRÍTICO adicionado. |
+| **BUG 5** | Moderado (correção) | `compute_jacobian_from_perturbations` usava `_nmeds_guess = 600` hardcoded, causando off-by-one em `extract_tensor` quando o modelo tinha `nmeds ≠ 600`. | `batch_runner.py:939` | Função helper `_nmeds_from_out_file` lê `nmeds(1..nt)` da linha 4 do `.out`; fallback computa a partir de `tj/p_med/theta` no `model.in`. |
+| **BUG 6** | Menor (robustez) | Header `.jac` v1 continha apenas `(nt, nmmax, nf, 9, n_layers, itr, nTR)`. Leitores precisariam adivinhar `nmeds` e `n_total_models`. | `PerfilaAnisoOmp.f08:1642-1711` | Novo formato **.jac v2** com `magic='JAC2'`, `version=2`, `n_total_models` e `nmeds(1..nt)` explícitos. |
+| **BUG 7** | Infra (build) | `make f2py_wrapper` falhava porque o `python3` padrão do Homebrew 3.14 não tem `numpy` instalado. | `Makefile:134-160` | Variável `PYTHON ?= ...` auto-detecta o primeiro interpretador com `numpy.f2py` disponível (prioriza `python3.11`, `python`, etc.). |
+
+**Validação numérica pós-refactor** (via `validate_jacobian.py`):
+
+| Teste | Critério | Resultado |
+|:------|:---------|:---------:|
+| Smoke test | shapes corretos, sem NaN/Inf | **PASS** (31 ms) |
+| Coerência ±δ | `H(ρ+δ) ≠ H(ρ−δ)`, bias `(H+ + H−)/2 − H(ρ)` < 1e-6 rel | **PASS** (bias = 6.7e-11 rel) |
+| Convergência O(δ²) | ordem ∈ [1.5, 2.8] | **PASS** (ordem = 2.00) |
+| Referência Python manual | diff Fortran ↔ Python < 1e-8 rel | **PASS** (diff = 0.0, bit-exato) |
+
+**Execução:**
+```bash
+cd Fortran_Gerador/
+make clean && make && make f2py_wrapper
+python validate_jacobian.py
+```
+
+Todos os 4 testes passaram em 0.2s. A comparação Fortran ↔ Python é bit-exata
+porque ambas as implementações usam os mesmos forward calls, com o mesmo valor
+de δ e a mesma política de guard — o que confirma a equivalência matemática.
 
 ---
 

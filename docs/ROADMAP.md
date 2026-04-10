@@ -380,7 +380,7 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 | **Feature 7** | **Antenas inclinadas (tilted coils)** | 📋 **Planejada** | Combinação linear: `H_tilted = cos(β)×H_axial + sin(β)×H_transverse`. Pós-processamento no tensor H(3×3). ~50 LOC. |
 | **Feature 8** | **Correção 1.5D (relative dip)** | 📋 **Planejada** | Modificação dos coeficientes de reflexão para camadas inclinadas. Essencial para geosteering real. ~500 LOC. |
 | **Feature 9** | **Efeito de invasão (mud filtrate)** | 📋 **Planejada** | Modelo de invasão radial step/gradient. Melhora fidelidade dos dados de treinamento. ~400 LOC. |
-| **Feature 10** | **Sensibilidades ∂H/∂ρ** | 📋 **Planejada** | Via diferenças finitas (Fortran) ou auto-diff (JAX). Essencial para PINNs e inversão Gauss-Newton. ~800 LOC (Fortran). |
+| **Feature 10** | **Sensibilidades ∂H/∂ρ (Jacobiano)** | ✅ **Implementada (v10.0 — 2026-04-10)** | Via diferenças finitas centradas — **Estratégias B (Python Workers) + C (Fortran OpenMP)**. Refactor de revisão aplicado: assumed-shape (elimina copy-in/out), allocate out-of-parallel (95% menos allocs), guard δ robusto, header .jac v2 com `nmeds`, ordem correta de flags no `batch_runner`. Validado via `validate_jacobian.py` (4/4 testes PASS — ordem O(δ²) = 2.00, bit-exato Fortran ↔ Python manual). ~1.250 LOC. |
 
 **Débitos técnicos — status atualizado**:
 

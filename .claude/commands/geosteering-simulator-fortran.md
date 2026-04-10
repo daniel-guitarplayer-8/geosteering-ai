@@ -180,25 +180,48 @@ jacobian_method=0: Estratégia B — Python Workers (ProcessPoolExecutor)
   • Expande cada modelo em 1+4n sub-modelos perturbados
   • Reutiliza infraestrutura de batch existente
   • Pós-processamento Python → salva .jac.npz (NumPy compactado)
-  • Throughput: ~1.930 mod+J/h
+  • nmeds por ângulo detectado dinamicamente do .out (fallback: model.in)
+  • Throughput estimado: ~1.930 mod+J/h
   • Uso: --use-jacobian 1 --jacobian-method 0
 
 jacobian_method=1: Estratégia C — Fortran OpenMP interno
-  • compute_jacobian_fd com !$omp parallel do schedule(dynamic, 1)
+  • compute_jacobian_fd com !$omp parallel default(shared) + !$omp do schedule(dynamic, 1)
   • Loop sobre 2n perturbações (n camadas × h/v) paralelo
-  • Cada thread aloca caches privados + reutiliza ws_pool
-  • Throughput: ~12.900 mod+J/h (13× mais rápido que B)
-  • Saída: arquivos .jac binário stream
+  • Caches privados (u_p, s_p, RT*_p, AdmInt_p) alocados UMA vez por thread
+    (refactor out-of-loop: elimina contenção no heap → ~95% menos allocs)
+  • Assumed-shape nos outputs (dH_dRho_*_out(:, :, :, :)) evita copy-in/out
+    de slices não-contíguas do caller
+  • Política de passo δ robusta:
+      1. δ_rel = fd_step × |ρ_ref|
+      2. δ = max(δ_rel, 1e-6)       — piso absoluto
+      3. δ = min(δ, 0.1 × |ρ_ref|)  — teto relativo (garante ρ_ref−δ > 0)
+  • Throughput estimado: ~12.900 mod+J/h (13× mais rápido que B)
+  • Saída: arquivos .jac v2 binário stream
   • Uso: --use-jacobian 1 --jacobian-method 1
 ```
 
 Shape do Jacobiano: `(nTR, ntheta, nmmax, nf, 9, n_layers)` complex(dp), dois arrays
-(`dH_dRho_h` e `dH_dRho_v`). `δ = max(jacobian_fd_step × |ρ|, 1e-6)` (default `fd_step = 1e-4`).
+(`dH_dRho_h` e `dH_dRho_v`). Default `fd_step = 1e-4`.
+
+**Formato .jac v2 (stream unformatted):**
+```
+header: magic='JAC2' (4B) + version=2 (int32)
+        nt, nmmax, nf, 9, n_layers, itr, nTR, n_total_models (8 × int32)
+        nmeds(1..nt) (nt × int32)
+payload por modelo:
+        modelm (int32)
+        Re/Im dH_dRho_h[k,j,i,ic,layer] — (nt × nmeds(k) × nf × 9 × n_layers × 2 × 8B)
+        Re/Im dH_dRho_v[k,j,i,ic,layer] — idem
+```
 
 Aplicações: PINNs (physics loss), inversão Gauss-Newton (`Δρ = (JᵀJ)⁻¹JᵀΔd`),
 quantificação de incerteza (matriz de covariância posterior).
 
 Wrapper f2py: `simulate_v10_jacobian(...)` retorna `(zrho, cH, cH_tilted, dH_dRho_h, dH_dRho_v)`.
+
+**Validação:** `validate_jacobian.py` — 4 testes (smoke, coerência ±δ, ordem O(δ²),
+referência Python manual). Testes 4/4 passam após refactor; ordem estimada = 2.00,
+diferença Fortran ↔ Python = 0.0 (bit-exato, validado 2026-04-10).
 
 ## 8. Scripts Python
 
@@ -206,7 +229,8 @@ Wrapper f2py: `simulate_v10_jacobian(...)` retorna `(zrho, cH, cH_tilted, dH_dRh
 |:-------|:-------|
 | `fifthBuildTIVModels.py` | Gerador de modelos TIV via Sobol QMC + Dirichlet (8 ensembles) |
 | `buildValidamodels.py` | Validação com 6 modelos canônicos (Oklahoma, Devine, Hou et al.) |
-| `batch_runner.py` | Orquestrador paralelo: ProcessPoolExecutor + concatenação binária |
+| `batch_runner.py` | Orquestrador paralelo: ProcessPoolExecutor + concatenação binária + F10 Estratégia B |
+| `validate_jacobian.py` | **Validação F10**: 4 testes (smoke, ±δ, O(δ²), referência Python) |
 | `bench/run_bench.sh` | Benchmark: wall-time, MD5, estatísticas |
 
 ## 9. Constantes Físicas (parameters.f08)

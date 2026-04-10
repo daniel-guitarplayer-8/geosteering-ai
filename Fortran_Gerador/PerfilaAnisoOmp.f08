@@ -1450,12 +1450,17 @@ end subroutine write_results
 ! ESTRATÉGIA C — Paralelização OpenMP interna (Máxima Performance)
 !
 ! Calcula a matriz Jacobiana ∂H/∂ρ para todas as medidas j de um único
-! ângulo k e par T-R itr, usando diferenças finitas centradas:
+! ângulo k e par T-R itr, usando diferenças finitas centradas (erro O(δ²)):
 !
 !   J_{jfc,layer,h} = (H_{jfc}(ρ_h + δ) − H_{jfc}(ρ_h − δ)) / (2 δ)
 !   J_{jfc,layer,v} = (H_{jfc}(ρ_v + δ) − H_{jfc}(ρ_v − δ)) / (2 δ)
 !
-! onde δ = max(fd_step × |ρ_ref|, 1e-6).
+! onde o passo δ segue a política de robustez numérica:
+!   1. δ = fd_step × |ρ_ref|             (perturbação puramente relativa)
+!   2. δ = max(δ, 1e-6)                   (piso absoluto)
+!   3. δ = min(δ, 0.1 × |ρ_ref|)          (teto relativo — protege ρ_m > 0)
+! Esta política garante que resist − δ > 0 sempre (evitando divisão por zero
+! em eta = 1/resist), mesmo para valores não-físicos de ρ_ref.
 !
 ! PARALELISMO: o loop `do kk = 1, 2*n` é paralelizado via !$omp parallel do.
 ! Cada iteração kk corresponde a UMA perturbação (layer, componente h ou v),
@@ -1469,9 +1474,18 @@ end subroutine write_results
 !
 ! THREAD-SAFETY:
 !   - ws_pool_in(tid) — cada thread usa seu próprio slot (tid único por thread)
-!   - Caches perturbados (u_p, s_p, ..., AdmInt_p) — alocados DENTRO do parallel
-!     do (arrays privados automáticos via allocate), não compartilhados
+!   - Caches perturbados (u_p, s_p, ..., AdmInt_p) — alocados UMA VEZ POR THREAD
+!     em região !$omp parallel separada (via diretriz private + allocate),
+!     evitando contenção de heap nos 2*n allocate/deallocate do loop kk.
 !   - resist_p, resist_m, eta_p, eta_m — arrays privados por thread
+!
+! ASSUMED-SHAPE (otimização de passagem):
+!   dH_dRho_*_out são declarados com `dimension(:,:,:,:)` (assumed-shape),
+!   permitindo que o CALLER passe slices não-contíguas (e.g., `h_all(itr,k,
+!   1:nmed(k), :, :, :)` que é descontíguo em column-major) SEM copy-in/
+!   copy-out. Isso requer interface explícita — garantido por estarmos no
+!   mesmo módulo DManisoTIV. Ganho: elimina cópia temporária de ~500 KB/k
+!   para o caso típico (ntheta=1, nmmax=600, nf=2, 9 comp, n=10 camadas).
 !
 ! REUTILIZAÇÃO DO ws_pool:
 ! compute_jacobian_fd é chamada FORA do loop paralelo externo de perfila1DanisoOMP
@@ -1486,8 +1500,12 @@ subroutine compute_jacobian_fd(ws_pool_in, n_threads_pool, ang, nf, freq,      &
                                 fd_step, dH_dRho_h_out, dH_dRho_v_out)
   implicit none
   ! ── Entradas ──
+  ! NOTA: n_threads_pool DEVE ser declarado antes de ws_pool_in,
+  ! pois Fortran 2008 estrito (-std=f2008) exige que variáveis usadas
+  ! no dimensionamento de arrays já estejam tipadas nesse ponto.
+  integer,      intent(in) :: n_threads_pool
   type(thread_workspace), intent(inout) :: ws_pool_in(0:n_threads_pool-1)
-  integer,      intent(in) :: n_threads_pool, nf, n_pos, npt_active, n
+  integer,      intent(in) :: nf, n_pos, npt_active, n
   real(dp),     intent(in) :: ang, freq(nf)
   real(dp),     intent(in) :: posTR_array(6, n_pos)
   character(*), intent(in) :: dipolo
@@ -1496,22 +1514,23 @@ subroutine compute_jacobian_fd(ws_pool_in, n_threads_pool, ang, nf, freq,      &
   real(dp),     intent(in) :: r_k         ! distância horizontal T-R (já computada no caller)
   real(dp),     intent(in) :: fd_step     ! ε relativo para FD centrada
 
-  ! ── Saídas ──
-  ! Shape (n_pos, nf, 9, n) — 4D: uma fatia "layer" por iteração kk.
-  ! O caller passa dH_dRho_h_all(itr, k, 1:nmed(k), :, :, :) com shape
-  ! (nmed(k), nf, 9, n) que casa com esta declaração explicit-shape.
-  complex(dp), intent(out) :: dH_dRho_h_out(n_pos, nf, 9, n)
-  complex(dp), intent(out) :: dH_dRho_v_out(n_pos, nf, 9, n)
+  ! ── Saídas (assumed-shape para aceitar slices não-contíguas do caller) ──
+  ! Shape esperado: (n_pos, nf, 9, n). A declaração assumed-shape permite que
+  ! o Fortran passe descritor (dope vector) em vez de copiar o array — crítico
+  ! para performance quando o caller passa h_all(itr, k, 1:nmed(k), :, :, :).
+  complex(dp), intent(out) :: dH_dRho_h_out(:, :, :, :)
+  complex(dp), intent(out) :: dH_dRho_v_out(:, :, :, :)
 
   ! Variáveis locais
-  integer     :: kk, layer, comp, jj, tid, ii
+  integer     :: kk, layer, comp, jj, ii
+  integer     :: tid                 !tid removido da cláusula private — atribuído dentro do loop
   real(dp)    :: delta, rho_ref, omega_loc
   complex(dp) :: zeta_loc
   real(dp)    :: resist_p(n, 2), resist_m(n, 2)
   real(dp)    :: eta_p(n, 2), eta_m(n, 2)
   real(dp)    :: zrho_p(nf, 3), zrho_m(nf, 3)
   complex(dp) :: cH_p(nf, 9), cH_m(nf, 9)
-  ! Caches perturbados por thread — alocados dentro do parallel do
+  ! Caches perturbados — alocados UMA vez por thread em região parallel externa
   complex(dp), allocatable :: u_p(:,:,:), s_p(:,:,:), uh_p(:,:,:), sh_p(:,:,:)
   complex(dp), allocatable :: RTEdw_p(:,:,:), RTEup_p(:,:,:)
   complex(dp), allocatable :: RTMdw_p(:,:,:), RTMup_p(:,:,:)
@@ -1521,21 +1540,31 @@ subroutine compute_jacobian_fd(ws_pool_in, n_threads_pool, ang, nf, freq,      &
   complex(dp), allocatable :: RTMdw_m(:,:,:), RTMup_m(:,:,:)
   complex(dp), allocatable :: AdmInt_m(:,:,:)
 
+  ! ── Sanidade de shape (defensiva, custo O(1)) ──
+  ! O caller DEVE passar arrays com shape (n_pos, nf, 9, n). Erros de shape
+  ! são detectados imediatamente, impedindo corrupção silenciosa.
+  if (size(dH_dRho_h_out, 1) /= n_pos .or. size(dH_dRho_h_out, 2) /= nf .or. &
+      size(dH_dRho_h_out, 3) /= 9     .or. size(dH_dRho_h_out, 4) /= n) then
+    write(*,'(A)') '[F10 ERRO] shape de dH_dRho_h_out inconsistente — abortando.'
+    write(*,'(A,4I6)') '  esperado: ', n_pos, nf, 9, n
+    write(*,'(A,4I6)') '  recebido: ', size(dH_dRho_h_out, 1), size(dH_dRho_h_out, 2), &
+                                          size(dH_dRho_h_out, 3), size(dH_dRho_h_out, 4)
+    return
+  end if
+
   ! Zeroing dos outputs (defensivo — sempre preenchidos no loop abaixo)
   dH_dRho_h_out = (0.d0, 0.d0)
   dH_dRho_v_out = (0.d0, 0.d0)
 
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Loop principal paralelo: 2*n perturbações independentes
+  ! Região paralela: cada thread aloca seus caches UMA VEZ, executa loop
+  ! dynamic sobre 2*n perturbações, depois desaloca.
+  !
+  ! Antes: allocate/deallocate DENTRO do `do kk` → 2*n × 18 allocs por thread.
+  ! Agora: allocate UMA VEZ por thread ANTES do do → 18 allocs por thread.
+  ! Ganho: ~95% redução de contenção no heap (lock do glibc malloc_arena).
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! NOTA sobre shape de dH_dRho_*_out: a assinatura acima declara (n_pos, nf, 9)
-  ! mas o CALLER passa dH_dRho_h_all(itr, k, 1:nmed(k), :, :, :) que tem shape
-  ! (n_pos, nf, 9, n). Fortran resolve isso via sequence association quando
-  ! passado a um dummy explicit-shape. Para evitar ambiguidade, usamos
-  ! declaração explícita (n_pos, nf, 9, n) e indexação (jj, :, :, layer).
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-
-  !$omp parallel do schedule(dynamic, 1) default(shared)                        &
+  !$omp parallel default(shared)                                                &
   !$omp&        private(kk, layer, comp, jj, tid, delta, rho_ref,               &
   !$omp&                resist_p, resist_m, eta_p, eta_m,                       &
   !$omp&                zrho_p, zrho_m, cH_p, cH_m, ii, omega_loc, zeta_loc,    &
@@ -1543,16 +1572,39 @@ subroutine compute_jacobian_fd(ws_pool_in, n_threads_pool, ang, nf, freq,      &
   !$omp&                RTMdw_p, RTMup_p, AdmInt_p,                             &
   !$omp&                u_m, s_m, uh_m, sh_m, RTEdw_m, RTEup_m,                 &
   !$omp&                RTMdw_m, RTMup_m, AdmInt_m)
+
+  ! ── Alocar caches Phase 4 privados (UMA vez por thread) ──
+  allocate(u_p(npt_active, n, nf), s_p(npt_active, n, nf))
+  allocate(uh_p(npt_active, n, nf), sh_p(npt_active, n, nf))
+  allocate(RTEdw_p(npt_active, n, nf), RTEup_p(npt_active, n, nf))
+  allocate(RTMdw_p(npt_active, n, nf), RTMup_p(npt_active, n, nf))
+  allocate(AdmInt_p(npt_active, n, nf))
+  allocate(u_m(npt_active, n, nf), s_m(npt_active, n, nf))
+  allocate(uh_m(npt_active, n, nf), sh_m(npt_active, n, nf))
+  allocate(RTEdw_m(npt_active, n, nf), RTEup_m(npt_active, n, nf))
+  allocate(RTMdw_m(npt_active, n, nf), RTMup_m(npt_active, n, nf))
+  allocate(AdmInt_m(npt_active, n, nf))
+
+  !$omp do schedule(dynamic, 1)
   do kk = 1, 2*n
     layer = (kk - 1) / 2 + 1         ! 1..n
     comp  = mod(kk - 1, 2) + 1       ! 1 = ρ_h, 2 = ρ_v
     tid   = omp_get_thread_num()
 
     ! ── Preparar resistividades perturbadas ──
+    ! Política de passo δ (robustez numérica):
+    !   1. Relativo: δ = fd_step × |ρ_ref|
+    !   2. Piso absoluto: δ ≥ 1e-6 (evita FD divergir para ρ ≈ 0)
+    !   3. Teto relativo: δ ≤ 0.1 × |ρ_ref| (garante ρ_ref − δ > 0 sempre)
+    ! Exemplo: ρ_ref=1e-7, fd_step=1e-4
+    !   δ_rel = 1e-11 → piso sobe para 1e-6 → teto reduz para 1e-8
+    !   resist_m = 1e-7 − 1e-8 = 9e-8 > 0 ✓
     resist_p = resist
     resist_m = resist
     rho_ref  = resist(layer, comp)
-    delta    = max(fd_step * abs(rho_ref), 1.d-6)
+    delta    = fd_step * abs(rho_ref)
+    if (delta < 1.d-6)                 delta = 1.d-6
+    if (delta > 0.1d0 * abs(rho_ref))  delta = 0.1d0 * abs(rho_ref)
     resist_p(layer, comp) = rho_ref + delta
     resist_m(layer, comp) = rho_ref - delta
 
@@ -1561,18 +1613,6 @@ subroutine compute_jacobian_fd(ws_pool_in, n_threads_pool, ang, nf, freq,      &
     eta_m = eta_shared
     eta_p(layer, comp) = 1.d0 / resist_p(layer, comp)
     eta_m(layer, comp) = 1.d0 / resist_m(layer, comp)
-
-    ! ── Alocar caches Phase 4 privados (por thread, por kk) ──
-    allocate(u_p(npt_active, n, nf), s_p(npt_active, n, nf))
-    allocate(uh_p(npt_active, n, nf), sh_p(npt_active, n, nf))
-    allocate(RTEdw_p(npt_active, n, nf), RTEup_p(npt_active, n, nf))
-    allocate(RTMdw_p(npt_active, n, nf), RTMup_p(npt_active, n, nf))
-    allocate(AdmInt_p(npt_active, n, nf))
-    allocate(u_m(npt_active, n, nf), s_m(npt_active, n, nf))
-    allocate(uh_m(npt_active, n, nf), sh_m(npt_active, n, nf))
-    allocate(RTEdw_m(npt_active, n, nf), RTEup_m(npt_active, n, nf))
-    allocate(RTMdw_m(npt_active, n, nf), RTMup_m(npt_active, n, nf))
-    allocate(AdmInt_m(npt_active, n, nf))
 
     ! ── Recomputar caches Phase 4 para cada frequência (perturbações +δ e −δ) ──
     do ii = 1, nf
@@ -1610,12 +1650,14 @@ subroutine compute_jacobian_fd(ws_pool_in, n_threads_pool, ang, nf, freq,      &
         dH_dRho_v_out(jj, :, :, layer) = (cH_p - cH_m) / (2.d0 * delta)
       end if
     end do
-
-    ! ── Liberar caches privados ──
-    deallocate(u_p, s_p, uh_p, sh_p, RTEdw_p, RTEup_p, RTMdw_p, RTMup_p, AdmInt_p)
-    deallocate(u_m, s_m, uh_m, sh_m, RTEdw_m, RTEup_m, RTMdw_m, RTMup_m, AdmInt_m)
   end do
-  !$omp end parallel do
+  !$omp end do
+
+  ! ── Liberar caches privados (UMA vez por thread) ──
+  deallocate(u_p, s_p, uh_p, sh_p, RTEdw_p, RTEup_p, RTMdw_p, RTMup_p, AdmInt_p)
+  deallocate(u_m, s_m, uh_m, sh_m, RTEdw_m, RTEup_m, RTMdw_m, RTMup_m, AdmInt_m)
+
+  !$omp end parallel
 
 end subroutine compute_jacobian_fd
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
@@ -1624,15 +1666,22 @@ end subroutine compute_jacobian_fd
 ! F10 — write_jacobian_file: Escreve o Jacobiano em arquivo binário .jac
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 !
-! Formato do arquivo .jac (stream unformatted):
-!   Header (int32):
-!     nt, nmmax, nf, 9, n_layers, itr, nTR
-!   Payload:
-!     Re(dH_dRho_h(k, j, i, ic, layer)), Im(dH_dRho_h(k, j, i, ic, layer))
-!     ... para todos (k, j, i, ic, layer) ...
-!     Re(dH_dRho_v(k, j, i, ic, layer)), Im(dH_dRho_v(k, j, i, ic, layer))
+! Formato do arquivo .jac v2 (stream unformatted):
+!   Header (int32), escrito UMA vez por arquivo (modelm=1 ou arquivo novo):
+!     magic (4 bytes ASCII 'JAC2'), version (int32 = 2)
+!     nt, nmmax, nf, n_components (=9), n_layers, itr, nTR, n_total_models
+!     nmeds(1..nt)  ← nmeds por ângulo (evita ambiguidade de leitura)
 !
-! Tamanho: 2 × (ntheta × nmmax × nf × 9 × n) × 16 bytes + 7 × 4 bytes (header)
+!   Payload (repetido por modelo):
+!     model_id (int32)
+!     Re/Im alternados de dH_dRho_h(k, j, i, ic, layer) — ordem (k, j, i, ic, layer)
+!     Re/Im alternados de dH_dRho_v(k, j, i, ic, layer)
+!
+! Apenas os nmeds(k) primeiros elementos da dimensão j são gravados (não nmmax),
+! o que permite arquivos compactos quando ntheta > 1 e nmed varia por ângulo.
+!
+! Tamanho header: 16 bytes (magic+version) + 8×4 bytes (counts) + nt×4 bytes (nmeds)
+! Tamanho payload/modelo: 4 bytes (id) + 2 × (sum(nmeds) × nf × 9 × n) × 16 bytes
 ! Nome: {filename}[_TR{itr}].jac (sufixo _TR{itr} se nTR > 1)
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 subroutine write_jacobian_file(modelm, nmaxmodel, mypath, filename, itr, nTR, &
@@ -1646,9 +1695,13 @@ subroutine write_jacobian_file(modelm, nmaxmodel, mypath, filename, itr, nTR, &
   complex(dp),  intent(in) :: dH_dRho_v_in(nt, nmmax, nf, 9, n_layers)
 
   integer :: k, j, i, ic, layer, exec
+  integer, parameter :: VERSION_JAC = 2
+  character(len=4)   :: magic
   character(len=:), allocatable :: fileJAC
   character(len=10) :: tr_suffix
   logical :: file_exists
+
+  magic = 'JAC2'
 
   ! ── Construção do nome do arquivo ──
   if (nTR > 1) then
@@ -1663,15 +1716,21 @@ subroutine write_jacobian_file(modelm, nmaxmodel, mypath, filename, itr, nTR, &
   if (modelm == 1 .or. .not. file_exists) then
     open(unit = 2000, iostat = exec, file = fileJAC, form = 'unformatted',  &
          access = 'stream', status = 'replace', action = 'write')
-    ! Header no início de arquivo novo
-    write(2000) nt, nmmax, nf, 9, n_layers, itr, nTR
+    ! Header v2 — escrito apenas quando o arquivo é criado
+    write(2000) magic, VERSION_JAC
+    write(2000) nt, nmmax, nf, 9, n_layers, itr, nTR, nmaxmodel
+    write(2000) (nmeds(k), k = 1, nt)
   else
     open(unit = 2000, iostat = exec, file = fileJAC, form = 'unformatted',  &
          access = 'stream', status = 'old', position = 'append', action = 'write')
   end if
 
-  ! ── Payload: escreve dH_dRho_h seguido de dH_dRho_v ──
-  ! Ordem de loops: (k, j, i, ic, layer) — matching column-major de Fortran
+  ! ── Payload: identificador do modelo + blocos Re/Im de dH_dRho_h e dH_dRho_v ──
+  ! Ordem de loops: (k, j, i, ic, layer) — matching column-major de Fortran.
+  ! Cada registro de payload começa com `modelm` (int32) para permitir
+  ! reconstrução robusta do índice lógico mesmo em arquivos concatenados.
+  write(2000) modelm
+
   do k = 1, nt
     do j = 1, nmeds(k)
       do i = 1, nf

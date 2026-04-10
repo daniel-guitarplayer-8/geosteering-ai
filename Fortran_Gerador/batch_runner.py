@@ -538,8 +538,28 @@ def run_model_batch(args):
                 
                 # Trave Lógica do Motor Fortran para Inserções Sequenciais de Acumuladores (`current_id max_id`):
                 f.write(f"{current_model_index} {model_end}         !modelo atual e o número máximo de modelos\n")
-                # F5/F7 — Flags opcionais v8.0 (backward compatible)
+
+                # ═══════════════════════════════════════════════════════════════════
+                # BLOCO DE FLAGS OPCIONAIS v10.0 — ORDEM CRÍTICA
+                # ═══════════════════════════════════════════════════════════════════
+                # RunAnisoOmp.f08 lê as linhas opcionais nesta ordem exata:
+                #   F5  : use_arbitrary_freq
+                #   F7  : use_tilted_antennas [+ n_tilted + (beta,phi)×n_tilted]
+                #   F6  : use_compensation    [+ n_comp_pairs + (near,far)×n]
+                #   FIL : filter_type
+                #   F10 : use_jacobian        [+ jacobian_method + fd_step]
+                #
+                # Se F10 estiver habilitado, TODAS as linhas precedentes DEVEM ser
+                # escritas — senão o Fortran interpreta F10 como F5/F6/filter_type,
+                # resultando em comportamento indefinido. O guard EOF via iostat
+                # ainda é válido: se paramos no meio de uma seção, apenas o default
+                # das seções seguintes é aplicado.
+                # ═══════════════════════════════════════════════════════════════════
+
+                # F5 — Frequências arbitrárias
                 f.write(f"{use_arb_freq}                 !F5: use_arbitrary_freq (0=desabilitado, 1=habilitado)\n")
+
+                # F7 — Antenas inclinadas
                 _use_tilted = 0
                 _tilted_configs = []
                 if feature_tilted and feature_tilted.get('use_tilted', 0) == 1:
@@ -551,20 +571,20 @@ def run_model_batch(args):
                     for _it_idx, (_beta_t, _phi_t) in enumerate(_tilted_configs):
                         f.write(f"{_beta_t}  {_phi_t}            !F7: beta({_it_idx+1}) phi({_it_idx+1})\n")
 
-                # ── F10 — Sensibilidades ∂H/∂ρ (Jacobiano) ──────────────────
-                # NOTA: para a Estratégia B (jacobian_method == 0), NÃO escrevemos
-                # estas linhas pois o Fortran nada precisa saber — a expansão de
-                # perturbações já foi feita pelo master process (cada sub-modelo
-                # gera um .dat separado e o pós-processamento calcula o Jacobiano).
-                # Apenas para a Estratégia C (jacobian_method == 1) instruímos o
-                # Fortran a calcular o Jacobiano internamente via compute_jacobian_fd.
+                # F10 — Sensibilidades ∂H/∂ρ (Jacobiano)
+                #
+                # Duas estratégias distintas:
+                #   (B) jacobian_method == 0 → Python Workers orquestram sub-modelos
+                #       perturbados. Cada worker roda Fortran sem Jacobiano (use_jacobian=0).
+                #       O pós-processamento master calcula J = (H+ − H−)/(2δ).
+                #   (C) jacobian_method == 1 → Fortran calcula J internamente via
+                #       compute_jacobian_fd (OpenMP), gerando arquivos .jac adjacentes.
+                #
+                # Para Estratégia B escrevemos use_jacobian=0 (o Fortran não precisa
+                # saber). Para Estratégia C escrevemos as três linhas F10 completas.
                 if use_jacobian == 1 and jacobian_method == 1:
-                    # Precisa escrever todas as linhas opcionais até F10 para manter
-                    # alinhamento do model.in. Mas como o header_text não inclui F5/F7/F6/
-                    # filter_type, confiamos que o model.in template já possui essas
-                    # linhas. Se não, o usuário precisa configurar o template adequado.
-                    f.write(f"1                 !F10: use_jacobian\n")
-                    f.write(f"{jacobian_method}                 !F10: jacobian_method (1=Fortran OpenMP C)\n")
+                    f.write(f"1                 !F10: use_jacobian (Estratégia C)\n")
+                    f.write(f"{jacobian_method}                 !F10: jacobian_method (1=Fortran OpenMP)\n")
                     f.write(f"{jacobian_fd_step}          !F10: jacobian_fd_step\n")
 
             # Acionamento Ativo: O código fonte base reprocessa tudo embasado na Matemática Recriada acima.
@@ -931,17 +951,72 @@ def main():
     # Salva resultado em .jac.npz ao lado de cada .dat correspondente.
     if use_jacobian_flag == 1 and jacobian_method == 0 and not args.no_concat:
         print("\n[F10-B] Pós-processamento: reagrupando sub-modelos e calculando Jacobiano...")
-        _nf_jac = info['nf']     if info else 2
-        _nt_jac = info['ntheta'] if info else 1
-        _ntr_jac = info['nTR']   if info else 1
-        # Estimativa do número de medidas por ângulo (usa nmeds_from_frag se disponível,
-        # senão assume nmmax ≈ 600 como default razoável para geosteering padrão)
-        _nmeds_guess = 600
+        _nf_jac  = info['nf']     if info else 2
+        _nt_jac  = info['ntheta'] if info else 1
+        _ntr_jac = info['nTR']    if info else 1
+
+        # ── Determinação dinâmica de nmeds por ângulo ──
+        # Fonte de verdade: o arquivo .out gerado pelo Fortran contém nmeds(1..nt)
+        # na 4ª linha. Caso não exista (por exemplo, se --no-concat for passado),
+        # calculamos a partir de (tj, p_med, theta) usando ceil(tj/(p_med·cos(θ))).
+        # Fallback final: 600 (valor histórico do geosteering padrão).
+        def _nmeds_from_out_file(workdir: str, basename_dat: str) -> int:
+            """Tenta ler nmeds a partir do .out correspondente ao .dat."""
+            # Heurística: substitui ".dat" por ".out" no nome base.
+            out_name = basename_dat.replace('.dat', '.out')
+            out_path = os.path.join(workdir, out_name)
+            if not os.path.isfile(out_path):
+                # Tenta qualquer .out no diretório
+                for candidate in os.listdir(workdir):
+                    if candidate.endswith('.out'):
+                        out_path = os.path.join(workdir, candidate)
+                        break
+                else:
+                    return 0
+            try:
+                with open(out_path, 'r') as _fo:
+                    _lines = [ln.strip() for ln in _fo if ln.strip()]
+                # Linha 4 (índice 3): nmeds(1..nt)
+                if len(_lines) >= 4:
+                    nm_list = [int(x) for x in _lines[3].split()]
+                    return max(nm_list) if nm_list else 0
+            except Exception:
+                return 0
+            return 0
+
+        def _nmeds_from_model_in() -> int:
+            """Fallback: calcula nmeds a partir do model.in (tj, p_med, ângulos)."""
+            if info is None:
+                return 600
+            try:
+                with open(args.model_in, 'r') as _fmi:
+                    _all = [ln.strip() for ln in _fmi if ln.strip()]
+                _idx = 1 + info['nf'] + 1 + info['ntheta'] + 1  # pula h1
+                _tj = float(_all[_idx].split()[0]); _idx += 1
+                _pm = float(_all[_idx].split()[0])
+                import math as _math
+                _nms = [
+                    _math.ceil(_tj / (_pm * _math.cos(_math.radians(a))))
+                    for a in info['angles']
+                ]
+                return max(_nms) if _nms else 600
+            except Exception:
+                return 600
+
         for basename in chunks_to_concat.keys():
             if not basename.endswith('.dat'):
                 continue
             dat_path = os.path.join(os.getcwd(), basename)
             jac_path = dat_path.replace('.dat', '.jac.npz')
+
+            # Determina nmmax (nmeds máximo entre ângulos) dinamicamente
+            _nmeds = _nmeds_from_out_file(os.getcwd(), basename)
+            if _nmeds <= 0:
+                _nmeds = _nmeds_from_model_in()
+            if _nmeds <= 0:
+                _nmeds = 600
+            print(f"  [F10-B] {basename}: n_meds={_nmeds} (detectado dinamicamente)")
+
             try:
                 compute_jacobian_from_perturbations(
                     dat_path=dat_path,
@@ -950,7 +1025,7 @@ def main():
                     out_jac_path=jac_path,
                     n_cols=22,
                     n_freqs=_nf_jac,
-                    n_meds=_nmeds_guess,
+                    n_meds=_nmeds,
                     n_theta=_nt_jac,
                     n_tr=_ntr_jac,
                 )
