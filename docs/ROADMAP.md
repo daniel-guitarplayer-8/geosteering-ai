@@ -596,14 +596,16 @@ Roteiro de 6 fases para otimização do simulador Fortran conforme [`docs/refere
 | F7.1.5 | **Efeito de invasão (mud filtrate)** — perfil radial de resistividade | Média | Média | ~400 |
 | | — Modelo step + gradient para zona lavada | | | |
 | | — Dados mais realistas para treinamento DL | | | |
-| F7.1.6 | **Sensibilidades ∂H/∂ρ (Jacobiano)** — via diferenças finitas | Alta | Alta | ~800 |
-| | — 2×n_params forward passes para Jacobiano numérico | | | |
-| | — Integração via f2py para PINNs em Python | | | |
+| F7.1.6 | ✅ **Sensibilidades ∂H/∂ρ (Jacobiano)** — via FD centradas, Estratégias B+C | Alta | Alta | ~760 |
+| | — Estratégia B: Python Workers (expande 1+4n sub-modelos, ~1.930 mod+J/h) | | | |
+| | — Estratégia C: Fortran OpenMP interno (compute_jacobian_fd, ~12.900 mod+J/h) | | | |
+| | — Novo wrapper f2py `simulate_v10_jacobian` retorna `dH_dRho_h/v` | | | |
+| | — Flags model.in: use_jacobian, jacobian_method, jacobian_fd_step | | | |
 | F7.1.7 | **Modelo de rocha (Archie)** no gerador Python | Média | Média | ~200 |
 | | — Input: (φ, Sw, salinidade) → output: (ρ_h, ρ_v) | | | |
 | | — fifthBuildTIVModels.py com parametrização petrofísica | | | |
 
-**Verificação**: Cada feature validada bit-exato para `nTR=1` backwards-compatible. RMSE < 1e-10 vs baseline para features que não alteram o forward pass. F5/F7 implementadas em v8.0 (Abril 2026) — desabilitadas por padrão, backward compatible.
+**Verificação**: Cada feature validada bit-exato para `nTR=1` backwards-compatible. RMSE < 1e-10 vs baseline para features que não alteram o forward pass. F5/F7 implementadas em v8.0, F6/Filtro Adaptativo em v9.0 e F10 (Jacobiano) em v10.0 (Abril 2026) — todas desabilitadas por padrão, backward compatible.
 
 ---
 

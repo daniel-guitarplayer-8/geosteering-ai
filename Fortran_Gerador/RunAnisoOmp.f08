@@ -2,14 +2,15 @@ program CampoMag1DAnisotropico
 ! Este programa realiza as simulações de um arranjo de perfilagem Triaxial conforme
 ! especificações dadas pelo usuário, informadas no arquivo model.in.
 !
-! Versão 9.0 — suporte a:
+! Versão 10.0 — suporte a:
 !   - Feature 1: múltiplos pares T-R (nTR espaçamentos) [v7.0]
 !   - F5: frequências arbitrárias (nf > 2, guard + validação) [v8.0]
 !   - F6: compensação midpoint (borehole compensation) [v9.0]
 !   - F7: antenas inclinadas (tilted coils, pós-processamento do tensor) [v8.0]
 !   - Filtro Adaptativo: seleção Kong/Werthmuller/Anderson [v9.0]
+!   - F10: Sensibilidades ∂H/∂ρ (Jacobiano) via FD centradas [v10.0]
 !
-! Formato do model.in (v9.0):
+! Formato do model.in (v10.0):
 !   nf                              ! número de frequências
 !   freq(1) ... freq(nf)            ! frequências em Hz (1 por linha)
 !   ntheta                          ! número de ângulos
@@ -26,7 +27,7 @@ program CampoMag1DAnisotropico
 !   resist(ncam,1) resist(ncam,2)
 !   esp(2) ... esp(ncam-1)          ! espessuras internas (1 por linha)
 !   modelm nmaxmodel                ! índice do modelo e total
-!   --- Seção opcional v9.0 (backward compatible via iostat) ---
+!   --- Seção opcional v10.0 (backward compatible via iostat) ---
 !   use_arbitrary_freq              ! F5: 0=desabilitado (default), 1=habilitado
 !   use_tilted_antennas             ! F7: 0=desabilitado (default), 1=habilitado
 !   n_tilted                        ! (só se F7=1) número de configs tilted
@@ -39,6 +40,9 @@ program CampoMag1DAnisotropico
 !   ...
 !   near(n_comp_pairs) far(n_comp_pairs)
 !   filter_type                     ! 0=Werthmuller (default), 1=Kong, 2=Anderson
+!   use_jacobian                    ! F10: 0=desabilitado (default), 1=habilitado
+!   jacobian_method                 ! (só se F10=1) 0=Python B, 1=Fortran OpenMP C
+!   jacobian_fd_step                ! (só se F10=1) ε relativo, default 1e-4
 !
 use parameters
 use DManisoTIV
@@ -61,6 +65,9 @@ integer :: use_compensation, n_comp_pairs, n_pairs_to_skip
 integer, dimension(:,:), allocatable :: comp_pairs
 ! Filtro Adaptativo — tipo de filtro de Hankel
 integer :: filter_type
+! F10 — Sensibilidades ∂H/∂ρ (Jacobiano)
+integer  :: use_jacobian, jacobian_method
+real(dp) :: jacobian_fd_step
 
 call getcwd(path)
 mypath = trim(path)//'/'
@@ -118,6 +125,9 @@ n_tilted         = 0
 use_compensation = 0
 n_comp_pairs     = 0
 filter_type      = 0
+use_jacobian     = 0
+jacobian_method  = 0
+jacobian_fd_step = 1.d-4
 
 ! F5 — Leitura do flag de frequências arbitrárias
 read(11, *, iostat=ios) use_arb_freq
@@ -233,11 +243,52 @@ end if
 read(11, *, iostat=ios) filter_type
 if (ios /= 0) then
   filter_type = 0  ! Default: Werthmuller
+  close(11)
+  goto 900
 end if
 ! Validação: filter_type deve estar em [0, 2]
 if (filter_type < 0 .or. filter_type > 2) then
   write(*,'(A,I0,A)') '[FILTRO AVISO] filter_type=', filter_type, ' inválido. Usando Werthmuller (0).'
   filter_type = 0
+end if
+
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+! F10 — Leitura das flags do Jacobiano ∂H/∂ρ (v10.0)
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+! Linhas opcionais após filter_type:
+!   use_jacobian       (0=off default, 1=on)
+!   jacobian_method    (0=Python Workers B, 1=Fortran OpenMP C) — só se use_jacobian==1
+!   jacobian_fd_step   (ε relativo, default 1e-4) — só se use_jacobian==1
+!
+! Backward compat: qualquer EOF ou erro → defaults (F10 desabilitado).
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+read(11, *, iostat=ios) use_jacobian
+if (ios /= 0) then
+  use_jacobian = 0
+  close(11)
+  goto 900
+end if
+
+if (use_jacobian == 1) then
+  read(11, *, iostat=ios) jacobian_method
+  if (ios /= 0) then
+    write(*,'(A)') '[F10 AVISO] use_jacobian=1 mas jacobian_method ausente. Usando 1 (Fortran C).'
+    jacobian_method = 1
+  end if
+  if (jacobian_method < 0 .or. jacobian_method > 1) then
+    write(*,'(A,I0,A)') '[F10 AVISO] jacobian_method=', jacobian_method, ' inválido. Usando 1.'
+    jacobian_method = 1
+  end if
+
+  read(11, *, iostat=ios) jacobian_fd_step
+  if (ios /= 0) then
+    jacobian_fd_step = 1.d-4
+  end if
+  if (jacobian_fd_step <= 0.d0 .or. jacobian_fd_step >= 1.d-1) then
+    write(*,'(A,ES12.4,A)') '[F10 AVISO] jacobian_fd_step=', jacobian_fd_step, &
+                            ' fora de (0, 0.1). Usando 1e-4.'
+    jacobian_fd_step = 1.d-4
+  end if
 end if
 
 close(11)
@@ -248,6 +299,7 @@ call perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta, h1, t
                        nTR, dTR_arr, p_med, ncam, resist, esp, filename, &
                        use_arb_freq, use_tilted, n_tilted, beta_tilt, phi_tilt, &
                        use_compensation, n_comp_pairs, comp_pairs, &
-                       filter_type)
+                       filter_type, &
+                       use_jacobian, jacobian_method, jacobian_fd_step)
 
 end program CampoMag1DAnisotropico

@@ -1153,6 +1153,10 @@ if __name__ == '__main__':
     use_compensation    = 0      # F6: 0=desabilitado (default), 1=habilitado
     comp_pairs          = []     # F6: lista de (near_itr, far_itr) — ex: [(1, 3)] para nTR≥3
     filter_type         = 0      # Filtro: 0=Werthmuller, 1=Kong, 2=Anderson
+    # F10 — Sensibilidades ∂H/∂ρ (Jacobiano) via diferenças finitas centradas
+    use_jacobian        = 0      # F10: 0=desabilitado (default), 1=habilitado
+    jacobian_method     = 1      # F10: 0=Python Workers (B), 1=Fortran OpenMP interno (C)
+    jacobian_fd_step    = 1e-4   # F10: ε relativo para FD centrada (default 1e-4 = 0,01%)
 
     # Nome base dos arquivos: encoda frequências e ângulos para rastreabilidade total
     _freq_tag = '-'.join(f'{int(fi/1000)}k'  for fi in freqs)   # ex: "2k-6k"
@@ -1261,6 +1265,11 @@ if __name__ == '__main__':
                     f.write(f'{near_i}  {far_i}' + '              ' + f'!F6: near({cp_idx+1}) far({cp_idx+1})\n')
             # Filtro Adaptativo
             f.write(str(filter_type) + '                 ' + '!Filtro: 0=Werthmuller, 1=Kong, 2=Anderson\n')
+            # F10 — Sensibilidades ∂H/∂ρ (Jacobiano)
+            if use_jacobian == 1:
+                f.write(str(use_jacobian) + '                 ' + '!F10: use_jacobian\n')
+                f.write(str(jacobian_method) + '                 ' + '!F10: jacobian_method (0=B Python, 1=C Fortran)\n')
+                f.write(str(jacobian_fd_step) + '          ' + '!F10: jacobian_fd_step (ε relativo)\n')
         #-------------------------------------------------------------------------------------------------------------
         # Executando o programa Fortran
         try:

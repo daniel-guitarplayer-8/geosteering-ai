@@ -1,15 +1,17 @@
 ---
 name: geosteering-simulator-fortran
 description: |
-  Simulador EM 1D TIV em Fortran (PerfilaAnisoOmp / tatu.x) do Geosteering AI.
-  Cobre: 7 módulos Fortran, formato model.in v9.0, formato binário 22-col,
-  Makefile (tatu.x, f2py, debug), otimizações OpenMP (Fases 0-5), Features F5/F6/F7,
-  Filtro Adaptativo (Kong/Werthmuller/Anderson),
+  Simulador EM 1D TIV em Fortran (PerfilaAnisoOmp / tatu.x) do Geosteering AI v10.0.
+  Cobre: 7 módulos Fortran, formato model.in v10.0, formato binário 22-col,
+  Makefile (tatu.x, f2py, debug), otimizações OpenMP (Fases 0-5), Features F5/F6/F7/F10,
+  Filtro Adaptativo (Kong/Werthmuller/Anderson), Jacobiano ∂H/∂ρ (Estratégias B+C),
   scripts Python (fifthBuildTIVModels, buildValidamodels, batch_runner).
   Triggers: "Fortran", "tatu.x", "simulador", "PerfilaAnisoOmp", "model.in",
   "Hankel", "f2py", "batch_runner", "OpenMP", "thread_workspace", "cache",
   "multi-TR", "antenas inclinadas", "tilted", "compilar", "make",
-  "compensação", "midpoint", "Kong", "Anderson", "filtro adaptativo".
+  "compensação", "midpoint", "Kong", "Anderson", "filtro adaptativo",
+  "jacobiano", "jacobian", "∂H/∂ρ", "sensibilidade", "F10",
+  "compute_jacobian_fd", "simulate_v10_jacobian", "PINN", "Estratégia B", "Estratégia C".
 ---
 
 # Geosteering AI — Simulador Fortran EM 1D TIV
@@ -39,12 +41,14 @@ tatu_f2py_wrapper.f08 (module tatu_wrapper)  ← Interface Python: simulate(), s
 
 | Módulo | Subroutine | Finalidade |
 |:-------|:-----------|:-----------|
-| **DManisoTIV** | `perfila1DanisoOMP` | Solver master (v9.0): loop itr→k→ii→j com OpenMP |
+| **DManisoTIV** | `perfila1DanisoOMP` | Solver master (v10.0): loop itr→k→ii→j com OpenMP |
 | | `fieldsinfreqs` | Legacy: calcula H(f) para 1 posição |
 | | `fieldsinfreqs_ws` | Phase 3: com thread_workspace pré-alocado |
 | | `fieldsinfreqs_cached_ws` | Phase 4: com cache de u/s/RT arrays |
 | | `writes_files` | Output: .dat binário + .out info (multi-TR, F7 tilted) |
 | | `writes_compensation_files` | F6: .dat compensado + atenuação (dB) |
+| | `compute_jacobian_fd` | **F10 (v10.0):** Jacobiano ∂H/∂ρ via FD centradas, OpenMP interno |
+| | `write_jacobian_file` | **F10 (v10.0):** Escrita binária .jac (stream) |
 | **magneticdipoles** | `hmd_TIV_optimized_ws` | Dipolo magnético horizontal (HMD) com workspace |
 | | `vmd_optimized_ws` | Dipolo magnético vertical (VMD) com workspace |
 | **utils** | `commonarraysMD` | Pré-computa u, s, uh, sh, RT*, AdmInt para Hankel |
@@ -56,8 +60,9 @@ tatu_f2py_wrapper.f08 (module tatu_wrapper)  ← Interface Python: simulate(), s
 | | `J0J1And` | Filtro Hankel Anderson 801pt (máxima precisão 10⁻⁸) |
 | **tatu_wrapper** | `simulate` | Interface f2py v7.0 (sempre Werthmuller) |
 | | `simulate_v8` | Interface f2py v9.0 (F5 + F6 + F7 + Filtro Adaptativo) |
+| | `simulate_v10_jacobian` | **Interface f2py v10.0:** retorna Jacobiano ∂H/∂ρ (Estratégia C) |
 
-## 3. Formato model.in (v9.0)
+## 3. Formato model.in (v10.0)
 
 ```
 nf                    !número de frequências
@@ -86,6 +91,9 @@ modelm nmaxmodel      !modelo atual e nº máximo
 [F6: n_comp_pairs]    !(só se F6=1)
 [F6: near(i) far(i)]  !pares T-R para compensação
 [filter_type]         !(v9.0 opcional, 0=Werth 1=Kong 2=Anderson)
+[F10: use_jacobian]   !(v10.0 opcional, 0=desab. 1=hab.)
+[F10: jacobian_method]!(só se F10=1, 0=Python B, 1=Fortran OpenMP C)
+[F10: jacobian_fd_step]!(só se F10=1, ε relativo, default 1e-4)
 ```
 
 **nTR=1**: saída `{filename}.dat` (sem sufixo). **nTR>1**: `{filename}_TR{k}.dat`.
@@ -137,7 +145,7 @@ col20-21 = Re/Im(Hzz)   — componente axial
 
 **Cache 4D:** `u_cache(npt, n, nf, ntheta)` — cada ângulo k escreve em slice independente, eliminando race condition.
 
-## 7. Features v9.0
+## 7. Features v10.0
 
 **F5 — Frequências Arbitrárias:** `use_arb_freq=1` habilita nf ∈ [1, 16]. Guard para nf>2 quando desabilitado.
 
@@ -163,6 +171,34 @@ filter_type=1: Kong 61pt (3.3× mais rápido, precisão 10⁻⁴)
 filter_type=2: Anderson 801pt (4× mais lento, precisão 10⁻⁸)
 ```
 Kong recomendado para geração de datasets de treinamento; Anderson para validação.
+
+**F10 — Sensibilidades ∂H/∂ρ (Jacobiano, v10.0):** `use_jacobian=1` habilita cálculo de
+Jacobiano via diferenças finitas centradas `J = (H(ρ+δ) − H(ρ−δ)) / (2δ)`. Duas estratégias:
+
+```
+jacobian_method=0: Estratégia B — Python Workers (ProcessPoolExecutor)
+  • Expande cada modelo em 1+4n sub-modelos perturbados
+  • Reutiliza infraestrutura de batch existente
+  • Pós-processamento Python → salva .jac.npz (NumPy compactado)
+  • Throughput: ~1.930 mod+J/h
+  • Uso: --use-jacobian 1 --jacobian-method 0
+
+jacobian_method=1: Estratégia C — Fortran OpenMP interno
+  • compute_jacobian_fd com !$omp parallel do schedule(dynamic, 1)
+  • Loop sobre 2n perturbações (n camadas × h/v) paralelo
+  • Cada thread aloca caches privados + reutiliza ws_pool
+  • Throughput: ~12.900 mod+J/h (13× mais rápido que B)
+  • Saída: arquivos .jac binário stream
+  • Uso: --use-jacobian 1 --jacobian-method 1
+```
+
+Shape do Jacobiano: `(nTR, ntheta, nmmax, nf, 9, n_layers)` complex(dp), dois arrays
+(`dH_dRho_h` e `dH_dRho_v`). `δ = max(jacobian_fd_step × |ρ|, 1e-6)` (default `fd_step = 1e-4`).
+
+Aplicações: PINNs (physics loss), inversão Gauss-Newton (`Δρ = (JᵀJ)⁻¹JᵀΔd`),
+quantificação de incerteza (matriz de covariância posterior).
+
+Wrapper f2py: `simulate_v10_jacobian(...)` retorna `(zrho, cH, cH_tilted, dH_dRho_h, dH_dRho_v)`.
 
 ## 8. Scripts Python
 

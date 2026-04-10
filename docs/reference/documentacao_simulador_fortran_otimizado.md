@@ -2696,12 +2696,13 @@ sincronização OpenMP; valores menores deixam núcleos ociosos entre subprocess
 
 ## 11. Recursos Avançados do Simulador
 
-> **Versão 8.0 (Abril 2026):** Esta seção documenta os seis recursos avançados do simulador
+> **Versão 10.0 (Abril 2026):** Esta seção documenta os oito recursos avançados do simulador
 > `PerfilaAnisoOmp` para suporte ao pipeline Geosteering AI v2.0: múltiplos pares T-R (v7.0),
 > tensor completo 9 componentes (v7.0), interface f2py para Python (v7.0), execução batch
-> paralela de modelos (v7.0), **frequências arbitrárias F5 (v8.0)** e **antenas inclinadas F7 (v8.0)**.
+> paralela de modelos (v7.0), **frequências arbitrárias F5 (v8.0)**, **antenas inclinadas F7 (v8.0)**,
+> **compensação midpoint F6 e Filtro Adaptativo (v9.0)** e **sensibilidades ∂H/∂ρ F10 (v10.0)**.
 > Cada recurso está validado com bit-equivalência ao baseline original quando operando em modo
-> retrocompatível (`nTR=1`, `use_arb_freq=0`, `use_tilted=0`).
+> retrocompatível (todos os flags opcionais == 0).
 
 ---
 
@@ -3355,6 +3356,150 @@ zrho, cH, cH_tilted = tatu_f2py.simulate_v8(
 
 ---
 
+### 11.9 F10 — Sensibilidades ∂H/∂ρ (Jacobiano) — v10.0
+
+#### 11.9.1 Motivação Física
+
+A matriz Jacobiana **J = ∂H/∂ρ** é o operador central de três aplicações críticas do projeto:
+
+1. **PINNs (Physics-Informed Neural Networks):** a physics loss envolve o resíduo
+   das equações de Maxwell `∂/∂ρ(L[H]) = 0`, que requer J explicitamente.
+2. **Inversão determinística (Gauss-Newton):** atualização do modelo
+   `Δρ = (JᵀJ)⁻¹·JᵀΔd` requer J a cada iteração.
+3. **Quantificação de incerteza:** `Σ_post ≈ (JᵀC_d⁻¹J + C_m⁻¹)⁻¹` — matriz de
+   covariância posterior aproximada a partir de J.
+
+Ref: [`docs/reference/relatorio_vantagens_jacobiano.md`](relatorio_vantagens_jacobiano.md) §1–3.
+
+#### 11.9.2 Formulação Matemática
+
+Diferenças finitas **centradas** (erro O(δ²)):
+
+```
+J_{i,k,h} = (H_i(ρ_h,k + δ) − H_i(ρ_h,k − δ)) / (2·δ)
+J_{i,k,v} = (H_i(ρ_v,k + δ) − H_i(ρ_v,k − δ)) / (2·δ)
+
+δ = max(fd_step × |ρ_ref|, 1e-6)     (default fd_step = 1e-4 = 0,01%)
+```
+
+Dimensões do Jacobiano:
+- **Input:** modelo com `n` camadas → `2n` parâmetros (ρ_h e ρ_v)
+- **Output:** `(nTR, ntheta, nmmax, nf, 9, n)` complex(dp) — uma derivada por camada
+- **Memória:** para `nTR=1, ntheta=1, nmmax=600, nf=2, n=10` ≈ **3,5 MB** (h + v)
+
+#### 11.9.3 Duas Estratégias de Paralelização (B e C)
+
+**Ambas implementadas em v10.0 — selecionáveis via `jacobian_method`:**
+
+```
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  ESTRATÉGIA B — Python Workers (ProcessPoolExecutor)                     │
+  │                                                                          │
+  │  Princípio: expandir cada modelo em (1 + 4n) sub-modelos perturbados.    │
+  │  Cada sub-modelo é uma execução normal do simulador (sem conhecimento    │
+  │  do Jacobiano). Pós-processamento em Python reagrupa por parent_id.      │
+  │                                                                          │
+  │  Fluxo:                                                                  │
+  │    master → expand_models_with_perturbations(models, δ_rel=1e-4)         │
+  │    workers → run_model_batch (cada um roda seus sub-modelos)             │
+  │    master → merge .dat → compute_jacobian_from_perturbations             │
+  │    → salva .jac.npz (formato NumPy compactado)                           │
+  │                                                                          │
+  │  Vantagens:                                                              │
+  │    • Zero modificação no Fortran                                         │
+  │    • Reutiliza 100% da infraestrutura de batch existente                 │
+  │    • Escala linearmente com workers (limitado apenas por I/O disco)      │
+  │                                                                          │
+  │  Desvantagens:                                                           │
+  │    • 61× mais arquivos intermediários (para n=15 camadas)                │
+  │    • Throughput ~1.930 mod+J/h (relatório §9.2)                          │
+  │                                                                          │
+  │  Uso: --use-jacobian 1 --jacobian-method 0                               │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  ESTRATÉGIA C — OpenMP Interno ao Fortran (compute_jacobian_fd)          │
+  │                                                                          │
+  │  Princípio: mover o loop de perturbações PARA DENTRO do Fortran,         │
+  │  reutilizando caches Phase 4 e ws_pool existente. Loop paralelo sobre    │
+  │  2n perturbações (n camadas × 2 componentes h/v) via !$omp parallel do.  │
+  │                                                                          │
+  │  !$omp parallel do schedule(dynamic, 1) default(shared)                  │
+  │    private(kk, layer, comp, resist_p, resist_m, cH_p, cH_m, ...)         │
+  │  do kk = 1, 2*n                                                          │
+  │    layer = (kk-1)/2 + 1                                                  │
+  │    comp  = mod(kk-1, 2) + 1    ! 1=h, 2=v                                │
+  │    ! Aloca caches Phase 4 privados por thread                            │
+  │    ! Chama fieldsinfreqs_cached_ws para +δ e −δ                          │
+  │    ! Calcula J = (H_p - H_m) / (2δ)                                      │
+  │  end do                                                                  │
+  │  !$omp end parallel do                                                   │
+  │                                                                          │
+  │  Vantagens:                                                              │
+  │    • Zero I/O: J fica em memória                                         │
+  │    • Reaproveita commonarraysMD e ws_pool existentes                     │
+  │    • ~13× mais rápido que Estratégia B (relatório §9.3)                  │
+  │    • Throughput ~12.900 mod+J/h                                          │
+  │                                                                          │
+  │  Saída: arquivos .jac (binário stream) com shape                         │
+  │         (ntheta, nmmax, nf, 9, n) complex(dp) para h e v.                │
+  │                                                                          │
+  │  Uso: --use-jacobian 1 --jacobian-method 1                               │
+  └──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 11.9.4 Tabela Comparativa B × C × JAX
+
+| Estratégia | Throughput (mod+J/h) | LOC Fortran | LOC Python | I/O disco | Risco | Uso |
+|:-----------|:--------------------:|:-----------:|:----------:|:---------:|:-----:|:----|
+| **A** (Sequencial intra-worker) | ~968 | 0 | ~50 | 61× | Baixo | Prototipagem |
+| **B** (Python Workers) | ~1.930 | 0 | ~280 | 61× | Médio | **Datasets ≤ 5k** (v10.0) |
+| **C** (OpenMP Fortran) | **~12.900** | ~430 | ~50 | Mínimo | Alto | **Produção** (v10.0) |
+| **JAX auto-diff** (referência) | ~133.000 | 0 | ~0 | Zero | Médio | Track 2 (futuro) |
+
+**Recomendação:** usar Estratégia C (método 1) para datasets de produção (throughput 13× maior).
+Estratégia B (método 0) é útil para validação cruzada e ambientes onde não é possível recompilar o Fortran.
+
+#### 11.9.5 Formato do arquivo `.jac` (Estratégia C, binário stream)
+
+```
+Header (int32): nt, nmmax, nf, 9, n_layers, itr, nTR     (28 bytes)
+Payload:
+  Re/Im de dH_dRho_h(k, j, i, ic, layer) × nt × nmmax × nf × 9 × n_layers
+  Re/Im de dH_dRho_v(k, j, i, ic, layer) × nt × nmmax × nf × 9 × n_layers
+```
+
+Nome: `{filename}[_TR{itr}].jac` (sufixo `_TR{itr}` apenas se nTR > 1).
+
+#### 11.9.6 Formato do arquivo `.jac.npz` (Estratégia B, NumPy compactado)
+
+Arrays salvos via `np.savez_compressed`:
+- `dH_dRho_h`: complex128 `(N_models, nTR, ntheta, nmmax, nf, 9, max_n)`
+- `dH_dRho_v`: mesma shape
+- `n_layers_per_model`: int32 `(N_models,)`
+- `deltas`: float64 `(N_models, max_n, 2)` — δ efetivo por (layer, componente)
+- `parent_ids`: int32 `(N_models,)` — validação do reagrupamento
+
+#### 11.9.7 Integração com simulate_v10_jacobian (f2py)
+
+```python
+import tatu_f2py
+zrho, cH, cH_tilted, dJ_h, dJ_v = tatu_f2py.simulate_v10_jacobian(
+    nf=2, freq=np.array([20000., 40000.]),
+    ntheta=1, theta=np.array([0.]),
+    h1=10., tj=120., nTR=1, dTR=np.array([1.0]), p_med=0.2,
+    n=3, resist=np.array([[1.,1.],[10.,10.],[100.,100.]]),
+    esp=np.array([0.,50.,0.]), nmmax=600,
+    use_arb_freq=0, use_tilted=0, n_tilted=0, n_tilted_sz=1,
+    beta_tilt=np.zeros(1), phi_tilt=np.zeros(1),
+    filter_type_in=0, use_jacobian_in=1, jacobian_fd_step_in=1e-4)
+
+assert dJ_h.shape == (1, 1, 600, 2, 9, 3)
+assert dJ_v.shape == (1, 1, 600, 2, 9, 3)
+```
+
+---
+
 ### 11.7 Impacto Computacional dos Novos Recursos
 
 | Recurso | Custo Adicional | Throughput (8t, n=15) | Compatibilidade |
@@ -3366,6 +3511,8 @@ zrho, cH, cH_tilted = tatu_f2py.simulate_v8(
 | **Batch runner (4w × 2t)** | Overhead de processo ~2-5% | ~120.000 mod/h | Idêntico por modelo |
 | **F5: nf arbitrário (nf=6)** | ~3× (linear em nf) | ~20.000 mod/h | Bit-exato p/ nf=2 |
 | **F7: Tilted (n_tilted=2)** | <0,01% (pós-processamento) | ~58.856 mod/h | Zero impacto no core |
+| **F10-B: Jacobiano Python** | 1 + 4n× (n camadas) | ~1.930 mod+J/h (n=10) | Opt-in, desabilitado default |
+| **F10-C: Jacobiano Fortran OpenMP** | 2n× com paralelismo | **~12.900 mod+J/h** (n=10) | Opt-in, bit-exato se off |
 
 **Nota:** O custo do Multi-TR é linear porque o cache Fase 4 deve ser recomputado para cada valor de `r_k = dTR(itr) * |sin(theta)|`, e o loop completo de medidas é executado `nTR` vezes. Não há possibilidade de reutilização de cache entre pares T-R distintos.
 

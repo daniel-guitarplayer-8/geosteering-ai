@@ -10,11 +10,12 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
                              nTR, dTR, p_med, n, resist, esp, filename, &
                              use_arb_freq, use_tilted, n_tilted, beta_tilt, phi_tilt, &
                              use_compensation, n_comp_pairs, comp_pairs, &
-                             filter_type)
+                             filter_type, &
+                             use_jacobian, jacobian_method, jacobian_fd_step)
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! Sub-rotina principal do simulador EM 1D TIV com múltiplos pares T-R.
   !
-  ! Versão 9.0: F5 + F7 + F6 (compensação midpoint) + Filtro Adaptativo.
+  ! Versão 10.0: F5 + F6 + F7 + Filtro Adaptativo + F10 (Jacobiano ∂H/∂ρ).
   !   - nTR = 1: backward-compatible (saída idêntica ao formato anterior)
   !   - nTR > 1: loop externo sobre pares T-R, cada um com r_k = dTR(itr)*|sin(θ)|
   !              Saída: arquivos separados por par T-R (sufixo _TR{itr})
@@ -52,6 +53,18 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !   adicionado); Anderson para validação cruzada com empymod.
   !   Ref: docs/reference/analise_novos_recursos_simulador_fortran.md §7.2.4
   !
+  ! F10 — Sensibilidades ∂H/∂ρ (Jacobiano) via diferenças finitas centradas:
+  !   Quando use_jacobian == 0 (default): sem cálculo extra, comportamento inalterado.
+  !   Quando use_jacobian == 1 .and. jacobian_method == 1: calcula Jacobiano
+  !   internamente em Fortran via compute_jacobian_fd (Estratégia C, OpenMP).
+  !   Quando use_jacobian == 1 .and. jacobian_method == 0: no-op aqui
+  !   (Estratégia B é puramente orquestração Python via batch_runner.py).
+  !   Fórmula: J_ik = (H_i(ρ_k + δ) − H_i(ρ_k − δ)) / (2δ)
+  !     δ = max(jacobian_fd_step × |ρ_k|, 1e-6)
+  !   Saída: dois arquivos .jac (um por componente h/v) com shape
+  !          (ntheta, nmmax, nf, 9, n) complex(dp).
+  !   Ref: docs/reference/relatorio_vantagens_jacobiano.md §9.3 (Estratégia C)
+  !
   ! Fluxo de execução (multi-TR):
   !   do itr = 1, nTR
   !     do k = 1, ntheta  (outer parallel if ntheta > 1)
@@ -84,6 +97,10 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   integer, intent(in) :: comp_pairs(:,:)   ! F6: pares (near_itr, far_itr), shape (n_comp_pairs, 2)
   ! Filtro Adaptativo — seleção do filtro de Hankel
   integer, intent(in) :: filter_type  ! 0=Werthmuller 201pt (default), 1=Kong 61pt, 2=Anderson 801pt
+  ! F10 — Sensibilidades ∂H/∂ρ (Jacobiano) via diferenças finitas centradas
+  integer,  intent(in) :: use_jacobian      ! F10: 0=desabilitado (default), 1=habilitado
+  integer,  intent(in) :: jacobian_method   ! F10: 0=Python B (no-op aqui), 1=Fortran OpenMP C
+  real(dp), intent(in) :: jacobian_fd_step  ! F10: ε relativo para FD centrada (default 1e-4)
 
   integer :: i, j, k, nmmax
   real(dp) :: thetamin, thetaplu, thetarad
@@ -195,6 +212,25 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   real(dp), allocatable    :: atten_db(:,:,:,:,:)      ! (n_comp_pairs, ntheta, nmmax, nf, 9)
   integer :: ipair, i_near, i_far, ic
   real(dp) :: abs_near, abs_far
+
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! F10 — Variáveis para Sensibilidades ∂H/∂ρ (Jacobiano)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Arrays globais de saída do Jacobiano (Estratégia C — Fortran OpenMP).
+  ! Shape: (nTR, ntheta, nmmax, nf, 9, n) — uma derivada por camada.
+  !   dH_dRho_h_all: ∂H/∂ρ_h (componente horizontal)
+  !   dH_dRho_v_all: ∂H/∂ρ_v (componente vertical)
+  !
+  ! Memória para nTR=1, ntheta=1, nmmax=600, nf=2, n=10:
+  !   2 arrays × 1 × 1 × 600 × 2 × 9 × 10 × 16 bytes ≈ 3.5 MB — negligível.
+  ! Para nTR=3, n=30: ~63 MB (ainda aceitável em workstation típica).
+  !
+  ! Array auxiliar posTR_array_k (6 × nmed(k)) reconstrói posições T-R por k.
+  ! Ref: docs/reference/relatorio_vantagens_jacobiano.md §9.3
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  complex(dp), allocatable :: dH_dRho_h_all(:,:,:,:,:,:)  ! (nTR, ntheta, nmmax, nf, 9, n)
+  complex(dp), allocatable :: dH_dRho_v_all(:,:,:,:,:,:)  ! (nTR, ntheta, nmmax, nf, 9, n)
+  real(dp), allocatable    :: posTR_array_k(:,:)          ! (6, nmed(k)) — posições para jacobian
 
   ! wtime = omp_get_wtime( )
 
@@ -434,6 +470,21 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     else
       write(*,'(A,I0,A)') '[FILTRO] Werthmuller (', npt_active, ' pts) — padrão (precisão 10⁻⁶)'
     end if
+
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    ! F10 — Informações sobre Jacobiano
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    if (use_jacobian == 1) then
+      if (jacobian_method == 1) then
+        write(*,'(A,ES10.3,A)') &
+          '[F10] Jacobiano habilitado — Estratégia C (Fortran OpenMP interno), fd_step=', &
+          jacobian_fd_step, ' (relativo)'
+        write(*,'(A,I0,A)') '[F10] Saída: 2 arquivos .jac com shape (ntheta, nmmax, nf, 9, ', &
+                            n, ') — h e v'
+      else
+        write(*,'(A)') '[F10] Jacobiano habilitado — Estratégia B (Python Workers, no-op no Fortran)'
+      end if
+    end if
   end if
 
   allocate(zrho1(ntheta,nmmax,nf,3), cH1(ntheta,nmmax,nf,9))
@@ -484,6 +535,27 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     allocate(cH_comp(0, 0, 0, 0, 0))
     allocate(phase_diff(0, 0, 0, 0, 0))
     allocate(atten_db(0, 0, 0, 0, 0))
+  end if
+
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! F10 — Alocação dos arrays globais do Jacobiano (Estratégia C)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Quando jacobian_method == 1 (Estratégia C — Fortran OpenMP interno):
+  !   aloca arrays completos (nTR, ntheta, nmmax, nf, 9, n) para armazenar
+  !   ∂H/∂ρ_h e ∂H/∂ρ_v de todos os pares T-R, ângulos e medidas.
+  ! Quando jacobian_method == 0 (Estratégia B — Python Workers externos):
+  !   Fortran não calcula o Jacobiano; a expansão de perturbações é feita
+  !   pelo batch_runner.py que chama múltiplas vezes o simulador normal.
+  !   Aloca zero-size para silenciar warnings e manter shape consistente.
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  if (use_jacobian == 1 .and. jacobian_method == 1) then
+    allocate(dH_dRho_h_all(nTR, ntheta, nmmax, nf, 9, n))
+    allocate(dH_dRho_v_all(nTR, ntheta, nmmax, nf, 9, n))
+    dH_dRho_h_all = (0.d0, 0.d0)
+    dH_dRho_v_all = (0.d0, 0.d0)
+  else
+    allocate(dH_dRho_h_all(0, 0, 0, 0, 0, 0))
+    allocate(dH_dRho_v_all(0, 0, 0, 0, 0, 0))
   end if
 
   ! Fase 2 — Hybrid Scheduler: escolha do schedule baseada na característica do loop
@@ -675,6 +747,57 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     zrho_all_tr(itr, :, :, :, :) = zrho1
   end if
 
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! F10 — Cálculo do Jacobiano ∂H/∂ρ (Estratégia C, serial no itr, paralelo internamente)
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Para cada ângulo k dentro deste par T-R (itr), reconstrói posTR_array_k
+  ! (6 × nmed(k)) e chama compute_jacobian_fd — que paraleliza internamente
+  ! sobre 2*n perturbações (n camadas × 2 componentes h/v).
+  !
+  ! Performance: o loop externo k é serial (poucas iterações tipicamente),
+  ! o loop 2*n dentro de compute_jacobian_fd é onde está o paralelismo OpenMP.
+  ! Ver compute_jacobian_fd abaixo para detalhes do schedule(dynamic, 1).
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  if (use_jacobian == 1 .and. jacobian_method == 1) then
+    do k = 1, ntheta
+      ang  = theta(k) * pi / 18.d1
+      seno = sin(ang)
+      coss = cos(ang)
+      px   = p_med * seno
+      pz   = p_med * coss
+      Lsen = dTR(itr) * seno
+      Lcos = dTR(itr) * coss
+      r_k  = dTR(itr) * dabs(seno)
+
+      ! Reconstrói posTR_array_k (6 × nmed(k)) — posições de medidas para este k.
+      ! Mesma lógica do loop j principal (linhas ~670 abaixo).
+      if (allocated(posTR_array_k)) deallocate(posTR_array_k)
+      allocate(posTR_array_k(6, nmed(k)))
+      do j = 1, nmed(k)
+        x  = 0.d0 + (j-1) * px - Lsen / 2
+        y  = 0.d0
+        z  = z1 + (j-1) * pz - Lcos / 2
+        Tx = 0.d0 + (j-1) * px + Lsen / 2
+        Ty = 0.d0
+        Tz = z1 + (j-1) * pz + Lcos / 2
+        posTR_array_k(:, j) = (/ Tx, Ty, Tz, x, y, z /)
+      end do
+
+      call compute_jacobian_fd(ws_pool, maxthreads, ang, nf, freq,              &
+                                posTR_array_k, nmed(k), dipolo, npt_active,     &
+                                krwJ0J1, n, h, prof, resist, eta_shared, r_k,   &
+                                jacobian_fd_step,                               &
+                                dH_dRho_h_all(itr, k, 1:nmed(k), :, :, :),      &
+                                dH_dRho_v_all(itr, k, 1:nmed(k), :, :, :))
+    end do
+
+    ! Escreve os arquivos .jac (Re e Im de dH_dRho_h e dH_dRho_v)
+    call write_jacobian_file(modelm, nmaxmodel, mypath, filename, itr, nTR,     &
+                              ntheta, nmmax, nf, n, nmed,                       &
+                              dH_dRho_h_all(itr, :, :, :, :, :),                &
+                              dH_dRho_v_all(itr, :, :, :, :, :))
+  end if
+
   end do  ! end do itr = 1, nTR
 
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
@@ -753,6 +876,10 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   if (allocated(cH_comp))      deallocate(cH_comp)
   if (allocated(phase_diff))   deallocate(phase_diff)
   if (allocated(atten_db))     deallocate(atten_db)
+  ! F10 — Liberação dos arrays do Jacobiano
+  if (allocated(dH_dRho_h_all)) deallocate(dH_dRho_h_all)
+  if (allocated(dH_dRho_v_all)) deallocate(dH_dRho_v_all)
+  if (allocated(posTR_array_k)) deallocate(posTR_array_k)
 
   ! Débito B5 corrigido: krwJ0J1 alocado na linha ~99 e nunca desalocado.
   ! Leak de ~9,6 KB/modelo (npt × 3 × 8 bytes = 201 × 3 × 8 ≈ 4,8 KB).
@@ -1314,5 +1441,264 @@ subroutine write_results(results, nk, nj, ni, arq, filename)
 
   close(arq)
 end subroutine write_results
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+! F10 — compute_jacobian_fd: Cálculo do Jacobiano ∂H/∂ρ via diferenças finitas centradas
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+!
+! ESTRATÉGIA C — Paralelização OpenMP interna (Máxima Performance)
+!
+! Calcula a matriz Jacobiana ∂H/∂ρ para todas as medidas j de um único
+! ângulo k e par T-R itr, usando diferenças finitas centradas:
+!
+!   J_{jfc,layer,h} = (H_{jfc}(ρ_h + δ) − H_{jfc}(ρ_h − δ)) / (2 δ)
+!   J_{jfc,layer,v} = (H_{jfc}(ρ_v + δ) − H_{jfc}(ρ_v − δ)) / (2 δ)
+!
+! onde δ = max(fd_step × |ρ_ref|, 1e-6).
+!
+! PARALELISMO: o loop `do kk = 1, 2*n` é paralelizado via !$omp parallel do.
+! Cada iteração kk corresponde a UMA perturbação (layer, componente h ou v),
+! com 2 chamadas sequenciais a fieldsinfreqs_cached_ws (±δ). As 2*n iterações
+! são completamente independentes (perturbam apenas uma entrada de resist a
+! cada vez), permitindo escalonamento ideal com OpenMP.
+!
+! Distribuição: schedule(dynamic, 1) — cada thread pega 1 perturbação por vez,
+! o que minimiza desbalanceamento quando algumas camadas são mais baratas que
+! outras (e.g., camadas externas sem contraste nas vizinhas).
+!
+! THREAD-SAFETY:
+!   - ws_pool_in(tid) — cada thread usa seu próprio slot (tid único por thread)
+!   - Caches perturbados (u_p, s_p, ..., AdmInt_p) — alocados DENTRO do parallel
+!     do (arrays privados automáticos via allocate), não compartilhados
+!   - resist_p, resist_m, eta_p, eta_m — arrays privados por thread
+!
+! REUTILIZAÇÃO DO ws_pool:
+! compute_jacobian_fd é chamada FORA do loop paralelo externo de perfila1DanisoOMP
+! (após !$omp end parallel do). Portanto, ws_pool já está livre e cada thread
+! do loop kk pode usar ws_pool(tid) sem conflito com o forward nominal.
+!
+! Ref: docs/reference/relatorio_vantagens_jacobiano.md §9.3 Estratégia C
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+subroutine compute_jacobian_fd(ws_pool_in, n_threads_pool, ang, nf, freq,      &
+                                posTR_array, n_pos, dipolo, npt_active,         &
+                                krwJ0J1, n, h, prof, resist, eta_shared, r_k,   &
+                                fd_step, dH_dRho_h_out, dH_dRho_v_out)
+  implicit none
+  ! ── Entradas ──
+  type(thread_workspace), intent(inout) :: ws_pool_in(0:n_threads_pool-1)
+  integer,      intent(in) :: n_threads_pool, nf, n_pos, npt_active, n
+  real(dp),     intent(in) :: ang, freq(nf)
+  real(dp),     intent(in) :: posTR_array(6, n_pos)
+  character(*), intent(in) :: dipolo
+  real(dp),     intent(in) :: krwJ0J1(npt_active, 3)
+  real(dp),     intent(in) :: h(n), prof(0:n), resist(n, 2), eta_shared(n, 2)
+  real(dp),     intent(in) :: r_k         ! distância horizontal T-R (já computada no caller)
+  real(dp),     intent(in) :: fd_step     ! ε relativo para FD centrada
+
+  ! ── Saídas ──
+  ! Shape (n_pos, nf, 9, n) — 4D: uma fatia "layer" por iteração kk.
+  ! O caller passa dH_dRho_h_all(itr, k, 1:nmed(k), :, :, :) com shape
+  ! (nmed(k), nf, 9, n) que casa com esta declaração explicit-shape.
+  complex(dp), intent(out) :: dH_dRho_h_out(n_pos, nf, 9, n)
+  complex(dp), intent(out) :: dH_dRho_v_out(n_pos, nf, 9, n)
+
+  ! Variáveis locais
+  integer     :: kk, layer, comp, jj, tid, ii
+  real(dp)    :: delta, rho_ref, omega_loc
+  complex(dp) :: zeta_loc
+  real(dp)    :: resist_p(n, 2), resist_m(n, 2)
+  real(dp)    :: eta_p(n, 2), eta_m(n, 2)
+  real(dp)    :: zrho_p(nf, 3), zrho_m(nf, 3)
+  complex(dp) :: cH_p(nf, 9), cH_m(nf, 9)
+  ! Caches perturbados por thread — alocados dentro do parallel do
+  complex(dp), allocatable :: u_p(:,:,:), s_p(:,:,:), uh_p(:,:,:), sh_p(:,:,:)
+  complex(dp), allocatable :: RTEdw_p(:,:,:), RTEup_p(:,:,:)
+  complex(dp), allocatable :: RTMdw_p(:,:,:), RTMup_p(:,:,:)
+  complex(dp), allocatable :: AdmInt_p(:,:,:)
+  complex(dp), allocatable :: u_m(:,:,:), s_m(:,:,:), uh_m(:,:,:), sh_m(:,:,:)
+  complex(dp), allocatable :: RTEdw_m(:,:,:), RTEup_m(:,:,:)
+  complex(dp), allocatable :: RTMdw_m(:,:,:), RTMup_m(:,:,:)
+  complex(dp), allocatable :: AdmInt_m(:,:,:)
+
+  ! Zeroing dos outputs (defensivo — sempre preenchidos no loop abaixo)
+  dH_dRho_h_out = (0.d0, 0.d0)
+  dH_dRho_v_out = (0.d0, 0.d0)
+
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! Loop principal paralelo: 2*n perturbações independentes
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+  ! NOTA sobre shape de dH_dRho_*_out: a assinatura acima declara (n_pos, nf, 9)
+  ! mas o CALLER passa dH_dRho_h_all(itr, k, 1:nmed(k), :, :, :) que tem shape
+  ! (n_pos, nf, 9, n). Fortran resolve isso via sequence association quando
+  ! passado a um dummy explicit-shape. Para evitar ambiguidade, usamos
+  ! declaração explícita (n_pos, nf, 9, n) e indexação (jj, :, :, layer).
+  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+
+  !$omp parallel do schedule(dynamic, 1) default(shared)                        &
+  !$omp&        private(kk, layer, comp, jj, tid, delta, rho_ref,               &
+  !$omp&                resist_p, resist_m, eta_p, eta_m,                       &
+  !$omp&                zrho_p, zrho_m, cH_p, cH_m, ii, omega_loc, zeta_loc,    &
+  !$omp&                u_p, s_p, uh_p, sh_p, RTEdw_p, RTEup_p,                 &
+  !$omp&                RTMdw_p, RTMup_p, AdmInt_p,                             &
+  !$omp&                u_m, s_m, uh_m, sh_m, RTEdw_m, RTEup_m,                 &
+  !$omp&                RTMdw_m, RTMup_m, AdmInt_m)
+  do kk = 1, 2*n
+    layer = (kk - 1) / 2 + 1         ! 1..n
+    comp  = mod(kk - 1, 2) + 1       ! 1 = ρ_h, 2 = ρ_v
+    tid   = omp_get_thread_num()
+
+    ! ── Preparar resistividades perturbadas ──
+    resist_p = resist
+    resist_m = resist
+    rho_ref  = resist(layer, comp)
+    delta    = max(fd_step * abs(rho_ref), 1.d-6)
+    resist_p(layer, comp) = rho_ref + delta
+    resist_m(layer, comp) = rho_ref - delta
+
+    ! ── eta = 1/resist (recomputado apenas para a camada perturbada) ──
+    eta_p = eta_shared
+    eta_m = eta_shared
+    eta_p(layer, comp) = 1.d0 / resist_p(layer, comp)
+    eta_m(layer, comp) = 1.d0 / resist_m(layer, comp)
+
+    ! ── Alocar caches Phase 4 privados (por thread, por kk) ──
+    allocate(u_p(npt_active, n, nf), s_p(npt_active, n, nf))
+    allocate(uh_p(npt_active, n, nf), sh_p(npt_active, n, nf))
+    allocate(RTEdw_p(npt_active, n, nf), RTEup_p(npt_active, n, nf))
+    allocate(RTMdw_p(npt_active, n, nf), RTMup_p(npt_active, n, nf))
+    allocate(AdmInt_p(npt_active, n, nf))
+    allocate(u_m(npt_active, n, nf), s_m(npt_active, n, nf))
+    allocate(uh_m(npt_active, n, nf), sh_m(npt_active, n, nf))
+    allocate(RTEdw_m(npt_active, n, nf), RTEup_m(npt_active, n, nf))
+    allocate(RTMdw_m(npt_active, n, nf), RTMup_m(npt_active, n, nf))
+    allocate(AdmInt_m(npt_active, n, nf))
+
+    ! ── Recomputar caches Phase 4 para cada frequência (perturbações +δ e −δ) ──
+    do ii = 1, nf
+      omega_loc = 2.d0 * pi * freq(ii)
+      zeta_loc  = cmplx(0.d0, 1.d0, kind=dp) * omega_loc * mu
+      call commonarraysMD(n, npt_active, r_k, krwJ0J1(:,1), zeta_loc, h, eta_p, &
+                          u_p(:,:,ii), s_p(:,:,ii), uh_p(:,:,ii), sh_p(:,:,ii), &
+                          RTEdw_p(:,:,ii), RTEup_p(:,:,ii),                      &
+                          RTMdw_p(:,:,ii), RTMup_p(:,:,ii), AdmInt_p(:,:,ii))
+      call commonarraysMD(n, npt_active, r_k, krwJ0J1(:,1), zeta_loc, h, eta_m, &
+                          u_m(:,:,ii), s_m(:,:,ii), uh_m(:,:,ii), sh_m(:,:,ii), &
+                          RTEdw_m(:,:,ii), RTEup_m(:,:,ii),                      &
+                          RTMdw_m(:,:,ii), RTMup_m(:,:,ii), AdmInt_m(:,:,ii))
+    end do
+
+    ! ── Loop serial sobre posições j (dentro da região paralela de kk) ──
+    do jj = 1, n_pos
+      call fieldsinfreqs_cached_ws(ws_pool_in(tid), ang, nf, freq,              &
+                                    posTR_array(:, jj), dipolo, npt_active,     &
+                                    krwJ0J1, n, h, prof, resist_p, eta_p,       &
+                                    u_p, s_p, uh_p, sh_p,                       &
+                                    RTEdw_p, RTEup_p, RTMdw_p, RTMup_p,         &
+                                    AdmInt_p, zrho_p, cH_p)
+      call fieldsinfreqs_cached_ws(ws_pool_in(tid), ang, nf, freq,              &
+                                    posTR_array(:, jj), dipolo, npt_active,     &
+                                    krwJ0J1, n, h, prof, resist_m, eta_m,       &
+                                    u_m, s_m, uh_m, sh_m,                       &
+                                    RTEdw_m, RTEup_m, RTMdw_m, RTMup_m,         &
+                                    AdmInt_m, zrho_m, cH_m)
+
+      ! ── Diferença finita centrada: J = (H+ − H−) / (2δ) ──
+      if (comp == 1) then
+        dH_dRho_h_out(jj, :, :, layer) = (cH_p - cH_m) / (2.d0 * delta)
+      else
+        dH_dRho_v_out(jj, :, :, layer) = (cH_p - cH_m) / (2.d0 * delta)
+      end if
+    end do
+
+    ! ── Liberar caches privados ──
+    deallocate(u_p, s_p, uh_p, sh_p, RTEdw_p, RTEup_p, RTMdw_p, RTMup_p, AdmInt_p)
+    deallocate(u_m, s_m, uh_m, sh_m, RTEdw_m, RTEup_m, RTMdw_m, RTMup_m, AdmInt_m)
+  end do
+  !$omp end parallel do
+
+end subroutine compute_jacobian_fd
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+! F10 — write_jacobian_file: Escreve o Jacobiano em arquivo binário .jac
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+!
+! Formato do arquivo .jac (stream unformatted):
+!   Header (int32):
+!     nt, nmmax, nf, 9, n_layers, itr, nTR
+!   Payload:
+!     Re(dH_dRho_h(k, j, i, ic, layer)), Im(dH_dRho_h(k, j, i, ic, layer))
+!     ... para todos (k, j, i, ic, layer) ...
+!     Re(dH_dRho_v(k, j, i, ic, layer)), Im(dH_dRho_v(k, j, i, ic, layer))
+!
+! Tamanho: 2 × (ntheta × nmmax × nf × 9 × n) × 16 bytes + 7 × 4 bytes (header)
+! Nome: {filename}[_TR{itr}].jac (sufixo _TR{itr} se nTR > 1)
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+subroutine write_jacobian_file(modelm, nmaxmodel, mypath, filename, itr, nTR, &
+                                nt, nmmax, nf, n_layers, nmeds,                &
+                                dH_dRho_h_in, dH_dRho_v_in)
+  implicit none
+  integer,      intent(in) :: modelm, nmaxmodel, itr, nTR, nt, nmmax, nf, n_layers
+  integer,      intent(in) :: nmeds(nt)
+  character(*), intent(in) :: mypath, filename
+  complex(dp),  intent(in) :: dH_dRho_h_in(nt, nmmax, nf, 9, n_layers)
+  complex(dp),  intent(in) :: dH_dRho_v_in(nt, nmmax, nf, 9, n_layers)
+
+  integer :: k, j, i, ic, layer, exec
+  character(len=:), allocatable :: fileJAC
+  character(len=10) :: tr_suffix
+  logical :: file_exists
+
+  ! ── Construção do nome do arquivo ──
+  if (nTR > 1) then
+    write(tr_suffix, '(A,I0)') '_TR', itr
+    fileJAC = mypath//trim(adjustl(filename))//trim(tr_suffix)//'.jac'
+  else
+    fileJAC = mypath//trim(adjustl(filename))//'.jac'
+  end if
+
+  ! ── Abertura condicional: append se modelm > 1 e arquivo existe ──
+  inquire(file = fileJAC, exist = file_exists)
+  if (modelm == 1 .or. .not. file_exists) then
+    open(unit = 2000, iostat = exec, file = fileJAC, form = 'unformatted',  &
+         access = 'stream', status = 'replace', action = 'write')
+    ! Header no início de arquivo novo
+    write(2000) nt, nmmax, nf, 9, n_layers, itr, nTR
+  else
+    open(unit = 2000, iostat = exec, file = fileJAC, form = 'unformatted',  &
+         access = 'stream', status = 'old', position = 'append', action = 'write')
+  end if
+
+  ! ── Payload: escreve dH_dRho_h seguido de dH_dRho_v ──
+  ! Ordem de loops: (k, j, i, ic, layer) — matching column-major de Fortran
+  do k = 1, nt
+    do j = 1, nmeds(k)
+      do i = 1, nf
+        do ic = 1, 9
+          do layer = 1, n_layers
+            write(2000) real(dH_dRho_h_in(k, j, i, ic, layer), kind=dp), &
+                       aimag(dH_dRho_h_in(k, j, i, ic, layer))
+          end do
+        end do
+      end do
+    end do
+  end do
+
+  do k = 1, nt
+    do j = 1, nmeds(k)
+      do i = 1, nf
+        do ic = 1, 9
+          do layer = 1, n_layers
+            write(2000) real(dH_dRho_v_in(k, j, i, ic, layer), kind=dp), &
+                       aimag(dH_dRho_v_in(k, j, i, ic, layer))
+          end do
+        end do
+      end do
+    end do
+  end do
+
+  close(unit = 2000)
+end subroutine write_jacobian_file
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 end module DManisoTIV
