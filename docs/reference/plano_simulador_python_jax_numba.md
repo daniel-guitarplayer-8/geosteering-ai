@@ -643,37 +643,54 @@ código e documentação:
 
 ### 15.1 Sprints concluídas
 
-| Sprint | Nome                         | Status        | Data       | Artefatos                                   |
-|:------:|:-----------------------------|:--------------|:-----------|:--------------------------------------------|
-| 1.1    | Extração dos pesos Hankel   | ✅ Concluída | 2026-04-11 | Parser + 3 `.npz` + FilterLoader + 45 testes |
+| Sprint | Nome                                       | Status        | Data       | Testes |
+|:------:|:-------------------------------------------|:--------------|:-----------|:------:|
+| 1.1    | Extração dos pesos Hankel                 | ✅ Concluída | 2026-04-11 | 53/53 |
+| 1.2    | SimulationConfig dataclass                 | ✅ Concluída | 2026-04-11 | 62/62 |
+| 1.3    | Soluções analíticas half-space (5 casos)  | ✅ Concluída | 2026-04-11 | 38/38 |
+|        | **TOTAL Fase 1 (Foundations)**            | **✅ Completa** | **2026-04-11** | **153/153 PASS em 1.81s** |
 
-**Relatório detalhado**: [`relatorio_sprint_1_1_hankel.md`](relatorio_sprint_1_1_hankel.md)
+**Relatórios detalhados**:
+- Sprint 1.1: [`relatorio_sprint_1_1_hankel.md`](relatorio_sprint_1_1_hankel.md)
+- Sprints 1.2 + 1.3: [`relatorio_sprint_1_2_1_3_config_halfspace.md`](relatorio_sprint_1_2_1_3_config_halfspace.md)
 
-Resumo dos artefatos da Sprint 1.1:
+Resumo dos artefatos entregues na Fase 1:
 
+**Sprint 1.1 (Filtros Hankel)**:
 - `scripts/extract_hankel_weights.py` — parser Fortran→.npz com SHA-256 auditável
 - `geosteering_ai/simulation/__init__.py` (fachada pública)
-- `geosteering_ai/simulation/filters/loader.py` — FilterLoader + HankelFilter
-- `geosteering_ai/simulation/filters/werthmuller_201pt.npz` (★ default, 5.8 KB)
-- `geosteering_ai/simulation/filters/kong_61pt.npz` (2.6 KB)
-- `geosteering_ai/simulation/filters/anderson_801pt.npz` (19.6 KB)
-- `geosteering_ai/simulation/filters/README.md`
-- `tests/test_simulation_filters.py` — **45/45 testes PASS em 0.80s**
-- `.claude/commands/geosteering-simulator-python.md` — sub skill nova
+- `geosteering_ai/simulation/filters/loader.py` — FilterLoader thread-safe + HankelFilter
+- `geosteering_ai/simulation/filters/*.npz` (3 arquivos, 28 KB totais)
+- `tests/test_simulation_filters.py` — **53/53 PASS**
+- 7 correções pós-review aplicadas
+
+**Sprint 1.2 (SimulationConfig)**:
+- `geosteering_ai/simulation/config.py` — `SimulationConfig` dataclass frozen
+  (13 campos, 4 presets, YAML roundtrip, errata validation)
+- `tests/test_simulation_config.py` — **62/62 PASS**
+
+**Sprint 1.3 (Half-space analítico)**:
+- `geosteering_ai/simulation/validation/__init__.py`
+- `geosteering_ai/simulation/validation/half_space.py` — 5 funções analíticas:
+  `static_decoupling_factors`, `skin_depth`, `wavenumber_quasi_static`,
+  `vmd_fullspace_axial`, `vmd_fullspace_broadside`
+- `tests/test_simulation_half_space.py` — **38/38 PASS**
 
 ### 15.2 Sprints em andamento
 
-Nenhuma — aguardando aprovação para iniciar Sprint 1.2.
+Nenhuma — aguardando aprovação para iniciar Fase 2 (backend Numba).
 
-### 15.3 Sprints próximas
+### 15.3 Sprints próximas (Fase 2 — backend Numba CPU)
 
-| Sprint | Nome                                           | Pré-requisitos       |
-|:------:|:-----------------------------------------------|:---------------------|
-| 1.2    | `SimulationConfig` dataclass + errata validation | Sprint 1.1 ✅       |
-| 1.3    | Teste de referência analítico (half-space)     | Sprint 1.2           |
-| 2.1    | `_numba/propagation.py` (commonarraysMD)       | Sprint 1.3           |
-| 2.2    | `_numba/dipoles.py` (hmd_TIV, vmd)             | Sprint 2.1           |
-| 2.3    | `_numba/kernel.py` (orchestrador forward)       | Sprint 2.2           |
+| Sprint | Nome                                           | Pré-requisitos  |
+|:------:|:-----------------------------------------------|:----------------|
+| 2.1    | `_numba/propagation.py` (commonarraysMD)       | Fase 1 ✅       |
+| 2.2    | `_numba/dipoles.py` (hmd_TIV, vmd)             | Sprint 2.1      |
+| 2.3    | `_numba/hankel.py` (quadratura digital)        | Sprint 2.2      |
+| 2.4    | `_numba/kernel.py` (orchestrador forward)      | Sprint 2.3      |
+| 2.5    | `forward.py` (API `simulate()` + backend dispatch) | Sprint 2.4  |
+| 2.6    | Validação Numba vs soluções analíticas (half-space) | Sprint 2.5 |
+| 2.7    | Benchmark CPU Numba (meta ≥ 40k mod/h)        | Sprint 2.6      |
 
 ---
 

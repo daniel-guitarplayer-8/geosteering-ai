@@ -66,43 +66,99 @@ WER_WJ0_200 = -2.645962918790746080e-08  # último
 WER_WJ1_0 = -2.594301879688918743e-03  # primeiro
 WER_WJ1_200 = 3.780807126974975489e-08  # último
 
-# Anderson 801pt, linhas 3569-... de filtersv2.f08:
-AND_ABSC_0 = 8.9170998013276122e-14  # primeiro
+# Anderson 801pt, linhas 3569-4173 de filtersv2.f08:
+# Valores em múltiplos pontos do array para detectar regressões no parser
+# em arrays longos (801 valores em bloco único multilinha — Dialeto B).
+AND_ABSC_0 = 8.9170998013276122e-14  # absc[0]  (primeiro)
+AND_ABSC_400 = 2.0989539161478380e04  # absc[400] (meio, elemento 401 Fortran)
+AND_ABSC_800 = 4.9406282763106685e21  # absc[800] (último, elemento 801 Fortran)
+AND_WJ0_0 = 0.21035620538389819885e-28  # weights_j0[0]   (primeiro)
+AND_WJ0_400 = 0.42878525031129105819e-05  # weights_j0[400] (meio)
+AND_WJ0_800 = 0.90953607290146280299e-10  # weights_j0[800] (último)
+AND_WJ1_0 = -0.23779001100582381051e-28  # weights_j1[0]   (primeiro)
+AND_WJ1_400 = 0.56033096589579911757e-06  # weights_j1[400] (meio)
+AND_WJ1_800 = 0.72149205056137611593e-27  # weights_j1[800] (último)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # FIXTURES
 # ──────────────────────────────────────────────────────────────────────────────
-@pytest.fixture(scope="module")
+# O cache de `FilterLoader` é classe-level (compartilhado entre instâncias e
+# entre testes). Testes que dependem do estado inicial do cache (vazio ou
+# populado) devem explicitamente chamar `clear_cache()` no setup. Por isso,
+# usamos escopo `function` (cada teste recebe sua própria instância) e o
+# `autouse=True` na fixture que limpa o cache, garantindo ordem independente
+# e compatibilidade com `pytest-randomly`.
+@pytest.fixture
 def loader() -> FilterLoader:
-    """Retorna uma instância de `FilterLoader` com cache limpo.
+    """Retorna uma instância limpa de `FilterLoader` por teste.
 
     Returns:
-        FilterLoader configurado para o diretório default.
+        FilterLoader configurado para o diretório default, com cache
+        classe-level limpo. Cada função-teste recebe uma instância nova.
     """
-    loader = FilterLoader()
-    loader.clear_cache()
-    return loader
+    return FilterLoader()
+
+
+@pytest.fixture(autouse=True)
+def _clean_filter_cache() -> None:
+    """Limpa o cache classe-level antes de cada teste (autouse).
+
+    Note:
+        Declarado como `autouse=True` para rodar antes de todos os testes
+        do módulo sem precisar ser referenciado explicitamente. Isso torna
+        a suíte independente de ordem de execução (`pytest-randomly` safe).
+    """
+    FilterLoader().clear_cache()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # TESTES DE PRESENÇA E METADATA
 # ──────────────────────────────────────────────────────────────────────────────
+# Conjunto mínimo de filtros conhecidos que SEMPRE devem estar presentes no
+# catálogo. É definido como `>= FILTROS_CONHECIDOS` (subconjunto) para
+# permitir que filtros futuros (ex.: Key 401pt, 2001pt Werthmüller) sejam
+# adicionados sem quebrar o CI — um teste novo é adicionado ao invés de
+# editar a contagem hardcoded.
+_FILTROS_CONHECIDOS: frozenset[str] = frozenset(
+    {
+        "werthmuller_201pt",
+        "kong_61pt",
+        "anderson_801pt",
+    }
+)
+
+
 class TestFilterArtifactsExist:
-    """Garante que os 3 artefatos .npz estão presentes e listáveis."""
+    """Garante que os filtros conhecidos estão presentes e listáveis."""
 
-    def test_three_filters_available(self, loader: FilterLoader) -> None:
-        """Todos os 3 filtros do catálogo devem estar instalados."""
-        available = loader.available()
-        assert set(available) == {
-            "werthmuller_201pt",
-            "kong_61pt",
-            "anderson_801pt",
-        }
+    def test_known_filters_available(self, loader: FilterLoader) -> None:
+        """Os 3 filtros conhecidos devem estar instalados e listáveis.
 
-    def test_filter_catalog_has_three_entries(self) -> None:
-        """O catálogo interno expõe exatamente 3 filtros."""
-        assert len(_FILTER_CATALOG) == 3
+        Note:
+            Usa `issubset` em vez de igualdade: se um 4° filtro for
+            adicionado ao catálogo no futuro, este teste continua
+            passando (a suíte cresce com testes adicionais, não com
+            edição de contagem hardcoded).
+        """
+        available = set(loader.available())
+        assert _FILTROS_CONHECIDOS.issubset(
+            available
+        ), f"Filtros faltantes: {_FILTROS_CONHECIDOS - available}"
+
+    def test_catalog_contains_known_filters(self) -> None:
+        """O catálogo interno contém (ao menos) os filtros conhecidos.
+
+        Note:
+            Substitui o antigo `assert len(_FILTER_CATALOG) == 3`, que
+            acoplaria o CI ao número exato de filtros e forçaria edição
+            do teste ao adicionar novos. A verificação por subconjunto
+            é forward-compatible.
+        """
+        assert _FILTROS_CONHECIDOS.issubset(set(_FILTER_CATALOG.keys())), (
+            f"Catálogo não contém filtros conhecidos: "
+            f"{_FILTROS_CONHECIDOS - set(_FILTER_CATALOG.keys())}"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -185,7 +241,15 @@ class TestWerthmuller201BitExactness:
 
 
 class TestAnderson801BitExactness:
-    """Compara valores específicos do Anderson 801pt com o Fortran."""
+    """Compara valores específicos do Anderson 801pt com o Fortran.
+
+    Note:
+        Cobertura de spot-check expandida (vs Sprint 1.1 inicial) para
+        incluir primeiro, meio e último em abscissas, wJ0 e wJ1 — total
+        de 9 valores de referência. Isso detecta regressões no parser
+        em acumulação de arrays longos (801 valores em bloco único
+        multilinha do Dialeto B).
+    """
 
     @pytest.fixture
     def filt(self, loader: FilterLoader) -> HankelFilter:
@@ -193,13 +257,46 @@ class TestAnderson801BitExactness:
 
     def test_npt(self, filt: HankelFilter) -> None:
         assert filt.npt == 801
+        assert filt.abscissas.shape == (801,)
+        assert filt.weights_j0.shape == (801,)
+        assert filt.weights_j1.shape == (801,)
 
     def test_fortran_filter_type(self, filt: HankelFilter) -> None:
         assert filt.fortran_filter_type == 2
 
+    # ── Abscissas: primeiro, meio (índice 400), último (índice 800) ──
     def test_absc_first(self, filt: HankelFilter) -> None:
         assert filt.abscissas[0] == AND_ABSC_0
 
+    def test_absc_middle(self, filt: HankelFilter) -> None:
+        """absc[400] detecta regressões no meio do array (1º terço)."""
+        assert filt.abscissas[400] == AND_ABSC_400
+
+    def test_absc_last(self, filt: HankelFilter) -> None:
+        """absc[800] detecta se o parser completou todos os 801 valores."""
+        assert filt.abscissas[-1] == AND_ABSC_800
+
+    # ── weights_j0: primeiro, meio, último ──
+    def test_wj0_first(self, filt: HankelFilter) -> None:
+        assert filt.weights_j0[0] == AND_WJ0_0
+
+    def test_wj0_middle(self, filt: HankelFilter) -> None:
+        assert filt.weights_j0[400] == AND_WJ0_400
+
+    def test_wj0_last(self, filt: HankelFilter) -> None:
+        assert filt.weights_j0[-1] == AND_WJ0_800
+
+    # ── weights_j1: primeiro, meio, último ──
+    def test_wj1_first(self, filt: HankelFilter) -> None:
+        assert filt.weights_j1[0] == AND_WJ1_0
+
+    def test_wj1_middle(self, filt: HankelFilter) -> None:
+        assert filt.weights_j1[400] == AND_WJ1_400
+
+    def test_wj1_last(self, filt: HankelFilter) -> None:
+        assert filt.weights_j1[-1] == AND_WJ1_800
+
+    # ── Validações semânticas ──
     def test_absc_strictly_increasing(self, filt: HankelFilter) -> None:
         """Validação semântica: abscissas devem ser crescentes."""
         assert np.all(np.diff(filt.abscissas) > 0)

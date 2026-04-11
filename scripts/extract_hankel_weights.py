@@ -92,6 +92,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import hashlib
+import json
 import logging
 import re
 import sys
@@ -127,8 +128,18 @@ FILTROS_ALVO: Final[tuple[tuple[str, str, str, int], ...]] = (
 #
 # Notação Fortran para reais: 1.234567D+02 (D em vez de E como expoente).
 # Notação Python/NumPy:         1.234567E+02
+#
+# A mantissa aceita quatro formas (em ordem de prevalência em filtersv2.f08):
+#   1. `1.234D+02`  (ponto no meio)      — Kong, Werthmüller
+#   2. `0.234D-28`  (leading zero)       — Anderson
+#   3. `.234D-28`   (dot-prefix)         — não observada, mas Fortran permite
+#   4. `1D0`        (inteiro + expoente) — não observada, mas legacy permite
+#
+# A alternativa `(?:\d+\.?\d*|\.\d+)` cobre todas as formas acima. Observe
+# que o expoente `[DdEe][+-]?\d+` é obrigatório: isso evita capturar
+# inteiros de índice (ex.: `absc(1:3)` → o `1`, `3` não seriam convertidos).
 _RE_FORTRAN_REAL: Final[re.Pattern[str]] = re.compile(
-    r"([+-]?\d+\.\d+)[DdEe]([+-]?\d+)"
+    r"([+-]?(?:\d+\.?\d*|\.\d+))[DdEe]([+-]?\d+)"
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -282,15 +293,23 @@ def _parse_array_block(
     )
 
     values: list[float] = []
+    # Regex de token numérico espelha a mantissa de `_RE_FORTRAN_REAL`
+    # (aceita `1.23`, `0.21`, `.21`, `1.`, `1`) mas exige o expoente
+    # `[EeDd][+-]?\d+` para NÃO capturar inteiros puros (ex.: `201` em
+    # `absc(201)` de um comentário) nem casar números de índice residuais.
+    # Observe que após `_fortran_real_to_python` o expoente já está em
+    # `E/e`, mas o regex ainda aceita `D/d` por defesa — nunca há custo
+    # em ser tolerante a ambas as notações.
+    _token_re = re.compile(
+        r"[+-]?(?:\d+\.?\d*|\.\d+)[EeDd][+-]?\d+"
+    )
     for match in assign_pattern.finditer(sub_body):
         body = match.group(1)
         # Converter D-notation para E-notation
         body_py = _fortran_real_to_python(body)
         # Extrair números usando regex tolerante a vírgulas, espaços, newlines
         # e caracteres de continuação `&`. Cada token é um float válido.
-        for tok in re.finditer(
-            r"[+-]?\d+\.\d+(?:[EeDd][+-]?\d+)?", body_py
-        ):
+        for tok in _token_re.finditer(body_py):
             values.append(float(tok.group(0)))
 
     # ── Passo 3: validação de comprimento ────────────────────────────────
@@ -437,9 +456,8 @@ def _save_npz(
     # Metadata serializada como array 0-d de string JSON para garantir
     # compatibilidade com o carregamento via `np.load(allow_pickle=False)`.
     # Usar dicts Python requer pickle, o que complica CI e torna o arquivo
-    # dependente de versão do Python.
-    import json
-
+    # dependente de versão do Python. `json` já está importado no topo do
+    # módulo (PEP 8).
     metadata = {
         "filter_name": filter_name,
         "npt": int(len(data["abscissas"])),
@@ -477,8 +495,6 @@ def _verify_outputs(source_hash: str) -> bool:
         True se todos os .npz existirem e estiverem sincronizados;
         False caso contrário (indicando que re-extração é necessária).
     """
-    import json
-
     all_ok = True
     for name, output_name, subroutine, expected_npt in FILTROS_ALVO:
         path = OUTPUT_DIR / output_name

@@ -747,10 +747,10 @@ recursivos. A análise de viabilidade (doc v2.0) demonstra que o gargalo computa
 #### Sprints
 
 ```
-F7.0 — Setup (branch, deps JAX+Numba+empymod, estrutura simulation/)      [EM ANDAMENTO]
+F7.0 ✅ — Setup (branch, deps JAX+Numba+empymod, estrutura simulation/)   [CONCLUÍDA]
 F7.1.1 ✅ — Extração dos pesos Hankel Fortran → .npz (Kong/Wer/And)       [CONCLUÍDA]
-F7.1.2 — SimulationConfig dataclass (errata validation, YAML roundtrip)    [PENDENTE]
-F7.1.3 — Teste de referência analítico (half-space homogêneo)              [PENDENTE]
+F7.1.2 ✅ — SimulationConfig dataclass (errata validation, YAML roundtrip) [CONCLUÍDA]
+F7.1.3 ✅ — Teste de referência analítico (half-space homogêneo, 5 casos)  [CONCLUÍDA]
 F7.2   — Backend Numba CPU: commonarraysMD, commonfactorsMD, hmd/vmd      [PENDENTE]
 F7.2.x — Paridade Fortran (erro < 1e-14 float64, < 1e-6 float32)          [PENDENTE]
 F7.3   — Backend JAX CPU/GPU: jit + vmap + pmap + lax.scan                [PENDENTE]
@@ -760,25 +760,74 @@ F7.6   — Integração no PipelineConfig (backend='numba'|'jax')             [P
 F7.7   — Otimizações finais (pmap multi-GPU, XLA, caching)                [PENDENTE]
 ```
 
+**Fase 1 concluída** ✅ em 2026-04-11: todos os entregáveis de Foundations
+(filtros + config + testes analíticos) foram implementados, revisados
+(7 correções pós-review) e validados com **153/153 testes PASS** em 1.81 s.
+
 #### Sprint 1.1 — Extração dos Pesos Hankel (concluída 2026-04-11)
 
 - ✅ `scripts/extract_hankel_weights.py` — parser do Fortran `filtersv2.f08`
-  (regex determinístico + conversão D→E + validação + SHA-256 auditável).
+  (regex robusta aceitando `1.23D+02`, `0.21D-28`, `.21D-28`, `1D0` +
+  conversão D→E + validação + SHA-256 auditável).
 - ✅ `geosteering_ai/simulation/filters/*.npz` — 3 artefatos:
   - `werthmuller_201pt.npz` (5.8 KB, filter_type=0, default)
   - `kong_61pt.npz` (2.6 KB, filter_type=1, rápido)
   - `anderson_801pt.npz` (19.6 KB, filter_type=2, preciso)
 - ✅ `geosteering_ai/simulation/filters/loader.py` — `FilterLoader` com
-  cache classe-level + `HankelFilter` (`@dataclass(frozen=True)`, arrays
-  read-only). Suporta nomes canônicos, aliases (`"wer"`, `"kong"`,
-  `"anderson"`) e filter_type numérico (`"0"`, `"1"`, `"2"`).
-- ✅ `tests/test_simulation_filters.py` — 45 testes (todos PASS em 0.80s):
-  - 11 de bit-exactness (valores literais vs Fortran)
-  - 12 de API (canônico, aliases, filter_type numérico, cache)
+  **cache classe-level thread-safe** (double-checked locking via
+  `threading.Lock` — seguro para Fase 2 com workers paralelos) +
+  `HankelFilter` (`@dataclass(frozen=True)`, arrays read-only).
+- ✅ `tests/test_simulation_filters.py` — **53 testes** (após revisão):
+  - 11 de bit-exactness (Kong, Werthmüller, Anderson: primeiro/meio/último)
+  - 13 de API (canônico, aliases, filter_type numérico, cache)
   - 4 de imutabilidade (arrays read-only, dataclass frozen)
   - 4 de sincronia SHA-256 (gate de auditoria entre .f08 e .npz)
-  - 14 restantes distribuídos (npt, shapes, sanidade semântica)
+  - 21 restantes (shapes, semântica, Anderson expandido)
+- ✅ **7 correções pós-review** aplicadas (1 race condition, 2 regex,
+  1 assertion, 1 spot-check Anderson, 1 fixture scope, 1 header D1).
 - ✅ Sub skill `.claude/commands/geosteering-simulator-python.md`.
+
+#### Sprint 1.2 — SimulationConfig dataclass (concluída 2026-04-11)
+
+- ✅ `geosteering_ai/simulation/config.py` — `SimulationConfig`
+  (`@dataclass(frozen=True)`, 13 campos):
+  - Validação de errata em `__post_init__` (ranges físicos, enums,
+    conflitos mútuos backend × device).
+  - **4 presets** @classmethod: `default()`, `high_precision()`,
+    `production_gpu()`, `realtime_cpu()`.
+  - **YAML roundtrip** via `to_yaml/from_yaml` (lazy import PyYAML).
+  - **Dict roundtrip** via `to_dict/from_dict` (ignora chaves extras).
+- ✅ `tests/test_simulation_config.py` — **62 testes**:
+  - 11 defaults (frequency=20000, tr_spacing=1.0, backend=fortran_f2py, ...)
+  - 8 ranges numéricos (frequência, spacing, posições)
+  - 12 enums (backend, dtype, device, hankel_filter)
+  - 4 mutual exclusivity (fortran+gpu, numba+gpu inválidos)
+  - 6 listas opcionais (multi-freq, multi-TR)
+  - 4 num_threads
+  - 5 presets (todos passam na validação)
+  - 3 imutabilidade (frozen, replace revalida)
+  - 6 serialização (dict + YAML)
+  - 3 igualdade + hash
+
+#### Sprint 1.3 — Soluções analíticas half-space (concluída 2026-04-11)
+
+- ✅ `geosteering_ai/simulation/validation/__init__.py` — fachada.
+- ✅ `geosteering_ai/simulation/validation/half_space.py` — **5 funções
+  puras NumPy** com ground-truth analítico para validação dos backends:
+  1. `static_decoupling_factors(L)` → (ACp, ACx). Bit-exato com CLAUDE.md.
+  2. `skin_depth(f, rho)` → δ em metros (Nabighian 1988).
+  3. `wavenumber_quasi_static(f, rho)` → k complexo (Ward-Hohmann 1988).
+  4. `vmd_fullspace_axial(L, f, rho, m)` → Hz em (0,0,L).
+  5. `vmd_fullspace_broadside(L, f, rho, m)` → Hz em (L,0,0).
+  - Convenção temporal **e^(-iωt)** (geofísica / Moran-Gianzero 1979).
+  - Convenção quasi-estática **k² = iωμ₀σ** → Im(k) > 0 (atenuação).
+- ✅ `tests/test_simulation_half_space.py` — **38 testes**:
+  - 7 decoupling factors (bit-exato vs CLAUDE.md, sinal, escalamento L³)
+  - 8 skin depth (fórmula, 1/√f, √ρ, array broadcast)
+  - 7 wavenumber (Im(k)>0, Re(k)=Im(k), |k|·δ=√2)
+  - 7 VMD axial (limite estático, linearidade, skin effect)
+  - 5 VMD broadside (limite estático ACp, sinal negativo)
+  - 4 cross-cutting (razão axial/broadside=-2, consistência entre casos)
 
 #### Estimativas de desempenho (doc seção 12.6)
 

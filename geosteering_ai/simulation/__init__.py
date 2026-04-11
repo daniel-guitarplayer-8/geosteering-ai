@@ -119,16 +119,20 @@ Note:
 from __future__ import annotations
 
 # ──────────────────────────────────────────────────────────────────────────────
-# EXPORTS PÚBLICOS (Sprint 1.1)
+# EXPORTS PÚBLICOS (Sprints 1.1, 1.2, 1.3)
 # ──────────────────────────────────────────────────────────────────────────────
-# Até a Fase 2, apenas o subsistema de filtros está disponível. Outras
-# exportações (SimulationConfig, simulate, ...) serão adicionadas quando
-# os módulos correspondentes forem implementados.
+# Estado de exposição pública:
+#   Sprint 1.1  →  FilterLoader, HankelFilter           (entregues)
+#   Sprint 1.2  →  SimulationConfig                      (entregue)
+#   Sprint 1.3  →  validation.half_space (submódulo)    (entregue)
+#   Fase 2+     →  simulate, _numba, _jax, forward      (pendente)
+from geosteering_ai.simulation.config import SimulationConfig
 from geosteering_ai.simulation.filters import FilterLoader, HankelFilter
 
 __all__ = [
     "FilterLoader",
     "HankelFilter",
+    "SimulationConfig",
 ]
 
 # Versão do subpacote. Sobe conforme Sprints concluídas.
@@ -136,4 +140,4 @@ __all__ = [
 #   0.2.x → Sprint 1.2 (SimulationConfig + validação)
 #   0.3.x → Sprint 1.3 (testes de referência half-space)
 #   1.0.0 → Fase 6 concluída (simulador 100% funcional)
-__version__ = "0.1.0"
+__version__ = "0.3.0"

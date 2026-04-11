@@ -99,6 +99,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Final
@@ -298,7 +299,19 @@ class FilterLoader:
             'werthmuller_201pt'
     """
 
+    # Cache compartilhado entre instâncias. Chaveado por
+    # (caminho_do_diretório, nome_canônico) para permitir múltiplos
+    # `FilterLoader` apontando a diretórios distintos sem colisão.
     _class_cache: ClassVar[dict[tuple[str, str], HankelFilter]] = {}
+
+    # Lock que protege inserções concorrentes no `_class_cache`. Sem ele,
+    # duas threads chamando `load(name)` simultaneamente no primeiro acesso
+    # construiriam dois `HankelFilter` distintos — o segundo sobrepõe o
+    # primeiro no dict, quebrando a garantia de identidade `a is b` que os
+    # consumidores (kernels Numba/JAX) assumem. Double-checked locking
+    # mantém a leitura rápida no caminho feliz (cache hit) e serializa só
+    # o cache miss.
+    _class_lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(self, filters_dir: Path | str | None = None) -> None:
         """Inicializa o carregador.
@@ -369,61 +382,90 @@ class FilterLoader:
         canonical = self.resolve_name(name)
         cache_key = (str(self.filters_dir), canonical)
 
-        # ── Cache hit? ────────────────────────────────────────────────
+        # ── Cache hit? (caminho rápido, sem lock) ────────────────────
         # Reuso de instâncias imutáveis é seguro e economiza ~10ms
-        # de I/O + validação por chamada.
-        if cache_key in self._class_cache:
-            return self._class_cache[cache_key]
+        # de I/O + validação por chamada. A leitura do dict é atômica
+        # sob GIL do CPython, então não precisa de lock no cache hit.
+        cached = self._class_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
-        # ── Cache miss: ler .npz e construir HankelFilter ────────────
-        catalog_entry = _FILTER_CATALOG[canonical]
-        npz_path = self.filters_dir / str(catalog_entry["file"])
-        if not npz_path.exists():
-            raise FileNotFoundError(
-                f"Artefato .npz do filtro '{canonical}' não encontrado em "
-                f"{npz_path}. Execute scripts/extract_hankel_weights.py "
-                f"para regenerá-lo."
-            )
+        # ── Cache miss: adquire lock e re-verifica (double-checked) ──
+        # Sem o lock, duas threads em cache miss simultâneo construiriam
+        # dois `HankelFilter` distintos e o segundo escrito sobreporia
+        # o primeiro, quebrando a garantia `a is b` que os consumidores
+        # assumem (kernels Numba/JAX chamados de múltiplos workers na
+        # Fase 2). A re-verificação dentro do lock garante que apenas
+        # uma thread faz o I/O mesmo após passarem ambas pelo `get`
+        # inicial sem o lock.
+        with FilterLoader._class_lock:
+            cached = self._class_cache.get(cache_key)
+            if cached is not None:
+                return cached
 
-        logger.debug("Carregando filtro %s de %s", canonical, npz_path)
-        with np.load(npz_path, allow_pickle=False) as npz:
-            # allow_pickle=False é estrito: forçamos que metadata seja
-            # serializada como string JSON (cf. extract_hankel_weights.py).
-            expected_keys = {"abscissas", "weights_j0", "weights_j1", "metadata"}
-            missing = expected_keys - set(npz.files)
-            if missing:
-                raise ValueError(
-                    f"Arquivo {npz_path.name} está incompleto. "
-                    f"Chaves faltantes: {sorted(missing)}. "
-                    f"Execute scripts/extract_hankel_weights.py para regenerar."
+            # ── Cache miss confirmado: ler .npz e construir HankelFilter ─
+            catalog_entry = _FILTER_CATALOG[canonical]
+            npz_path = self.filters_dir / str(catalog_entry["file"])
+            if not npz_path.exists():
+                raise FileNotFoundError(
+                    f"Artefato .npz do filtro '{canonical}' não encontrado em "
+                    f"{npz_path}. Execute scripts/extract_hankel_weights.py "
+                    f"para regenerá-lo."
                 )
 
-            abscissas = np.ascontiguousarray(npz["abscissas"], dtype=np.float64)
-            weights_j0 = np.ascontiguousarray(npz["weights_j0"], dtype=np.float64)
-            weights_j1 = np.ascontiguousarray(npz["weights_j1"], dtype=np.float64)
-            metadata = json.loads(str(npz["metadata"]))
+            logger.debug("Carregando filtro %s de %s", canonical, npz_path)
+            with np.load(npz_path, allow_pickle=False) as npz:
+                # allow_pickle=False é estrito: forçamos que metadata seja
+                # serializada como string JSON (cf. extract_hankel_weights.py).
+                expected_keys = {
+                    "abscissas",
+                    "weights_j0",
+                    "weights_j1",
+                    "metadata",
+                }
+                missing = expected_keys - set(npz.files)
+                if missing:
+                    raise ValueError(
+                        f"Arquivo {npz_path.name} está incompleto. "
+                        f"Chaves faltantes: {sorted(missing)}. "
+                        f"Execute scripts/extract_hankel_weights.py para regenerar."
+                    )
 
-        # ── Marca arrays como read-only ──────────────────────────────
-        # Previne bugs onde outro módulo escreveria nos arrays cacheados,
-        # corrompendo todas as chamadas subsequentes.
-        abscissas.setflags(write=False)
-        weights_j0.setflags(write=False)
-        weights_j1.setflags(write=False)
+                abscissas = np.ascontiguousarray(
+                    npz["abscissas"],
+                    dtype=np.float64,
+                )
+                weights_j0 = np.ascontiguousarray(
+                    npz["weights_j0"],
+                    dtype=np.float64,
+                )
+                weights_j1 = np.ascontiguousarray(
+                    npz["weights_j1"],
+                    dtype=np.float64,
+                )
+                metadata = json.loads(str(npz["metadata"]))
 
-        # ── Constrói dataclass imutável + valida invariantes ─────────
-        filt = HankelFilter(
-            name=canonical,
-            abscissas=abscissas,
-            weights_j0=weights_j0,
-            weights_j1=weights_j1,
-            npt=int(catalog_entry["npt"]),
-            fortran_filter_type=int(catalog_entry["fortran_filter_type"]),
-            source_sha256=str(metadata.get("source_sha256", "")),
-            description=str(catalog_entry["description"]),
-        )
+            # ── Marca arrays como read-only ──────────────────────────
+            # Previne bugs onde outro módulo escreveria nos arrays
+            # cacheados, corrompendo todas as chamadas subsequentes.
+            abscissas.setflags(write=False)
+            weights_j0.setflags(write=False)
+            weights_j1.setflags(write=False)
 
-        self._class_cache[cache_key] = filt
-        return filt
+            # ── Constrói dataclass imutável + valida invariantes ─────
+            filt = HankelFilter(
+                name=canonical,
+                abscissas=abscissas,
+                weights_j0=weights_j0,
+                weights_j1=weights_j1,
+                npt=int(catalog_entry["npt"]),
+                fortran_filter_type=int(catalog_entry["fortran_filter_type"]),
+                source_sha256=str(metadata.get("source_sha256", "")),
+                description=str(catalog_entry["description"]),
+            )
+
+            self._class_cache[cache_key] = filt
+            return filt
 
     def available(self) -> list[str]:
         """Lista os nomes canônicos dos filtros disponíveis.
@@ -446,9 +488,12 @@ class FilterLoader:
             Útil em testes que queiram forçar re-leitura do disco (por
             exemplo, após `scripts/extract_hankel_weights.py` regerar
             um .npz). Afeta todas as instâncias `FilterLoader` do
-            processo — o cache é classe-level.
+            processo — o cache é classe-level. A operação é serializada
+            via `_class_lock` para evitar corrida com um `load()`
+            concorrente em outra thread.
         """
-        self._class_cache.clear()
+        with FilterLoader._class_lock:
+            self._class_cache.clear()
 
 
 __all__ = ["FilterLoader", "HankelFilter"]
