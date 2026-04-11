@@ -729,25 +729,85 @@ via decomposição TE/TM + transformada de Hankel (filtro Werthmuller 201 pts) +
 recursivos. A análise de viabilidade (doc v2.0) demonstra que o gargalo computacional está em
 `commonarraysMD` (propagação) e na convolução de Hankel — ambos altamente paralelizáveis.
 
+**Branch de desenvolvimento**: `feature/simulator-python`
+**Plano detalhado**: [`docs/reference/plano_simulador_python_jax_numba.md`](reference/plano_simulador_python_jax_numba.md)
+**Sub skill**: `.claude/commands/geosteering-simulator-python.md`
+
+#### Decisões arquiteturais (fixadas em 2026-04-11)
+
+| Questão                    | Decisão                                                      |
+|:---------------------------|:-------------------------------------------------------------|
+| Ordem de implementação     | **Numba primeiro** (paridade CPU), depois JAX                |
+| Precisão default           | **complex128** + `complex64` via config (prod. GPU)          |
+| Filtro default             | **werthmuller_201pt** (paridade filter_type=0 Fortran)       |
+| Dependência empymod        | **Incluída** (validação cruzada, 3ª fonte independente)      |
+| Backend PipelineConfig     | Permanece **`fortran_f2py`** até Fase 6 concluída            |
+| Branch                     | **`feature/simulator-python`** (criada em 2026-04-11)        |
+
+#### Sprints
+
 ```
-"F7.1 — Protótipo NumPy vetorizado: commonarraysMD + hmd_TIV + vmd — validar vs Fortran (erro < 1e-10)"
-"F7.2 — Numba @njit + prange: kernels críticos com compilação JIT paralela (target: ~1.2× Fortran)"
-"F7.3 — CUDA kernels via Numba: 201 threads/bloco para propagação + redução para Hankel (target: ~20× Fortran)"
-"F7.4 — JAX/XLA: diferenciação automática para backpropagation through physics (PINNs cenário surrogate)"
-"F7.5 — Integrar como geosteering_ai/simulation/ com interface PipelineConfig — geração on-the-fly"
-"F7.6 — Benchmark throughput: NumPy vs Numba CPU vs Numba CUDA vs Fortran OpenMP"
+F7.0 — Setup (branch, deps JAX+Numba+empymod, estrutura simulation/)      [EM ANDAMENTO]
+F7.1.1 ✅ — Extração dos pesos Hankel Fortran → .npz (Kong/Wer/And)       [CONCLUÍDA]
+F7.1.2 — SimulationConfig dataclass (errata validation, YAML roundtrip)    [PENDENTE]
+F7.1.3 — Teste de referência analítico (half-space homogêneo)              [PENDENTE]
+F7.2   — Backend Numba CPU: commonarraysMD, commonfactorsMD, hmd/vmd      [PENDENTE]
+F7.2.x — Paridade Fortran (erro < 1e-14 float64, < 1e-6 float32)          [PENDENTE]
+F7.3   — Backend JAX CPU/GPU: jit + vmap + pmap + lax.scan                [PENDENTE]
+F7.4   — Validação cruzada (Fortran ↔ Numba ↔ JAX ↔ empymod)              [PENDENTE]
+F7.5   — Jacobiano ∂H/∂ρ: jacfwd (JAX) + FD centrada (Numba)              [PENDENTE]
+F7.6   — Integração no PipelineConfig (backend='numba'|'jax')             [PENDENTE]
+F7.7   — Otimizações finais (pmap multi-GPU, XLA, caching)                [PENDENTE]
 ```
 
-**Estimativas de desempenho** (doc seção 12.6):
-| Implementação | Tempo/modelo | vs Fortran |
-|:-------------|:------------|:-----------|
-| NumPy vetorizado | ~4 s | 10× mais lento |
-| Numba CPU (JIT) | ~0.5 s | ~1.2× mais lento |
-| Numba CUDA | ~0.02 s | ~20× mais rápido |
-| JAX (XLA) | ~0.05 s | ~8× mais rápido |
+#### Sprint 1.1 — Extração dos Pesos Hankel (concluída 2026-04-11)
 
-**Módulos propostos** (doc seção 12.8):
-`geosteering_ai/simulation/`: forward.py, propagation.py, dipoles.py, hankel.py, rotation.py, filters.py, geometry.py, cuda_kernels.py, validation.py
+- ✅ `scripts/extract_hankel_weights.py` — parser do Fortran `filtersv2.f08`
+  (regex determinístico + conversão D→E + validação + SHA-256 auditável).
+- ✅ `geosteering_ai/simulation/filters/*.npz` — 3 artefatos:
+  - `werthmuller_201pt.npz` (5.8 KB, filter_type=0, default)
+  - `kong_61pt.npz` (2.6 KB, filter_type=1, rápido)
+  - `anderson_801pt.npz` (19.6 KB, filter_type=2, preciso)
+- ✅ `geosteering_ai/simulation/filters/loader.py` — `FilterLoader` com
+  cache classe-level + `HankelFilter` (`@dataclass(frozen=True)`, arrays
+  read-only). Suporta nomes canônicos, aliases (`"wer"`, `"kong"`,
+  `"anderson"`) e filter_type numérico (`"0"`, `"1"`, `"2"`).
+- ✅ `tests/test_simulation_filters.py` — 45 testes (todos PASS em 0.80s):
+  - 11 de bit-exactness (valores literais vs Fortran)
+  - 12 de API (canônico, aliases, filter_type numérico, cache)
+  - 4 de imutabilidade (arrays read-only, dataclass frozen)
+  - 4 de sincronia SHA-256 (gate de auditoria entre .f08 e .npz)
+  - 14 restantes distribuídos (npt, shapes, sanidade semântica)
+- ✅ Sub skill `.claude/commands/geosteering-simulator-python.md`.
+
+#### Estimativas de desempenho (doc seção 12.6)
+
+| Implementação        | Tempo/modelo | vs Fortran  | Meta              |
+|:---------------------|:------------|:------------|:------------------|
+| NumPy vetorizado     | ~4 s        | 10× lento   | Não será usado    |
+| Numba CPU (JIT)      | ~0.5 s      | ~1.2× lento | ≥ 40k mod/h       |
+| JAX CPU (JIT)        | ~0.5 s      | ~1.2× lento | ≥ 40k mod/h       |
+| JAX GPU T4           | ~0.02 s     | ~3× rápido  | ≥ 200k mod/h      |
+| JAX GPU A100         | ~0.008 s    | ~8× rápido  | ≥ 500k mod/h      |
+| Jacobiano GPU (jacfwd)| -          | autodiff    | ≥ 10× JAX forward |
+
+#### Módulos propostos (após Fase 2)
+
+```
+geosteering_ai/simulation/
+├── __init__.py          ← fachada pública (★ já criado, Sprint 1.1)
+├── config.py            ← SimulationConfig [Sprint 1.2]
+├── forward.py           ← API simulate() [Fase 2-3]
+├── _numba/              ← backend CPU [Fase 2]
+├── _jax/                ← backend CPU/GPU/TPU [Fase 3]
+├── filters/             ← ★ IMPLEMENTADO (Sprint 1.1)
+│   ├── loader.py        ← FilterLoader, HankelFilter
+│   └── *.npz            ← 3 filtros Hankel extraídos
+├── geometry.py          ← [Fase 2]
+├── postprocess.py       ← [Fase 2]
+├── validation/          ← [Fase 4]
+└── benchmarks/          ← [Fase 4-7]
+```
 
 Ref: `docs/reference/documentacao_simulador_fortran.md` (6.558 LOC, v4.0) — documentação completa incluindo formulação teórica via Potenciais de Hertz (Moran & Gianzero 1979), análise avançada de paralelismo OpenMP (3-level collapse, NUMA), viabilidade CUDA/Python, **Pipeline A Fortran** (otimização CPU+GPU em 3 fases), **Pipeline B Fortran** (novos recursos), **Pipeline A Python** (conversão Numba JIT CPU+GPU), **Pipeline B Python** (novos recursos), **Pipeline C Python** (vantagens sobre Fortran), e **Pipeline D Python** (avaliação comparativa Fortran vs Python).
 Ref: `Tex_Projects/TatuAniso/FormulaçãoTatuAnisoTIV.tex` — artigo com a formulação matemática fundamental do simulador.

@@ -34,6 +34,23 @@
 
 ---
 
+## Regras de Documentação (Invioláveis)
+
+- **Acentuação em PT-BR obrigatória** — TODOS os documentos MD em língua portuguesa (Brasil)
+  e TODA documentação de código gerada (comentários, docstrings, headers) DEVEM ter acentuação
+  garantida. Nunca escrever "implementacao", "configuracao", "nao", "funcao" etc. — sempre
+  "implementação", "configuração", "não", "função". Esta regra se aplica a qualquer arquivo
+  gerado ou editado, incluindo comentários em blocos de código Fortran, Python e YAML.
+
+- **Geração de relatórios MD — perguntar antes** — Por padrão, NÃO gere arquivos MD de
+  relatórios/análises sem solicitação explícita do usuário. Se a geração parecer importante
+  para documentar uma decisão ou análise, PERGUNTE PRIMEIRO ao usuário antes de criar o
+  arquivo. Exceção: arquivos MD que são atualização de documentos existentes no `docs/`
+  (ex.: ROADMAP.md, documentacao_simulador_fortran_otimizado.md) podem ser editados sem
+  confirmação quando o contexto da tarefa indica claramente que é esperado.
+
+---
+
 ## Valores Fisicos Criticos (Errata Imutavel)
 
 ```python
@@ -290,6 +307,8 @@ Testes minimos por modulo:
 | Skill | Uso |
 |:------|:----|
 | **geosteering-v2** | Skill PRINCIPAL v2.0 — dominio fisico (geofisica/petrofisica/EM), padroes de codigo v2.0 (PipelineConfig/Factory), DL aplicado a geociencias. Usar para TODAS as questoes do projeto |
+| **geosteering-simulator-python** | Simulador Python otimizado (JAX + Numba). Cobre: `geosteering_ai/simulation/`, FilterLoader, HankelFilter, `extract_hankel_weights.py`, plano de 7 fases, metas de performance CPU/GPU. Usar para qualquer questão sobre o simulador Python em desenvolvimento em `feature/simulator-python` |
+| **geosteering-simulator-fortran** | Simulador Fortran v10.0 (`PerfilaAnisoOmp.f08` / `tatu.x`). Cobre: `Fortran_Gerador/`, módulos F08, Makefile, OpenMP, Features F5/F6/F7/F10, Jacobiano ∂H/∂ρ, f2py wrapper |
 | **geosteering-v5015** | Skill LEGADA para celulas C0-C73. Usar apenas para referencia ao codigo legado |
 | **consensus-search** | Pesquisa cientifica multi-fonte — Semantic Scholar + ArXiv + WebSearch. Fase A (imediata) |
 | **arxiv-search** | Busca em repositorios abertos — ArXiv + Semantic Scholar. Opcao B (sem API key) |
