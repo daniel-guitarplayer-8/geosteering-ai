@@ -1666,22 +1666,27 @@ end subroutine compute_jacobian_fd
 ! F10 — write_jacobian_file: Escreve o Jacobiano em arquivo binário .jac
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 !
-! Formato do arquivo .jac v2 (stream unformatted):
+! Formato do arquivo .jac v3 (stream unformatted):
 !   Header (int32), escrito UMA vez por arquivo (modelm=1 ou arquivo novo):
-!     magic (4 bytes ASCII 'JAC2'), version (int32 = 2)
-!     nt, nmmax, nf, n_components (=9), n_layers, itr, nTR, n_total_models
+!     magic (4 bytes ASCII 'JAC3'), version (int32 = 3)
+!     nt, nmmax, nf, n_components (=9), itr, nTR, nmaxmodel  ← 7 inteiros
 !     nmeds(1..nt)  ← nmeds por ângulo (evita ambiguidade de leitura)
+!   NOTA v3: n_layers MIGRADO para payload por-modelo (cada modelo pode ter
+!   número diferente de camadas — o gerador Sobol produz modelos com n_layers
+!   variáveis). nmaxmodel no header é apenas informativo: leitores robustos
+!   devem contar modelos até EOF em vez de confiar nesse valor.
 !
 !   Payload (repetido por modelo):
 !     model_id (int32)
+!     n_layers (int32)  ← NOVO v3: número de camadas DESTE modelo
 !     Re/Im alternados de dH_dRho_h(k, j, i, ic, layer) — ordem (k, j, i, ic, layer)
 !     Re/Im alternados de dH_dRho_v(k, j, i, ic, layer)
 !
 ! Apenas os nmeds(k) primeiros elementos da dimensão j são gravados (não nmmax),
 ! o que permite arquivos compactos quando ntheta > 1 e nmed varia por ângulo.
 !
-! Tamanho header: 16 bytes (magic+version) + 8×4 bytes (counts) + nt×4 bytes (nmeds)
-! Tamanho payload/modelo: 4 bytes (id) + 2 × (sum(nmeds) × nf × 9 × n) × 16 bytes
+! Tamanho header v3: 8 bytes (magic+version) + 7×4 bytes (counts) + nt×4 bytes (nmeds)
+! Tamanho payload/modelo: 4 (id) + 4 (n_layers) + 2 × (sum(nmeds) × nf × 9 × n) × 16 bytes
 ! Nome: {filename}[_TR{itr}].jac (sufixo _TR{itr} se nTR > 1)
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 subroutine write_jacobian_file(modelm, nmaxmodel, mypath, filename, itr, nTR, &
@@ -1695,13 +1700,13 @@ subroutine write_jacobian_file(modelm, nmaxmodel, mypath, filename, itr, nTR, &
   complex(dp),  intent(in) :: dH_dRho_v_in(nt, nmmax, nf, 9, n_layers)
 
   integer :: k, j, i, ic, layer, exec
-  integer, parameter :: VERSION_JAC = 2
+  integer, parameter :: VERSION_JAC = 3
   character(len=4)   :: magic
   character(len=:), allocatable :: fileJAC
   character(len=10) :: tr_suffix
   logical :: file_exists
 
-  magic = 'JAC2'
+  magic = 'JAC3'
 
   ! ── Construção do nome do arquivo ──
   if (nTR > 1) then
@@ -1716,20 +1721,25 @@ subroutine write_jacobian_file(modelm, nmaxmodel, mypath, filename, itr, nTR, &
   if (modelm == 1 .or. .not. file_exists) then
     open(unit = 2000, iostat = exec, file = fileJAC, form = 'unformatted',  &
          access = 'stream', status = 'replace', action = 'write')
-    ! Header v2 — escrito apenas quando o arquivo é criado
+    ! Header v3 — escrito apenas quando o arquivo é criado.
+    ! NOTA: n_layers removido do header (migrado para payload por-modelo), pois
+    ! o gerador Sobol produz modelos com n_layers variáveis. nmaxmodel aqui é
+    ! informativo (leitores robustos devem contar via EOF).
     write(2000) magic, VERSION_JAC
-    write(2000) nt, nmmax, nf, 9, n_layers, itr, nTR, nmaxmodel
+    write(2000) nt, nmmax, nf, 9, itr, nTR, nmaxmodel
     write(2000) (nmeds(k), k = 1, nt)
   else
     open(unit = 2000, iostat = exec, file = fileJAC, form = 'unformatted',  &
          access = 'stream', status = 'old', position = 'append', action = 'write')
   end if
 
-  ! ── Payload: identificador do modelo + blocos Re/Im de dH_dRho_h e dH_dRho_v ──
+  ! ── Payload: identificador do modelo + n_layers + Re/Im de dH_dRho_h e dH_dRho_v ──
   ! Ordem de loops: (k, j, i, ic, layer) — matching column-major de Fortran.
-  ! Cada registro de payload começa com `modelm` (int32) para permitir
-  ! reconstrução robusta do índice lógico mesmo em arquivos concatenados.
+  ! v3: cada payload inclui (modelm, n_layers) permitindo que modelos com
+  ! diferentes n_layers coexistam no mesmo arquivo (crítico para modo batch
+  ! com gerador estocástico).
   write(2000) modelm
+  write(2000) n_layers
 
   do k = 1, nt
     do j = 1, nmeds(k)

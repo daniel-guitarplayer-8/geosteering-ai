@@ -729,25 +729,134 @@ via decomposição TE/TM + transformada de Hankel (filtro Werthmuller 201 pts) +
 recursivos. A análise de viabilidade (doc v2.0) demonstra que o gargalo computacional está em
 `commonarraysMD` (propagação) e na convolução de Hankel — ambos altamente paralelizáveis.
 
+**Branch de desenvolvimento**: `feature/simulator-python`
+**Plano detalhado**: [`docs/reference/plano_simulador_python_jax_numba.md`](reference/plano_simulador_python_jax_numba.md)
+**Sub skill**: `.claude/commands/geosteering-simulator-python.md`
+
+#### Decisões arquiteturais (fixadas em 2026-04-11)
+
+| Questão                    | Decisão                                                      |
+|:---------------------------|:-------------------------------------------------------------|
+| Ordem de implementação     | **Numba primeiro** (paridade CPU), depois JAX                |
+| Precisão default           | **complex128** + `complex64` via config (prod. GPU)          |
+| Filtro default             | **werthmuller_201pt** (paridade filter_type=0 Fortran)       |
+| Dependência empymod        | **Incluída** (validação cruzada, 3ª fonte independente)      |
+| Backend PipelineConfig     | Permanece **`fortran_f2py`** até Fase 6 concluída            |
+| Branch                     | **`feature/simulator-python`** (criada em 2026-04-11)        |
+
+#### Sprints
+
 ```
-"F7.1 — Protótipo NumPy vetorizado: commonarraysMD + hmd_TIV + vmd — validar vs Fortran (erro < 1e-10)"
-"F7.2 — Numba @njit + prange: kernels críticos com compilação JIT paralela (target: ~1.2× Fortran)"
-"F7.3 — CUDA kernels via Numba: 201 threads/bloco para propagação + redução para Hankel (target: ~20× Fortran)"
-"F7.4 — JAX/XLA: diferenciação automática para backpropagation through physics (PINNs cenário surrogate)"
-"F7.5 — Integrar como geosteering_ai/simulation/ com interface PipelineConfig — geração on-the-fly"
-"F7.6 — Benchmark throughput: NumPy vs Numba CPU vs Numba CUDA vs Fortran OpenMP"
+F7.0 ✅ — Setup (branch, deps JAX+Numba+empymod, estrutura simulation/)   [CONCLUÍDA]
+F7.1.1 ✅ — Extração dos pesos Hankel Fortran → .npz (Kong/Wer/And)       [CONCLUÍDA]
+F7.1.2 ✅ — SimulationConfig dataclass (errata validation, YAML roundtrip) [CONCLUÍDA]
+F7.1.3 ✅ — Teste de referência analítico (half-space homogêneo, 5 casos)  [CONCLUÍDA]
+F7.2   — Backend Numba CPU: commonarraysMD, commonfactorsMD, hmd/vmd      [PENDENTE]
+F7.2.x — Paridade Fortran (erro < 1e-14 float64, < 1e-6 float32)          [PENDENTE]
+F7.3   — Backend JAX CPU/GPU: jit + vmap + pmap + lax.scan                [PENDENTE]
+F7.4   — Validação cruzada (Fortran ↔ Numba ↔ JAX ↔ empymod)              [PENDENTE]
+F7.5   — Jacobiano ∂H/∂ρ: jacfwd (JAX) + FD centrada (Numba)              [PENDENTE]
+F7.6   — Integração no PipelineConfig (backend='numba'|'jax')             [PENDENTE]
+F7.7   — Otimizações finais (pmap multi-GPU, XLA, caching)                [PENDENTE]
 ```
 
-**Estimativas de desempenho** (doc seção 12.6):
-| Implementação | Tempo/modelo | vs Fortran |
-|:-------------|:------------|:-----------|
-| NumPy vetorizado | ~4 s | 10× mais lento |
-| Numba CPU (JIT) | ~0.5 s | ~1.2× mais lento |
-| Numba CUDA | ~0.02 s | ~20× mais rápido |
-| JAX (XLA) | ~0.05 s | ~8× mais rápido |
+**Fase 1 concluída** ✅ em 2026-04-11: todos os entregáveis de Foundations
+(filtros + config + testes analíticos) foram implementados, revisados
+(7 correções pós-review) e validados com **153/153 testes PASS** em 1.81 s.
 
-**Módulos propostos** (doc seção 12.8):
-`geosteering_ai/simulation/`: forward.py, propagation.py, dipoles.py, hankel.py, rotation.py, filters.py, geometry.py, cuda_kernels.py, validation.py
+#### Sprint 1.1 — Extração dos Pesos Hankel (concluída 2026-04-11)
+
+- ✅ `scripts/extract_hankel_weights.py` — parser do Fortran `filtersv2.f08`
+  (regex robusta aceitando `1.23D+02`, `0.21D-28`, `.21D-28`, `1D0` +
+  conversão D→E + validação + SHA-256 auditável).
+- ✅ `geosteering_ai/simulation/filters/*.npz` — 3 artefatos:
+  - `werthmuller_201pt.npz` (5.8 KB, filter_type=0, default)
+  - `kong_61pt.npz` (2.6 KB, filter_type=1, rápido)
+  - `anderson_801pt.npz` (19.6 KB, filter_type=2, preciso)
+- ✅ `geosteering_ai/simulation/filters/loader.py` — `FilterLoader` com
+  **cache classe-level thread-safe** (double-checked locking via
+  `threading.Lock` — seguro para Fase 2 com workers paralelos) +
+  `HankelFilter` (`@dataclass(frozen=True)`, arrays read-only).
+- ✅ `tests/test_simulation_filters.py` — **53 testes** (após revisão):
+  - 11 de bit-exactness (Kong, Werthmüller, Anderson: primeiro/meio/último)
+  - 13 de API (canônico, aliases, filter_type numérico, cache)
+  - 4 de imutabilidade (arrays read-only, dataclass frozen)
+  - 4 de sincronia SHA-256 (gate de auditoria entre .f08 e .npz)
+  - 21 restantes (shapes, semântica, Anderson expandido)
+- ✅ **7 correções pós-review** aplicadas (1 race condition, 2 regex,
+  1 assertion, 1 spot-check Anderson, 1 fixture scope, 1 header D1).
+- ✅ Sub skill `.claude/commands/geosteering-simulator-python.md`.
+
+#### Sprint 1.2 — SimulationConfig dataclass (concluída 2026-04-11)
+
+- ✅ `geosteering_ai/simulation/config.py` — `SimulationConfig`
+  (`@dataclass(frozen=True)`, 13 campos):
+  - Validação de errata em `__post_init__` (ranges físicos, enums,
+    conflitos mútuos backend × device).
+  - **4 presets** @classmethod: `default()`, `high_precision()`,
+    `production_gpu()`, `realtime_cpu()`.
+  - **YAML roundtrip** via `to_yaml/from_yaml` (lazy import PyYAML).
+  - **Dict roundtrip** via `to_dict/from_dict` (ignora chaves extras).
+- ✅ `tests/test_simulation_config.py` — **62 testes**:
+  - 11 defaults (frequency=20000, tr_spacing=1.0, backend=fortran_f2py, ...)
+  - 8 ranges numéricos (frequência, spacing, posições)
+  - 12 enums (backend, dtype, device, hankel_filter)
+  - 4 mutual exclusivity (fortran+gpu, numba+gpu inválidos)
+  - 6 listas opcionais (multi-freq, multi-TR)
+  - 4 num_threads
+  - 5 presets (todos passam na validação)
+  - 3 imutabilidade (frozen, replace revalida)
+  - 6 serialização (dict + YAML)
+  - 3 igualdade + hash
+
+#### Sprint 1.3 — Soluções analíticas half-space (concluída 2026-04-11)
+
+- ✅ `geosteering_ai/simulation/validation/__init__.py` — fachada.
+- ✅ `geosteering_ai/simulation/validation/half_space.py` — **5 funções
+  puras NumPy** com ground-truth analítico para validação dos backends:
+  1. `static_decoupling_factors(L)` → (ACp, ACx). Bit-exato com CLAUDE.md.
+  2. `skin_depth(f, rho)` → δ em metros (Nabighian 1988).
+  3. `wavenumber_quasi_static(f, rho)` → k complexo (Ward-Hohmann 1988).
+  4. `vmd_fullspace_axial(L, f, rho, m)` → Hz em (0,0,L).
+  5. `vmd_fullspace_broadside(L, f, rho, m)` → Hz em (L,0,0).
+  - Convenção temporal **e^(-iωt)** (geofísica / Moran-Gianzero 1979).
+  - Convenção quasi-estática **k² = iωμ₀σ** → Im(k) > 0 (atenuação).
+- ✅ `tests/test_simulation_half_space.py` — **38 testes**:
+  - 7 decoupling factors (bit-exato vs CLAUDE.md, sinal, escalamento L³)
+  - 8 skin depth (fórmula, 1/√f, √ρ, array broadcast)
+  - 7 wavenumber (Im(k)>0, Re(k)=Im(k), |k|·δ=√2)
+  - 7 VMD axial (limite estático, linearidade, skin effect)
+  - 5 VMD broadside (limite estático ACp, sinal negativo)
+  - 4 cross-cutting (razão axial/broadside=-2, consistência entre casos)
+
+#### Estimativas de desempenho (doc seção 12.6)
+
+| Implementação        | Tempo/modelo | vs Fortran  | Meta              |
+|:---------------------|:------------|:------------|:------------------|
+| NumPy vetorizado     | ~4 s        | 10× lento   | Não será usado    |
+| Numba CPU (JIT)      | ~0.5 s      | ~1.2× lento | ≥ 40k mod/h       |
+| JAX CPU (JIT)        | ~0.5 s      | ~1.2× lento | ≥ 40k mod/h       |
+| JAX GPU T4           | ~0.02 s     | ~3× rápido  | ≥ 200k mod/h      |
+| JAX GPU A100         | ~0.008 s    | ~8× rápido  | ≥ 500k mod/h      |
+| Jacobiano GPU (jacfwd)| -          | autodiff    | ≥ 10× JAX forward |
+
+#### Módulos propostos (após Fase 2)
+
+```
+geosteering_ai/simulation/
+├── __init__.py          ← fachada pública (★ já criado, Sprint 1.1)
+├── config.py            ← SimulationConfig [Sprint 1.2]
+├── forward.py           ← API simulate() [Fase 2-3]
+├── _numba/              ← backend CPU [Fase 2]
+├── _jax/                ← backend CPU/GPU/TPU [Fase 3]
+├── filters/             ← ★ IMPLEMENTADO (Sprint 1.1)
+│   ├── loader.py        ← FilterLoader, HankelFilter
+│   └── *.npz            ← 3 filtros Hankel extraídos
+├── geometry.py          ← [Fase 2]
+├── postprocess.py       ← [Fase 2]
+├── validation/          ← [Fase 4]
+└── benchmarks/          ← [Fase 4-7]
+```
 
 Ref: `docs/reference/documentacao_simulador_fortran.md` (6.558 LOC, v4.0) — documentação completa incluindo formulação teórica via Potenciais de Hertz (Moran & Gianzero 1979), análise avançada de paralelismo OpenMP (3-level collapse, NUMA), viabilidade CUDA/Python, **Pipeline A Fortran** (otimização CPU+GPU em 3 fases), **Pipeline B Fortran** (novos recursos), **Pipeline A Python** (conversão Numba JIT CPU+GPU), **Pipeline B Python** (novos recursos), **Pipeline C Python** (vantagens sobre Fortran), e **Pipeline D Python** (avaliação comparativa Fortran vs Python).
 Ref: `Tex_Projects/TatuAniso/FormulaçãoTatuAnisoTIV.tex` — artigo com a formulação matemática fundamental do simulador.
