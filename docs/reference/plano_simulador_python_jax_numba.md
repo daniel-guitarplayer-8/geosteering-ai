@@ -643,12 +643,14 @@ código e documentação:
 
 ### 15.1 Sprints concluídas
 
-| Sprint | Nome                                       | Status        | Data       | Testes |
-|:------:|:-------------------------------------------|:--------------|:-----------|:------:|
-| 1.1    | Extração dos pesos Hankel                 | ✅ Concluída | 2026-04-11 | 53/53 |
-| 1.2    | SimulationConfig dataclass                 | ✅ Concluída | 2026-04-11 | 62/62 |
-| 1.3    | Soluções analíticas half-space (5 casos)  | ✅ Concluída | 2026-04-11 | 38/38 |
-|        | **TOTAL Fase 1 (Foundations)**            | **✅ Completa** | **2026-04-11** | **153/153 PASS em 1.81s** |
+| Sprint | Nome                                                | Status        | Data       | Testes |
+|:------:|:----------------------------------------------------|:--------------|:-----------|:------:|
+| 1.1    | Extração dos pesos Hankel                          | ✅ Concluída | 2026-04-11 | 53/53 |
+| 1.2    | SimulationConfig dataclass                          | ✅ Concluída | 2026-04-11 | 62/62 |
+| 1.3    | Soluções analíticas half-space (5 casos)           | ✅ Concluída | 2026-04-11 | 38/38 |
+|        | **TOTAL Fase 1 (Foundations)**                     | **✅ Completa + merged** | **2026-04-11** | **153/153** |
+| 2.1    | _numba/propagation.py (common_arrays + common_factors) | ✅ Concluída | 2026-04-11 | 25/25 |
+|        | **TOTAL Fase 1 + Sprint 2.1**                      | **🟡 Fase 2 em andamento** | **2026-04-11** | **178/178 PASS em 1.81s** |
 
 **Relatórios detalhados**:
 - Sprint 1.1: [`relatorio_sprint_1_1_hankel.md`](relatorio_sprint_1_1_hankel.md)
@@ -678,7 +680,13 @@ Resumo dos artefatos entregues na Fase 1:
 
 ### 15.2 Sprints em andamento
 
-Nenhuma — aguardando aprovação para iniciar Fase 2 (backend Numba).
+**Fase 2** iniciada em 2026-04-11 na branch `feature/simulator-python-phase2`
+(após merge do PR #1 em `main` via squash, commit `9985add8`).
+
+**Sprint 2.1** concluída — port Python+Numba de `commonarraysMD` e
+`commonfactorsMD` em `geosteering_ai/simulation/_numba/propagation.py`
+(dual-mode Numba: funciona com ou sem a biblioteca instalada).
+Relatório detalhado: [`relatorio_sprint_2_1_numba_propagation.md`](relatorio_sprint_2_1_numba_propagation.md).
 
 ### 15.3 Sprints próximas (Fase 2 — backend Numba CPU)
 
