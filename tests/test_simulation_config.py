@@ -85,31 +85,53 @@ class TestDefaults:
 # TESTES DE VALIDAÇÃO DE RANGES NUMÉRICOS
 # ──────────────────────────────────────────────────────────────────────────────
 class TestRangeValidation:
-    """Falha ao construir com valores fora dos ranges físicos."""
+    """Falha ao construir com valores fora dos ranges físicos expandidos.
+
+    Note:
+        Ranges atualizados na Sprint 2.1 pós-revisão:
+        - frequency_hz: [10, 2e6] — cobre CSAMT baixa freq até 2 MHz (ARC/PeriScope).
+        - tr_spacing_m: [0.01, 50] — cobre ferramentas curtas (0.5 m) até
+          deep-reading PeriScope HD (20.43 m) com margem.
+    """
 
     def test_frequency_too_low_fails(self) -> None:
         with pytest.raises(AssertionError, match="frequency_hz"):
-            SimulationConfig(frequency_hz=50.0)  # < 100 Hz
+            SimulationConfig(frequency_hz=5.0)  # < 10 Hz (novo mínimo)
 
     def test_frequency_too_high_fails(self) -> None:
         with pytest.raises(AssertionError, match="frequency_hz"):
-            SimulationConfig(frequency_hz=2.0e6)  # > 1 MHz
+            SimulationConfig(frequency_hz=5.0e6)  # > 2 MHz (novo máximo)
 
     def test_frequency_at_lower_boundary_ok(self) -> None:
-        cfg = SimulationConfig(frequency_hz=100.0)
-        assert cfg.frequency_hz == 100.0
+        cfg = SimulationConfig(frequency_hz=10.0)  # novo mínimo
+        assert cfg.frequency_hz == 10.0
 
     def test_frequency_at_upper_boundary_ok(self) -> None:
-        cfg = SimulationConfig(frequency_hz=1.0e6)
-        assert cfg.frequency_hz == 1.0e6
+        cfg = SimulationConfig(frequency_hz=2.0e6)  # novo máximo (ARC/PeriScope 2 MHz)
+        assert cfg.frequency_hz == 2.0e6
 
     def test_tr_spacing_too_low_fails(self) -> None:
         with pytest.raises(AssertionError, match="tr_spacing_m"):
-            SimulationConfig(tr_spacing_m=0.05)  # < 0.1 m
+            SimulationConfig(tr_spacing_m=0.005)  # < 0.01 m (novo mínimo)
 
     def test_tr_spacing_too_high_fails(self) -> None:
         with pytest.raises(AssertionError, match="tr_spacing_m"):
-            SimulationConfig(tr_spacing_m=20.0)  # > 10 m
+            SimulationConfig(tr_spacing_m=100.0)  # > 50 m (novo máximo)
+
+    def test_tr_spacing_periscope_hd_deep_reading(self) -> None:
+        """20.43 m (PeriScope HD deep-reading) agora é válido."""
+        cfg = SimulationConfig(tr_spacing_m=20.43)
+        assert cfg.tr_spacing_m == 20.43
+
+    def test_tr_spacing_arc_ultra_long_819(self) -> None:
+        """8.19 m (ARC ultra-longo) agora é válido."""
+        cfg = SimulationConfig(tr_spacing_m=8.19)
+        assert cfg.tr_spacing_m == 8.19
+
+    def test_frequency_lwd_2mhz_dual(self) -> None:
+        """2 MHz (par dual LWD moderno) agora é válido."""
+        cfg = SimulationConfig(frequency_hz=2.0e6)
+        assert cfg.frequency_hz == 2.0e6
 
     def test_n_positions_too_low_fails(self) -> None:
         with pytest.raises(AssertionError, match="n_positions"):
@@ -207,11 +229,11 @@ class TestOptionalLists:
 
     def test_out_of_range_frequency_in_list_fails(self) -> None:
         with pytest.raises(AssertionError, match="frequencies_hz"):
-            SimulationConfig(frequencies_hz=[20000.0, 2.0e6])  # 2e6 > 1e6
+            SimulationConfig(frequencies_hz=[20000.0, 5.0e6])  # 5e6 > 2e6
 
     def test_out_of_range_tr_spacing_in_list_fails(self) -> None:
         with pytest.raises(AssertionError, match="tr_spacings_m"):
-            SimulationConfig(tr_spacings_m=[1.0, 20.0])  # 20 > 10
+            SimulationConfig(tr_spacings_m=[1.0, 100.0])  # 100 > 50
 
     def test_valid_frequencies_list(self) -> None:
         cfg = SimulationConfig(frequencies_hz=[20000.0, 100000.0, 400000.0])
@@ -220,6 +242,16 @@ class TestOptionalLists:
     def test_valid_tr_spacings_list(self) -> None:
         cfg = SimulationConfig(tr_spacings_m=[0.5, 1.0, 1.5])
         assert cfg.tr_spacings_m == [0.5, 1.0, 1.5]
+
+    def test_arc_periscope_multi_tr_valid(self) -> None:
+        """Configuração ARC + PeriScope HD: [8.19, 20.43] m agora válida."""
+        cfg = SimulationConfig(tr_spacings_m=[8.19, 20.43])
+        assert cfg.tr_spacings_m == [8.19, 20.43]
+
+    def test_lwd_dual_frequency_400k_2mhz_valid(self) -> None:
+        """Par dual 400 kHz + 2 MHz (ARC6/PeriScope) agora válido."""
+        cfg = SimulationConfig(frequencies_hz=[400000.0, 2.0e6])
+        assert cfg.frequencies_hz == [400000.0, 2.0e6]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -305,7 +337,7 @@ class TestImmutability:
         """dataclasses.replace dispara __post_init__ novamente."""
         cfg = SimulationConfig()
         with pytest.raises(AssertionError, match="frequency_hz"):
-            dataclasses.replace(cfg, frequency_hz=50.0)  # fora do range
+            dataclasses.replace(cfg, frequency_hz=5.0)  # < 10 Hz (novo min)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

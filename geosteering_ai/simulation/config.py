@@ -120,22 +120,47 @@ from pathlib import Path
 from typing import Any, Dict, Final, List, Optional
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CONSTANTES DE VALIDAÇÃO (errata imutável — mirror do PipelineConfig)
+# CONSTANTES DE VALIDAÇÃO (errata expandida pós-revisão Sprint 2.1)
 # ──────────────────────────────────────────────────────────────────────────────
-# Ranges de validação para os parâmetros físicos. Os limites refletem:
-#   • Ferramentas LWD comerciais (ex.: Geosteer, PeriScope) operam
-#     tipicamente em 2 kHz–400 kHz. O range 100 Hz–1 MHz cobre todo o
-#     espectro LWD presente na literatura e permite pesquisa em
-#     frequências não-padrão sem editar o código.
-#   • Espaçamento TR 0.1–10 m cobre ferramentas curtas (≤1 m, fast decay)
-#     e longas (até 10 m, deep-reading). Fora deste range o simulador
-#     não foi validado contra Fortran.
-#   • Comprimento de 10–100 000 posições: 10 é o mínimo para qualquer
-#     exercício didático; 100 000 é o máximo prático antes de saturar
-#     memória em CPU (para batches típicos do pipeline v2.0).
-_FREQUENCY_HZ_RANGE: Final[tuple[float, float]] = (100.0, 1.0e6)
-_TR_SPACING_M_RANGE: Final[tuple[float, float]] = (0.1, 10.0)
+# Ranges de validação para os parâmetros físicos. Os limites refletem a
+# capacidade real do simulador Fortran (validada em revisão de 2026-04-11)
+# após investigação dos comentários em `fifthBuildTIVModels.py` que
+# indicam uso de dTR = [8.19, 20.43] m (ferramentas tipo ARC/PeriScope).
+#
+# Mudanças em relação à Sprint 1.2 (limites antigos):
+#   • frequency_hz max: 1e6 → 2e6 (paridade com ARC/PeriScope 2 MHz)
+#   • frequency_hz min: 100 → 10 (permite pesquisa em MT/CSAMT baixa freq)
+#   • tr_spacing_m max: 10 → 50 (cobre deep-reading PeriScope 20 m + margem)
+#   • tr_spacing_m min: 0.1 → 0.01 (ferramentas curtas/experimentais)
+#   • novos: _RESISTIVITY_OHM_M_RANGE para ρh/ρv (alta resistividade)
+#
+# Justificativa física:
+#   • Limite 2 MHz: aproximação quasi-estática (zeta = i·ω·μ, usada no
+#     Fortran utils.f08 linhas 636, 971, 1066) permanece válida
+#     (|ωε/σ| < 1%) até ~2 MHz mesmo em ρ = 10 000 Ω·m. Acima disso,
+#     corrente de deslocamento torna-se não desprezível — fora do escopo.
+#   • Limite 50 m: Werthmüller 201pt tem abscissas kr ∈ [8.7e-4, 93.7]
+#     adequado para r ≤ ~30 m. Para r > 30 m, Anderson 801pt cobre até
+#     ~1000 m. Setamos 50 m como limite conservador.
+#   • Limite 10 Hz: quasi-estático permanece válido em freqs baixíssimas
+#     (CSAMT, MT controlado). Abaixo disso, air-wave domina e o modelo
+#     1D TIV não captura geometria 2D/3D.
+#   • Resistividade 0.1–1e6 Ω·m: cobre argilas (~1 Ω·m), arenitos (10–100),
+#     carbonatos (100–10 000), sal (10 000–100 000), crosta seca (1e5–1e6).
+#
+# Referências:
+#   • Anderson et al. (2008) — "Multiple Array Logging While Drilling..."
+#     SPWLA, ARC6 com arranjos de 8–28 pés (2.4–8.5 m).
+#   • Omeragic et al. (2009) — "Deep Directional Electromagnetic Measurements"
+#     SPWLA, PeriScope HD com TR até 20 m para DOI de 15 m.
+#   • Moran & Gianzero (1979) — Geophysics 44, quasi-estática TIV.
+_FREQUENCY_HZ_RANGE: Final[tuple[float, float]] = (10.0, 2.0e6)
+_TR_SPACING_M_RANGE: Final[tuple[float, float]] = (0.01, 50.0)
 _N_POSITIONS_RANGE: Final[tuple[int, int]] = (10, 100_000)
+# Resistividade horizontal e vertical (Ω·m). Range amplo cobre toda a
+# variedade de litologias encontradas em LWD, desde folhelhos salinos
+# (~1 Ω·m) até rochas salinas/ígneas (~10⁶ Ω·m).
+_RESISTIVITY_OHM_M_RANGE: Final[tuple[float, float]] = (0.1, 1.0e6)
 
 # Conjuntos de valores válidos para campos enum-like. Mantidos como
 # `frozenset` para lookup O(1) em `__post_init__` e imutabilidade.
@@ -318,17 +343,24 @@ class SimulationConfig:
         fmin, fmax = _FREQUENCY_HZ_RANGE
         assert fmin <= self.frequency_hz <= fmax, (
             f"frequency_hz={self.frequency_hz} Hz fora do range válido "
-            f"[{fmin}, {fmax}]. Ferramentas LWD comerciais operam "
-            f"tipicamente em 2 kHz–400 kHz; o range 100 Hz–1 MHz cobre "
-            f"todo o espectro de pesquisa e produção."
+            f"[{fmin}, {fmax}]. Ferramentas LWD comerciais modernas (ARC6, "
+            f"PeriScope, EcoScope, AziTrak) operam em 400 kHz e 2 MHz como "
+            f"pares duais. O range expandido 10 Hz–2 MHz cobre desde CSAMT "
+            f"controlado (baixa freq) até dual-frequency LWD (2 MHz). "
+            f"Acima de ~2 MHz, a aproximação quasi-estática |ωε/σ|≪1 "
+            f"começa a falhar em rochas de alta resistividade (ρ > 1e4 Ω·m)."
         )
 
         smin, smax = _TR_SPACING_M_RANGE
         assert smin <= self.tr_spacing_m <= smax, (
             f"tr_spacing_m={self.tr_spacing_m} m fora do range válido "
-            f"[{smin}, {smax}]. Ferramentas curtas (1 m) e longas (10 m) "
-            f"são suportadas; fora deste range o simulador não foi "
-            f"validado contra o Fortran."
+            f"[{smin}, {smax}]. O range expandido 0.01–50 m cobre "
+            f'ferramentas curtas (ARC6 arranjos 22"–40" ~0.56–1.02 m), '
+            f"intermediárias (8.19 m, ARC ultra-longo) e deep-reading "
+            f"(PeriScope HD 20.43 m para DOI de 15 m em geosteering). "
+            f"Fora deste range, a precisão do filtro Hankel Werthmüller "
+            f"201pt (abscissas kr∈[8.7e-4, 93.7]) pode degradar — use "
+            f"Anderson 801pt para r > 30 m."
         )
 
         nmin, nmax = _N_POSITIONS_RANGE

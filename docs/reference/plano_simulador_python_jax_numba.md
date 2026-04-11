@@ -702,6 +702,98 @@ Relatório detalhado: [`relatorio_sprint_2_1_numba_propagation.md`](relatorio_sp
 
 ---
 
+## 16. Revisão Pós-Sprint 2.1 — Expansão de Limites e Alta Resistividade (2026-04-11)
+
+Após a Sprint 2.1, uma revisão crítica disparada pelas perguntas do usuário
+sobre ferramentas LWD modernas (ARC6, PeriScope HD, EcoScope) e alta
+resistividade revelou que os limites físicos do `SimulationConfig` da
+Sprint 1.2 eram **excessivamente conservadores** em relação à capacidade
+real do simulador Fortran.
+
+### 16.1 Descobertas da revisão
+
+1. **`fifthBuildTIVModels.py:1137`** contém comentário explícito indicando
+   que o simulador Fortran é usado com `dTR = [8.19, 20.43]` m em
+   configurações de investigação profunda tipo ARC (8.19 m ≈ 27 pés) e
+   PeriScope HD (20.43 m ≈ 67 pés). O dataset atual usa `dTR = [1.0]`
+   apenas por simplicidade, **não** por limite físico.
+
+2. **Fortran `utils.f08` + `PerfilaAnisoOmp.f08`** não impõem limite
+   superior em `dTR` nem em `freq`. A aproximação quasi-estática
+   `zeta = i·ω·μ₀` (linhas 636, 971, 1066) é válida até ~2 MHz mesmo em
+   ρ = 10 000 Ω·m (`|ωε/σ| ≈ 1%`).
+
+3. **Ferramentas LWD modernas** operam em pares duais 400 kHz + **2 MHz**
+   (não 1 MHz), então o limite `frequency_hz ≤ 1e6` da Sprint 1.2 fica
+   abaixo do padrão industrial.
+
+4. **Alta resistividade** (carbonatos, sal, crosta seca; `ρ > 1000 Ω·m`)
+   é um caso de uso legítimo que o simulador Fortran trata sem problemas
+   mas o SimulationConfig da Sprint 1.2 não validava explicitamente.
+
+### 16.2 Limites expandidos (Sprint 2.1 pós-revisão)
+
+| Parâmetro            | Sprint 1.2 (antigo) | Sprint 2.1 (novo) | Justificativa |
+|:---------------------|:-------------------:|:-----------------:|:--------------|
+| `frequency_hz` min   | 100 Hz              | **10 Hz**         | Pesquisa CSAMT/MT controlado |
+| `frequency_hz` max   | 1 MHz               | **2 MHz**         | Paridade ARC6/PeriScope dual-freq |
+| `tr_spacing_m` min   | 0.1 m               | **0.01 m**        | Ferramentas curtas/experimentais |
+| `tr_spacing_m` max   | 10 m                | **50 m**          | Deep-reading PeriScope HD (20.43 m) + margem |
+| `resistivity_ohm_m`  | —                   | **0.1–1e6 Ω·m**   | Sal/carbonatos/crosta seca |
+
+### 16.3 Metas físicas expandidas da Fase 2
+
+O simulador Python otimizado **DEVE** suportar, com paridade bit-exata
+contra Fortran:
+
+- **Deep-reading geosteering**: `dTR = 20.43 m` com Werthmüller 201pt
+  (precisão 1e-6) ou Anderson 801pt (precisão 1e-8).
+- **Dual-frequency ARC6**: `f = [400000, 2000000]` Hz simultâneas.
+- **Alta resistividade**: `ρh, ρv ∈ [1000, 100 000]` Ω·m sem perda de
+  precisão no decoupling (teste de regressão obrigatório).
+- **Baixa frequência CSAMT**: `f = 10 Hz` a `1 kHz` para pesquisa
+  (testes de sanidade, não em produção LWD).
+
+### 16.4 Teste de alta resistividade (gate adicional para Sprint 2.6)
+
+Adicionar aos testes de paridade Numba vs analítico:
+
+```python
+# tests/test_simulation_numba_vs_analytical.py (Sprint 2.6)
+@pytest.mark.parametrize("rho", [1.0, 100.0, 1000.0, 10000.0, 100000.0])
+def test_parity_high_resistivity(rho):
+    cfg = SimulationConfig(frequency_hz=20000.0, tr_spacing_m=1.0)
+    H_numba = simulate(cfg, profile=Homogeneous(rho=rho), ...)
+    H_analytic = vmd_fullspace_axial(L=1.0, f=20000.0, rho=rho)
+    assert np.isclose(H_numba, H_analytic, atol=1e-10, rtol=1e-10)
+```
+
+### 16.5 Nota sobre `fastmath` em alta resistividade
+
+Em `ρ > 10 000 Ω·m`, o decoupling entre sinal primário e secundário pode
+exigir cancelamento de ~6 ordens de magnitude (SNR ~10⁻⁶). Nestes casos,
+`fastmath=False` no Numba é **crítico** — reordering de FMA pode
+introduzir erro relativo > 1e-10 em subtrações catastróficas. A Sprint
+2.1 já aplica `fastmath=False` por default em `propagation.py`.
+
+### 16.6 Frequências além de 2 MHz (fora do escopo)
+
+Para incluir frequências > 2 MHz em alta resistividade seria necessário:
+
+1. Alterar `zeta = i·ω·μ₀` para `zeta = i·ω·μ₀ + ω²·μ₀·ε₀·εᵣ` (inclui
+   corrente de deslocamento).
+2. Validar que a família de filtros Hankel permanece adequada no regime
+   de propagação (não apenas difusão).
+3. Considerar adição de modo "full EM" no `SimulationConfig` como flag
+   `include_displacement_current: bool = False`.
+
+**Decisão**: **fora do escopo** da Fase 2. A meta é paridade matemática
+com o Fortran atual, que usa exclusivamente quasi-estático. Se no
+futuro for necessário cobrir ferramentas dielétricas (como Schlumberger
+ADT) acima de 100 MHz, abrir uma Fase 8 dedicada.
+
+---
+
 ## Referências
 
 - Anderson, W.L. (1979). *Numerical integration of related Hankel transforms of orders 0 and 1 by adaptive digital filtering.* Geophysics, 44(7), 1287–1305.

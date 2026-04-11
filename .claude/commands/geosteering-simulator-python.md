@@ -360,12 +360,12 @@ cfg.to_yaml("configs/sim_production_gpu.yaml")
 cfg_loaded = SimulationConfig.from_yaml("configs/sim_production_gpu.yaml")
 ```
 
-### 5.3 Validação de errata (via `__post_init__`)
+### 5.3 Validação de errata (via `__post_init__`) — **expandida Sprint 2.1**
 
 | Campo              | Regra                                                       |
 |:-------------------|:------------------------------------------------------------|
-| `frequency_hz`     | 100 ≤ f ≤ 1e6 (LWD comercial 2 kHz-400 kHz)               |
-| `tr_spacing_m`     | 0.1 ≤ L ≤ 10.0                                             |
+| `frequency_hz`     | **10 ≤ f ≤ 2e6** (CSAMT baixa + ARC/PeriScope 2 MHz)       |
+| `tr_spacing_m`     | **0.01 ≤ L ≤ 50** (curtas + deep-reading 20.43 m PeriScope HD) |
 | `n_positions`      | 10 ≤ N ≤ 100_000                                            |
 | `backend`          | `{fortran_f2py, numba, jax}`                               |
 | `dtype`            | `{complex128, complex64}`                                   |
@@ -376,6 +376,21 @@ cfg_loaded = SimulationConfig.from_yaml("configs/sim_production_gpu.yaml")
 | `frequencies_hz`   | se ≠ None: len ≥ 1, todos no range de `frequency_hz`       |
 | `tr_spacings_m`    | se ≠ None: len ≥ 1, todos no range de `tr_spacing_m`       |
 | `num_threads`      | -1 (auto) ou ≥ 1                                            |
+
+**Motivação dos limites expandidos** (documentada em plano-mãe §16):
+
+- `frequency_hz = 2 MHz`: paridade com ferramentas LWD dual-frequency
+  (ARC6, PeriScope, EcoScope rodam 400 kHz + 2 MHz).
+- `tr_spacing_m = 50 m`: cobre deep-reading PeriScope HD (20.43 m) +
+  GeoSphere + margem. Limite físico real do filtro Werthmüller 201pt
+  é ~30 m; Anderson 801pt cobre até ~1000 m.
+- **Alta resistividade** (ρ > 1000 Ω·m) em carbonatos/sal/crosta seca
+  é caso de uso legítimo — testes de paridade Numba vs analítico na
+  Sprint 2.6 incluem `rho ∈ [1, 100, 1000, 10000, 100000]` Ω·m.
+- Limite superior 2 MHz preserva validade da aproximação quasi-estática
+  (|ωε/σ| < 1%) até ρ = 10 000 Ω·m. Acima de 2 MHz ou em dielétricos
+  (ρ > 1e5 Ω·m com f > 1 MHz) é necessário modo "full EM" (fora do
+  escopo da Fase 2).
 
 ### 5.4 Imutabilidade
 
