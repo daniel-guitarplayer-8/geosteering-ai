@@ -43,18 +43,21 @@ Branch de desenvolvimento: `feature/simulator-python`.
 | **Testes**       | **153/153 PASS** em 1.81s (53 filtros + 62 config + 38 half-space) |
 | **Referência**   | `docs/reference/plano_simulador_python_jax_numba.md`      |
 
-### 1.2 Fases do plano (7 fases, Fase 1 concluída)
+### 1.2 Fases do plano (7 fases, Fase 1 concluída + Sprint 2.1)
 
 | Fase | Nome                                    | Status      | Sprint(s) |
 |:----:|:----------------------------------------|:------------|:----------|
 |  0   | Setup (branch, deps, estrutura)         | ✅ Concluída | 1.1 ✅ |
 |  1   | Foundations (filtros, config, analítico) | ✅ **Concluída** | 1.1 ✅, 1.2 ✅, 1.3 ✅ |
-|  2   | Backend Numba CPU (paridade Fortran)    | ⬜ Pendente | 2.1-2.5   |
+|  2   | Backend Numba CPU (paridade Fortran)    | 🟡 **Em andamento** | **2.1 ✅**, 2.2-2.7 |
 |  3   | Backend JAX (CPU+GPU, vmap+jit)         | ⬜ Pendente | 3.1-3.4   |
 |  4   | Validação cruzada (Fortran/Numba/empymod) | ⬜ Pendente | 4.1-4.3 |
 |  5   | Jacobiano ∂H/∂ρ (jacfwd JAX, FD Numba)  | ⬜ Pendente | 5.1-5.2   |
 |  6   | Integração no PipelineConfig (backend)  | ⬜ Pendente | 6.1-6.2   |
 |  7   | Otimizações finais (pmap, XLA, caching) | ⬜ Pendente | 7.1-7.3   |
+
+**PR #1 (Fase 1) mergeado** em `main` em 2026-04-11 via squash-merge
+(commit `9985add8`). Sprint 2.1 em nova branch `feature/simulator-python-phase2`.
 
 ### 1.3 Sprint 1.1 — Extração dos pesos Hankel (concluída 2026-04-11)
 
@@ -119,12 +122,43 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 ### 1.6 Bateria de testes consolidada
 
-| Suíte                              | Testes | Tempo  |
-|:-----------------------------------|:------:|:------:|
-| tests/test_simulation_filters.py   |   53   | 0.82s  |
-| tests/test_simulation_config.py    |   62   | ~0.8s  |
-| tests/test_simulation_half_space.py |   38   | ~0.2s  |
-| **TOTAL**                          | **153** | **1.81s** |
+| Suíte                                      | Testes | Tempo  |
+|:-------------------------------------------|:------:|:------:|
+| tests/test_simulation_filters.py           |   53   | 0.82s  |
+| tests/test_simulation_config.py            |   62   | ~0.8s  |
+| tests/test_simulation_half_space.py        |   38   | ~0.2s  |
+| tests/test_simulation_numba_propagation.py |   25   | ~0.6s  |
+| **TOTAL**                                  | **178** | **1.81s** |
+
+### 1.7 Sprint 2.1 — Backend Numba propagation (concluída 2026-04-11)
+
+- `geosteering_ai/simulation/_numba/__init__.py` — fachada do backend
+  Numba, re-export de `common_arrays`, `common_factors`, `HAS_NUMBA`.
+- `geosteering_ai/simulation/_numba/propagation.py` — port Python+Numba
+  de `commonarraysMD` e `commonfactorsMD` (Fortran `utils.f08:158-297`)
+  com pipeline completo de propagação TE/TM e reflexão multi-camada.
+  - **Dual-mode Numba**: funciona com ou sem Numba instalado (no-op
+    decorator fallback), permitindo CI mínimo e debugging nativo.
+  - **Decoradores**: `@njit(cache=True, fastmath=False, error_model="numpy")`
+    — paridade bit-exata com Fortran `real(dp)` (sem FMA reorder).
+  - **Guard de singularidade**: `hordist < 1e-12 → r = 0.01 m`
+    (replica Fortran `utils.f08:195`).
+  - **9 arrays invariantes** (common_arrays): `u`, `s`, `uh`, `sh`,
+    `RTEdw`, `RTEup`, `RTMdw`, `RTMup`, `AdmInt` (shape `(npt, n)`
+    complex128).
+  - **6 fatores de onda** (common_factors): `Mxdw`, `Mxup`, `Eudw`,
+    `Euup`, `FEdwz`, `FEupz` (shape `(npt,)` complex128).
+- `tests/test_simulation_numba_propagation.py` — **25 testes**
+  (todos PASS em 0.59s):
+  - 4 shapes/dtypes/não-mutação
+  - 5 limite 1-camada homogêneo isotrópico (s=u, RT=0, u²=kr²+zeta·σh)
+  - 3 limite TIV (λ=4, s²=λ·(kr²+zeta·σv), u independente de σv)
+  - 4 invariantes da recursão (RTEdw[n-1]=0, RTEup[0]=0, |RT|≤1)
+  - 3 common_factors shapes/dtypes/count
+  - 4 common_factors self-consistency (Mxdw=exp(-s·dz), FEdwz=exp(-u·dz))
+  - 2 dual-mode Numba (HAS_NUMBA bool, chamada em qualquer modo)
+
+**Gate 2.1 → 2.2**: ✅ Atingido — paridade estrutural e física 100%.
 
 ---
 
@@ -149,14 +183,15 @@ geosteering_ai/simulation/
 ├── config.py                  ← ★ SimulationConfig (Sprint 1.2)
 ├── forward.py                 ← [PENDENTE Fase 2-3] API simulate()
 │
-├── _numba/                    ← [PENDENTE Fase 2] backend CPU (njit+prange)
-│   ├── __init__.py
-│   ├── propagation.py         ← commonarraysMD, commonfactorsMD
-│   ├── dipoles.py             ← hmd_TIV, vmd
-│   ├── hankel.py              ← quadratura Hankel digital
-│   ├── rotation.py            ← RtHR (Euler tensor rotation)
-│   ├── jacobian.py            ← ∂H/∂ρ via finite differences
-│   └── kernel.py              ← orchestrador forward
+├── _numba/                    ← 🟡 EM CONSTRUÇÃO (Fase 2)
+│   ├── __init__.py            ← ★ (Sprint 2.1, dual-mode Numba)
+│   ├── propagation.py         ← ★ (Sprint 2.1) common_arrays + common_factors
+│   ├── dipoles.py             ← [PENDENTE Sprint 2.2] hmd_TIV, vmd
+│   ├── hankel.py              ← [PENDENTE Sprint 2.3] quadratura digital
+│   ├── rotation.py            ← [PENDENTE Sprint 2.3] RtHR (Euler)
+│   ├── geometry.py            ← [PENDENTE Sprint 2.3] findlayersTR2well
+│   ├── jacobian.py            ← [PENDENTE Fase 5] ∂H/∂ρ via FD
+│   └── kernel.py              ← [PENDENTE Sprint 2.4] orquestrador forward
 │
 ├── _jax/                      ← [PENDENTE Fase 3] backend CPU/GPU/TPU
 │   ├── __init__.py
@@ -325,12 +360,12 @@ cfg.to_yaml("configs/sim_production_gpu.yaml")
 cfg_loaded = SimulationConfig.from_yaml("configs/sim_production_gpu.yaml")
 ```
 
-### 5.3 Validação de errata (via `__post_init__`)
+### 5.3 Validação de errata (via `__post_init__`) — **expandida Sprint 2.1**
 
 | Campo              | Regra                                                       |
 |:-------------------|:------------------------------------------------------------|
-| `frequency_hz`     | 100 ≤ f ≤ 1e6 (LWD comercial 2 kHz-400 kHz)               |
-| `tr_spacing_m`     | 0.1 ≤ L ≤ 10.0                                             |
+| `frequency_hz`     | **10 ≤ f ≤ 2e6** (CSAMT baixa + ARC/PeriScope 2 MHz)       |
+| `tr_spacing_m`     | **0.01 ≤ L ≤ 50** (curtas + deep-reading 20.43 m PeriScope HD) |
 | `n_positions`      | 10 ≤ N ≤ 100_000                                            |
 | `backend`          | `{fortran_f2py, numba, jax}`                               |
 | `dtype`            | `{complex128, complex64}`                                   |
@@ -341,6 +376,21 @@ cfg_loaded = SimulationConfig.from_yaml("configs/sim_production_gpu.yaml")
 | `frequencies_hz`   | se ≠ None: len ≥ 1, todos no range de `frequency_hz`       |
 | `tr_spacings_m`    | se ≠ None: len ≥ 1, todos no range de `tr_spacing_m`       |
 | `num_threads`      | -1 (auto) ou ≥ 1                                            |
+
+**Motivação dos limites expandidos** (documentada em plano-mãe §16):
+
+- `frequency_hz = 2 MHz`: paridade com ferramentas LWD dual-frequency
+  (ARC6, PeriScope, EcoScope rodam 400 kHz + 2 MHz).
+- `tr_spacing_m = 50 m`: cobre deep-reading PeriScope HD (20.43 m) +
+  GeoSphere + margem. Limite físico real do filtro Werthmüller 201pt
+  é ~30 m; Anderson 801pt cobre até ~1000 m.
+- **Alta resistividade** (ρ > 1000 Ω·m) em carbonatos/sal/crosta seca
+  é caso de uso legítimo — testes de paridade Numba vs analítico na
+  Sprint 2.6 incluem `rho ∈ [1, 100, 1000, 10000, 100000]` Ω·m.
+- Limite superior 2 MHz preserva validade da aproximação quasi-estática
+  (|ωε/σ| < 1%) até ρ = 10 000 Ω·m. Acima de 2 MHz ou em dielétricos
+  (ρ > 1e5 Ω·m com f > 1 MHz) é necessário modo "full EM" (fora do
+  escopo da Fase 2).
 
 ### 5.4 Imutabilidade
 
