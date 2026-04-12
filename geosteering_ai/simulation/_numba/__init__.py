@@ -81,16 +81,46 @@ Note:
 from __future__ import annotations
 
 from geosteering_ai.simulation._numba.dipoles import hmd_tiv, vmd
+from geosteering_ai.simulation._numba.geometry import (
+    find_layers_tr,
+    layer_at_depth,
+    sanitize_profile,
+)
+from geosteering_ai.simulation._numba.hankel import (
+    integrate_j0,
+    integrate_j0_j1,
+    integrate_j1,
+    prepare_kr,
+)
+from geosteering_ai.simulation._numba.kernel import compute_zrho, fields_in_freqs
 from geosteering_ai.simulation._numba.propagation import (
     HAS_NUMBA,
     common_arrays,
     common_factors,
 )
+from geosteering_ai.simulation._numba.rotation import build_rotation_matrix, rotate_tensor
 
 __all__ = [
     "HAS_NUMBA",
+    # Sprint 2.1 — propagation
     "common_arrays",
     "common_factors",
+    # Sprint 2.2 — dipoles
     "hmd_tiv",
     "vmd",
+    # Sprint 2.3 — geometry
+    "sanitize_profile",
+    "find_layers_tr",
+    "layer_at_depth",
+    # Sprint 2.3 — rotation
+    "build_rotation_matrix",
+    "rotate_tensor",
+    # Sprint 2.3 — hankel helpers
+    "prepare_kr",
+    "integrate_j0",
+    "integrate_j1",
+    "integrate_j0_j1",
+    # Sprint 2.4 — kernel orchestrator
+    "fields_in_freqs",
+    "compute_zrho",
 ]
