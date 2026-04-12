@@ -44,14 +44,20 @@
 # ║    )                                                                      ║
 # ║                                                                           ║
 # ║  ESTADO ATUAL                                                             ║
-# ║    Sprint 1.1 (concluída): extração dos pesos Hankel (.npz) +           ║
-# ║                            FilterLoader para Kong 61, Werthmüller 201,  ║
-# ║                            Anderson 801.                                 ║
+# ║    Sprints concluídas:                                                   ║
+# ║      1.1 ✅ Filtros Hankel (.npz) + FilterLoader                         ║
+# ║      1.2 ✅ SimulationConfig + errata + 9 grupos                         ║
+# ║      1.3 ✅ Half-space analítico (5 funções NumPy puras)                ║
+# ║      2.1 ✅ Backend Numba — commonarraysMD + commonfactorsMD            ║
+# ║      2.2 ✅ Backend Numba — hmd_tiv + vmd + I/O + F6/F7 (opt-in)       ║
+# ║                                                                           ║
 # ║    Próximas Sprints:                                                     ║
-# ║      1.2  SimulationConfig dataclass + errata validation                ║
-# ║      1.3  Testes de referência (half-space analítico)                   ║
-# ║      2.x  Backend Numba (commonarraysMD, commonfactorsMD, hmd/vmd)     ║
-# ║      3.x  Backend JAX  (vmap + jit + pmap)                             ║
+# ║      2.3  Hankel quadrature + rotation RtHR + geometry                  ║
+# ║      2.4  Kernel orchestrator (fatia por posição, multi-TR loop)       ║
+# ║      2.5  API pública simulate(cfg) + dispatcher backend                ║
+# ║      2.6  Validação numérica vs half_space.py (gate < 1e-10)           ║
+# ║      2.7  Benchmark ≥ 40 000 mod/h (gate final Fase 2)                 ║
+# ║      3.x  Backend JAX (vmap + jit + pmap)                               ║
 # ║                                                                           ║
 # ║  REFERÊNCIAS                                                              ║
 # ║    • docs/reference/plano_simulador_python_jax_numba.md                 ║
@@ -139,5 +145,7 @@ __all__ = [
 #   0.1.x → Sprint 1.1 (filtros Hankel extraídos)
 #   0.2.x → Sprint 1.2 (SimulationConfig + validação)
 #   0.3.x → Sprint 1.3 (testes de referência half-space)
+#   0.4.x → Sprint 2.1 (backend Numba propagation)
+#   0.5.x → Sprint 2.2 (Numba dipoles + I/O + F6/F7)
 #   1.0.0 → Fase 6 concluída (simulador 100% funcional)
-__version__ = "0.3.0"
+__version__ = "0.5.0"

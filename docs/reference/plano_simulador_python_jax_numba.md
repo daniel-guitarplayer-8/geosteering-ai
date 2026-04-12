@@ -650,7 +650,8 @@ código e documentação:
 | 1.3    | Soluções analíticas half-space (5 casos)           | ✅ Concluída | 2026-04-11 | 38/38 |
 |        | **TOTAL Fase 1 (Foundations)**                     | **✅ Completa + merged** | **2026-04-11** | **153/153** |
 | 2.1    | _numba/propagation.py (common_arrays + common_factors) | ✅ Concluída | 2026-04-11 | 25/25 |
-|        | **TOTAL Fase 1 + Sprint 2.1**                      | **🟡 Fase 2 em andamento** | **2026-04-11** | **178/178 PASS em 1.81s** |
+| 2.2    | _numba/dipoles.py + io/ + postprocess/ + F6/F7 opt-in | ✅ Concluída | 2026-04-11 | 83/83 |
+|        | **TOTAL Fase 1 + Sprints 2.1 + 2.2**               | **🟡 Fase 2 em andamento** | **2026-04-11** | **261/261 PASS (+1 skip) em 1.58s** |
 
 **Relatórios detalhados**:
 - Sprint 1.1: [`relatorio_sprint_1_1_hankel.md`](relatorio_sprint_1_1_hankel.md)
@@ -680,21 +681,28 @@ Resumo dos artefatos entregues na Fase 1:
 
 ### 15.2 Sprints em andamento
 
-**Fase 2** iniciada em 2026-04-11 na branch `feature/simulator-python-phase2`
-(após merge do PR #1 em `main` via squash, commit `9985add8`).
+**Fase 2** iniciada em 2026-04-11. PRs #1 e #2 mergeados em `main` via
+squash-merge (commits `9985add8` e `048f35ae`). Sprint 2.2 em andamento na
+branch `feature/simulator-python-sprint-2-2`.
 
-**Sprint 2.1** concluída — port Python+Numba de `commonarraysMD` e
+**Sprint 2.1** ✅ concluída — port Python+Numba de `commonarraysMD` e
 `commonfactorsMD` em `geosteering_ai/simulation/_numba/propagation.py`
 (dual-mode Numba: funciona com ou sem a biblioteca instalada).
 Relatório detalhado: [`relatorio_sprint_2_1_numba_propagation.md`](relatorio_sprint_2_1_numba_propagation.md).
+
+**Sprint 2.2** ✅ concluída — port dos dipolos magnéticos `hmd_TIV` + `vmd`
++ exportadores Fortran-compatíveis (model.in, .dat 22-col, .out) + features
+opt-in F6 Compensação Midpoint e F7 Antenas Inclinadas. Três novos grupos
+em `SimulationConfig`: (7) I/O, (8) F6, (9) F7 — todos opt-in, default OFF.
+Relatório detalhado: [`relatorio_sprint_2_2_io_f6_f7.md`](relatorio_sprint_2_2_io_f6_f7.md).
 
 ### 15.3 Sprints próximas (Fase 2 — backend Numba CPU)
 
 | Sprint | Nome                                           | Pré-requisitos  |
 |:------:|:-----------------------------------------------|:----------------|
 | 2.1    | `_numba/propagation.py` (commonarraysMD)       | Fase 1 ✅       |
-| 2.2    | `_numba/dipoles.py` (hmd_TIV, vmd)             | Sprint 2.1      |
-| 2.3    | `_numba/hankel.py` (quadratura digital)        | Sprint 2.2      |
+| 2.2    | `_numba/dipoles.py` (hmd_TIV, vmd) + I/O + F6/F7 | Sprint 2.1 ✅ |
+| 2.3    | `_numba/hankel.py` + `rotation.py` + `geometry.py` | Sprint 2.2 ✅ |
 | 2.4    | `_numba/kernel.py` (orchestrador forward)      | Sprint 2.3      |
 | 2.5    | `forward.py` (API `simulate()` + backend dispatch) | Sprint 2.4  |
 | 2.6    | Validação Numba vs soluções analíticas (half-space) | Sprint 2.5 |
