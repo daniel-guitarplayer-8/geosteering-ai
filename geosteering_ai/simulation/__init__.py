@@ -152,5 +152,6 @@ __all__ = [
 #   0.5.x → Sprint 2.2 (Numba dipoles + I/O + F6/F7)
 #   0.6.x → Sprints 2.3 + 2.4 (geometry + rotation + hankel + kernel)
 #   0.7.x → Sprints 2.5 + 2.6 (forward API + validação analítica)
+#   0.8.x → Sprint 2.7 (benchmark ≥ 40k mod/h — gate final Fase 2)
 #   1.0.0 → Fase 6 concluída (simulador 100% funcional)
-__version__ = "0.7.0"
+__version__ = "0.8.0"
