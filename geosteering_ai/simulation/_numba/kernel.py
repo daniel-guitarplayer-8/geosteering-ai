@@ -263,7 +263,11 @@ def fields_in_freqs(
     #           negativo em sanitize_profile.
     if n == 1:
         h_arr = np.zeros(1, dtype=np.float64)
-        prof_arr = np.array([0.0, 1.0e300], dtype=np.float64)
+        # Sentinels: prof[0] = -1e300 (topo ∞), prof[1] = +1e300 (fundo ∞)
+        # Paridade com Fortran sanitize_hprof_well: prof(0) = -1.d300.
+        # CRÍTICO: sem o sentinel negativo, exp(s * (prof[0] - h0)) overflow
+        # quando h0 é negativo (TX acima de z=0).
+        prof_arr = np.array([-1.0e300, 1.0e300], dtype=np.float64)
         camad_t = 0
         camad_r = 0
     else:

@@ -34,14 +34,15 @@ class TestSanitizeProfile:
     """sanitize_profile produz h e prof corretos."""
 
     def test_3_layers_1_internal(self):
-        """n=3, 1 camada interna → h=[0, 5, 0], prof=[0, 0, 5, 1e300]."""
+        """n=3, 1 camada interna → h=[0, 5, 0], prof=[-1e300, 0, 5, 1e300]."""
         esp = np.array([5.0])
         h, prof = sanitize_profile(n=3, esp=esp)
         assert h.shape == (3,)
         assert prof.shape == (4,)
         np.testing.assert_allclose(h, [0.0, 5.0, 0.0])
-        np.testing.assert_allclose(prof[:3], [0.0, 0.0, 5.0])
-        assert prof[3] == 1.0e300
+        assert prof[0] == -1.0e300  # sentinel topo (paridade Fortran)
+        np.testing.assert_allclose(prof[1:3], [0.0, 5.0])
+        assert prof[3] == 1.0e300  # sentinel fundo
 
     def test_5_layers_3_internal(self):
         """n=5, 3 camadas internas."""
@@ -50,19 +51,19 @@ class TestSanitizeProfile:
         assert h.shape == (5,)
         assert prof.shape == (6,)
         np.testing.assert_allclose(h, [0.0, 1.5, 2.0, 1.0, 0.0])
-        # prof[i+1] = prof[i] + h[i]
-        # prof[0]=0, prof[1]=0+0=0, prof[2]=0+1.5=1.5,
-        # prof[3]=1.5+2=3.5, prof[4]=3.5+1=4.5, prof[5]=1e300
-        np.testing.assert_allclose(prof[:5], [0.0, 0.0, 1.5, 3.5, 4.5])
+        # prof[0]=-1e300, prof[1]=0, prof[2]=1.5, prof[3]=3.5, prof[4]=4.5, prof[5]=1e300
+        assert prof[0] == -1.0e300
+        np.testing.assert_allclose(prof[1:5], [0.0, 1.5, 3.5, 4.5])
         assert prof[5] == 1.0e300
 
     def test_2_layers_no_internal(self):
-        """n=2, esp vazio → h=[0,0], prof=[0,0,1e300]."""
+        """n=2, esp vazio → h=[0,0], prof=[-1e300, 0, 1e300]."""
         esp = np.zeros(0, dtype=np.float64)
         h, prof = sanitize_profile(n=2, esp=esp)
         assert h.shape == (2,)
         assert prof.shape == (3,)
         np.testing.assert_allclose(h, [0.0, 0.0])
+        assert prof[0] == -1.0e300
         assert prof[2] == 1.0e300
 
     def test_invalid_n_raises(self):
