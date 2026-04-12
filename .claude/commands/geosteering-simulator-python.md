@@ -33,23 +33,23 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | 0.5.0 (Sprints 1.1-1.3 + 2.1-2.2 concluídas)              |
-| **Branch**       | `feature/simulator-python-sprint-2-2`                     |
-| **Base**         | `main` (a partir do commit Sprint 2.1 `048f35ae`)         |
+| **Versão**       | 0.6.0 (Sprints 1.1-1.3 + 2.1-2.4 concluídas)              |
+| **Branch**       | `feature/simulator-python-sprint-2-3-4`                   |
+| **Base**         | `main` (a partir do commit Sprint 2.2 `08ba8a2`)          |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.60+ + JAX 0.4.30+ + empymod (valid.)  |
 | **Precisão**     | `complex128` default + `complex64` via config (prod.)     |
 | **Filtro default** | Werthmüller 201pt (mantém paridade Fortran filter_type=0) |
-| **Testes**       | **261/261 PASS** (+1 skipped) em 1.58s (53 filtros + 87 config + 38 half-space + 25 propagation + 22 dipoles + 16 io + 20 postprocess) |
+| **Testes**       | **320/320 PASS** (+1 skipped) em 0.99s |
 | **Referência**   | `docs/reference/plano_simulador_python_jax_numba.md`      |
 
-### 1.2 Fases do plano (7 fases, Fase 1 concluída + Sprints 2.1-2.2)
+### 1.2 Fases do plano (7 fases, Fase 1 concluída + Sprints 2.1-2.4)
 
 | Fase | Nome                                    | Status      | Sprint(s) |
 |:----:|:----------------------------------------|:------------|:----------|
 |  0   | Setup (branch, deps, estrutura)         | ✅ Concluída | 1.1 ✅ |
 |  1   | Foundations (filtros, config, analítico) | ✅ **Concluída** | 1.1 ✅, 1.2 ✅, 1.3 ✅ |
-|  2   | Backend Numba CPU (paridade Fortran)    | 🟡 **Em andamento** | **2.1 ✅, 2.2 ✅**, 2.3-2.7 |
+|  2   | Backend Numba CPU (paridade Fortran)    | 🟡 **Em andamento** | **2.1 ✅, 2.2 ✅, 2.3 ✅, 2.4 ✅**, 2.5-2.7 |
 |  3   | Backend JAX (CPU+GPU, vmap+jit)         | ⬜ Pendente | 3.1-3.4   |
 |  4   | Validação cruzada (Fortran/Numba/empymod) | ⬜ Pendente | 4.1-4.3 |
 |  5   | Jacobiano ∂H/∂ρ (jacfwd JAX, FD Numba)  | ⬜ Pendente | 5.1-5.2   |
@@ -132,7 +132,11 @@ squash-merge (commits `9985add8` e `048f35ae`). Sprint 2.2 em nova branch
 | tests/test_simulation_numba_dipoles.py     |   22   | ~0.5s  |
 | tests/test_simulation_io.py                |   16   | ~0.2s  |
 | tests/test_simulation_postprocess.py       |   20   | ~0.1s  |
-| **TOTAL**                                  | **261** | **1.58s** |
+| tests/test_simulation_numba_geometry.py    |   16   | ~0.3s  |
+| tests/test_simulation_numba_rotation.py    |   12   | ~0.2s  |
+| tests/test_simulation_numba_hankel.py      |   11   | ~0.1s  |
+| tests/test_simulation_numba_kernel.py      |   20   | ~0.3s  |
+| **TOTAL**                                  | **320** | **0.99s** |
 
 ### 1.7 Sprint 2.1 — Backend Numba propagation (concluída 2026-04-11)
 
@@ -242,6 +246,51 @@ Compensação Midpoint e F7 Antenas Inclinadas.
 Decoupling ACp e ACx bit-exato vs CLAUDE.md errata. Alta resistividade
 estável até 10⁶ Ω·m sem NaN/Inf.
 
+### 1.9 Sprint 2.3 + 2.4 — Geometry + Rotation + Hankel + Kernel (concluída 2026-04-12)
+
+**Objetivo**: Portar os módulos auxiliares (geometria de camadas, rotação Euler
+RtHR, quadratura Hankel) e o orquestrador forward que amarra toda a cadeia
+de cálculo do tensor H em uma função `fields_in_freqs`.
+
+**Módulos criados** (Sprint 2.3):
+
+- `_numba/geometry.py` — `sanitize_profile()` (constrói h/prof a partir de
+  espessuras), `find_layers_tr()` (localiza camadas TX/RX), `layer_at_depth()`
+  (camada para profundidade arbitrária). Port de `utils.f08:5-87,299-319`.
+- `_numba/rotation.py` — `build_rotation_matrix(α, β, γ)` (matriz R 3×3),
+  `rotate_tensor(α, β, γ, H)` (aplica Rᵀ·H·R). Port de `utils.f08:321-355`
+  (Liu 2017 eq. 4.80). Convenção: ângulos em radianos.
+- `_numba/hankel.py` — `prepare_kr()`, `integrate_j0()`, `integrate_j1()`,
+  `integrate_j0_j1()`. Helpers para a quadratura digital de Hankel, usados
+  como API de conveniência e documentação (os dipolos da Sprint 2.2 já fazem
+  a integração inline para performance máxima).
+
+**Módulo criado** (Sprint 2.4):
+
+- `_numba/kernel.py` — `fields_in_freqs()` (orquestrador forward completo)
+  + `compute_zrho()` (profundidade do ponto-médio + resistividades).
+  Port de `fieldsinfreqs` (`PerfilaAnisoOmp.f08:937-993`). Recebe posição
+  TR, dip, perfil geológico e frequências; retorna tensor H rotacionado
+  `(nf, 9)` complex128.
+
+**Testes** (59 novos):
+
+- `test_simulation_numba_geometry.py` — **16 testes**: sanitize shapes,
+  find_layers TX/RX em 7 posições canônicas, layer_at_depth.
+- `test_simulation_numba_rotation.py` — **12 testes**: R identidade,
+  ortogonalidade R·Rᵀ=I, det=+1, γ=π/2 troca Hxx↔Hyy, trace invariante,
+  norma Frobenius invariante.
+- `test_simulation_numba_hankel.py` — **11 testes**: prepare_kr, integrate
+  J0/J1/J0J1 com constantes, complex, guard, filtro real.
+- `test_simulation_numba_kernel.py` — **20 testes**: shape (nf,9), multi-freq,
+  no-NaN/Inf, decoupling ACx/ACp/Hzz, VMD analítico < 1e-4, 3-camadas
+  isotrópicas = full-space, TIV ≠ isotrópico, alta resistividade ρ 1..10⁶,
+  dip_rad=0 vs π/2, compute_zrho.
+
+**Gate 2.4 → 2.5**: ✅ Atingido — 320/320 PASS (+1 skip) em 0.99s. O
+orquestrador `fields_in_freqs` reproduz ACp/ACx/Hzz analítico e funciona
+com perfis multi-camada, TIV, alta resistividade e rotação dip.
+
 ---
 
 ## 2. Decisões de Arquitetura (fixadas pelo usuário)
@@ -269,11 +318,11 @@ geosteering_ai/simulation/
 │   ├── __init__.py            ← ★ (Sprint 2.1, dual-mode Numba)
 │   ├── propagation.py         ← ★ (Sprint 2.1) common_arrays + common_factors
 │   ├── dipoles.py             ← ★ (Sprint 2.2) hmd_tiv + vmd (port Fortran)
-│   ├── hankel.py              ← [PENDENTE Sprint 2.3] quadratura digital
-│   ├── rotation.py            ← [PENDENTE Sprint 2.3] RtHR (Euler)
-│   ├── geometry.py            ← [PENDENTE Sprint 2.3] findlayersTR2well
-│   ├── jacobian.py            ← [PENDENTE Fase 5] ∂H/∂ρ via FD
-│   └── kernel.py              ← [PENDENTE Sprint 2.4] orquestrador forward
+│   ├── geometry.py            ← ★ (Sprint 2.3) sanitize_profile + find_layers_tr + layer_at_depth
+│   ├── rotation.py            ← ★ (Sprint 2.3) build_rotation_matrix + rotate_tensor (RtHR)
+│   ├── hankel.py              ← ★ (Sprint 2.3) prepare_kr + integrate_j0/j1 (helpers)
+│   ├── kernel.py              ← ★ (Sprint 2.4) fields_in_freqs + compute_zrho (orquestrador)
+│   └── jacobian.py            ← [PENDENTE Fase 5] ∂H/∂ρ via FD
 │
 ├── io/                        ← ★ IMPLEMENTADO (Sprint 2.2) — opt-in
 │   ├── __init__.py            ← fachada + re-exports

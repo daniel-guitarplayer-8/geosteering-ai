@@ -651,7 +651,9 @@ código e documentação:
 |        | **TOTAL Fase 1 (Foundations)**                     | **✅ Completa + merged** | **2026-04-11** | **153/153** |
 | 2.1    | _numba/propagation.py (common_arrays + common_factors) | ✅ Concluída | 2026-04-11 | 25/25 |
 | 2.2    | _numba/dipoles.py + io/ + postprocess/ + F6/F7 opt-in | ✅ Concluída | 2026-04-11 | 83/83 |
-|        | **TOTAL Fase 1 + Sprints 2.1 + 2.2**               | **🟡 Fase 2 em andamento** | **2026-04-11** | **261/261 PASS (+1 skip) em 1.58s** |
+| 2.3    | _numba/geometry.py + rotation.py + hankel.py         | ✅ Concluída | 2026-04-12 | 39/39 |
+| 2.4    | _numba/kernel.py (orquestrador forward)              | ✅ Concluída | 2026-04-12 | 20/20 |
+|        | **TOTAL Fase 1 + Sprints 2.1–2.4**                  | **🟡 Fase 2 em andamento** | **2026-04-12** | **320/320 PASS (+1 skip) em 0.99s** |
 
 **Relatórios detalhados**:
 - Sprint 1.1: [`relatorio_sprint_1_1_hankel.md`](relatorio_sprint_1_1_hankel.md)
