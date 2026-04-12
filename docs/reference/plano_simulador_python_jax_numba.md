@@ -653,7 +653,9 @@ código e documentação:
 | 2.2    | _numba/dipoles.py + io/ + postprocess/ + F6/F7 opt-in | ✅ Concluída | 2026-04-11 | 83/83 |
 | 2.3    | _numba/geometry.py + rotation.py + hankel.py         | ✅ Concluída | 2026-04-12 | 39/39 |
 | 2.4    | _numba/kernel.py (orquestrador forward)              | ✅ Concluída | 2026-04-12 | 20/20 |
-|        | **TOTAL Fase 1 + Sprints 2.1–2.4**                  | **🟡 Fase 2 em andamento** | **2026-04-12** | **320/320 PASS (+1 skip) em 0.99s** |
+| 2.5    | forward.py (API simulate()) + bugfix prof[0] sentinel | ✅ Concluída | 2026-04-12 | 18/18 |
+| 2.6    | validation/compare_analytical.py (gate analítico)   | ✅ Concluída | 2026-04-12 | 15/15 |
+|        | **TOTAL Fase 1 + Sprints 2.1–2.6**                  | **🟡 Fase 2 em andamento** | **2026-04-12** | **353/353 PASS (+1 skip) em 1.04s** |
 
 **Relatórios detalhados**:
 - Sprint 1.1: [`relatorio_sprint_1_1_hankel.md`](relatorio_sprint_1_1_hankel.md)

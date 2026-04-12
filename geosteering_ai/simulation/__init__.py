@@ -134,11 +134,14 @@ from __future__ import annotations
 #   Fase 2+     →  simulate, _numba, _jax, forward      (pendente)
 from geosteering_ai.simulation.config import SimulationConfig
 from geosteering_ai.simulation.filters import FilterLoader, HankelFilter
+from geosteering_ai.simulation.forward import SimulationResult, simulate
 
 __all__ = [
     "FilterLoader",
     "HankelFilter",
     "SimulationConfig",
+    "SimulationResult",
+    "simulate",
 ]
 
 # Versão do subpacote. Sobe conforme Sprints concluídas.
@@ -148,5 +151,6 @@ __all__ = [
 #   0.4.x → Sprint 2.1 (backend Numba propagation)
 #   0.5.x → Sprint 2.2 (Numba dipoles + I/O + F6/F7)
 #   0.6.x → Sprints 2.3 + 2.4 (geometry + rotation + hankel + kernel)
+#   0.7.x → Sprints 2.5 + 2.6 (forward API + validação analítica)
 #   1.0.0 → Fase 6 concluída (simulador 100% funcional)
-__version__ = "0.6.0"
+__version__ = "0.7.0"

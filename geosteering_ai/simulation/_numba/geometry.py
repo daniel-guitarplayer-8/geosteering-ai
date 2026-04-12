@@ -176,14 +176,25 @@ def sanitize_profile(
         )
 
     # Constrói prof: shape (n+1,) para suportar prof[i] = topo camada i
-    # e prof[n] = 1e300. Essa é a convenção do simulador Python
-    # (dipoles.py já espera prof com shape (n+1,)).
-    prof = np.zeros(n + 1, dtype=np.float64)
-    # prof[0] = 0.0 (topo do modelo)
-    # prof[i+1] = prof[i] + h[i] para i = 0..n-2
-    for i in range(n - 1):
-        prof[i + 1] = prof[i] + h[i]
-    # Meio infinito inferior
+    # e prof[n] = 1e300. Mapeamento:
+    #   prof[0]   = -1e300 (sentinel: "topo infinito", paridade Fortran prof(0))
+    #   prof[1]   = h[0] = 0 (topo da camada 0, semi-espaço superior)
+    #   prof[i+1] = prof[i] + h[i] para i=1..n-2
+    #   prof[n]   = +1e300 (sentinel: "fundo infinito", semi-espaço inferior)
+    #
+    # NOTA: O sentinel prof[0] = -1e300 é CRÍTICO para evitar overflow
+    # em exponenciais `exp(s*(prof[camad_t] - h0))` quando o TX está
+    # na camada topo (camad_t=0). Sem este sentinel, posições negativas
+    # de h0 causam `exp(s*|h0|)` que estoura float64 para kr grande.
+    # Paridade com Fortran utils.f08:120 `prof(0) = -1.d300`.
+    prof = np.empty(n + 1, dtype=np.float64)
+    prof[0] = -_INFINITY_PROF  # sentinel topo (Fortran prof(0) = -1.d300)
+    # prof[1] = h[0] (espessura do semi-espaço topo = 0), acumulado para frente
+    cumulative = 0.0
+    for i in range(n):
+        cumulative += h[i]
+        prof[i + 1] = cumulative
+    # Sentinel do meio infinito inferior (substitui o acumulado da última camada)
     prof[n] = _INFINITY_PROF
 
     return h, prof
