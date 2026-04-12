@@ -117,7 +117,7 @@ import dataclasses
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Final, List, Optional
+from typing import Any, Dict, Final, List, Optional, Tuple
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CONSTANTES DE VALIDAÇÃO (errata expandida pós-revisão Sprint 2.1)
@@ -323,6 +323,67 @@ class SimulationConfig:
     num_threads: int = -1
     seed: int = 42
 
+    # ┌───────────────────────────────────────────────────────────────┐
+    # │  Grupo 7 — Exportadores Fortran-compatíveis (opt-in)          │
+    # └───────────────────────────────────────────────────────────────┘
+    # Sprint 2.2 — adiciona a possibilidade de salvar o modelo e as
+    # amostras em formatos idênticos aos gerados por `tatu.x`, para:
+    #   (a) reproduzir o modelo no simulador Fortran e validar paridade
+    #   (b) salvar um conjunto de amostras em disco para uso externo
+    #       (treino offline, análise em outra máquina, audit trail)
+    #
+    # Arquivos gerados (quando as flags estão ativas):
+    #   • {output_dir}/{output_filename}.model.in       ← texto ASCII
+    #   • {output_dir}/{output_filename}.dat            ← binário 22-col
+    #   • {output_dir}/info{output_filename}.out        ← metadata texto
+    #
+    # Todas as flags são `False` por default — simulação pura não toca
+    # no sistema de arquivos. Ativar consome I/O e aumenta tempo de
+    # execução em ~5-10% por amostra.
+    export_model_in: bool = False
+    export_binary_dat: bool = False
+    output_dir: str = "."
+    output_filename: str = "simulation"
+
+    # ┌───────────────────────────────────────────────────────────────┐
+    # │  Grupo 8 — Feature F6: Compensação Midpoint (opt-in)          │
+    # └───────────────────────────────────────────────────────────────┘
+    # Sprint 2.2 — processamento pós-forward que combina pares
+    # (T_near, T_far) em torno do ponto médio (midpoint), cancelando
+    # efeitos simétricos de 1ª ordem (rugosidade, excentricidade da
+    # ferramenta, vibração BHA). Implementação clássica da "Schlumberger
+    # Compensated Dual Resistivity" (CDR).
+    #
+    # Fórmula (por componente `ic` do tensor H):
+    #     H_comp[ic] = 0.5 · (H_near[ic] + H_far[ic])
+    #     Δφ[°]      = 180/π · (arg(H_near[ic]) − arg(H_far[ic]))
+    #     Δα[dB]     = 20 · log10(|H_near[ic]| / |H_far[ic]|)
+    #
+    # Pré-requisito físico: `len(tr_spacings_m) >= 2` quando
+    # `use_compensation=True`. Os índices em `comp_pairs` são 0-based
+    # (diferente do Fortran que usa 1-based) e apontam para posições
+    # na lista `tr_spacings_m`.
+    use_compensation: bool = False
+    comp_pairs: Optional[Tuple[Tuple[int, int], ...]] = None
+
+    # ┌───────────────────────────────────────────────────────────────┐
+    # │  Grupo 9 — Feature F7: Antenas Inclinadas (opt-in)            │
+    # └───────────────────────────────────────────────────────────────┘
+    # Sprint 2.2 — projeção do tensor H 3×3 para N configurações
+    # `(β, φ)` com:
+    #     β = inclinação (graus), 0°=Hzz axial, 90°=plano Hxz/Hyz
+    #     φ = azimute (graus),    0°=x-aligned,   90°=y-aligned
+    #
+    # Fórmula:
+    #     H_tilted(β, φ) = cos(β)·Hzz
+    #                    + sin(β)·[cos(φ)·Hxz + sin(φ)·Hyz]
+    #
+    # Útil para simular ferramentas comerciais com antenas não-axiais
+    # (ex.: PeriScope HD com tilt de 45° e 90°). O pós-processamento é
+    # puro NumPy (~5 mul + 2 add por ponto) — custo desprezível.
+    use_tilted_antennas: bool = False
+    tilted_configs: Optional[Tuple[Tuple[float, float], ...]] = None
+
     # ─────────────────────────────────────────────────────────────────
     # VALIDAÇÃO (errata imutável, inspired by PipelineConfig)
     # ─────────────────────────────────────────────────────────────────
@@ -442,6 +503,101 @@ class SimulationConfig:
             f"num_threads={self.num_threads} inválido. Use -1 para "
             f"auto-detectar (usa todos os cores) ou um inteiro >= 1."
         )
+
+        # ──────────────────────────────────────────────────────────────
+        # GRUPO 7 — Exportadores Fortran-compatíveis
+        # ──────────────────────────────────────────────────────────────
+        # Se qualquer flag de exportação está ativa, precisamos de um
+        # `output_dir` válido e um `output_filename` não-vazio. Não
+        # validamos existência do diretório aqui (pode ser criado
+        # tardiamente); apenas o path precisa ser uma string não-vazia.
+        if self.export_model_in or self.export_binary_dat:
+            assert isinstance(self.output_dir, str) and self.output_dir, (
+                f"output_dir={self.output_dir!r} inválido: deve ser uma "
+                f"string não-vazia quando export_model_in ou "
+                f"export_binary_dat está ativo."
+            )
+            assert isinstance(self.output_filename, str) and self.output_filename, (
+                f"output_filename={self.output_filename!r} inválido: "
+                f"deve ser uma string não-vazia quando qualquer flag de "
+                f"exportação está ativa."
+            )
+            # Caracteres inválidos em nomes de arquivo (cross-platform).
+            _invalid_chars = set('<>:"|?*')
+            if any(c in _invalid_chars for c in self.output_filename):
+                raise AssertionError(
+                    f"output_filename={self.output_filename!r} contém "
+                    f"caracteres inválidos em nome de arquivo: "
+                    f"{sorted(_invalid_chars & set(self.output_filename))}."
+                )
+
+        # ──────────────────────────────────────────────────────────────
+        # GRUPO 8 — F6 Compensação Midpoint
+        # ──────────────────────────────────────────────────────────────
+        # Pré-requisito físico: F6 é *compensação* entre dois TR, logo
+        # exige ≥ 2 espaçamentos. Os índices em `comp_pairs` são
+        # 0-based e devem apontar para posições válidas em
+        # `tr_spacings_m`. Pares (near, far) com near == far são
+        # degenerados e bloqueados.
+        if self.use_compensation:
+            n_tr = len(self.tr_spacings_m) if self.tr_spacings_m else 1
+            assert n_tr >= 2, (
+                f"use_compensation=True requer len(tr_spacings_m) >= 2 "
+                f"(pares T_near/T_far), encontrado nTR={n_tr}. A feature "
+                f"F6 é inerentemente multi-TR — ative tr_spacings_m com "
+                f"pelo menos 2 entradas ou desabilite use_compensation."
+            )
+            assert self.comp_pairs is not None and len(self.comp_pairs) >= 1, (
+                "use_compensation=True exige comp_pairs não-vazio. "
+                "Exemplo: comp_pairs=((0, 1),) para um par (near=TR0, "
+                "far=TR1)."
+            )
+            for i, pair in enumerate(self.comp_pairs):
+                assert len(pair) == 2, (
+                    f"comp_pairs[{i}]={pair!r} deve ter exatamente 2 "
+                    f"elementos (near_idx, far_idx)."
+                )
+                near_idx, far_idx = pair
+                assert isinstance(near_idx, int) and isinstance(far_idx, int), (
+                    f"comp_pairs[{i}]={pair!r}: índices devem ser "
+                    f"inteiros 0-based, não {type(near_idx).__name__}/"
+                    f"{type(far_idx).__name__}."
+                )
+                assert 0 <= near_idx < n_tr and 0 <= far_idx < n_tr, (
+                    f"comp_pairs[{i}]=({near_idx},{far_idx}) fora do "
+                    f"range [0, {n_tr}). Lembre-se: índices são 0-based."
+                )
+                assert near_idx != far_idx, (
+                    f"comp_pairs[{i}]=({near_idx},{far_idx}): near_idx e "
+                    f"far_idx devem ser diferentes (compensação triviál)."
+                )
+
+        # ──────────────────────────────────────────────────────────────
+        # GRUPO 9 — F7 Antenas Inclinadas
+        # ──────────────────────────────────────────────────────────────
+        # Ranges físicos:
+        #   β ∈ [0°, 90°] — 0=axial (Hzz puro), 90=equatorial (Hxz/Hyz)
+        #   φ ∈ [0°, 360°) — azimute no plano xy (0=x, 90=y, 180=-x)
+        if self.use_tilted_antennas:
+            assert self.tilted_configs is not None and len(self.tilted_configs) >= 1, (
+                "use_tilted_antennas=True exige tilted_configs não-vazio. "
+                "Exemplo: tilted_configs=((45.0, 0.0),) para um beam "
+                "tilted a 45° azimute 0."
+            )
+            for i, cfg in enumerate(self.tilted_configs):
+                assert len(cfg) == 2, (
+                    f"tilted_configs[{i}]={cfg!r} deve ser " f"(beta_graus, phi_graus)."
+                )
+                beta, phi = cfg
+                assert 0.0 <= float(beta) <= 90.0, (
+                    f"tilted_configs[{i}].beta={beta}° fora do range "
+                    f"[0, 90]. β=0° é axial (Hzz puro), β=90° é "
+                    f"equatorial (Hxz/Hyz)."
+                )
+                assert 0.0 <= float(phi) < 360.0, (
+                    f"tilted_configs[{i}].phi={phi}° fora do range "
+                    f"[0, 360). Use φ=0° para x-aligned, 90° y-aligned."
+                )
 
         # ── Jacobiano: só faz sentido em backends de produção ────────
         # Apesar do backend fortran_f2py ter F10 nativo, o campo

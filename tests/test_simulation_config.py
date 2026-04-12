@@ -428,3 +428,192 @@ class TestEquality:
         # Deve ser usável como chave de dict
         cache: dict[SimulationConfig, str] = {cfg: "resultado"}
         assert cache[cfg] == "resultado"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TESTES SPRINT 2.2 — GRUPO 7 (I/O Exportadores)
+# ──────────────────────────────────────────────────────────────────────────────
+class TestGroup7Exporters:
+    """Valida os campos de exportação Fortran-compatível (Sprint 2.2)."""
+
+    def test_defaults_all_off(self) -> None:
+        """Por default, nenhum exportador está ativo."""
+        cfg = SimulationConfig()
+        assert cfg.export_model_in is False
+        assert cfg.export_binary_dat is False
+        assert cfg.output_dir == "."
+        assert cfg.output_filename == "simulation"
+
+    def test_export_model_in_with_valid_dir(self) -> None:
+        """export_model_in=True + output_dir válido passa."""
+        cfg = SimulationConfig(
+            export_model_in=True,
+            output_dir="/tmp/sim",
+            output_filename="test",
+        )
+        assert cfg.export_model_in is True
+
+    def test_export_with_empty_output_dir_fails(self) -> None:
+        """output_dir vazio com export ativo falha."""
+        with pytest.raises(AssertionError, match="output_dir"):
+            SimulationConfig(export_model_in=True, output_dir="")
+
+    def test_export_with_empty_filename_fails(self) -> None:
+        """output_filename vazio com export ativo falha."""
+        with pytest.raises(AssertionError, match="output_filename"):
+            SimulationConfig(export_model_in=True, output_filename="")
+
+    def test_export_with_invalid_filename_chars_fails(self) -> None:
+        """output_filename com caracteres especiais inválidos falha."""
+        with pytest.raises(AssertionError, match="caracteres inválidos"):
+            SimulationConfig(export_binary_dat=True, output_filename="bad<name>")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TESTES SPRINT 2.2 — GRUPO 8 (F6 Compensação Midpoint)
+# ──────────────────────────────────────────────────────────────────────────────
+class TestGroup8Compensation:
+    """Valida os campos de compensação F6 (Sprint 2.2)."""
+
+    def test_default_off(self) -> None:
+        """Por default, use_compensation=False, comp_pairs=None."""
+        cfg = SimulationConfig()
+        assert cfg.use_compensation is False
+        assert cfg.comp_pairs is None
+
+    def test_f6_requires_multi_tr(self) -> None:
+        """F6 ativo com nTR < 2 deve falhar."""
+        with pytest.raises(AssertionError, match=r"inerentemente multi-TR"):
+            SimulationConfig(
+                use_compensation=True,
+                comp_pairs=((0, 1),),
+                tr_spacings_m=[1.0],  # apenas 1 TR
+            )
+
+    def test_f6_requires_comp_pairs(self) -> None:
+        """F6=True sem comp_pairs deve falhar."""
+        with pytest.raises(AssertionError, match="comp_pairs não-vazio"):
+            SimulationConfig(
+                use_compensation=True,
+                tr_spacings_m=[0.5, 1.0, 2.0],
+            )
+
+    def test_f6_valid_multi_tr_with_pair(self) -> None:
+        """F6 com 3 TRs e 1 par válido passa."""
+        cfg = SimulationConfig(
+            use_compensation=True,
+            tr_spacings_m=[0.5, 1.0, 2.0],
+            comp_pairs=((0, 2),),
+        )
+        assert cfg.use_compensation is True
+        assert len(cfg.comp_pairs) == 1
+
+    def test_f6_pair_near_equals_far_fails(self) -> None:
+        """comp_pairs com near == far (degenerado) deve falhar."""
+        with pytest.raises(AssertionError, match="devem ser diferentes"):
+            SimulationConfig(
+                use_compensation=True,
+                tr_spacings_m=[0.5, 1.0, 2.0],
+                comp_pairs=((1, 1),),
+            )
+
+    def test_f6_pair_index_out_of_range_fails(self) -> None:
+        """comp_pairs com índice >= nTR deve falhar."""
+        with pytest.raises(AssertionError, match="fora do"):
+            SimulationConfig(
+                use_compensation=True,
+                tr_spacings_m=[0.5, 1.0],
+                comp_pairs=((0, 5),),
+            )
+
+    def test_f6_multiple_pairs(self) -> None:
+        """F6 com múltiplos pares independentes funciona."""
+        cfg = SimulationConfig(
+            use_compensation=True,
+            tr_spacings_m=[0.5, 1.0, 2.0, 4.0],
+            comp_pairs=((0, 1), (2, 3)),
+        )
+        assert len(cfg.comp_pairs) == 2
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TESTES SPRINT 2.2 — GRUPO 9 (F7 Antenas Inclinadas)
+# ──────────────────────────────────────────────────────────────────────────────
+class TestGroup9TiltedAntennas:
+    """Valida os campos de antenas inclinadas F7 (Sprint 2.2)."""
+
+    def test_default_off(self) -> None:
+        """Por default, use_tilted_antennas=False."""
+        cfg = SimulationConfig()
+        assert cfg.use_tilted_antennas is False
+        assert cfg.tilted_configs is None
+
+    def test_f7_requires_tilted_configs(self) -> None:
+        """F7=True sem tilted_configs deve falhar."""
+        with pytest.raises(AssertionError, match="tilted_configs não-vazio"):
+            SimulationConfig(use_tilted_antennas=True)
+
+    def test_f7_valid_config_passes(self) -> None:
+        """F7 com 1 config (45°, 0°) válida passa."""
+        cfg = SimulationConfig(
+            use_tilted_antennas=True,
+            tilted_configs=((45.0, 0.0),),
+        )
+        assert cfg.use_tilted_antennas is True
+        assert len(cfg.tilted_configs) == 1
+
+    def test_f7_beta_out_of_range_fails(self) -> None:
+        """β fora do range [0, 90] falha."""
+        with pytest.raises(AssertionError, match="beta"):
+            SimulationConfig(
+                use_tilted_antennas=True,
+                tilted_configs=((95.0, 0.0),),
+            )
+
+    def test_f7_phi_out_of_range_fails(self) -> None:
+        """φ fora do range [0, 360) falha."""
+        with pytest.raises(AssertionError, match="phi"):
+            SimulationConfig(
+                use_tilted_antennas=True,
+                tilted_configs=((45.0, 360.0),),
+            )
+
+    def test_f7_multiple_configs_independent(self) -> None:
+        """F7 com múltiplas configurações distintas funciona."""
+        cfg = SimulationConfig(
+            use_tilted_antennas=True,
+            tilted_configs=((0.0, 0.0), (45.0, 90.0), (90.0, 180.0)),
+        )
+        assert len(cfg.tilted_configs) == 3
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TESTES DE INTEGRAÇÃO — COMBINAÇÕES DOS NOVOS GRUPOS
+# ──────────────────────────────────────────────────────────────────────────────
+class TestSprint22Integration:
+    """Testes de integração dos 3 novos grupos (I/O + F6 + F7)."""
+
+    def test_all_new_groups_disabled_is_default(self) -> None:
+        """Nenhuma flag Sprint 2.2 ativa no config default."""
+        cfg = SimulationConfig()
+        assert cfg.export_model_in is False
+        assert cfg.export_binary_dat is False
+        assert cfg.use_compensation is False
+        assert cfg.use_tilted_antennas is False
+
+    def test_all_new_groups_enabled_together(self) -> None:
+        """Todos os grupos Sprint 2.2 ativos juntos é válido."""
+        cfg = SimulationConfig(
+            tr_spacings_m=[0.5, 1.0, 2.0],
+            export_model_in=True,
+            export_binary_dat=True,
+            output_dir="/tmp/sim",
+            output_filename="smoke",
+            use_compensation=True,
+            comp_pairs=((0, 2),),
+            use_tilted_antennas=True,
+            tilted_configs=((45.0, 0.0), (45.0, 90.0)),
+        )
+        assert cfg.use_compensation is True
+        assert cfg.use_tilted_antennas is True
+        assert cfg.export_model_in is True

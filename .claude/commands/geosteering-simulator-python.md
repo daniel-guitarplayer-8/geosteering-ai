@@ -33,31 +33,32 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | 0.3.0 (Sprints 1.1, 1.2 e 1.3 concluídas)                 |
-| **Branch**       | `feature/simulator-python`                                |
-| **Base**         | `main` (a partir do commit F10 Jacobiano `f1bd6e9`)       |
+| **Versão**       | 0.5.0 (Sprints 1.1-1.3 + 2.1-2.2 concluídas)              |
+| **Branch**       | `feature/simulator-python-sprint-2-2`                     |
+| **Base**         | `main` (a partir do commit Sprint 2.1 `048f35ae`)         |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.60+ + JAX 0.4.30+ + empymod (valid.)  |
 | **Precisão**     | `complex128` default + `complex64` via config (prod.)     |
 | **Filtro default** | Werthmüller 201pt (mantém paridade Fortran filter_type=0) |
-| **Testes**       | **153/153 PASS** em 1.81s (53 filtros + 62 config + 38 half-space) |
+| **Testes**       | **261/261 PASS** (+1 skipped) em 1.58s (53 filtros + 87 config + 38 half-space + 25 propagation + 22 dipoles + 16 io + 20 postprocess) |
 | **Referência**   | `docs/reference/plano_simulador_python_jax_numba.md`      |
 
-### 1.2 Fases do plano (7 fases, Fase 1 concluída + Sprint 2.1)
+### 1.2 Fases do plano (7 fases, Fase 1 concluída + Sprints 2.1-2.2)
 
 | Fase | Nome                                    | Status      | Sprint(s) |
 |:----:|:----------------------------------------|:------------|:----------|
 |  0   | Setup (branch, deps, estrutura)         | ✅ Concluída | 1.1 ✅ |
 |  1   | Foundations (filtros, config, analítico) | ✅ **Concluída** | 1.1 ✅, 1.2 ✅, 1.3 ✅ |
-|  2   | Backend Numba CPU (paridade Fortran)    | 🟡 **Em andamento** | **2.1 ✅**, 2.2-2.7 |
+|  2   | Backend Numba CPU (paridade Fortran)    | 🟡 **Em andamento** | **2.1 ✅, 2.2 ✅**, 2.3-2.7 |
 |  3   | Backend JAX (CPU+GPU, vmap+jit)         | ⬜ Pendente | 3.1-3.4   |
 |  4   | Validação cruzada (Fortran/Numba/empymod) | ⬜ Pendente | 4.1-4.3 |
 |  5   | Jacobiano ∂H/∂ρ (jacfwd JAX, FD Numba)  | ⬜ Pendente | 5.1-5.2   |
 |  6   | Integração no PipelineConfig (backend)  | ⬜ Pendente | 6.1-6.2   |
 |  7   | Otimizações finais (pmap, XLA, caching) | ⬜ Pendente | 7.1-7.3   |
 
-**PR #1 (Fase 1) mergeado** em `main` em 2026-04-11 via squash-merge
-(commit `9985add8`). Sprint 2.1 em nova branch `feature/simulator-python-phase2`.
+**PRs #1 (Fase 1) e #2 (Sprint 2.1)** mergeados em `main` em 2026-04-11 via
+squash-merge (commits `9985add8` e `048f35ae`). Sprint 2.2 em nova branch
+`feature/simulator-python-sprint-2-2` (este documento).
 
 ### 1.3 Sprint 1.1 — Extração dos pesos Hankel (concluída 2026-04-11)
 
@@ -125,10 +126,13 @@ Branch de desenvolvimento: `feature/simulator-python`.
 | Suíte                                      | Testes | Tempo  |
 |:-------------------------------------------|:------:|:------:|
 | tests/test_simulation_filters.py           |   53   | 0.82s  |
-| tests/test_simulation_config.py            |   62   | ~0.8s  |
+| tests/test_simulation_config.py            |   87   | ~0.8s  |
 | tests/test_simulation_half_space.py        |   38   | ~0.2s  |
 | tests/test_simulation_numba_propagation.py |   25   | ~0.6s  |
-| **TOTAL**                                  | **178** | **1.81s** |
+| tests/test_simulation_numba_dipoles.py     |   22   | ~0.5s  |
+| tests/test_simulation_io.py                |   16   | ~0.2s  |
+| tests/test_simulation_postprocess.py       |   20   | ~0.1s  |
+| **TOTAL**                                  | **261** | **1.58s** |
 
 ### 1.7 Sprint 2.1 — Backend Numba propagation (concluída 2026-04-11)
 
@@ -160,6 +164,84 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 **Gate 2.1 → 2.2**: ✅ Atingido — paridade estrutural e física 100%.
 
+### 1.8 Sprint 2.2 — Dipolos + I/O + F6/F7 (concluída 2026-04-11)
+
+**Objetivo**: Portar os kernels de dipolos magnéticos (`hmd_TIV`, `vmd`) para
+Numba e adicionar 3 features opt-in: exportadores Fortran-compatíveis, F6
+Compensação Midpoint e F7 Antenas Inclinadas.
+
+**Módulos criados**:
+
+- `geosteering_ai/simulation/_numba/dipoles.py` (~1300 LOC) — port
+  line-for-line de `magneticdipoles.f08:91-624`:
+  - `hmd_tiv(...)` — HMD com 2 polarizações (hmdx + hmdy) retorna 3
+    arrays `(2,)` complex128 para `[Hx, Hy, Hz]_{dipolo}`.
+  - `vmd(...)` — VMD retorna 3 escalares complex128 `(Hx, Hy, Hz)`.
+  - 6 casos geométricos tratados: `camadR==0 and camadT!=0`,
+    `camadR<camadT`, `camadR==camadT and z≤h0`, `camadR==camadT and z>h0`,
+    `camadR>camadT and camadR!=n-1`, `camadR==n-1`.
+  - Integração Hankel via `wJ0`/`wJ1` do `FilterLoader`.
+
+- `geosteering_ai/simulation/io/model_in.py` (~360 LOC) —
+  `export_model_in()` escreve arquivo ASCII idêntico ao formato
+  `model.in` v10.0 (paridade `fifthBuildTIVModels.py`). Suporta F5, F6,
+  F7 quando ativos no config. Opt-in via `cfg.export_model_in=True`.
+
+- `geosteering_ai/simulation/io/binary_dat.py` (~400 LOC) —
+  `export_binary_dat()` escreve `.dat` 22-col stream nativo + 
+  `export_out_metadata()` escreve `info{filename}.out` texto. Round-trip
+  byte-exato via `np.fromfile(path, dtype=DTYPE_22COL)`. Opt-in via
+  `cfg.export_binary_dat=True`.
+
+- `geosteering_ai/simulation/postprocess/compensation.py` (~240 LOC) —
+  `apply_compensation(H_tensors, comp_pairs)` implementa F6 via fórmula
+  CDR clássica: `H_comp = 0.5·(H_near+H_far)`, `Δφ[°]` e `Δα[dB]`.
+  Retorna tupla `(H_comp, phase_diff_deg, atten_db)`.
+
+- `geosteering_ai/simulation/postprocess/tilted.py` (~180 LOC) —
+  `apply_tilted_antennas(H_tensor, tilted_configs)` implementa F7 via
+  projeção `H_tilted = cos(β)·Hzz + sin(β)·[cos(φ)·Hxz + sin(φ)·Hyz]`.
+
+**Ampliação de `SimulationConfig` (3 novos grupos)**:
+
+- **Grupo 7 (I/O)**: `export_model_in`, `export_binary_dat`, `output_dir`,
+  `output_filename` — todos default `False`/`"."`/`"simulation"`.
+- **Grupo 8 (F6)**: `use_compensation: bool`, `comp_pairs: Tuple[Tuple[int, int], ...]`.
+  Pré-requisito: `len(tr_spacings_m) >= 2`.
+- **Grupo 9 (F7)**: `use_tilted_antennas: bool`,
+  `tilted_configs: Tuple[Tuple[float, float], ...]`. Ranges: β ∈ [0°, 90°],
+  φ ∈ [0°, 360°).
+
+**Testes**:
+
+- `tests/test_simulation_numba_dipoles.py` — **22 testes PASS + 1 skip**:
+  - 4 shapes/dtypes/no-nan-inf
+  - 5 decoupling limit (ACp, ACx bit-exato em σ→0)
+  - 4 VMD analítico vs `vmd_fullspace_broadside` (< 1e-4, atol em ρ=100 Ω·m)
+  - 6 alta resistividade ρ ∈ {1, 10², 10³, 10⁴, 10⁵, 10⁶} Ω·m
+  - 2 reciprocidade T↔R
+  - 2 compilação JIT (1 skip se Numba não instalado)
+
+- `tests/test_simulation_io.py` — **16 testes PASS**:
+  - 5 TestModelInBasic (opt-in, layout, filter_type)
+  - 4 TestModelInFlags (F5, F6, F7, multi-TR)
+  - 5 TestBinaryDatRoundTrip (opt-in, 172 bytes, round-trip, append, shape 2D)
+  - 2 TestOutMetadata (conteúdo básico + F7)
+
+- `tests/test_simulation_postprocess.py` — **20 testes PASS**:
+  - 6 TestCompensationBasic (shapes, opt-in, identidade)
+  - 4 TestCompensationPhysics (fórmula CDR, dB, φ, NaN guard)
+  - 5 TestTiltedBasic (shapes, β=0 → Hzz, β=90° φ=0° → Hxz, β=90° φ=90° → Hyz)
+  - 5 TestTiltedOrtogonality (combinações canônicas)
+
+- `tests/test_simulation_config.py` +25 testes novos:
+  - 5 TestGroup7Exporters, 7 TestGroup8Compensation, 6 TestGroup9TiltedAntennas,
+    2 TestSprint22Integration, 5 ajustes em testes pré-existentes.
+
+**Gate 2.2 → 2.3**: ✅ Atingido — 261/261 testes (+1 skip) PASS em 1.58s.
+Decoupling ACp e ACx bit-exato vs CLAUDE.md errata. Alta resistividade
+estável até 10⁶ Ω·m sem NaN/Inf.
+
 ---
 
 ## 2. Decisões de Arquitetura (fixadas pelo usuário)
@@ -186,12 +268,22 @@ geosteering_ai/simulation/
 ├── _numba/                    ← 🟡 EM CONSTRUÇÃO (Fase 2)
 │   ├── __init__.py            ← ★ (Sprint 2.1, dual-mode Numba)
 │   ├── propagation.py         ← ★ (Sprint 2.1) common_arrays + common_factors
-│   ├── dipoles.py             ← [PENDENTE Sprint 2.2] hmd_TIV, vmd
+│   ├── dipoles.py             ← ★ (Sprint 2.2) hmd_tiv + vmd (port Fortran)
 │   ├── hankel.py              ← [PENDENTE Sprint 2.3] quadratura digital
 │   ├── rotation.py            ← [PENDENTE Sprint 2.3] RtHR (Euler)
 │   ├── geometry.py            ← [PENDENTE Sprint 2.3] findlayersTR2well
 │   ├── jacobian.py            ← [PENDENTE Fase 5] ∂H/∂ρ via FD
 │   └── kernel.py              ← [PENDENTE Sprint 2.4] orquestrador forward
+│
+├── io/                        ← ★ IMPLEMENTADO (Sprint 2.2) — opt-in
+│   ├── __init__.py            ← fachada + re-exports
+│   ├── model_in.py            ← export_model_in() Fortran-compatível
+│   └── binary_dat.py          ← DTYPE_22COL + export_binary_dat + export_out_metadata
+│
+├── postprocess/               ← ★ IMPLEMENTADO (Sprint 2.2) — opt-in
+│   ├── __init__.py            ← fachada + re-exports
+│   ├── compensation.py        ← F6 apply_compensation (CDR midpoint)
+│   └── tilted.py              ← F7 apply_tilted_antennas (β, φ projeção)
 │
 ├── _jax/                      ← [PENDENTE Fase 3] backend CPU/GPU/TPU
 │   ├── __init__.py

@@ -31,7 +31,7 @@
 # ║    │  Módulo                 │  Sprint    │  Status                  │   ║
 # ║    ├────────────────────────┼────────────┼──────────────────────────┤   ║
 # ║    │  propagation.py         │  2.1 ★     │  ✅ Entregue             │   ║
-# ║    │  dipoles.py             │  2.2       │  ⬜ Pendente             │   ║
+# ║    │  dipoles.py             │  2.2 ★     │  ✅ Entregue             │   ║
 # ║    │  hankel.py              │  2.3       │  ⬜ Pendente             │   ║
 # ║    │  rotation.py            │  2.3       │  ⬜ Pendente             │   ║
 # ║    │  geometry.py            │  2.3       │  ⬜ Pendente             │   ║
@@ -80,6 +80,7 @@ Note:
 """
 from __future__ import annotations
 
+from geosteering_ai.simulation._numba.dipoles import hmd_tiv, vmd
 from geosteering_ai.simulation._numba.propagation import (
     HAS_NUMBA,
     common_arrays,
@@ -90,4 +91,6 @@ __all__ = [
     "HAS_NUMBA",
     "common_arrays",
     "common_factors",
+    "hmd_tiv",
+    "vmd",
 ]
