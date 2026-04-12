@@ -320,8 +320,19 @@ class SimulationConfig:
     # -1 no `num_threads` significa auto-detect (usa todos os cores
     # disponíveis via `multiprocessing.cpu_count()`). Valores > 0
     # forçam número específico. 0 é inválido.
+    #
+    # Sprint 2.8 — campo `parallel` ativa paralelização via
+    # `ThreadPoolExecutor` no loop externo de posições em `forward.py`.
+    # Finding Sprint 2.8: com o orquestrador `fields_in_freqs` em Python
+    # puro (não-@njit), o GIL é retido entre as chamadas aos kernels
+    # Numba internos — contention elimina o ganho de threads (speedup
+    # ≈ 1.0× em benchmarks medium/large).
+    # Default=False: infraestrutura preservada para futuro quando
+    # `fields_in_freqs` for portado para @njit (Sprint 2.9?) ou
+    # substituído por vmap JAX (Sprint 3.x, onde XLA não sofre de GIL).
     num_threads: int = -1
     seed: int = 42
+    parallel: bool = False
 
     # ┌───────────────────────────────────────────────────────────────┐
     # │  Grupo 7 — Exportadores Fortran-compatíveis (opt-in)          │

@@ -33,32 +33,100 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | 0.8.0 (Sprints 1.1-1.3 + 2.1-2.7 concluídas — **Fase 2 completa**)  |
-| **Branch**       | `feature/simulator-python-sprint-2-7`                     |
-| **Base**         | `main` (a partir do commit Sprint 2.5+2.6 `d36e4b1`)      |
+| **Versão**       | **0.9.0** (Sprints 1.1-1.3 + 2.1-2.8 + **3.1** concluídas) |
+| **Branch**       | `feature/simulator-python-sprint-2-8-and-3-1`             |
+| **Base**         | `main` (a partir do commit Sprint 2.7 `91e4634`)          |
 | **Autor**        | Daniel Leal                                               |
-| **Framework**    | NumPy 2.x + Numba 0.60+ + JAX 0.4.30+ + empymod (valid.)  |
+| **Framework**    | NumPy 2.x + Numba 0.61+ + **JAX 0.4.38+** + empymod (valid.)  |
 | **Precisão**     | `complex128` default + `complex64` via config (prod.)     |
 | **Filtro default** | Werthmüller 201pt (mantém paridade Fortran filter_type=0) |
-| **Testes**       | **364/364 PASS** (+1 skipped) em 6.04s |
+| **Testes**       | **1135 passed, 295 skipped** em 32.9s (+27 Sprint 2.8+3.1) |
 | **Referência**   | `docs/reference/plano_simulador_python_jax_numba.md`      |
 
-### 1.2 Fases do plano (7 fases, Fase 1 concluída + Sprints 2.1-2.4)
+### 1.2 Fases do plano (7 fases)
 
 | Fase | Nome                                    | Status      | Sprint(s) |
 |:----:|:----------------------------------------|:------------|:----------|
 |  0   | Setup (branch, deps, estrutura)         | ✅ Concluída | 1.1 ✅ |
 |  1   | Foundations (filtros, config, analítico) | ✅ **Concluída** | 1.1 ✅, 1.2 ✅, 1.3 ✅ |
-|  2   | Backend Numba CPU (paridade Fortran)    | ✅ **Concluída** | 2.1 ✅, 2.2 ✅, 2.3 ✅, 2.4 ✅, 2.5 ✅, 2.6 ✅, **2.7 ✅** |
-|  3   | Backend JAX (CPU+GPU, vmap+jit)         | ⬜ Pendente | 3.1-3.4   |
+|  2   | Backend Numba CPU (paridade Fortran)    | ✅ **Concluída** | 2.1–2.7 ✅, **2.8 ✅ (prange + viz)** |
+|  3   | Backend JAX (CPU+GPU, vmap+jit)         | 🟡 **Em andamento** | **3.1 ✅ (hankel + rotation)**, 3.2–3.4 ⬜ |
 |  4   | Validação cruzada (Fortran/Numba/empymod) | ⬜ Pendente | 4.1-4.3 |
 |  5   | Jacobiano ∂H/∂ρ (jacfwd JAX, FD Numba)  | ⬜ Pendente | 5.1-5.2   |
 |  6   | Integração no PipelineConfig (backend)  | ⬜ Pendente | 6.1-6.2   |
 |  7   | Otimizações finais (pmap, XLA, caching) | ⬜ Pendente | 7.1-7.3   |
 
-**PRs #1 (Fase 1) e #2 (Sprint 2.1)** mergeados em `main` em 2026-04-11 via
-squash-merge (commits `9985add8` e `048f35ae`). Sprint 2.2 em nova branch
-`feature/simulator-python-sprint-2-2` (este documento).
+**PRs mergeados em `main`**: #1 (Fase 1), #2–#6 (Sprints 2.1-2.7). Sprints 2.8
++ 3.1 em branch `feature/simulator-python-sprint-2-8-and-3-1` (este commit).
+
+### 1.2b Sprint 2.8 — Paralelização via ThreadPool + Visualização (concluída 2026-04-12)
+
+**Finding principal**: `@njit(parallel=True, prange)` NÃO funciona porque
+`fields_in_freqs` (kernel.py) é uma função Python pura que orquestra chamadas
+a @njit kernels — não pode ser chamada de dentro de um contexto @njit sem
+refatoração profunda. Usamos `ThreadPoolExecutor` como alternativa, mas o
+speedup foi ≈ 1.0× porque o GIL é retido entre as chamadas @njit. A
+infraestrutura (`forward.py:_simulate_positions_parallel` + `cfg.parallel`
+flag) está preservada para quando `fields_in_freqs` for portado para @njit
+(Sprint 2.9?) ou substituído por `vmap` JAX (Sprint 3.3+, onde XLA não sofre
+de GIL).
+
+**Default do config**: `parallel=False` (não ajuda atualmente, evita confusão).
+
+**Novos módulos**:
+- `geosteering_ai/simulation/visualization/__init__.py` — fachada pública
+- `geosteering_ai/simulation/visualization/plot_tensor.py` — `plot_tensor_profile()`
+  + `plot_resistivity_profile()` com layout GridSpec(3,7) (19 axes) —
+  replica padrão de `buildValidamodels.py:571-628`
+- `geosteering_ai/simulation/visualization/plot_benchmark.py` — 
+  `plot_benchmark_comparison()` (2 painéis: throughput + % Fortran)
+
+**Testes**: `tests/test_simulation_visualization.py` — **11 testes PASS** em
+3.0s (4 TestResistivityProfile, 4 TestTensorProfile, 3 TestBenchmarkComparison).
+
+**Convenções visuais**:
+- Eixo y invertido (profundidade cresce para baixo)
+- ρ em semilogx (cobre 1e-1 a 1e6 Ω·m)
+- Paletas Re: azul, Im: vermelho (fidelidade `buildValidamodels.py:540-545`)
+- Interfaces: `axhline` tracejadas pretas
+
+### 1.2c Sprint 3.1 — JAX Foundation CPU (concluída 2026-04-12)
+
+**Objetivo**: Fundação do backend JAX — portar módulos não-recursivos
+(hankel, rotation) com paridade numérica < 1e-12 vs Numba.
+
+**Instalação**: JAX 0.4.38 via `pip install jax[cpu]` — 99.7 MB jaxlib +
+2.2 MB jax. Backend CPU default. `jax.config.update("jax_enable_x64", True)`
+chamado no `_jax/__init__.py` para garantir complex128.
+
+**Novos módulos**:
+- `geosteering_ai/simulation/_jax/__init__.py` — fachada + `HAS_JAX` flag
+- `geosteering_ai/simulation/_jax/hankel.py` — `integrate_j0`, `integrate_j1`,
+  `integrate_j0_j1` via `jnp.einsum("i,i->", w, v)` + `@jax.jit`
+- `geosteering_ai/simulation/_jax/rotation.py` — `build_rotation_matrix`
+  (matriz R 3×3 via `jnp.stack`), `rotate_tensor` (`Rᵀ @ H @ R`) — **diferenciáveis
+  via `jax.grad`/`jax.jacfwd`**
+
+**Paridade medida**:
+- `build_rotation_matrix`: **0.00e+00** (bit-exato) vs Numba
+- `rotate_tensor`: **9.16e-16** (ULP float64) vs Numba
+- `integrate_j0/j1` vs numpy: < 1e-13
+
+**Testes**: `tests/test_simulation_jax_foundation.py` — **15 testes PASS**
+em 5.0s:
+- 5 Hankel (integrais, paridade numpy, consistência j0_j1, JIT cache)
+- 5 BuildRotationMatrix (identidade, ortogonalidade R·Rᵀ=I, det=+1,
+  paridade Numba, diferenciabilidade via `jax.grad`)
+- 5 RotateTensor (identidade preserva, tr invariante, ‖·‖_F invariante,
+  paridade Numba, composição R(α)·R(-α) = I)
+
+**Deferido para Sprints 3.2–3.4**:
+- Sprint 3.2: port de `_jax/propagation.py` (common_arrays + common_factors
+  com `jax.lax.scan` para recursões TE/TM)
+- Sprint 3.3: port de `_jax/dipoles.py` + `_jax/kernel.py` (orquestrador
+  `fields_in_freqs_jax` com `vmap` sobre posições)
+- Sprint 3.4: GPU support (pip install `jax[cuda12]` / `jax[metal]`) +
+  benchmark T4/A100
 
 ### 1.3 Sprint 1.1 — Extração dos pesos Hankel (concluída 2026-04-11)
 
