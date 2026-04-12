@@ -33,14 +33,14 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | 0.7.0 (Sprints 1.1-1.3 + 2.1-2.6 concluídas)              |
-| **Branch**       | `feature/simulator-python-sprint-2-5-6`                   |
-| **Base**         | `main` (a partir do commit Sprint 2.3+2.4 `f078425`)      |
+| **Versão**       | 0.8.0 (Sprints 1.1-1.3 + 2.1-2.7 concluídas — **Fase 2 completa**)  |
+| **Branch**       | `feature/simulator-python-sprint-2-7`                     |
+| **Base**         | `main` (a partir do commit Sprint 2.5+2.6 `d36e4b1`)      |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.60+ + JAX 0.4.30+ + empymod (valid.)  |
 | **Precisão**     | `complex128` default + `complex64` via config (prod.)     |
 | **Filtro default** | Werthmüller 201pt (mantém paridade Fortran filter_type=0) |
-| **Testes**       | **353/353 PASS** (+1 skipped) em 1.04s |
+| **Testes**       | **364/364 PASS** (+1 skipped) em 6.04s |
 | **Referência**   | `docs/reference/plano_simulador_python_jax_numba.md`      |
 
 ### 1.2 Fases do plano (7 fases, Fase 1 concluída + Sprints 2.1-2.4)
@@ -49,7 +49,7 @@ Branch de desenvolvimento: `feature/simulator-python`.
 |:----:|:----------------------------------------|:------------|:----------|
 |  0   | Setup (branch, deps, estrutura)         | ✅ Concluída | 1.1 ✅ |
 |  1   | Foundations (filtros, config, analítico) | ✅ **Concluída** | 1.1 ✅, 1.2 ✅, 1.3 ✅ |
-|  2   | Backend Numba CPU (paridade Fortran)    | 🟡 **Em andamento** | **2.1 ✅, 2.2 ✅, 2.3 ✅, 2.4 ✅, 2.5 ✅, 2.6 ✅**, 2.7 |
+|  2   | Backend Numba CPU (paridade Fortran)    | ✅ **Concluída** | 2.1 ✅, 2.2 ✅, 2.3 ✅, 2.4 ✅, 2.5 ✅, 2.6 ✅, **2.7 ✅** |
 |  3   | Backend JAX (CPU+GPU, vmap+jit)         | ⬜ Pendente | 3.1-3.4   |
 |  4   | Validação cruzada (Fortran/Numba/empymod) | ⬜ Pendente | 4.1-4.3 |
 |  5   | Jacobiano ∂H/∂ρ (jacfwd JAX, FD Numba)  | ⬜ Pendente | 5.1-5.2   |
@@ -138,7 +138,8 @@ squash-merge (commits `9985add8` e `048f35ae`). Sprint 2.2 em nova branch
 | tests/test_simulation_numba_kernel.py      |   20   | ~0.3s  |
 | tests/test_simulation_forward.py           |   18   | ~0.4s  |
 | tests/test_simulation_analytical_validation.py | 15 | ~0.3s  |
-| **TOTAL**                                  | **353** | **1.04s** |
+| tests/test_simulation_benchmark.py         |   11   | ~4.5s  |
+| **TOTAL**                                  | **364** | **~6s** |
 
 ### 1.7 Sprint 2.1 — Backend Numba propagation (concluída 2026-04-11)
 
