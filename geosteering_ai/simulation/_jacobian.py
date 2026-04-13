@@ -554,50 +554,64 @@ def _compute_jacobian_jacfwd_native(
         depende de `_jax/kernel.py::fields_in_freqs_jax_batch` ser
         `jit`-compilável em modo ``use_native_dipoles=True``.
     """
+    # Sprint 5.1b (PR #14b): jacfwd end-to-end nativo via forward_pure_jax.
+    # O caminho híbrido (use_native_dipoles=False) permanece preservado em
+    # ``fields_in_freqs_jax_batch`` — este módulo só é ativado quando o
+    # usuário pede jacobiano via ``backend='jax'``.
+    import time as _time
+
     import jax  # import local — já coberto por HAS_JAX check
-    import jax.numpy as jnp
 
-    # JAX em default config usa float32; pedimos float64 apenas quando
-    # jax_enable_x64 está ativo. Fallback silencioso para float32 evita
-    # warning ruidoso durante os testes de fallback — a precisão não
-    # importa aqui porque esta função levanta NotImplementedError
-    # abaixo (PR #13 design: jacfwd end-to-end é Sprint F7.5.1b futura).
-    float_dtype = jnp.float64 if jax.config.read("jax_enable_x64") else jnp.float32
-    rho_h_jnp = jnp.asarray(rho_h, dtype=float_dtype)
-    rho_v_jnp = jnp.asarray(rho_v, dtype=float_dtype)
+    from geosteering_ai.simulation._jax.forward_pure import (
+        build_static_context,
+        forward_pure_jax,
+    )
 
-    def forward_fn(rh: jnp.ndarray, rv: jnp.ndarray) -> jnp.ndarray:
-        """Forward JAX diferenciável que retorna H_tensor flat."""
-        # Convertemos para NumPy dentro do wrapper porque `simulate`
-        # ainda é NumPy/Numba — este é o ponto crítico que requer
-        # uma implementação JAX pura de `fields_in_freqs_jax_batch`
-        # para que `jax.jacfwd` funcione genuinamente.
-        # Na PR #13 esta chamada exercita o mecanismo mas cai em
-        # fallback FD quando o traçado JAX não é viável.
-        rh_np = np.asarray(rh, dtype=np.float64)
-        rv_np = np.asarray(rv, dtype=np.float64)
-        result = simulate(
-            rho_h=rh_np,
-            rho_v=rv_np,
-            esp=esp,
-            positions_z=positions_z,
-            frequency_hz=frequency_hz,
-            tr_spacing_m=tr_spacing_m,
-            dip_deg=dip_deg,
-            cfg=cfg,
+    if not jax.config.read("jax_enable_x64"):
+        raise RuntimeError(
+            "compute_jacobian_jax requer JAX_ENABLE_X64=True. "
+            "Ative via `jax.config.update('jax_enable_x64', True)` "
+            "antes da primeira chamada, ou exporte "
+            "`JAX_ENABLE_X64=True` no ambiente."
         )
-        return jnp.asarray(result.H_tensor)
 
-    # `jax.jacfwd` sobre função NumPy-bridged não propaga tangentes:
-    # isto dispara um TracerArrayConversionError, que é capturado pelo
-    # chamador `compute_jacobian_jax`. Deixamos a linha abaixo para
-    # documentar o design pretendido — implementação end-to-end
-    # nativa está na Sprint F7.5.1b (próximo PR).
-    _ = jax.jacfwd(forward_fn, argnums=(0, 1))(rho_h_jnp, rho_v_jnp)
-    # Se chegou aqui (improvável antes do PR #14), converte e retorna.
-    raise NotImplementedError(
-        "jax.jacfwd end-to-end nativo requer Sprint F7.5.1b: "
-        "forward jit-compilable em rho_h/rho_v. Fallback: FD."
+    freq = float(frequency_hz if frequency_hz is not None else cfg.frequency_hz)
+    tr = float(tr_spacing_m if tr_spacing_m is not None else cfg.tr_spacing_m)
+
+    ctx = build_static_context(
+        rho_h=np.asarray(rho_h, dtype=np.float64),
+        rho_v=np.asarray(rho_v, dtype=np.float64),
+        esp=np.asarray(esp, dtype=np.float64),
+        positions_z=np.asarray(positions_z, dtype=np.float64),
+        freqs_hz=np.array([freq], dtype=np.float64),
+        tr_spacing_m=tr,
+        dip_deg=float(dip_deg),
+        hankel_filter=cfg.hankel_filter,
+    )
+
+    def _fwd(rh, rv):
+        return forward_pure_jax(rh, rv, ctx)
+
+    t0 = _time.perf_counter()
+    J_h, J_v = jax.jacfwd(_fwd, argnums=(0, 1))(ctx.rho_h_jnp, ctx.rho_v_jnp)
+    elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+
+    J_h_np = np.asarray(J_h)  # (n_pos, nf, 9, n_layers) complex128
+    J_v_np = np.asarray(J_v)
+
+    n_layers = rho_h.shape[0]
+    device = "gpu" if jax.devices()[0].platform == "gpu" else "cpu"
+    return JacobianResult(
+        dH_dRho_h=J_h_np,
+        dH_dRho_v=J_v_np,
+        positions_z=np.asarray(positions_z, dtype=np.float64),
+        n_layers=n_layers,
+        backend="jax_native",
+        device=device,
+        method="jacfwd",
+        fd_step=None,
+        cfg=cfg,
+        elapsed_ms=elapsed_ms,
     )
 
 

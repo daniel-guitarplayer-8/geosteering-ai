@@ -148,8 +148,11 @@ def test_compute_jacobian_dispatcher_numba(simple_3layer_model) -> None:
     assert jac.method == "fd_central"
 
 
-def test_compute_jacobian_jax_fallback_fd() -> None:
-    """Com backend='jax', jacfwd experimental cai em FD fallback (esperado no PR #13)."""
+def test_compute_jacobian_jax_native_or_fallback() -> None:
+    """PR #14b: jacfwd nativo funciona (method='jacfwd'); PR #13 cairia em fallback FD.
+
+    Aceita ambos os caminhos para permitir ambiente sem JAX x64 habilitado.
+    """
     rho_h = np.array([10.0, 100.0, 10.0])
     rho_v = np.array([10.0, 100.0, 10.0])
     esp = np.array([5.0])
@@ -157,11 +160,11 @@ def test_compute_jacobian_jax_fallback_fd() -> None:
     cfg = SimulationConfig(backend="jax", frequency_hz=20000.0, tr_spacing_m=1.0)
 
     jac = compute_jacobian_jax(rho_h, rho_v, esp, z, cfg=cfg, try_jacfwd=True)
-    # PR #13: jacfwd nativo end-to-end é experimental; fallback FD é esperado.
-    assert jac.method == "fd_central"
-    # Backend reflete que o forward subjacente é JAX, mas método Jacobiano é FD.
-    assert "fd" in jac.backend.lower() or jac.backend == "numba_fd"
+    assert jac.method in {"jacfwd", "fd_central"}
     assert np.all(np.isfinite(jac.dH_dRho_h.real))
+    if jac.method == "jacfwd":
+        assert jac.backend == "jax_native"
+        assert jac.fd_step is None
 
 
 def test_jacobian_result_serialization(simple_3layer_model) -> None:
