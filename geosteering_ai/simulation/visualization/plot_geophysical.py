@@ -360,9 +360,287 @@ def plot_tornado(
     return fig
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Constante — epsilon para guard de denominador (compatível float64)
+# ──────────────────────────────────────────────────────────────────────────────
+_EPS_DENOM: float = 1e-12
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# plot_apparent_resistivity_curves — curvas LWD industriais (ρ_a vs TVD)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def plot_apparent_resistivity_curves(
+    result,
+    *,
+    components: Tuple[str, ...] = ("Hxx", "Hyy", "Hzz"),
+    freq_indices: Optional[Iterable[int]] = None,
+    mu0: float = 4e-7 * np.pi,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (9.0, 8.0),
+    show_true_rho: bool = True,
+) -> "Figure":
+    """Curvas de resistividade aparente vs TVD — padrão LWD industrial.
+
+    Converte amplitudes do tensor H em resistividade aparente ρ_a(f, z)
+    via expressão canônica de LWD (Moran-Gianzero 1979):
+
+        ρ_a ≈ (ω · μ₀ · L²) / (2 · |H_ij · 4π · L³|)
+
+    onde L = spacing T-R. Produz painel duplo: (esquerda) perfil ρ_h/ρ_v
+    verdadeiro (log-scale, depth invertida), (direita) curvas ρ_a das
+    componentes selecionadas vs TVD, sobrepostas por frequência.
+
+    Convenção LWD: interpretação direta é válida em camadas homogêneas
+    espessas; em boundaries e meios finos, ρ_a desvia da verdadeira ρ
+    (fenômeno de polarização de camada). Este gráfico é o padrão
+    industrial de visualização para navegação em tempo real (Schlumberger
+    GeoSteering Pilot, Halliburton GeoForce).
+
+    Args:
+        result: :class:`SimulationResult` do simulador Python.
+        components: Componentes do tensor a exibir (padrão: diagonais).
+        freq_indices: Índices das frequências em ``result.freqs_hz``.
+            Se ``None``, usa todas.
+        mu0: Permeabilidade magnética do vácuo (H/m). Default 4π×10⁻⁷.
+        title: Título da figura.
+        figsize: Tamanho.
+        show_true_rho: Se True, sobrepõe ρ_h/ρ_v verdadeiras no painel
+            direito para comparação visual (industry-standard).
+
+    Returns:
+        :class:`matplotlib.figure.Figure` com 2 painéis lado a lado.
+
+    Note:
+        A conversão ρ_a é simplificada — em produção, o LWD service
+        company aplica correções de invasão, dip, e espessura de camada
+        antes de reportar. Este plot é apenas para verificação visual
+        da sensibilidade do simulador.
+
+    Example:
+        >>> fig = plot_apparent_resistivity_curves(result,
+        ...     components=("Hxx", "Hzz"), freq_indices=[0, 1])
+        >>> fig.savefig("apparent_resistivity.png", dpi=300)
+    """
+    _require_mpl()
+
+    H = np.asarray(result.H_tensor)
+    z_obs = np.asarray(result.z_obs)
+    freqs = np.asarray(result.freqs_hz)
+    L = float(result.cfg.tr_spacing_m)
+
+    if freq_indices is None:
+        freq_indices = list(range(freqs.size))
+    freq_indices = list(freq_indices)
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize, sharey=True)
+    fig.suptitle(
+        title or f"Resistividade aparente LWD — L = {L:.2f} m",
+        fontsize=13,
+        y=0.99,
+    )
+
+    # ── Painel esquerdo: ρ_h / ρ_v verdadeiras ────────────────────────
+    ax_true = axes[0]
+    ax_true.semilogx(
+        result.rho_h_at_obs,
+        z_obs,
+        color="steelblue",
+        linewidth=1.8,
+        label=r"$\rho_h$ verdadeira",
+    )
+    ax_true.semilogx(
+        result.rho_v_at_obs,
+        z_obs,
+        color="darkorange",
+        linewidth=1.5,
+        linestyle="--",
+        label=r"$\rho_v$ verdadeira",
+    )
+    ax_true.invert_yaxis()
+    ax_true.set_xlabel(r"Resistividade ($\Omega \cdot m$)")
+    ax_true.set_ylabel("TVD (m)")
+    ax_true.set_title("Perfil verdadeiro")
+    ax_true.grid(True, which="both", linestyle=":", alpha=0.5)
+    ax_true.legend(loc="best", fontsize=9)
+
+    # ── Painel direito: ρ_a(f) por componente ─────────────────────────
+    ax_app = axes[1]
+    if show_true_rho:
+        ax_app.semilogx(
+            result.rho_h_at_obs,
+            z_obs,
+            color="gray",
+            linewidth=1.0,
+            linestyle=":",
+            alpha=0.6,
+            label=r"$\rho_h$ (ref.)",
+        )
+
+    cmap = plt.get_cmap("viridis")
+    for ic, comp in enumerate(components):
+        idx = _COMPS[comp]
+        for jf, fi in enumerate(freq_indices):
+            H_ij = H[:, fi, idx]
+            amp = np.abs(H_ij) + _EPS_DENOM
+            # ρ_a ≈ ω μ₀ L² / (2 · amp · 4π L³) = f μ₀ / (4·amp·L)
+            omega = 2.0 * np.pi * freqs[fi]
+            rho_a = (omega * mu0) / (4.0 * amp * L + _EPS_DENOM) * L
+            color = cmap(
+                0.15
+                + 0.7
+                * (ic * len(freq_indices) + jf)
+                / max(1, len(components) * len(freq_indices))
+            )
+            freq_hz = freqs[fi]
+            flabel = (
+                f"{freq_hz/1000:.1f} kHz" if freq_hz < 1e6 else f"{freq_hz/1e6:.1f} MHz"
+            )
+            ax_app.semilogx(
+                rho_a,
+                z_obs,
+                color=color,
+                linewidth=1.5,
+                label=f"{comp} @ {flabel}",
+            )
+
+    ax_app.set_xlabel(r"$\rho_a$ aparente ($\Omega \cdot m$)")
+    ax_app.set_title("Resistividade aparente")
+    ax_app.grid(True, which="both", linestyle=":", alpha=0.5)
+    ax_app.legend(loc="best", fontsize=8, ncol=1)
+
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    return fig
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# plot_geosignal_response_vs_dip — GS USD/UAD/UHR/UHA em função de dip
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def plot_geosignal_response_vs_dip(
+    results_by_dip: Dict[float, object],
+    *,
+    freq_idx: int = 0,
+    z_target: Optional[float] = None,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (10.0, 7.0),
+) -> "Figure":
+    """Resposta de GeoSignals (USD/UAD/UHR/UHA) em função de dip relativo.
+
+    Plota as 4 razões de GeoSignal canônicas do LWD direcional para
+    boundary-mapping, em função do ângulo de dip relativo da ferramenta
+    em relação à camada. Cada GS isola uma direção de gradiente:
+
+      • USD = (Hxx - Hyy) / (Hxx + Hyy) — simétrica planar
+      • UAD = (Hxz - Hzx) / (Hxz + Hzx + ε)  — antissimétrica cross
+      • UHR = Re(Hxy / Hzz) — acoplamento horizontal normalizado
+      • UHA = Re(Hxz / Hzz) — acoplamento axial normalizado
+
+    O dip relativo φ é o ângulo entre o eixo z da ferramenta e a normal
+    à camada (φ=0° → paralelo, φ=90° → perpendicular). A sensibilidade
+    direcional do boundary mapping aparece como picos/zeros em valores
+    específicos de φ.
+
+    Args:
+        results_by_dip: Dict ``{dip_graus: SimulationResult}`` — um
+            resultado por ângulo de dip.
+        freq_idx: Índice da frequência.
+        z_target: Profundidade (m) alvo para extração. Se ``None``, usa
+            o meio do perfil.
+        title: Título.
+        figsize: Tamanho.
+
+    Returns:
+        Figure com 4 painéis (2×2) — um por GS.
+
+    Example:
+        >>> # Rodar simulação para cada dip
+        >>> dips = np.linspace(0, 90, 19)
+        >>> results = {float(d): simulate(..., cfg=cfg_with_dip(d))
+        ...            for d in dips}
+        >>> fig = plot_geosignal_response_vs_dip(results)
+    """
+    _require_mpl()
+
+    if not results_by_dip:
+        raise ValueError("results_by_dip vazio")
+
+    dips = sorted(results_by_dip.keys())
+    _sample = results_by_dip[dips[0]]
+    z_obs = np.asarray(_sample.z_obs)
+    if z_target is None:
+        z_idx = z_obs.size // 2
+    else:
+        z_idx = int(np.argmin(np.abs(z_obs - z_target)))
+    z_actual = float(z_obs[z_idx])
+
+    Hxx = np.array(
+        [np.complex128(results_by_dip[d].H_tensor[z_idx, freq_idx, 0]) for d in dips]
+    )
+    Hyy = np.array(
+        [np.complex128(results_by_dip[d].H_tensor[z_idx, freq_idx, 4]) for d in dips]
+    )
+    Hzz = np.array(
+        [np.complex128(results_by_dip[d].H_tensor[z_idx, freq_idx, 8]) for d in dips]
+    )
+    Hxy = np.array(
+        [np.complex128(results_by_dip[d].H_tensor[z_idx, freq_idx, 1]) for d in dips]
+    )
+    Hxz = np.array(
+        [np.complex128(results_by_dip[d].H_tensor[z_idx, freq_idx, 2]) for d in dips]
+    )
+    Hzx = np.array(
+        [np.complex128(results_by_dip[d].H_tensor[z_idx, freq_idx, 6]) for d in dips]
+    )
+
+    usd = (Hxx - Hyy) / (Hxx + Hyy + _EPS_DENOM)
+    uad = (Hxz - Hzx) / (Hxz + Hzx + _EPS_DENOM)
+    uhr = Hxy / (Hzz + _EPS_DENOM)
+    uha = Hxz / (Hzz + _EPS_DENOM)
+
+    fig, axes = plt.subplots(2, 2, figsize=figsize, sharex=True)
+    freq = float(_sample.freqs_hz[freq_idx])
+    flabel = f"{freq/1000:.3g} kHz" if freq < 1e6 else f"{freq/1e6:.3g} MHz"
+    fig.suptitle(
+        title or f"GeoSignals vs dip relativo — z = {z_actual:.2f} m, " f"f = {flabel}",
+        fontsize=13,
+        y=0.99,
+    )
+
+    gs_curves = [
+        (axes[0, 0], usd, "USD — $(H_{xx} - H_{yy})/(H_{xx} + H_{yy})$", "steelblue"),
+        (axes[0, 1], uad, "UAD — $(H_{xz} - H_{zx})/(H_{xz} + H_{zx})$", "firebrick"),
+        (axes[1, 0], uhr, r"UHR — $H_{xy}/H_{zz}$", "seagreen"),
+        (axes[1, 1], uha, r"UHA — $H_{xz}/H_{zz}$", "darkorange"),
+    ]
+    for ax, curve, lbl, color in gs_curves:
+        ax.plot(dips, np.real(curve), color=color, linewidth=1.8, label="Re")
+        ax.plot(
+            dips,
+            np.imag(curve),
+            color=color,
+            linewidth=1.3,
+            linestyle="--",
+            alpha=0.7,
+            label="Im",
+        )
+        ax.axhline(0.0, color="black", linestyle=":", linewidth=0.8, alpha=0.6)
+        ax.set_title(lbl, fontsize=10)
+        ax.set_xlabel("Dip relativo (graus)")
+        ax.grid(True, linestyle=":", alpha=0.5)
+        ax.legend(loc="best", fontsize=8)
+
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
+    return fig
+
+
 __all__ = [
     "plot_pseudosection",
     "plot_polar_directivity",
     "plot_nyquist",
     "plot_tornado",
+    "plot_apparent_resistivity_curves",
+    "plot_geosignal_response_vs_dip",
 ]

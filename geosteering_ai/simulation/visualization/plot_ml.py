@@ -239,7 +239,149 @@ def plot_uncertainty_bands(
     return fig
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# plot_pinn_loss_decomposition — decomposição L_total em termos PINN
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def plot_pinn_loss_decomposition(
+    loss_history: dict,
+    *,
+    components: Tuple[str, ...] = ("loss_data", "loss_physics", "loss_continuity"),
+    log_scale: bool = True,
+    show_total: bool = True,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (10.0, 6.5),
+) -> "Figure":
+    """Decomposição temporal da função objetivo PINN (L_total = Σ L_i).
+
+    Integra com os 8 cenários PINN do pipeline v2.0
+    (``geosteering_ai/losses/pinns.py``) exibindo como cada termo
+    da função objetivo composta evolui ao longo do treino. Cada
+    cenário PINN pode ter seu peso relativo — esta plotagem expõe
+    visualmente o balanço:
+
+        L_total = λ_data · L_data + λ_phys · L_physics + λ_cont · L_continuity
+
+    Útil para:
+      - Diagnóstico de colapso de gradiente (um termo domina)
+      - Curriculum PINN (terms devem convergir em momentos distintos)
+      - Sanity check do weighting adaptativo (ex.: GradNorm, SoftAdapt)
+
+    Args:
+        loss_history: Dict ``{"epochs": [...], "loss_data": [...],
+            "loss_physics": [...], ...}``. Compatível com o callback
+            de v2.0 ``training/callbacks.py::PINNLossLogger``.
+        components: Quais termos plotar (deve existir em ``loss_history``).
+            Default cobre o caso PINN-canônico.
+        log_scale: Se True, usa escala log no eixo y (padrão para
+            funções objetivo que caem 3-6 ordens de magnitude).
+        show_total: Se True, traça também L_total como linha tracejada.
+        title: Título.
+        figsize: Tamanho.
+
+    Returns:
+        Figure com painel principal (curvas por termo) + painel inferior
+        com razões relativas L_i / L_total ao longo do treino.
+
+    Raises:
+        KeyError: Se ``loss_history`` não contiver ``"epochs"`` ou algum
+            dos ``components``.
+
+    Note:
+        Para integração com TensorBoard ou Weights & Biases, o caller
+        pode persistir ``loss_history`` via callback e chamar esta
+        plotagem para relatórios pós-treino.
+
+    Example:
+        >>> history = {
+        ...     "epochs": list(range(100)),
+        ...     "loss_data": np.exp(-0.05 * np.arange(100)) + 1e-3,
+        ...     "loss_physics": 0.5 * np.exp(-0.03 * np.arange(100)),
+        ...     "loss_continuity": 0.1 * np.exp(-0.02 * np.arange(100)),
+        ... }
+        >>> fig = plot_pinn_loss_decomposition(history)
+    """
+    _require_mpl()
+
+    if "epochs" not in loss_history:
+        raise KeyError("loss_history deve conter chave 'epochs'")
+    epochs = np.asarray(loss_history["epochs"], dtype=np.float64)
+
+    # Valida presença dos componentes
+    for comp in components:
+        if comp not in loss_history:
+            raise KeyError(f"loss_history não contém '{comp}'")
+
+    curves = {c: np.asarray(loss_history[c], dtype=np.float64) for c in components}
+
+    fig, axes = plt.subplots(
+        2,
+        1,
+        figsize=figsize,
+        sharex=True,
+        gridspec_kw={"height_ratios": [2.2, 1.0]},
+    )
+    fig.suptitle(
+        title or "Decomposição da função objetivo PINN — L_total = Σ L_i",
+        fontsize=13,
+        y=0.99,
+    )
+
+    # ── Painel 1: curvas individuais + total ──────────────────────────
+    ax_main = axes[0]
+    palette = ["steelblue", "firebrick", "seagreen", "darkorange", "purple"]
+    total = np.zeros_like(epochs)
+    for i, (comp, values) in enumerate(curves.items()):
+        color = palette[i % len(palette)]
+        label = comp.replace("loss_", r"$\mathcal{L}_{\mathrm{") + r"}}$"
+        ax_main.plot(
+            epochs,
+            np.maximum(values, 1e-15),
+            color=color,
+            linewidth=1.8,
+            label=label,
+        )
+        total = total + np.maximum(values, 0.0)
+
+    if show_total:
+        ax_main.plot(
+            epochs,
+            np.maximum(total, 1e-15),
+            color="black",
+            linewidth=2.2,
+            linestyle="--",
+            alpha=0.8,
+            label=r"$\mathcal{L}_{\mathrm{total}}$",
+        )
+
+    if log_scale:
+        ax_main.set_yscale("log")
+    ax_main.set_ylabel("Valor da função objetivo")
+    ax_main.set_title("Evolução por termo")
+    ax_main.grid(True, which="both", linestyle=":", alpha=0.5)
+    ax_main.legend(loc="upper right", fontsize=9)
+
+    # ── Painel 2: razões relativas L_i / L_total ──────────────────────
+    ax_ratio = axes[1]
+    total_safe = np.maximum(total, 1e-12)
+    for i, (comp, values) in enumerate(curves.items()):
+        color = palette[i % len(palette)]
+        ratio = values / total_safe
+        ax_ratio.plot(epochs, ratio, color=color, linewidth=1.5)
+
+    ax_ratio.set_xlabel("Época")
+    ax_ratio.set_ylabel(r"$\mathcal{L}_i / \mathcal{L}_{\mathrm{total}}$")
+    ax_ratio.set_title("Contribuição relativa por termo")
+    ax_ratio.set_ylim(0.0, 1.05)
+    ax_ratio.grid(True, linestyle=":", alpha=0.5)
+
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    return fig
+
+
 __all__ = [
     "plot_augmentation_preview",
     "plot_uncertainty_bands",
+    "plot_pinn_loss_decomposition",
 ]

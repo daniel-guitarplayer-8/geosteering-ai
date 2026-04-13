@@ -380,10 +380,193 @@ def plot_sensitivity_kernel(
     return fig
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# plot_anisotropy_ratio_sensitivity — ∂H/∂λ vs profundidade
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def plot_anisotropy_ratio_sensitivity(
+    result,
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    esp: np.ndarray,
+    *,
+    lambdas: Optional[np.ndarray] = None,
+    component: str = "Hzz",
+    freq_idx: int = 0,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (11.0, 7.0),
+    cmap: str = "viridis",
+) -> "Figure":
+    """Mapa de sensibilidade à razão de anisotropia λ = √(ρ_v/ρ_h).
+
+    Calcula via diferenças finitas como o tensor H responde a variações
+    na razão de anisotropia λ ∈ [0.5, 2.5] (tipicamente λ ≈ 1 para meio
+    isotrópico; λ > 1 indica ρ_v > ρ_h — típico em folhelhos laminares).
+    Produz heatmap ``∂|H_ij|/∂λ`` em função de profundidade × λ,
+    acompanhado de perfil ρ_h/ρ_v verdadeiro à esquerda.
+
+    Útil para:
+      - Identificar profundidades onde o sinal é mais sensível à anisotropia
+      - Treino de PINNs com weighting físico baseado na sensibilidade
+      - Diagnóstico de inversão (onde λ é bem/mal determinado)
+
+    Args:
+        result: :class:`SimulationResult` base (λ ≈ 1 ou arbitrário),
+            usado apenas para geometria (``z_obs``, ``cfg``).
+        rho_h: (n,) Array de resistividades horizontais do perfil
+            geológico original. **Deve ser passado explicitamente** —
+            não pode ser reconstruído de forma robusta a partir de
+            ``result.rho_h_at_obs`` quando há camadas com resistividades
+            repetidas (ex.: `[1, 100, 1]`) ou valores próximos em ruído
+            de ponto flutuante.
+        rho_v: (n,) Resistividades verticais do perfil base.
+        esp: (n-2,) Espessuras internas das camadas (topo e fundo são
+            semi-infinitos).
+        lambdas: Array de valores λ para sweep. Default
+            ``np.linspace(0.5, 2.5, 21)``.
+        component: Componente do tensor H a analisar.
+        freq_idx: Índice da frequência.
+        title: Título.
+        figsize: Tamanho.
+        cmap: Colormap do heatmap.
+
+    Returns:
+        Figure com 2 painéis: (esq.) ρ_h/ρ_v; (dir.) heatmap ∂H/∂λ.
+
+    Note:
+        Esta função **RE-SIMULA** internamente para cada λ via
+        ``simulate()``. Para perfis grandes, pode ser custoso. Considere
+        reduzir o número de lambdas em produção.
+
+        A partir de Sprint 3.3.2, os arrays do perfil (``rho_h``,
+        ``rho_v``, ``esp``) devem ser passados explicitamente pelo
+        caller — a tentativa anterior de reconstruí-los de
+        ``rho_h_at_obs`` produzia geologia incorreta em modelos com
+        camadas repetidas (issue identificado em code-review).
+
+    Example:
+        >>> rho_h = np.array([1.0, 100.0, 1.0])
+        >>> rho_v = np.array([1.0, 200.0, 1.0])
+        >>> esp = np.array([5.0])
+        >>> fig = plot_anisotropy_ratio_sensitivity(
+        ...     result, rho_h, rho_v, esp,
+        ...     lambdas=np.linspace(0.7, 1.5, 9))
+    """
+    _require_mpl()
+    # Import diferido para evitar circular
+    from geosteering_ai.simulation import SimulationConfig, simulate
+
+    if lambdas is None:
+        lambdas = np.linspace(0.5, 2.5, 21)
+    lambdas = np.asarray(lambdas, dtype=np.float64)
+
+    rho_h = np.ascontiguousarray(rho_h, dtype=np.float64)
+    rho_v = np.ascontiguousarray(rho_v, dtype=np.float64)
+    esp = np.ascontiguousarray(esp, dtype=np.float64)
+    if rho_h.shape != rho_v.shape:
+        raise ValueError(
+            f"rho_h e rho_v devem ter shape idêntico; obtido "
+            f"{rho_h.shape} vs {rho_v.shape}"
+        )
+    if esp.size != max(0, rho_h.size - 2):
+        raise ValueError(
+            f"esp deve ter shape (n-2,) onde n = rho_h.size ({rho_h.size}); "
+            f"obtido shape {esp.shape}"
+        )
+
+    idx = _COMPONENT_INDEX[component]
+    z_obs = np.asarray(result.z_obs)
+    n_z = z_obs.size
+
+    rho_h_prof = np.asarray(result.rho_h_at_obs)
+    H_grid = np.zeros((n_z, lambdas.size), dtype=np.complex128)
+    base_cfg = result.cfg
+
+    cfg = SimulationConfig(
+        frequency_hz=float(base_cfg.frequency_hz),
+        frequencies_hz=(
+            list(base_cfg.frequencies_hz) if base_cfg.frequencies_hz else None
+        ),
+        tr_spacing_m=float(base_cfg.tr_spacing_m),
+        parallel=False,
+    )
+    for j, lam in enumerate(lambdas):
+        rho_v_swept = rho_h * (lam**2)
+        res_j = simulate(
+            rho_h=rho_h,
+            rho_v=rho_v_swept,
+            esp=esp,
+            positions_z=z_obs,
+            cfg=cfg,
+        )
+        H_grid[:, j] = res_j.H_tensor[:, freq_idx, idx]
+
+    # Sensibilidade ∂|H|/∂λ via diferença central
+    amp = np.abs(H_grid)
+    dH_dlambda = np.gradient(amp, lambdas, axis=1)
+
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=figsize,
+        sharey=True,
+        gridspec_kw={"width_ratios": [1.0, 2.2]},
+    )
+    fig.suptitle(
+        title
+        or rf"Sensibilidade $\partial |{component}|/\partial \lambda$"
+        rf" (λ = √(ρ_v/ρ_h))",
+        fontsize=13,
+        y=0.99,
+    )
+
+    # ── Painel esquerdo: perfil ρ_h verdadeiro ────────────────────────
+    ax_rho = axes[0]
+    ax_rho.semilogx(
+        rho_h_prof, z_obs, color="steelblue", linewidth=1.8, label=r"$\rho_h$"
+    )
+    ax_rho.invert_yaxis()
+    ax_rho.set_xlabel(r"$\rho_h$ ($\Omega \cdot m$)")
+    ax_rho.set_ylabel("Profundidade (m)")
+    ax_rho.grid(True, which="both", linestyle=":", alpha=0.5)
+    ax_rho.legend(loc="best", fontsize=9)
+
+    # ── Painel direito: heatmap ∂|H|/∂λ ───────────────────────────────
+    ax_h = axes[1]
+    # Normaliza para visualização (log-magnitude signed)
+    vmax = np.nanmax(np.abs(dH_dlambda)) + _EPS_DENOM
+    im = ax_h.pcolormesh(
+        lambdas,
+        z_obs,
+        dH_dlambda,
+        cmap=cmap,
+        vmin=-vmax,
+        vmax=vmax,
+        shading="auto",
+    )
+    ax_h.axvline(
+        1.0,
+        color="red",
+        linestyle="--",
+        linewidth=1.0,
+        alpha=0.7,
+        label="λ=1 (isotrópico)",
+    )
+    ax_h.set_xlabel(r"λ = $\sqrt{\rho_v / \rho_h}$")
+    ax_h.set_title(rf"$\partial |{component}| / \partial \lambda$")
+    ax_h.legend(loc="upper right", fontsize=9)
+
+    plt.colorbar(im, ax=ax_h, label=rf"$\partial |{component}| / \partial \lambda$")
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    return fig
+
+
 __all__ = [
     "plot_skin_depth_heatmap",
     "plot_attenuation_phase",
     "plot_feature_views",
     "plot_geosignals",
     "plot_sensitivity_kernel",
+    "plot_anisotropy_ratio_sensitivity",
 ]

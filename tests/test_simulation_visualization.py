@@ -186,3 +186,198 @@ class TestBenchmarkComparison:
         import matplotlib.pyplot as plt
 
         plt.close(fig)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 3.3.2 — 4 novos plots LWD/PINN industriais
+# ──────────────────────────────────────────────────────────────────────────────
+
+from geosteering_ai.simulation.visualization import (  # noqa: E402
+    plot_anisotropy_ratio_sensitivity,
+    plot_apparent_resistivity_curves,
+    plot_geosignal_response_vs_dip,
+    plot_pinn_loss_decomposition,
+)
+
+
+class TestApparentResistivityCurves:
+    """Smoke tests — plot_apparent_resistivity_curves (padrão LWD industrial)."""
+
+    def test_returns_fig_with_2_panels(self, simple_result) -> None:
+        fig = plot_apparent_resistivity_curves(simple_result)
+        assert fig is not None
+        # 2 painéis (perfil verdadeiro + ρ_a aparente)
+        assert len(fig.axes) == 2
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_y_axis_inverted_geology_convention(self, simple_result) -> None:
+        """Eixo y deve estar invertido (profundidade cresce para baixo)."""
+        fig = plot_apparent_resistivity_curves(simple_result)
+        ymin, ymax = fig.axes[0].get_ylim()
+        assert ymin > ymax
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_title_pt_br_accented(self, simple_result) -> None:
+        """Título deve estar em PT-BR com acentuação."""
+        fig = plot_apparent_resistivity_curves(simple_result)
+        title_text = fig._suptitle.get_text()
+        assert "aparente" in title_text
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_no_nan_in_output(self, simple_result) -> None:
+        """Nenhum NaN deve ser produzido nos dados plotados."""
+        fig = plot_apparent_resistivity_curves(
+            simple_result, components=("Hzz",), freq_indices=[0]
+        )
+        ax_app = fig.axes[1]
+        for line in ax_app.get_lines():
+            xdata = line.get_xdata()
+            assert not np.any(np.isnan(xdata))
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+class TestGeosignalResponseVsDip:
+    """Smoke tests — plot_geosignal_response_vs_dip (LWD directional)."""
+
+    @pytest.fixture
+    def results_by_dip(self):
+        """Gera 5 simulações em dips distintos (reusa layer simples)."""
+        cfg = SimulationConfig(parallel=False)
+        dips_deg = [0.0, 30.0, 45.0, 60.0, 90.0]
+        out = {}
+        for dip in dips_deg:
+            res = simulate(
+                rho_h=np.array([1.0, 100.0, 1.0]),
+                rho_v=np.array([1.0, 200.0, 1.0]),
+                esp=np.array([5.0]),
+                positions_z=np.linspace(-2.0, 7.0, 20),
+                dip_deg=dip,
+                cfg=cfg,
+            )
+            out[dip] = res
+        return out
+
+    def test_empty_raises(self) -> None:
+        with pytest.raises(ValueError, match="vazio"):
+            plot_geosignal_response_vs_dip({})
+
+    def test_returns_2x2_panels(self, results_by_dip) -> None:
+        fig = plot_geosignal_response_vs_dip(results_by_dip)
+        assert fig is not None
+        # 2×2 painéis (USD/UAD/UHR/UHA)
+        assert len(fig.axes) == 4
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_titles_contain_gs_names(self, results_by_dip) -> None:
+        fig = plot_geosignal_response_vs_dip(results_by_dip)
+        titles = [ax.get_title() for ax in fig.axes]
+        assert any("USD" in t for t in titles)
+        assert any("UAD" in t for t in titles)
+        assert any("UHR" in t for t in titles)
+        assert any("UHA" in t for t in titles)
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+class TestAnisotropyRatioSensitivity:
+    """Smoke tests — plot_anisotropy_ratio_sensitivity (∂H/∂λ)."""
+
+    # Perfil geológico do `simple_result` fixture — caller deve fornecê-lo
+    # explicitamente (Sprint 3.3.2: não pode ser reconstruído de forma
+    # robusta a partir de rho_h_at_obs).
+    _RHO_H = np.array([1.0, 100.0, 1.0])
+    _RHO_V = np.array([1.0, 200.0, 1.0])
+    _ESP = np.array([5.0])
+
+    def test_returns_fig_with_2_panels(self, simple_result) -> None:
+        """Com 5 lambdas sweep, figura deve ter painel ρ_h + heatmap."""
+        lambdas = np.array([0.7, 0.9, 1.0, 1.3, 1.6])
+        fig = plot_anisotropy_ratio_sensitivity(
+            simple_result,
+            self._RHO_H,
+            self._RHO_V,
+            self._ESP,
+            lambdas=lambdas,
+            component="Hzz",
+        )
+        assert fig is not None
+        # 2 painéis + colorbar axes
+        assert len(fig.axes) >= 2
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_title_mentions_lambda(self, simple_result) -> None:
+        lambdas = np.array([0.8, 1.0, 1.2])
+        fig = plot_anisotropy_ratio_sensitivity(
+            simple_result, self._RHO_H, self._RHO_V, self._ESP, lambdas=lambdas
+        )
+        title_text = fig._suptitle.get_text()
+        assert "lambda" in title_text.lower() or "λ" in title_text
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_shape_mismatch_raises(self, simple_result) -> None:
+        """rho_h.shape != rho_v.shape → ValueError."""
+        with pytest.raises(ValueError, match="shape"):
+            plot_anisotropy_ratio_sensitivity(
+                simple_result,
+                np.array([1.0, 100.0]),  # shape mismatch
+                np.array([1.0, 200.0, 1.0]),
+                np.array([5.0]),
+                lambdas=np.array([1.0, 1.2]),
+            )
+
+
+class TestPinnLossDecomposition:
+    """Smoke tests — plot_pinn_loss_decomposition."""
+
+    @pytest.fixture
+    def synthetic_loss_history(self):
+        epochs = np.arange(50)
+        return {
+            "epochs": epochs,
+            "loss_data": np.exp(-0.08 * epochs) + 1e-4,
+            "loss_physics": 0.5 * np.exp(-0.05 * epochs) + 1e-5,
+            "loss_continuity": 0.15 * np.exp(-0.03 * epochs) + 1e-6,
+        }
+
+    def test_returns_fig_with_2_panels(self, synthetic_loss_history) -> None:
+        fig = plot_pinn_loss_decomposition(synthetic_loss_history)
+        assert fig is not None
+        # 2 painéis (curvas + razões relativas)
+        assert len(fig.axes) == 2
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_missing_epochs_raises(self) -> None:
+        with pytest.raises(KeyError, match="epochs"):
+            plot_pinn_loss_decomposition({"loss_data": [1.0]})
+
+    def test_missing_component_raises(self, synthetic_loss_history) -> None:
+        history = {k: v for k, v in synthetic_loss_history.items() if k != "loss_physics"}
+        with pytest.raises(KeyError, match="loss_physics"):
+            plot_pinn_loss_decomposition(history)
+
+    def test_ratio_panel_values_bounded(self, synthetic_loss_history) -> None:
+        """Razões L_i/L_total devem estar em [0, 1]."""
+        fig = plot_pinn_loss_decomposition(synthetic_loss_history)
+        ax_ratio = fig.axes[1]
+        ymin, ymax = ax_ratio.get_ylim()
+        assert ymin >= -0.01 and ymax <= 1.1
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
