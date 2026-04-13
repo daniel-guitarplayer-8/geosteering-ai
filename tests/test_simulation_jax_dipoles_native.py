@@ -423,16 +423,14 @@ class TestImplementationStatus:
         assert "_hmd_tiv_full_jax" in IMPLEMENTATION_STATUS
         assert "✅" in IMPLEMENTATION_STATUS["_hmd_tiv_full_jax"]
 
-    def test_status_marks_vmd_complete(self) -> None:
-        # Sprint 3.3.3 (PR #11): VMD nativo completo — ETAPAS 3+6 ainda
-        # pendentes para Sprint 3.3.4 (PR #12).
-        assert "_vmd_full_jax" in IMPLEMENTATION_STATUS
-        assert "✅" in IMPLEMENTATION_STATUS["_vmd_full_jax"]
-        assert "ETAPAS 3+6 (TEdwz/TEupz prop + tensor assembly)" in IMPLEMENTATION_STATUS
-        assert (
-            "⏳"
-            in IMPLEMENTATION_STATUS["ETAPAS 3+6 (TEdwz/TEupz prop + tensor assembly)"]
-        )
+    def test_status_marks_native_e2e_complete(self) -> None:
+        # Sprint 3.3.4 (PR #12): ETAPAS 3+6 nativas completas
+        assert "native_dipoles_full_jax" in IMPLEMENTATION_STATUS
+        assert "✅" in IMPLEMENTATION_STATUS["native_dipoles_full_jax"]
+        assert "_hmd_tiv_native_jax" in IMPLEMENTATION_STATUS
+        assert "✅" in IMPLEMENTATION_STATUS["_hmd_tiv_native_jax"]
+        assert "_vmd_native_jax" in IMPLEMENTATION_STATUS
+        assert "✅" in IMPLEMENTATION_STATUS["_vmd_native_jax"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -440,12 +438,12 @@ class TestImplementationStatus:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestHybridFallback:
-    """Quando use_native_dipoles=True, deve emitir WARNING e funcionar
-    como o caminho híbrido (bit-exato)."""
+class TestNativeFlag:
+    """Quando use_native_dipoles=True, deve emitir INFO e produzir
+    resultado bit-exato vs hybrid (paridade < 1e-10)."""
 
-    def test_native_flag_warns_but_works(self, caplog) -> None:
-        """Flag use_native_dipoles=True emite warning mas preserva resultado."""
+    def test_native_flag_info_and_works(self, caplog) -> None:
+        """Flag use_native_dipoles=True emite info e produz resultado correto."""
         from geosteering_ai.simulation import SimulationConfig, simulate
 
         # Não há forma direta de passar use_native_dipoles através de
@@ -467,7 +465,7 @@ class TestHybridFallback:
         import logging
 
         with caplog.at_level(
-            logging.WARNING, logger="geosteering_ai.simulation._jax.kernel"
+            logging.INFO, logger="geosteering_ai.simulation._jax.kernel"
         ):
             out_native = fields_in_freqs_jax_batch(
                 positions_z=positions_z,
@@ -484,11 +482,11 @@ class TestHybridFallback:
                 wJ1=filt.weights_j1,
                 use_native_dipoles=True,  # Deve disparar warning + fallback
             )
-        # Warning foi emitido?
+        # Info foi emitido?
         assert any(
             "use_native_dipoles=True" in record.message for record in caplog.records
-        ), "Warning de fallback deveria ter sido emitido"
-        # Resultado é o mesmo que hybrid (bit-exato, pois cai de volta)
+        ), "Info de native path deveria ter sido emitido"
+        # Resultado é paridade vs hybrid (bit-exato via path diferente)
         out_hybrid = fields_in_freqs_jax_batch(
             positions_z=positions_z,
             dz_half=0.5,
@@ -504,4 +502,4 @@ class TestHybridFallback:
             wJ1=filt.weights_j1,
             use_native_dipoles=False,
         )
-        np.testing.assert_allclose(out_native, out_hybrid, rtol=1e-14, atol=1e-16)
+        np.testing.assert_allclose(out_native, out_hybrid, rtol=1e-10, atol=1e-12)
