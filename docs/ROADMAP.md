@@ -774,8 +774,11 @@ F7.4.1 ✅ — Validação cruzada empymod opt-in (Hzz VMD axial)               
 F7.4.2 ✅ — empymod TIV INFRA 9 componentes (mapa AB + λ² + dataclass)       [CONCLUÍDA 2026-04-13]
 F7.4.3 ✅ — empymod bit-exactness: fator ρ + ab codes 1-3 corrigidos          [CONCLUÍDA 2026-04-13]
 F7.I/O ✅ — read_model_in + simulate_from_model_in → .dat/.out              [CONCLUÍDA 2026-04-13]
-F7.4   — Validação cruzada (Fortran ↔ Numba ↔ JAX ↔ empymod)                [PENDENTE]
-F7.5   — Jacobiano ∂H/∂ρ: jacfwd (JAX) + FD centrada (Numba)                [PENDENTE]
+F7.4.4 ✅ — TIV analítico (half_space): wavenumber_tiv + VMD/HMD TIV         [CONCLUÍDA 2026-04-13 PR #13]
+F7.5.1 ✅ — JAX jacfwd dispatcher + fallback FD (experimental)               [CONCLUÍDA 2026-04-13 PR #13]
+F7.5.2 ✅ — Numba FD centrada (política δ=clip(ε·|ρ|,1e-6,0.1·|ρ|))          [CONCLUÍDA 2026-04-13 PR #13]
+F7.4   — Fortran↔Python direto .dat comparison (tatu.x subprocess)          [PENDENTE — PR #14]
+F7.5.1b — jax.jacfwd end-to-end nativo (remove fallback FD)                 [PENDENTE — PR #15]
 F7.6   — Integração no PipelineConfig (backend='numba'|'jax')               [PENDENTE]
 F7.7   — Otimizações finais (pmap multi-GPU, XLA, caching)                  [PENDENTE]
 ```

@@ -91,21 +91,29 @@ from geosteering_ai.simulation.validation.compare_empymod import (
 )
 from geosteering_ai.simulation.validation.half_space import (
     MU_0,
+    hmd_fullspace_tiv,
     skin_depth,
     static_decoupling_factors,
     vmd_fullspace_axial,
+    vmd_fullspace_axial_tiv,
     vmd_fullspace_broadside,
+    vmd_fullspace_broadside_tiv,
     wavenumber_quasi_static,
+    wavenumber_tiv,
 )
 
 __all__ = [
-    # half_space (Sprint 1.3)
+    # half_space (Sprint 1.3 + 4.x TIV)
     "MU_0",
+    "hmd_fullspace_tiv",
     "skin_depth",
     "static_decoupling_factors",
     "vmd_fullspace_axial",
+    "vmd_fullspace_axial_tiv",
     "vmd_fullspace_broadside",
+    "vmd_fullspace_broadside_tiv",
     "wavenumber_quasi_static",
+    "wavenumber_tiv",
     # canonical_models (Sprint 2.9)
     "CanonicalModel",
     "ModelId",

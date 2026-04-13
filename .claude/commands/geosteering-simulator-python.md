@@ -33,17 +33,18 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **1.4.0** (+ Sprint **3.3.4** native e2e + Sprint **4.3** empymod bit-exact + I/O utility) |
-| **Branch**       | `feature/sim-pr-12`                                       |
-| **Base**         | `main` (PR #11 `e643a01` — Sprint 3.3.3 VMD native + Sprint 4.2 empymod INFRA) |
+| **Versão**       | **1.5.0** (+ Sprint **5.1 JAX jacfwd** + Sprint **5.2 FD Numba** + Sprint **4.x TIV analítico**) |
+| **Branch**       | `feature/pr13-jacobiano-diferenciavel`                    |
+| **Base**         | `main` (PR #12 `869cfe9` — Sprint 3.3.4 JAX native e2e + 4.3 empymod bit-exact + I/O) |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod 2.6+ (opt-in) |
 | **Precisão**     | `complex128` default + `complex64` via config             |
 | **Filtro default** | Werthmüller 201pt (paridade Fortran filter_type=0)      |
-| **Testes**       | **1325 passed, 295 skipped** em ~153s                     |
+| **Testes**       | **~1402 passed, ~295 skipped** em ~165s (CPU)             |
 | **Performance**  | **1.014M/347k/184k mod/h** (small/medium/large) = **1722%/589%/312% Fortran** ✅ |
-| **Plots**        | **31 totais** (20 + 6 PR #11 + 5 helper)                 |
+| **Jacobiano**    | FD Numba (política Fortran `δ=clip(ε·|ρ|,1e-6,0.1·|ρ|)`) + JAX jacfwd experimental + fallback FD |
 | **JAX native**   | **end-to-end** (ETAPAS 3+5+6) — `jax.grad` sobre rho_h ✅ |
+| **TIV analítico**| 4 novas funções: `wavenumber_tiv`, `vmd_fullspace_{axial,broadside}_tiv`, `hmd_fullspace_tiv` |
 | **Referência**   | `docs/reference/plano_simulador_python_jax_numba.md`      |
 
 ### 1.2j Sprint 2.10 — Cache `common_arrays` (Fase 4 Fortran) — 2026-04-13
@@ -1244,7 +1245,61 @@ Use esta sub skill quando o usuário mencionar:
 - Módulos `geosteering_ai/simulation/*`
 - Comparação Python vs Fortran, paridade numérica, empymod
 - Fases/Sprints do plano `plano_simulador_python_jax_numba.md`
-- Branch `feature/simulator-python`
+- Branch `feature/simulator-python`, `feature/pr13-jacobiano-diferenciavel`
 - JIT, vmap, pmap, jacfwd, njit, prange
 - Meta de performance para CPU/GPU
 - Hot kernels: `commonarraysMD`, `commonfactorsMD`, `hmd_TIV`, `vmd`
+- **Jacobiano ∂H/∂ρ**, `compute_jacobian`, `JacobianResult`, FD centrada
+- **TIV analítico**: `wavenumber_tiv`, `vmd_fullspace_axial_tiv`, `hmd_fullspace_tiv`
+
+---
+
+## 20. PR #13 — Sprint 5.1 + 5.2 + 4.x TIV (2026-04-13)
+
+### 20.1 Escopo entregue
+
+| Sprint | Status | Entregas |
+|:------:|:------:|:---------|
+| **5.2 FD Numba** | ✅ | `compute_jacobian_fd_numba()` em `_jacobian.py` — port do `compute_jacobian_fd` Fortran com política de passo `δ = clip(ε·|ρ|, 1e-6, 0.1·|ρ|)`. |
+| **5.1 JAX jacfwd** | ✅ (experimental) | `compute_jacobian_jax()` com tentativa de `jax.jacfwd` sobre path JAX native + fallback FD automático. `NotImplementedError` esperada no PR #13 → cai em FD transparentemente. |
+| **4.x TIV analítico** | ✅ | 4 funções em `half_space.py`: `wavenumber_tiv`, `vmd_fullspace_axial_tiv`, `vmd_fullspace_broadside_tiv`, `hmd_fullspace_tiv`. Reduzem bit-a-bit ao caso isotrópico quando λ=1. |
+
+### 20.2 API pública nova
+
+```python
+from geosteering_ai.simulation import (
+    JacobianResult,
+    compute_jacobian,          # dispatcher
+    compute_jacobian_fd_numba, # Sprint 5.2
+    compute_jacobian_jax,      # Sprint 5.1 (+ fallback FD)
+)
+
+# Jacobiano FD — sempre funciona (4·n_layers forwards)
+jac = compute_jacobian_fd_numba(
+    rho_h=rho_h, rho_v=rho_v, esp=esp,
+    positions_z=z, cfg=cfg, fd_step=1e-4,
+)
+jac.dH_dRho_h  # (n_pos, nf, 9, n_layers) complex128
+jac.dH_dRho_v  # idem
+jac.norm_per_layer()  # (n_layers, 2) magnitude agregada
+jac.method  # "fd_central"
+```
+
+### 20.3 Arquivos criados/modificados (PR #13)
+
+| Arquivo | Mudança |
+|:--------|:--------|
+| `geosteering_ai/simulation/_jacobian.py` | **NOVO** (~620 LOC) — FD Numba + JAX jacfwd + dispatcher + `JacobianResult` |
+| `geosteering_ai/simulation/validation/half_space.py` | +260 LOC — 4 funções TIV analíticas |
+| `geosteering_ai/simulation/validation/__init__.py` | Reexports TIV |
+| `geosteering_ai/simulation/__init__.py` | Reexports Jacobian API + version bump 1.2.0 |
+| `tests/test_simulation_half_space_tiv.py` | **NOVO** (12 testes, 12 PASS) |
+| `tests/test_simulation_jacobian.py` | **NOVO** (9 testes, 9 PASS) |
+
+### 20.4 Não entregue neste PR (próximos PRs)
+
+- **PR #14 — Fortran↔Python direto**: `compare_fortran.py` com `run_tatu_x` via subprocess, comparar `.dat` binário Fortran vs Python para 7 canonical models × 3 backends. Depende de `tatu.x` compilado no ambiente local.
+- **PR #14 — Benchmarks reais**: `bench_jacobian.py` com medições CPU Intel i9 local + GPU Colab T4 (requer execução do hardware do usuário).
+- **PR #14 — Notebook Colab**: `bench_jax_gpu_colab.ipynb` com demo jacfwd interativo (cell execution no lado do usuário).
+- **PR #15 — JAX jacfwd end-to-end nativo** (Sprint F7.5.1b): exige `fields_in_freqs_jax_batch` jit-compilable em `(rho_h, rho_v)`. Hoje o caminho nativo existe mas a diferenciação end-to-end em relação a `rho_h` requer wrapping adicional.
+- **Sprint F7.6.1**: integração no `PipelineConfig` via `simulator_backend` dispatch — `simulate()` passará a aceitar `backend="jax"` diretamente.
