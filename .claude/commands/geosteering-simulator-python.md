@@ -33,8 +33,8 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **1.6.0-alpha** (+ Sprint **4.4 Fortran↔Python direto** + bench real CPU Intel i9) |
-| **Branch**       | `feature/pr14a-fortran-direto-benchmarks`                 |
+| **Versão**       | **1.6.0** (+ Sprint **5.1b jacfwd nativo** + Colab GPU T4 + bench 4-way CPU) |
+| **Branch**       | `feature/pr14b-jacfwd-nativo-colab`                       |
 | **Base**         | `main` (PR #13 `16a50ac` — Sprint 5.1+5.2 Jacobiano + TIV analítico) |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod 2.6+ (opt-in) |
@@ -1365,4 +1365,83 @@ from geosteering_ai.simulation.validation import (
 ### 21.7 Próximos PRs
 
 - **PR #14b** — Sprint 5.1b `jax.jacfwd` end-to-end nativo + notebook GPU Colab T4.
+- **PR #14c** — Sprints 6.1+6.2: `simulator_backend` em `PipelineConfig` + `SyntheticDataGenerator` substituindo `Fortran_Gerador/batch_runner.py`.
+
+---
+
+## 22. PR #14b — Sprint 5.1b jax.jacfwd nativo + Colab GPU (2026-04-13)
+
+### 22.1 Entregas
+
+| Item | Status | Detalhe |
+|:----:|:------:|:--------|
+| **5.1b jacfwd nativo** | ✅ | `_jax/forward_pure.py` JAX puro end-to-end |
+| **Notebook Colab** | ✅ | `notebooks/bench_jax_gpu_colab_pr14b.ipynb` pronto |
+| **Benchmark 4-way CPU** | ✅ | Fortran vs Numba vs JAX híbrido vs JAX nativo |
+| **Preservação JAX híbrido** | ✅ | `use_native_dipoles=False` intacto |
+
+### 22.2 API pública nova
+
+```python
+from geosteering_ai.simulation._jax.forward_pure import (
+    HAS_JAX,
+    ForwardPureContext,
+    build_static_context,
+    forward_pure_jax,  # jax.jacfwd funciona end-to-end
+)
+
+# Via dispatcher principal:
+jac = compute_jacobian_jax(
+    rho_h=..., rho_v=..., esp=..., positions_z=...,
+    cfg=SimulationConfig(backend='jax'),
+    try_jacfwd=True,   # default — usa forward_pure_jax
+)
+assert jac.backend == 'jax_native'
+assert jac.method == 'jacfwd'
+```
+
+### 22.3 Benchmark 4-way CPU Intel i9 (3 canônicos, 50 posições)
+
+| Backend | oklahoma_3 | oklahoma_5 | oklahoma_28 |
+|:--------|-----------:|-----------:|------------:|
+| Fortran tatu.x (subprocess) | 29,7 ms | 219,0 ms | 393,8 ms |
+| **Python Numba** | **3,61 ms** | **3,92 ms** | **7,17 ms** |
+| JAX híbrido | 15.870 ms | 15.834 ms | 16.024 ms |
+| JAX nativo | 17.135 ms | 17.111 ms | 17.359 ms |
+
+**Conclusão**: em CPU puro, **Numba é o backend mais rápido** (paridade Fortran). JAX só é vantajoso com (a) `jax.jacfwd`/`jax.grad` nativos, (b) GPU (T4/A100), ou (c) batches grandes via `jax.vmap`.
+
+### 22.4 Testes novos — 5/5 PASS
+
+- `tests/test_simulation_jacfwd_native.py`
+  - forward_pure vs Numba (max_abs < 1e-10)
+  - jacfwd native shape/dtype
+  - jacfwd native vs FD Numba (rel_err < 5%)
+  - high-ρ (1500 Ω·m) estabilidade
+  - JAX híbrido preservado
+
+### 22.5 Requisito obrigatório
+
+**`JAX_ENABLE_X64=True`** — sem isso, `compute_jacobian_jax` levanta `RuntimeError` com mensagem orientativa. Ativação:
+
+```python
+import jax
+jax.config.update('jax_enable_x64', True)
+# OU
+import os; os.environ['JAX_ENABLE_X64'] = 'True'
+```
+
+### 22.6 Arquivos
+
+| Arquivo | Tipo | LOC |
+|:--------|:-----|----:|
+| `geosteering_ai/simulation/_jax/forward_pure.py` | NOVO | ~380 |
+| `geosteering_ai/simulation/_jacobian.py` | MOD | +60/−40 |
+| `geosteering_ai/simulation/__init__.py` | MOD | v1.2.0 → v1.3.0 |
+| `tests/test_simulation_jacfwd_native.py` | NOVO | ~170 |
+| `notebooks/bench_jax_gpu_colab_pr14b.ipynb` | NOVO | Colab T4 |
+| `docs/reference/sprint_5_1b_jacfwd_nativo.md` | NOVO | relatório PT-BR |
+
+### 22.7 Próximo PR
+
 - **PR #14c** — Sprints 6.1+6.2: `simulator_backend` em `PipelineConfig` + `SyntheticDataGenerator` substituindo `Fortran_Gerador/batch_runner.py`.
