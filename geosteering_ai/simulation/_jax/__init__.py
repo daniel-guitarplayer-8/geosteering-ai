@@ -91,6 +91,10 @@ except ImportError:
 # Re-exports públicos
 # ──────────────────────────────────────────────────────────────────────────────
 if HAS_JAX:
+    from geosteering_ai.simulation._jax.dipoles_native import (
+        IMPLEMENTATION_STATUS,
+        decoupling_factors_jax,
+    )
     from geosteering_ai.simulation._jax.hankel import (
         integrate_j0,
         integrate_j0_j1,
@@ -108,6 +112,8 @@ if HAS_JAX:
         "integrate_j0_j1",
         "build_rotation_matrix",
         "rotate_tensor",
+        "decoupling_factors_jax",
+        "IMPLEMENTATION_STATUS",
     ]
 else:
     __all__ = ["HAS_JAX"]

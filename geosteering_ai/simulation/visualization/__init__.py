@@ -64,9 +64,33 @@ Note:
 from geosteering_ai.simulation.visualization.plot_benchmark import (
     plot_benchmark_comparison,
 )
+from geosteering_ai.simulation.visualization.plot_benchmark_advanced import (
+    measure_component_times,
+    plot_component_times,
+    plot_error_heatmap,
+    plot_filter_convergence,
+    plot_speedup_curve,
+)
 from geosteering_ai.simulation.visualization.plot_canonical import (
     plot_all_canonical_models,
     plot_canonical_model,
+)
+from geosteering_ai.simulation.visualization.plot_geophysical import (
+    plot_nyquist,
+    plot_polar_directivity,
+    plot_pseudosection,
+    plot_tornado,
+)
+from geosteering_ai.simulation.visualization.plot_ml import (
+    plot_augmentation_preview,
+    plot_uncertainty_bands,
+)
+from geosteering_ai.simulation.visualization.plot_physics import (
+    plot_attenuation_phase,
+    plot_feature_views,
+    plot_geosignals,
+    plot_sensitivity_kernel,
+    plot_skin_depth_heatmap,
 )
 from geosteering_ai.simulation.visualization.plot_tensor import (
     plot_resistivity_profile,
@@ -74,9 +98,32 @@ from geosteering_ai.simulation.visualization.plot_tensor import (
 )
 
 __all__ = [
+    # Tensor principal + perfil (Sprint 2.8)
     "plot_tensor_profile",
     "plot_resistivity_profile",
+    # Benchmark básico (Sprint 2.8)
     "plot_benchmark_comparison",
+    # Modelos canônicos (Sprint 2.9)
     "plot_canonical_model",
     "plot_all_canonical_models",
+    # Físicas complementares (Sprint 2.10+)
+    "plot_skin_depth_heatmap",
+    "plot_attenuation_phase",
+    "plot_feature_views",
+    "plot_geosignals",
+    "plot_sensitivity_kernel",
+    # Benchmark avançado (Sprint 2.10+)
+    "plot_speedup_curve",
+    "plot_filter_convergence",
+    "plot_error_heatmap",
+    "plot_component_times",
+    "measure_component_times",
+    # Geofísicas avançadas (Sprint 2.10+)
+    "plot_pseudosection",
+    "plot_polar_directivity",
+    "plot_nyquist",
+    "plot_tornado",
+    # ML/DL integration (Sprint 2.10+)
+    "plot_augmentation_preview",
+    "plot_uncertainty_bands",
 ]

@@ -33,15 +33,89 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **1.0.0** (Sprints 1.1-1.3 + 2.1-2.9 + **3.1-3.4** concluídas) |
-| **Branch**       | `feature/simulator-python-sprint-3-complete`              |
-| **Base**         | `main` (a partir do commit Sprint 2.7 `91e4634`)          |
+| **Versão**       | **1.1.0** (+ Sprints **2.10** cache, **3.3.1** JAX native parcial, **4.1** empymod + 16 plots) |
+| **Branch**       | `feature/simulator-python-sprint-2-10-and-more`           |
+| **Base**         | `main` (Sprint 2.7 `91e4634`)                              |
 | **Autor**        | Daniel Leal                                               |
-| **Framework**    | NumPy 2.x + Numba 0.61+ + **JAX 0.4.38+** + empymod (valid.)  |
-| **Precisão**     | `complex128` default + `complex64` via config (prod.)     |
-| **Filtro default** | Werthmüller 201pt (mantém paridade Fortran filter_type=0) |
-| **Testes**       | **1214 passed, 295 skipped** em 42.1s (+79 Sprint 2.9+3.2+3.3) |
+| **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod (opt-in)  |
+| **Precisão**     | `complex128` default + `complex64` via config             |
+| **Filtro default** | Werthmüller 201pt (paridade Fortran filter_type=0)      |
+| **Testes**       | **1214 passed, 295 skipped** em 41.4s                     |
+| **Performance**  | **1.014M/347k/184k mod/h** (small/medium/large) = **1722%/589%/312% Fortran** ✅ |
 | **Referência**   | `docs/reference/plano_simulador_python_jax_numba.md`      |
+
+### 1.2j Sprint 2.10 — Cache `common_arrays` (Fase 4 Fortran) — 2026-04-13
+
+**Finding**: `common_arrays` é **6× mais custoso** que `common_factors` e só
+depende de `(hordist, freq, perfil)` — não de Tz/camad_t. Sprint 2.9
+recomputava em cada posição (601× desnecessariamente).
+
+**Implementação**:
+- `kernel.py::precompute_common_arrays_cache()` — pré-computa cache (nf, npt, n)
+- `kernel.py::_fields_in_freqs_kernel_cached()` — consome cache
+- `forward.py::_simulate_positions_njit_cached()` — loop paralelo
+- `simulate()` usa caminho cached quando `cfg.parallel=True`
+
+**Benchmarks Sprint 2.10 (vs Fortran 58.856 mod/h):**
+| Perfil | Sprint 2.9 | **Sprint 2.10** | % Fortran |
+|:---|---:|---:|---:|
+| small  | 663k | **1.014M mod/h** | **1722.9%** ✅ |
+| medium | 170k | **347k mod/h**   | **589.5%** ✅ |
+| large  | 26k  | **184k mod/h**   | **312.1%** ✅ |
+
+### 1.2k Plotagens (Sprint 2.10) — 16 novos plots
+
+Quatro novos módulos em `visualization/`:
+
+**`plot_physics.py`** — 5 funções:
+- `plot_skin_depth_heatmap` (heatmap δ(f, ρ))
+- `plot_attenuation_phase` (dB + graus, LWD industrial)
+- `plot_feature_views` (Re/Im/|H|/arg(H))
+- `plot_geosignals` (GS antissimétrico e simétrico)
+- `plot_sensitivity_kernel` (∂H/∂ρ heatmap)
+
+**`plot_benchmark_advanced.py`** — 5 funções:
+- `plot_speedup_curve` (strong scaling)
+- `plot_filter_convergence` (Kong vs Werthmüller vs Anderson)
+- `plot_error_heatmap` (log erro relativo posição × freq)
+- `plot_component_times` (hot spots por componente)
+- `measure_component_times` (helper que mede)
+
+**`plot_geophysical.py`** — 4 funções:
+- `plot_pseudosection` (H vs posição × ângulo — anisotropia)
+- `plot_polar_directivity` (diretividade em polar)
+- `plot_nyquist` (Re vs Im em frequência variável)
+- `plot_tornado` (sensibilidade a cada variável)
+
+**`plot_ml.py`** — 2 funções (ML/DL integration):
+- `plot_augmentation_preview` (canal limpo vs ruidoso)
+- `plot_uncertainty_bands` (UQ posterior bands)
+
+### 1.2l Sprint 3.3.1 parcial — JAX dipoles nativo (2026-04-13)
+
+Port parcial nativo (mantendo híbrido da Sprint 3.3 como API preferida):
+
+**Implementado** (`_jax/dipoles_native.py`):
+- ✅ `decoupling_factors_jax(L)` — bit-exato + diferenciável via `jax.grad`
+- ✅ `_dipole_phases_jax()` — fatores exp do caso `camadR==camadT`
+- 🟡 `_hmd_tiv_same_layer_jax()` — caso 3 de 6 (experimental)
+
+**Pendente** (Sprints futuros):
+- ⏳ 5 casos geométricos restantes via `lax.switch` (Sprint 3.3.2)
+- ⏳ `_vmd_native_jax` (Sprint 3.3.3)
+
+### 1.2m Sprint 4.1 — Validação cruzada empymod (2026-04-13)
+
+**Opt-in** (requer `pip install empymod`):
+
+`validation/compare_empymod.py`:
+- `HAS_EMPYMOD` — flag de detecção
+- `compare_numba_empymod()` — compara Numba vs empymod.dipole(ab=55)
+- `ComparisonResult` — container com max_abs/rel_error, notes
+- `install_empymod_instruction()` — mensagens de erro informativas
+
+**Escopo Sprint 4.1**: VMD axial (Hzz) isotrópico. TIV e outros
+componentes em Sprint 4.2.
 
 ### 1.2 Fases do plano (7 fases)
 
