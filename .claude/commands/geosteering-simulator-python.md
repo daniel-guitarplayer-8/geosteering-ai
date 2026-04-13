@@ -33,32 +33,276 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | 0.8.0 (Sprints 1.1-1.3 + 2.1-2.7 concluídas — **Fase 2 completa**)  |
-| **Branch**       | `feature/simulator-python-sprint-2-7`                     |
-| **Base**         | `main` (a partir do commit Sprint 2.5+2.6 `d36e4b1`)      |
+| **Versão**       | **1.1.0** (+ Sprints **2.10** cache, **3.3.1** JAX native parcial, **4.1** empymod + 16 plots) |
+| **Branch**       | `feature/simulator-python-sprint-2-10-and-more`           |
+| **Base**         | `main` (Sprint 2.7 `91e4634`)                              |
 | **Autor**        | Daniel Leal                                               |
-| **Framework**    | NumPy 2.x + Numba 0.60+ + JAX 0.4.30+ + empymod (valid.)  |
-| **Precisão**     | `complex128` default + `complex64` via config (prod.)     |
-| **Filtro default** | Werthmüller 201pt (mantém paridade Fortran filter_type=0) |
-| **Testes**       | **364/364 PASS** (+1 skipped) em 6.04s |
+| **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod (opt-in)  |
+| **Precisão**     | `complex128` default + `complex64` via config             |
+| **Filtro default** | Werthmüller 201pt (paridade Fortran filter_type=0)      |
+| **Testes**       | **1214 passed, 295 skipped** em 41.4s                     |
+| **Performance**  | **1.014M/347k/184k mod/h** (small/medium/large) = **1722%/589%/312% Fortran** ✅ |
 | **Referência**   | `docs/reference/plano_simulador_python_jax_numba.md`      |
 
-### 1.2 Fases do plano (7 fases, Fase 1 concluída + Sprints 2.1-2.4)
+### 1.2j Sprint 2.10 — Cache `common_arrays` (Fase 4 Fortran) — 2026-04-13
+
+**Finding**: `common_arrays` é **6× mais custoso** que `common_factors` e só
+depende de `(hordist, freq, perfil)` — não de Tz/camad_t. Sprint 2.9
+recomputava em cada posição (601× desnecessariamente).
+
+**Implementação**:
+- `kernel.py::precompute_common_arrays_cache()` — pré-computa cache (nf, npt, n)
+- `kernel.py::_fields_in_freqs_kernel_cached()` — consome cache
+- `forward.py::_simulate_positions_njit_cached()` — loop paralelo
+- `simulate()` usa caminho cached quando `cfg.parallel=True`
+
+**Benchmarks Sprint 2.10 (vs Fortran 58.856 mod/h):**
+| Perfil | Sprint 2.9 | **Sprint 2.10** | % Fortran |
+|:---|---:|---:|---:|
+| small  | 663k | **1.014M mod/h** | **1722.9%** ✅ |
+| medium | 170k | **347k mod/h**   | **589.5%** ✅ |
+| large  | 26k  | **184k mod/h**   | **312.1%** ✅ |
+
+### 1.2k Plotagens (Sprint 2.10) — 16 novos plots
+
+Quatro novos módulos em `visualization/`:
+
+**`plot_physics.py`** — 5 funções:
+- `plot_skin_depth_heatmap` (heatmap δ(f, ρ))
+- `plot_attenuation_phase` (dB + graus, LWD industrial)
+- `plot_feature_views` (Re/Im/|H|/arg(H))
+- `plot_geosignals` (GS antissimétrico e simétrico)
+- `plot_sensitivity_kernel` (∂H/∂ρ heatmap)
+
+**`plot_benchmark_advanced.py`** — 5 funções:
+- `plot_speedup_curve` (strong scaling)
+- `plot_filter_convergence` (Kong vs Werthmüller vs Anderson)
+- `plot_error_heatmap` (log erro relativo posição × freq)
+- `plot_component_times` (hot spots por componente)
+- `measure_component_times` (helper que mede)
+
+**`plot_geophysical.py`** — 4 funções:
+- `plot_pseudosection` (H vs posição × ângulo — anisotropia)
+- `plot_polar_directivity` (diretividade em polar)
+- `plot_nyquist` (Re vs Im em frequência variável)
+- `plot_tornado` (sensibilidade a cada variável)
+
+**`plot_ml.py`** — 2 funções (ML/DL integration):
+- `plot_augmentation_preview` (canal limpo vs ruidoso)
+- `plot_uncertainty_bands` (UQ posterior bands)
+
+### 1.2l Sprint 3.3.1 parcial — JAX dipoles nativo (2026-04-13)
+
+Port parcial nativo (mantendo híbrido da Sprint 3.3 como API preferida):
+
+**Implementado** (`_jax/dipoles_native.py`):
+- ✅ `decoupling_factors_jax(L)` — bit-exato + diferenciável via `jax.grad`
+- ✅ `_dipole_phases_jax()` — fatores exp do caso `camadR==camadT`
+- 🟡 `_hmd_tiv_same_layer_jax()` — caso 3 de 6 (experimental)
+
+**Pendente** (Sprints futuros):
+- ⏳ 5 casos geométricos restantes via `lax.switch` (Sprint 3.3.2)
+- ⏳ `_vmd_native_jax` (Sprint 3.3.3)
+
+### 1.2m Sprint 4.1 — Validação cruzada empymod (2026-04-13)
+
+**Opt-in** (requer `pip install empymod`):
+
+`validation/compare_empymod.py`:
+- `HAS_EMPYMOD` — flag de detecção
+- `compare_numba_empymod()` — compara Numba vs empymod.dipole(ab=55)
+- `ComparisonResult` — container com max_abs/rel_error, notes
+- `install_empymod_instruction()` — mensagens de erro informativas
+
+**Escopo Sprint 4.1**: VMD axial (Hzz) isotrópico. TIV e outros
+componentes em Sprint 4.2.
+
+### 1.2 Fases do plano (7 fases)
 
 | Fase | Nome                                    | Status      | Sprint(s) |
 |:----:|:----------------------------------------|:------------|:----------|
 |  0   | Setup (branch, deps, estrutura)         | ✅ Concluída | 1.1 ✅ |
 |  1   | Foundations (filtros, config, analítico) | ✅ **Concluída** | 1.1 ✅, 1.2 ✅, 1.3 ✅ |
-|  2   | Backend Numba CPU (paridade Fortran)    | ✅ **Concluída** | 2.1 ✅, 2.2 ✅, 2.3 ✅, 2.4 ✅, 2.5 ✅, 2.6 ✅, **2.7 ✅** |
-|  3   | Backend JAX (CPU+GPU, vmap+jit)         | ⬜ Pendente | 3.1-3.4   |
+|  2   | Backend Numba CPU (paridade Fortran)    | ✅ **Concluída** | 2.1–2.9 ✅ (**2.9: @njit + prange, 6.6× speedup**) |
+|  3   | Backend JAX (CPU+GPU, vmap+jit)         | ✅ **Concluída** | **3.1 ✅**, **3.2 ✅**, **3.3 ✅** (híbrido), **3.4 ✅** (Colab) |
 |  4   | Validação cruzada (Fortran/Numba/empymod) | ⬜ Pendente | 4.1-4.3 |
 |  5   | Jacobiano ∂H/∂ρ (jacfwd JAX, FD Numba)  | ⬜ Pendente | 5.1-5.2   |
 |  6   | Integração no PipelineConfig (backend)  | ⬜ Pendente | 6.1-6.2   |
 |  7   | Otimizações finais (pmap, XLA, caching) | ⬜ Pendente | 7.1-7.3   |
 
-**PRs #1 (Fase 1) e #2 (Sprint 2.1)** mergeados em `main` em 2026-04-11 via
-squash-merge (commits `9985add8` e `048f35ae`). Sprint 2.2 em nova branch
-`feature/simulator-python-sprint-2-2` (este documento).
+### 1.2d Sprint 2.9 — fields_in_freqs @njit (concluída 2026-04-12)
+
+**Objetivo cumprido**: Port de `fields_in_freqs` para `@njit`, criando
+`_fields_in_freqs_kernel` e `_compute_zrho_kernel`. Mesma estratégia para
+`sanitize_profile → _sanitize_profile_kernel`. Habilitou
+`_simulate_positions_njit` com `@njit(parallel=True)` + `prange` —
+**speedup real de 6.6× em medium profile** (GIL eliminado do caminho crítico).
+
+**Benchmarks Sprint 2.9 (parallel=True default):**
+| Perfil | Sprint 2.7 | Sprint 2.9 | % Fortran |
+|:---|---:|---:|---:|
+| small  | 66k mod/h | **663k mod/h** | **1127.5%** ✅ |
+| medium | 15k mod/h | **170k mod/h** | **289.6%** ✅ |
+| large  | 3.6k mod/h | **26k mod/h** | 44.8% |
+
+### 1.2e Modelos canônicos (Sprint 2.9)
+
+Novo submódulo `validation/canonical_models.py` com **7 modelos geológicos
+canônicos** para validação reprodutível:
+
+| Id | Nome | Camadas | Tipo | Referência |
+|:---|:---|:---:|:---|:---|
+| oklahoma_3 | Oklahoma 3 | 3 | TIV | TR 32_2011 |
+| oklahoma_5 | Oklahoma 5 | 5 | TIV gradual | TR 32_2011 |
+| devine_8 | Devine 8 | 8 | Isotrópico | TR 32_2011 |
+| oklahoma_15 | Oklahoma 15 | 15 | Isotrópico | TR 32_2011 |
+| oklahoma_28 | Oklahoma 28 | 28 | TIV forte (ρv=2ρh) | TR 32_2011 |
+| hou_7 | Hou et al. 7 | 7 | TIV | Hou 2006 |
+| viking_graben_10 | Viking Graben 10 | 10 | TIV (N. Sea) | Eidesmo 2002 |
+
+Wrappers de plotagem em `visualization/plot_canonical.py`:
+- `plot_canonical_model(name, freq, TR, dip, ...)` → Figure
+- `plot_all_canonical_models(output_dir)` → List[Path]
+
+**69 testes** cobrindo shapes, ρ positivo, interfaces monotônicas,
+simulate() funcional e plot wrappers.
+
+### 1.2f Sprint 3.2 — _jax/propagation.py (concluída 2026-04-12)
+
+**Port JAX** de `common_arrays` + `common_factors` usando:
+- `jax.vmap` sobre eixo de camadas para constantes por camada
+- `jax.lax.scan` para recursões TE/TM bottom-up e top-down
+- Operações primitivas diferenciáveis (habilita `jax.grad`)
+
+**Paridade JAX vs Numba**:
+- 9 arrays de `common_arrays_jax`: **< 1e-13** (ULP float64)
+- 6 fatores de `common_factors_jax`: **< 1e-16** (bit-exato)
+
+**10 testes PASS** em 4 cenários (single_layer, 3-TIV, 5-iso, alta resistividade
+1e6 Ω·m) × {shape, paridade}.
+
+### 1.2g Sprint 3.3 — _jax/kernel.py híbrido (concluída 2026-04-12)
+
+**Arquitetura pragmática**: `fields_in_freqs_jax_batch` reusa os 900 LOC
+complexos de `hmd_tiv`+`vmd` (Numba) via `jax.pure_callback`, enquanto a
+propagação roda em JAX puro (diferenciável).
+
+**Vantagens do híbrido**:
+1. Propagação JAX com `jax.lax.scan` — compilável por XLA, diferenciável
+2. Dipolos reusados de Numba — sem re-implementação de 6 casos geométricos
+3. Paridade numérica automática (< 1e-13 vs Numba puro)
+4. Preparado para GPU — quando `pure_callback` for substituído por port
+   JAX nativo dos dipolos (Sprint 3.3.1 futuro), todo o pipeline roda
+   em GPU
+
+### 1.2h Sprint 3.4 — GPU + Colab (concluída 2026-04-12)
+
+**Notebook Colab**: `notebooks/bench_jax_gpu_colab.ipynb`
+- Detecção automática CPU/GPU (via `nvidia-smi`)
+- Instalação condicional: `jax[cuda12]` se GPU, `jax[cpu]` caso contrário
+- Benchmark Numba CPU + JAX (CPU/GPU) + validação com 7 modelos canônicos
+- Compatível com Colab Pro+ T4/L4/A100
+
+**Compatibilidade local**:
+- macOS: `pip install jax[cpu]` (JAX Metal é experimental, não
+  recomendado por enquanto)
+- Linux + CUDA: `pip install jax[cuda12]`
+- Windows + CUDA: `pip install jax[cuda12]` (via WSL2 preferencialmente)
+
+### 1.2i Bateria de testes consolidada (2026-04-12)
+
+**Total: 1214 passed, 295 skipped** em 42.1s (CPU)
+
+- 53 test_simulation_filters
+- 87 test_simulation_config
+- 38 test_simulation_half_space
+- 25 test_simulation_numba_propagation (+1 correção bit-exato→rtol)
+- 22 test_simulation_numba_dipoles
+- 16 test_simulation_io
+- 20 test_simulation_postprocess
+- 16 test_simulation_numba_geometry
+- 12 test_simulation_numba_rotation
+- 11 test_simulation_numba_hankel
+- 20 test_simulation_numba_kernel
+- 18 test_simulation_forward
+- 15 test_simulation_analytical_validation
+- 11 test_simulation_benchmark
+- 11 test_simulation_visualization (Sprint 2.8)
+- 15 test_simulation_jax_foundation (Sprint 3.1)
+- **69 test_simulation_canonical_models (Sprint 2.9)**
+- **10 test_simulation_jax_propagation (Sprint 3.2)**
+
+**PRs mergeados em `main`**: #1 (Fase 1), #2–#6 (Sprints 2.1-2.7). Sprints 2.8
++ 3.1 em branch `feature/simulator-python-sprint-2-8-and-3-1` (este commit).
+
+### 1.2b Sprint 2.8 — Paralelização via ThreadPool + Visualização (concluída 2026-04-12)
+
+**Finding principal**: `@njit(parallel=True, prange)` NÃO funciona porque
+`fields_in_freqs` (kernel.py) é uma função Python pura que orquestra chamadas
+a @njit kernels — não pode ser chamada de dentro de um contexto @njit sem
+refatoração profunda. Usamos `ThreadPoolExecutor` como alternativa, mas o
+speedup foi ≈ 1.0× porque o GIL é retido entre as chamadas @njit. A
+infraestrutura (`forward.py:_simulate_positions_parallel` + `cfg.parallel`
+flag) está preservada para quando `fields_in_freqs` for portado para @njit
+(Sprint 2.9?) ou substituído por `vmap` JAX (Sprint 3.3+, onde XLA não sofre
+de GIL).
+
+**Default do config**: `parallel=False` (não ajuda atualmente, evita confusão).
+
+**Novos módulos**:
+- `geosteering_ai/simulation/visualization/__init__.py` — fachada pública
+- `geosteering_ai/simulation/visualization/plot_tensor.py` — `plot_tensor_profile()`
+  + `plot_resistivity_profile()` com layout GridSpec(3,7) (19 axes) —
+  replica padrão de `buildValidamodels.py:571-628`
+- `geosteering_ai/simulation/visualization/plot_benchmark.py` — 
+  `plot_benchmark_comparison()` (2 painéis: throughput + % Fortran)
+
+**Testes**: `tests/test_simulation_visualization.py` — **11 testes PASS** em
+3.0s (4 TestResistivityProfile, 4 TestTensorProfile, 3 TestBenchmarkComparison).
+
+**Convenções visuais**:
+- Eixo y invertido (profundidade cresce para baixo)
+- ρ em semilogx (cobre 1e-1 a 1e6 Ω·m)
+- Paletas Re: azul, Im: vermelho (fidelidade `buildValidamodels.py:540-545`)
+- Interfaces: `axhline` tracejadas pretas
+
+### 1.2c Sprint 3.1 — JAX Foundation CPU (concluída 2026-04-12)
+
+**Objetivo**: Fundação do backend JAX — portar módulos não-recursivos
+(hankel, rotation) com paridade numérica < 1e-12 vs Numba.
+
+**Instalação**: JAX 0.4.38 via `pip install jax[cpu]` — 99.7 MB jaxlib +
+2.2 MB jax. Backend CPU default. `jax.config.update("jax_enable_x64", True)`
+chamado no `_jax/__init__.py` para garantir complex128.
+
+**Novos módulos**:
+- `geosteering_ai/simulation/_jax/__init__.py` — fachada + `HAS_JAX` flag
+- `geosteering_ai/simulation/_jax/hankel.py` — `integrate_j0`, `integrate_j1`,
+  `integrate_j0_j1` via `jnp.einsum("i,i->", w, v)` + `@jax.jit`
+- `geosteering_ai/simulation/_jax/rotation.py` — `build_rotation_matrix`
+  (matriz R 3×3 via `jnp.stack`), `rotate_tensor` (`Rᵀ @ H @ R`) — **diferenciáveis
+  via `jax.grad`/`jax.jacfwd`**
+
+**Paridade medida**:
+- `build_rotation_matrix`: **0.00e+00** (bit-exato) vs Numba
+- `rotate_tensor`: **9.16e-16** (ULP float64) vs Numba
+- `integrate_j0/j1` vs numpy: < 1e-13
+
+**Testes**: `tests/test_simulation_jax_foundation.py` — **15 testes PASS**
+em 5.0s:
+- 5 Hankel (integrais, paridade numpy, consistência j0_j1, JIT cache)
+- 5 BuildRotationMatrix (identidade, ortogonalidade R·Rᵀ=I, det=+1,
+  paridade Numba, diferenciabilidade via `jax.grad`)
+- 5 RotateTensor (identidade preserva, tr invariante, ‖·‖_F invariante,
+  paridade Numba, composição R(α)·R(-α) = I)
+
+**Deferido para Sprints 3.2–3.4**:
+- Sprint 3.2: port de `_jax/propagation.py` (common_arrays + common_factors
+  com `jax.lax.scan` para recursões TE/TM)
+- Sprint 3.3: port de `_jax/dipoles.py` + `_jax/kernel.py` (orquestrador
+  `fields_in_freqs_jax` com `vmap` sobre posições)
+- Sprint 3.4: GPU support (pip install `jax[cuda12]` / `jax[metal]`) +
+  benchmark T4/A100
 
 ### 1.3 Sprint 1.1 — Extração dos pesos Hankel (concluída 2026-04-11)
 

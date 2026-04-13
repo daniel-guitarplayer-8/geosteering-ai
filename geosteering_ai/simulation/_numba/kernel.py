@@ -112,9 +112,9 @@ import numpy as np
 
 from geosteering_ai.simulation._numba.dipoles import hmd_tiv, vmd
 from geosteering_ai.simulation._numba.geometry import (
+    _sanitize_profile_kernel,
     find_layers_tr,
     layer_at_depth,
-    sanitize_profile,
 )
 from geosteering_ai.simulation._numba.propagation import (
     common_arrays,
@@ -252,26 +252,87 @@ def fields_in_freqs(
             f"wJ0.shape={wJ0.shape}, wJ1.shape={wJ1.shape}."
         )
 
+    # Sprint 2.9: delega para kernel @njit que aceita arrays já validados.
+    return _fields_in_freqs_kernel(
+        Tx,
+        Ty,
+        Tz,
+        cx,
+        cy,
+        cz,
+        dip_rad,
+        n,
+        rho_h,
+        rho_v,
+        esp,
+        freqs_hz,
+        krJ0J1,
+        wJ0,
+        wJ1,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _fields_in_freqs_kernel — versão @njit (Sprint 2.9)
+# ──────────────────────────────────────────────────────────────────────────────
+# Kernel 100% @njit do orquestrador forward. Recebe arrays já validados
+# (ascontiguousarray + shape check) do wrapper Python `fields_in_freqs`.
+# Toda a lógica está aqui — desde geometria até montagem do tensor.
+#
+# Por que separar em 2 funções:
+#   • Validações com `raise ValueError` com f-strings complexas não são
+#     suportadas em @njit 0.61 de forma robusta. Fica no wrapper Python.
+#   • `np.ascontiguousarray(..., dtype=...)` tem compatibilidade parcial
+#     em @njit. Fica no wrapper.
+#   • A função @njit pode ser chamada de dentro de outras @njit (ex.:
+#     `_simulate_positions_njit` em forward.py com prange paralelo),
+#     desbloqueando speedup real — ver finding Sprint 2.8.
+
+
+@njit(cache=True)
+def _fields_in_freqs_kernel(
+    Tx: float,
+    Ty: float,
+    Tz: float,
+    cx: float,
+    cy: float,
+    cz: float,
+    dip_rad: float,
+    n: int,
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    esp: np.ndarray,
+    freqs_hz: np.ndarray,
+    krJ0J1: np.ndarray,
+    wJ0: np.ndarray,
+    wJ1: np.ndarray,
+) -> np.ndarray:
+    """Kernel @njit do orquestrador forward (Sprint 2.9).
+
+    Idêntico a `fields_in_freqs` mas @njit-compatível. Sem validação
+    de shape — assume arrays já validados pelo wrapper.
+
+    Args e Returns: Ver :func:`fields_in_freqs`.
+
+    Note:
+        Chamável de dentro de outras funções @njit(parallel=True).
+        Este é o caminho que desbloqueia o paralelismo real com
+        `prange` no loop externo de posições (Sprint 2.9 + forward.py).
+    """
     npt = krJ0J1.shape[0]
     nf = freqs_hz.shape[0]
 
     # ── Geometria: sanitize + localização TX/RX ────────────────────
-    # Casos especiais:
-    #   n == 1: apenas 1 camada (full-space). Não existem "interfaces"
-    #           internas; TX e RX sempre na camada 0. Criamos h=[0] e
-    #           prof=[0, 1e300] manualmente para evitar esp de tamanho
-    #           negativo em sanitize_profile.
     if n == 1:
         h_arr = np.zeros(1, dtype=np.float64)
         # Sentinels: prof[0] = -1e300 (topo ∞), prof[1] = +1e300 (fundo ∞)
-        # Paridade com Fortran sanitize_hprof_well: prof(0) = -1.d300.
-        # CRÍTICO: sem o sentinel negativo, exp(s * (prof[0] - h0)) overflow
-        # quando h0 é negativo (TX acima de z=0).
-        prof_arr = np.array([-1.0e300, 1.0e300], dtype=np.float64)
+        prof_arr = np.empty(2, dtype=np.float64)
+        prof_arr[0] = -1.0e300
+        prof_arr[1] = 1.0e300
         camad_t = 0
         camad_r = 0
     else:
-        h_arr, prof_arr = sanitize_profile(n, esp)
+        h_arr, prof_arr = _sanitize_profile_kernel(n, esp)
         camad_t, camad_r = find_layers_tr(n, Tz, cz, prof_arr)
 
     # ── Admitividade eta[i, 0]=σh, eta[i, 1]=σv ───────────────────
@@ -288,11 +349,6 @@ def fields_in_freqs(
     # ── Output ─────────────────────────────────────────────────────
     cH = np.empty((nf, 9), dtype=np.complex128)
 
-    # ──────────────────────────────────────────────────────────────
-    # Loop sobre frequências (Fortran: `do i = 1, nf`)
-    # ──────────────────────────────────────────────────────────────
-    # Não paralelizamos aqui — a paralelização entra no loop externo
-    # de posições do poço via `prange` na Sprint 2.5.
     for i_f in range(nf):
         freq = freqs_hz[i_f]
         omega = 2.0 * math.pi * freq
@@ -458,17 +514,315 @@ def compute_zrho(
     rho_v = np.asarray(rho_v, dtype=np.float64)
     esp = np.asarray(esp, dtype=np.float64)
 
+    return _compute_zrho_kernel(Tz, cz, n, rho_h, rho_v, esp)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _compute_zrho_kernel — versão @njit (Sprint 2.9)
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper @njit que replica compute_zrho sem conversão de array. Permite
+# chamada de dentro de outra função @njit (ex: _simulate_positions_njit em
+# forward.py). Retorna tupla (float, float, float) — compatível com Numba.
+
+
+@njit(cache=True)
+def _compute_zrho_kernel(
+    Tz: float,
+    cz: float,
+    n: int,
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    esp: np.ndarray,
+) -> tuple:
+    """Kernel @njit de compute_zrho.
+
+    Idêntico a :func:`compute_zrho` mas @njit-compatível. Não faz
+    conversão de arrays (assume float64 contíguo).
+    """
     zobs = 0.5 * (Tz + cz)
     if n == 1:
-        # Full-space: só existe 1 camada
-        return zobs, float(rho_h[0]), float(rho_v[0])
+        return zobs, rho_h[0], rho_v[0]
 
-    _, prof_arr = sanitize_profile(n, esp)
+    _, prof_arr = _sanitize_profile_kernel(n, esp)
     layer_obs = layer_at_depth(n, zobs, prof_arr)
-    return zobs, float(rho_h[layer_obs]), float(rho_v[layer_obs])
+    return zobs, rho_h[layer_obs], rho_v[layer_obs]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 2.10 — Cache de common_arrays (paridade Fase 4 Fortran)
+# ──────────────────────────────────────────────────────────────────────────────
+# `common_arrays` depende apenas de (hordist, freq, perfil geológico) — NÃO
+# depende de Tz/cz/camad_t. No simulador Fortran v10.0, a Fase 4 introduziu
+# um cache que pré-computa esses arrays uma vez por `theta` e reutiliza em
+# todas as posições do poço (speedup ~4× no loop interno).
+#
+# Em Python Sprint 2.9, recomputávamos `common_arrays` em cada posição
+# (601× no perfil large) — gargalo de 99.8% do tempo do kernel para
+# dip=0° (ou qualquer dip fixo). Sprint 2.10 corrige isso.
+#
+# Arquitetura:
+#   • `precompute_common_arrays_cache()` — chamada UMA vez por (r, freq)
+#   • `_fields_in_freqs_kernel_cached()` — kernel que recebe cache pronto
+#   • `forward.py` pré-computa cache por frequência e passa via closure
+#
+# Ganho esperado: 4–6× no perfil large (onde n_camadas é alto e
+# common_arrays domina o custo).
+
+
+@njit(cache=True)
+def precompute_common_arrays_cache(
+    n: int,
+    npt: int,
+    hordist: float,
+    krJ0J1: np.ndarray,
+    freqs_hz: np.ndarray,
+    h_arr: np.ndarray,
+    eta: np.ndarray,
+) -> tuple:
+    """Pré-computa cache de common_arrays para todas as frequências (Sprint 2.10).
+
+    Port Python do cache Fase 4 do Fortran (perfilaAnisoOmp.f08). Invoca
+    `common_arrays` uma vez por frequência e empilha os 9 resultados em
+    arrays (nf, npt, n).
+
+    Args:
+        n: Número de camadas.
+        npt: Tamanho do filtro Hankel.
+        hordist: Distância horizontal TX–RX (m). Constante para todas
+            as posições em uma simulação dip-fixo.
+        krJ0J1: (npt,) — abscissas do filtro.
+        freqs_hz: (nf,) — frequências em Hz.
+        h_arr: (n,) — espessuras.
+        eta: (n, 2) — condutividades horizontal/vertical.
+
+    Returns:
+        Tupla de 9 arrays shape (nf, npt, n) complex128, ordem:
+        (u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, AdmInt).
+
+    Note:
+        Deve ser chamada ANTES do loop de posições, e passada como
+        argumento a `_fields_in_freqs_kernel_cached`.
+    """
+    nf = freqs_hz.shape[0]
+
+    u_cache = np.empty((nf, npt, n), dtype=np.complex128)
+    s_cache = np.empty((nf, npt, n), dtype=np.complex128)
+    uh_cache = np.empty((nf, npt, n), dtype=np.complex128)
+    sh_cache = np.empty((nf, npt, n), dtype=np.complex128)
+    RTEdw_cache = np.empty((nf, npt, n), dtype=np.complex128)
+    RTEup_cache = np.empty((nf, npt, n), dtype=np.complex128)
+    RTMdw_cache = np.empty((nf, npt, n), dtype=np.complex128)
+    RTMup_cache = np.empty((nf, npt, n), dtype=np.complex128)
+    AdmInt_cache = np.empty((nf, npt, n), dtype=np.complex128)
+
+    for i_f in range(nf):
+        freq = freqs_hz[i_f]
+        omega = 2.0 * math.pi * freq
+        zeta = 1j * omega * _MU_0
+
+        u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, AdmInt = common_arrays(
+            n, npt, hordist, krJ0J1, zeta, h_arr, eta
+        )
+        u_cache[i_f] = u
+        s_cache[i_f] = s
+        uh_cache[i_f] = uh
+        sh_cache[i_f] = sh
+        RTEdw_cache[i_f] = RTEdw
+        RTEup_cache[i_f] = RTEup
+        RTMdw_cache[i_f] = RTMdw
+        RTMup_cache[i_f] = RTMup
+        AdmInt_cache[i_f] = AdmInt
+
+    return (
+        u_cache,
+        s_cache,
+        uh_cache,
+        sh_cache,
+        RTEdw_cache,
+        RTEup_cache,
+        RTMdw_cache,
+        RTMup_cache,
+        AdmInt_cache,
+    )
+
+
+@njit(cache=True)
+def _fields_in_freqs_kernel_cached(
+    Tx: float,
+    Ty: float,
+    Tz: float,
+    cx: float,
+    cy: float,
+    cz: float,
+    dip_rad: float,
+    n: int,
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    h_arr: np.ndarray,
+    prof_arr: np.ndarray,
+    eta: np.ndarray,
+    freqs_hz: np.ndarray,
+    krJ0J1: np.ndarray,
+    wJ0: np.ndarray,
+    wJ1: np.ndarray,
+    u_cache: np.ndarray,
+    s_cache: np.ndarray,
+    uh_cache: np.ndarray,
+    sh_cache: np.ndarray,
+    RTEdw_cache: np.ndarray,
+    RTEup_cache: np.ndarray,
+    RTMdw_cache: np.ndarray,
+    RTMup_cache: np.ndarray,
+    AdmInt_cache: np.ndarray,
+) -> np.ndarray:
+    """Kernel @njit com cache de common_arrays (Sprint 2.10).
+
+    Variante de `_fields_in_freqs_kernel` que NÃO recomputa common_arrays
+    — consome os arrays pré-calculados passados como parâmetros. Usa a
+    mesma lógica para common_factors + dipolos + rotação.
+
+    Args:
+        Tx, Ty, Tz, cx, cy, cz, dip_rad: posição TX/RX + dip.
+        n, rho_h, rho_v: perfil geológico.
+        h_arr, prof_arr, eta: geometria + condutividade (pré-calculados).
+        freqs_hz, krJ0J1, wJ0, wJ1: frequências + filtro Hankel.
+        u_cache, ..., AdmInt_cache: shape (nf, npt, n) — common_arrays
+            pré-computado por :func:`precompute_common_arrays_cache`.
+
+    Returns:
+        Array (nf, 9) complex128 — tensor H rotacionado.
+    """
+    npt = krJ0J1.shape[0]
+    nf = freqs_hz.shape[0]
+
+    camad_t, camad_r = find_layers_tr(n, Tz, cz, prof_arr)
+
+    cH = np.empty((nf, 9), dtype=np.complex128)
+
+    for i_f in range(nf):
+        freq = freqs_hz[i_f]
+        omega = 2.0 * math.pi * freq
+        zeta = 1j * omega * _MU_0
+
+        # Lê do cache em vez de recomputar
+        u = u_cache[i_f]
+        s = s_cache[i_f]
+        uh = uh_cache[i_f]
+        sh = sh_cache[i_f]
+        RTEdw = RTEdw_cache[i_f]
+        RTEup = RTEup_cache[i_f]
+        RTMdw = RTMdw_cache[i_f]
+        RTMup = RTMup_cache[i_f]
+        AdmInt = AdmInt_cache[i_f]
+
+        # common_factors depende de Tz/camad_t — NÃO cacheável
+        Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz = common_factors(
+            n,
+            npt,
+            Tz,
+            h_arr,
+            prof_arr,
+            camad_t,
+            u,
+            s,
+            uh,
+            sh,
+            RTEdw,
+            RTEup,
+            RTMdw,
+            RTMup,
+        )
+
+        # Dipolos magnéticos
+        Hx_hmd, Hy_hmd, Hz_hmd = hmd_tiv(
+            Tx,
+            Ty,
+            Tz,
+            n,
+            camad_r,
+            camad_t,
+            npt,
+            krJ0J1,
+            wJ0,
+            wJ1,
+            h_arr,
+            prof_arr,
+            zeta,
+            eta,
+            cx,
+            cy,
+            cz,
+            u,
+            s,
+            uh,
+            sh,
+            RTEdw,
+            RTEup,
+            RTMdw,
+            RTMup,
+            Mxdw,
+            Mxup,
+            Eudw,
+            Euup,
+        )
+        Hx_vmd, Hy_vmd, Hz_vmd = vmd(
+            Tx,
+            Ty,
+            Tz,
+            n,
+            camad_r,
+            camad_t,
+            npt,
+            krJ0J1,
+            wJ0,
+            wJ1,
+            h_arr,
+            prof_arr,
+            zeta,
+            cx,
+            cy,
+            cz,
+            u,
+            uh,
+            AdmInt,
+            RTEdw,
+            RTEup,
+            FEdwz,
+            FEupz,
+        )
+
+        # Montagem matH 3×3
+        matH = np.empty((3, 3), dtype=np.complex128)
+        matH[0, 0] = Hx_hmd[0]
+        matH[0, 1] = Hy_hmd[0]
+        matH[0, 2] = Hz_hmd[0]
+        matH[1, 0] = Hx_hmd[1]
+        matH[1, 1] = Hy_hmd[1]
+        matH[1, 2] = Hz_hmd[1]
+        matH[2, 0] = Hx_vmd
+        matH[2, 1] = Hy_vmd
+        matH[2, 2] = Hz_vmd
+
+        tH = rotate_tensor(dip_rad, 0.0, 0.0, matH)
+
+        cH[i_f, 0] = tH[0, 0]
+        cH[i_f, 1] = tH[0, 1]
+        cH[i_f, 2] = tH[0, 2]
+        cH[i_f, 3] = tH[1, 0]
+        cH[i_f, 4] = tH[1, 1]
+        cH[i_f, 5] = tH[1, 2]
+        cH[i_f, 6] = tH[2, 0]
+        cH[i_f, 7] = tH[2, 1]
+        cH[i_f, 8] = tH[2, 2]
+
+    return cH
 
 
 __all__ = [
     "fields_in_freqs",
+    "_fields_in_freqs_kernel",
+    "_fields_in_freqs_kernel_cached",
+    "precompute_common_arrays_cache",
     "compute_zrho",
+    "_compute_zrho_kernel",
 ]

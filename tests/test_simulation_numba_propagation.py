@@ -151,10 +151,17 @@ class TestCommonArraysHomogeneousLimit:
         )
 
     def test_admint_equals_u_over_zeta(self, outputs_iso: tuple) -> None:
-        """AdmInt = u / zeta (definição direta)."""
+        """AdmInt = u / zeta (definição direta).
+
+        Note:
+            Usa ``np.testing.assert_allclose`` com rtol=1e-13 em vez de
+            ``np.array_equal`` porque o Numba JIT (LLVM) pode reordenar
+            operações float, gerando diferenças na última casa decimal —
+            comportamento esperado e documentado no Sprint 2.1.
+        """
         u = outputs_iso[0]
         AdmInt = outputs_iso[8]
-        assert np.array_equal(AdmInt, u / _ZETA_LWD)
+        np.testing.assert_allclose(AdmInt, u / _ZETA_LWD, rtol=1e-13)
 
     def test_rtedw_zero_for_single_layer(self, outputs_iso: tuple) -> None:
         """Sem interface inferior → RTEdw[:, n-1] = 0."""

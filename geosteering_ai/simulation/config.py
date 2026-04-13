@@ -320,8 +320,19 @@ class SimulationConfig:
     # -1 no `num_threads` significa auto-detect (usa todos os cores
     # disponíveis via `multiprocessing.cpu_count()`). Valores > 0
     # forçam número específico. 0 é inválido.
+    #
+    # Sprint 2.8/2.9 — campo `parallel` ativa paralelização via
+    # `@njit(parallel=True)` + `prange` no loop externo de posições em
+    # `forward.py::_simulate_positions_njit`. Sprint 2.9 portou
+    # `fields_in_freqs` para @njit, desbloqueando speedup real sem GIL.
+    #
+    # Default=True: com o kernel @njit puro, o prange é eficiente em
+    # CPUs com 4+ cores (speedup ~5–8× em perfis medium/large).
+    # Se Numba não estiver instalado, cai automaticamente no caminho
+    # serial sem erro (ver forward.py).
     num_threads: int = -1
     seed: int = 42
+    parallel: bool = True
 
     # ┌───────────────────────────────────────────────────────────────┐
     # │  Grupo 7 — Exportadores Fortran-compatíveis (opt-in)          │
