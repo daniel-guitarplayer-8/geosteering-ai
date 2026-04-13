@@ -562,6 +562,94 @@ def plot_anisotropy_ratio_sensitivity(
     return fig
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 3.3.3+ — plot_induction_number_heatmap (categoria a — física)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def plot_induction_number_heatmap(
+    *,
+    freqs_hz=None,
+    rhos=None,
+    spacing_m: float = 1.0,
+    mu0: float = 4.0e-7 * np.pi,
+    title: str = "Número de indução adimensional B = ωμ₀σL² (régime quase-estático vs dinâmico)",
+    figsize: tuple = (10.0, 5.5),
+    cmap: str = "viridis",
+):
+    """Heatmap do número de indução ``B = ω·μ₀·σ·L²`` vs frequência × resistividade.
+
+    O número de indução é o parâmetro adimensional que separa os regimes
+    EM em meios condutores:
+
+      ============  ================  =====================================
+      Regime        Faixa             Significado físico
+      ============  ================  =====================================
+      Quase-estático ``B << 1``        deslocamento → 0; LWD convencional
+      Transição    ``B ~ 1``         skin depth ~ L
+      Dinâmico     ``B >> 1``         radiação dominante; rara em LWD
+      ============  ================  =====================================
+
+    Útil para o engenheiro de poço entender se a frequência escolhida
+    está no regime quase-estático esperado pelo simulador (todos os
+    nossos kernels assumem ``B << 1``).
+
+    Args:
+        freqs_hz: ``(nf,)`` array de frequências (Hz). Default
+            ``np.geomspace(100, 1e6, 60)``.
+        rhos: ``(nrho,)`` array de resistividades (Ω·m). Default
+            ``np.geomspace(0.1, 10000.0, 60)``.
+        spacing_m: Espaçamento TR (m). Default 1.0.
+        mu0: Permeabilidade do vácuo (H/m).
+        title: Título da figura.
+        figsize: Tamanho da figura em polegadas.
+        cmap: Nome da colormap matplotlib.
+
+    Returns:
+        ``Figure`` com heatmap colorido em escala log para B.
+
+    Note:
+        Contornos brancos marcam ``B = 0.01, 0.1, 1.0, 10.0`` para fácil
+        identificação dos regimes.
+
+    Example:
+        >>> fig = plot_induction_number_heatmap(spacing_m=1.0)
+        >>> fig.axes[0].get_xlabel()
+        'Frequência (Hz)'
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    if freqs_hz is None:
+        freqs_hz = np.geomspace(100.0, 1.0e6, 60)
+    if rhos is None:
+        rhos = np.geomspace(0.1, 1.0e4, 60)
+    freqs_hz = np.asarray(freqs_hz, dtype=np.float64)
+    rhos = np.asarray(rhos, dtype=np.float64)
+
+    omega = 2.0 * np.pi * freqs_hz  # (nf,)
+    sigma = 1.0 / rhos  # (nrho,)
+    # B[i, j] = omega[j] * mu0 * sigma[i] * L²
+    B = np.outer(sigma, omega) * mu0 * (spacing_m**2)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    pcm = ax.pcolormesh(
+        freqs_hz, rhos, B, norm=_make_log_norm(B), cmap=cmap, shading="auto"
+    )
+    cs = ax.contour(
+        freqs_hz, rhos, B, levels=[0.01, 0.1, 1.0, 10.0], colors="white", linewidths=1.0
+    )
+    ax.clabel(cs, inline=True, fontsize=8, fmt="B=%g")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Frequência (Hz)")
+    ax.set_ylabel("Resistividade ρ (Ω·m)")
+    ax.set_title(title)
+    plt.colorbar(pcm, ax=ax, label="Número de indução B (log10)")
+    fig.tight_layout()
+    return fig
+
+
 __all__ = [
     "plot_skin_depth_heatmap",
     "plot_attenuation_phase",
@@ -569,4 +657,6 @@ __all__ = [
     "plot_geosignals",
     "plot_sensitivity_kernel",
     "plot_anisotropy_ratio_sensitivity",
+    # Sprint 3.3.3+ — Categoria (a)
+    "plot_induction_number_heatmap",
 ]

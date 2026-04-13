@@ -378,10 +378,13 @@ def fields_in_freqs_jax_batch(
 
         _log = logging.getLogger(__name__)
         _log.warning(
-            "use_native_dipoles=True — Sprint 3.3.2 (PR #10) fornece "
-            "apenas a ETAPA 5 do HMD em JAX (_hmd_tiv_full_jax). "
-            "VMD nativo e wiring completo ficam para Sprint 3.3.3 "
-            "(PR #11). Caindo de volta ao caminho híbrido (bit-exato)."
+            "use_native_dipoles=True — Sprints 3.3.2+3.3.3 (PRs #10/#11) "
+            "fornecem ETAPA 5 nativa em JAX para HMD (_hmd_tiv_full_jax) "
+            "e VMD (_vmd_full_jax). As ETAPAS 3 (propagação dos potenciais "
+            "TEdwz/TEupz/TMdw/TMup entre camadas) e 6 (assembly final do "
+            "tensor 9-comp via Hankel + Ward-Hohmann) ainda usam o caminho "
+            "híbrido para preservar bit-exactness. Wiring end-to-end é "
+            "Sprint 3.3.4. Caindo de volta ao caminho híbrido (bit-exato)."
         )
     n_positions = positions_z.shape[0]
     nf = freqs_hz.shape[0]

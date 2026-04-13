@@ -66,9 +66,11 @@ from geosteering_ai.simulation.visualization.plot_benchmark import (
 )
 from geosteering_ai.simulation.visualization.plot_benchmark_advanced import (
     measure_component_times,
+    plot_backend_comparison_heatmap,
     plot_component_times,
     plot_error_heatmap,
     plot_filter_convergence,
+    plot_memory_usage_vs_profile_size,
     plot_speedup_curve,
 )
 from geosteering_ai.simulation.visualization.plot_canonical import (
@@ -77,7 +79,9 @@ from geosteering_ai.simulation.visualization.plot_canonical import (
 )
 from geosteering_ai.simulation.visualization.plot_geophysical import (
     plot_apparent_resistivity_curves,
+    plot_geometric_factor_sensitivity,
     plot_geosignal_response_vs_dip,
+    plot_multi_frequency_hodograph,
     plot_nyquist,
     plot_polar_directivity,
     plot_pseudosection,
@@ -85,6 +89,7 @@ from geosteering_ai.simulation.visualization.plot_geophysical import (
 )
 from geosteering_ai.simulation.visualization.plot_ml import (
     plot_augmentation_preview,
+    plot_inference_latency_distribution,
     plot_pinn_loss_decomposition,
     plot_uncertainty_bands,
 )
@@ -93,6 +98,7 @@ from geosteering_ai.simulation.visualization.plot_physics import (
     plot_attenuation_phase,
     plot_feature_views,
     plot_geosignals,
+    plot_induction_number_heatmap,
     plot_sensitivity_kernel,
     plot_skin_depth_heatmap,
 )
@@ -135,4 +141,11 @@ __all__ = [
     "plot_geosignal_response_vs_dip",
     "plot_anisotropy_ratio_sensitivity",
     "plot_pinn_loss_decomposition",
+    # Sprint 3.3.3+ — 6 plots curados (a/b/c/d)
+    "plot_induction_number_heatmap",  # (a) física
+    "plot_multi_frequency_hodograph",  # (c) geofísica
+    "plot_geometric_factor_sensitivity",  # (c) geofísica
+    "plot_memory_usage_vs_profile_size",  # (b) diagnóstico
+    "plot_backend_comparison_heatmap",  # (b) diagnóstico
+    "plot_inference_latency_distribution",  # (d) ML/DL
 ]

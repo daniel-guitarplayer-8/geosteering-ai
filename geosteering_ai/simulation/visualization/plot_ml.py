@@ -380,8 +380,135 @@ def plot_pinn_loss_decomposition(
     return fig
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 3.3.3+ — plot_inference_latency_distribution (categoria d — ML/DL)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def plot_inference_latency_distribution(
+    latencies_ms,
+    *,
+    batch_sizes=None,
+    realtime_target_ms: float = 50.0,
+    title: str = "Distribuição de latência por batch — readiness para realtime LWD",
+    figsize: tuple = (10.0, 5.5),
+    bins: int = 30,
+):
+    """Histograma de latência (ms) por batch size, com linha de target realtime.
+
+    Útil para validar se um modelo DL (inferência online em LWD) atende
+    o budget de latência da aplicação. Modelos cuja distribuição de
+    latência cruza o target de realtime (ex: 50 ms) precisam ser
+    otimizados (quantização, pruning, ONNX) antes de deployment.
+
+    Args:
+        latencies_ms: Dict ``{batch_size: array (n_runs,)}`` ou
+            ``(n_batches, n_runs)`` array com latências em ms.
+        batch_sizes: Lista de batch sizes (necessária se ``latencies_ms``
+            não for dict).
+        realtime_target_ms: Target de latência (ms) para realtime.
+            Default 50.0 (típico LWD: 20 Hz output rate → 50 ms budget).
+        title: Título da figura.
+        figsize: Tamanho da figura.
+        bins: Número de bins do histograma.
+
+    Returns:
+        ``Figure`` com 2 painéis: (esquerda) histogramas sobrepostos por
+        batch_size, (direita) box plot por batch_size + linha de target.
+
+    Note:
+        Compatível com o formato de saída de
+        :class:`geosteering_ai.inference.InferencePipeline.profile()`
+        (chave ``latency_ms`` por batch_size).
+
+    Example:
+        >>> import numpy as np
+        >>> rng = np.random.default_rng(0)
+        >>> data = {1: rng.normal(15, 3, 100), 8: rng.normal(35, 6, 100),
+        ...         32: rng.normal(85, 12, 100)}
+        >>> fig = plot_inference_latency_distribution(data)
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    # Normaliza entrada → dict {batch_size: array}
+    if isinstance(latencies_ms, dict):
+        d = {int(k): np.asarray(v, dtype=np.float64) for k, v in latencies_ms.items()}
+    else:
+        arr = np.asarray(latencies_ms, dtype=np.float64)
+        if arr.ndim != 2:
+            raise ValueError(
+                "latencies_ms deve ser dict {bs: arr} ou 2D (n_batches, n_runs)"
+            )
+        if batch_sizes is None or len(batch_sizes) != arr.shape[0]:
+            raise ValueError(
+                f"batch_sizes deve ter len={arr.shape[0]} para casar com latencies_ms.shape[0]"
+            )
+        d = {int(bs): arr[i] for i, bs in enumerate(batch_sizes)}
+
+    sorted_bs = sorted(d.keys())
+    fig, (ax_h, ax_b) = plt.subplots(1, 2, figsize=figsize)
+    cmap = plt.get_cmap("viridis")
+    n = len(sorted_bs)
+
+    # Painel 1 — histogramas sobrepostos
+    for i, bs in enumerate(sorted_bs):
+        color = cmap(i / max(1, n - 1))
+        ax_h.hist(
+            d[bs],
+            bins=bins,
+            color=color,
+            alpha=0.55,
+            edgecolor="black",
+            linewidth=0.5,
+            label=f"bs={bs}",
+        )
+    ax_h.axvline(
+        realtime_target_ms,
+        color="red",
+        lw=2.0,
+        linestyle="--",
+        label=f"target {realtime_target_ms:.0f} ms",
+    )
+    ax_h.set_xlabel("Latência (ms)")
+    ax_h.set_ylabel("Frequência")
+    ax_h.set_title("Histograma por batch size")
+    ax_h.legend(loc="best", fontsize=9)
+    ax_h.grid(True, linestyle=":", alpha=0.5)
+
+    # Painel 2 — box plot
+    box_data = [d[bs] for bs in sorted_bs]
+    bp = ax_b.boxplot(
+        box_data,
+        tick_labels=[str(bs) for bs in sorted_bs],
+        patch_artist=True,
+        showmeans=True,
+    )
+    for i, patch in enumerate(bp["boxes"]):
+        patch.set_facecolor(cmap(i / max(1, n - 1)))
+        patch.set_alpha(0.7)
+    ax_b.axhline(
+        realtime_target_ms,
+        color="red",
+        lw=2.0,
+        linestyle="--",
+        label=f"target {realtime_target_ms:.0f} ms",
+    )
+    ax_b.set_xlabel("Batch size")
+    ax_b.set_ylabel("Latência (ms)")
+    ax_b.set_title("Distribuição (box plot)")
+    ax_b.legend(loc="best", fontsize=9)
+    ax_b.grid(True, linestyle=":", alpha=0.5)
+
+    fig.suptitle(title)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
+    return fig
+
+
 __all__ = [
     "plot_augmentation_preview",
     "plot_uncertainty_bands",
     "plot_pinn_loss_decomposition",
+    # Sprint 3.3.3+ — Categoria (d)
+    "plot_inference_latency_distribution",
 ]

@@ -381,3 +381,172 @@ class TestPinnLossDecomposition:
         import matplotlib.pyplot as plt
 
         plt.close(fig)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 3.3.3+ — 6 plots curados (a/b/c/d)
+# ──────────────────────────────────────────────────────────────────────────────
+
+from geosteering_ai.simulation.visualization import (  # noqa: E402
+    plot_backend_comparison_heatmap,
+    plot_geometric_factor_sensitivity,
+    plot_induction_number_heatmap,
+    plot_inference_latency_distribution,
+    plot_memory_usage_vs_profile_size,
+    plot_multi_frequency_hodograph,
+)
+
+
+class TestInductionNumberHeatmap:
+    """Categoria (a) — física: heatmap do número de indução B = ωμ₀σL²."""
+
+    def test_returns_figure(self) -> None:
+        fig = plot_induction_number_heatmap(spacing_m=1.0)
+        assert fig is not None
+        assert len(fig.axes) >= 1
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_log_scales(self) -> None:
+        fig = plot_induction_number_heatmap()
+        ax = fig.axes[0]
+        assert ax.get_xscale() == "log"
+        assert ax.get_yscale() == "log"
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+class TestMultiFrequencyHodograph:
+    """Categoria (c) — geofísica: hodógrafo Re×Im multi-freq."""
+
+    def test_returns_figure(self, simple_result) -> None:
+        fig = plot_multi_frequency_hodograph(simple_result, component="Hzz")
+        assert fig is not None
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_unknown_component_raises(self, simple_result) -> None:
+        with pytest.raises(ValueError, match="Componente desconhecido"):
+            plot_multi_frequency_hodograph(simple_result, component="Hbogus")
+
+
+class TestGeometricFactorSensitivity:
+    """Categoria (c) — geofísica: G(z) = |dH/dz|."""
+
+    def test_returns_2_panels(self, simple_result) -> None:
+        fig = plot_geometric_factor_sensitivity(simple_result, component="Hzz")
+        assert fig is not None
+        # 2 painéis: |H(z)| + G(z) normalizado
+        assert len(fig.axes) == 2
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_y_axis_inverted(self, simple_result) -> None:
+        fig = plot_geometric_factor_sensitivity(simple_result)
+        ax_h = fig.axes[0]
+        ymin, ymax = ax_h.get_ylim()
+        assert ymin > ymax  # profundidade cresce para baixo
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_freq_idx_out_of_range_raises(self, simple_result) -> None:
+        nf = simple_result.H_tensor.shape[1]
+        with pytest.raises(ValueError, match="freq_idx"):
+            plot_geometric_factor_sensitivity(simple_result, freq_idx=nf + 99)
+
+
+class TestMemoryUsageVsProfileSize:
+    """Categoria (b) — diagnóstico: pico de RAM (MB) vs n_pontos."""
+
+    def test_returns_figure_single_curve(self) -> None:
+        sizes = np.array([10, 50, 100, 500])
+        mem = np.array([12.0, 45.0, 90.0, 410.0])
+        fig = plot_memory_usage_vs_profile_size(sizes, mem)
+        assert fig is not None
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_multiple_curves(self) -> None:
+        sizes = np.array([10, 50, 100, 500])
+        mem = np.array(
+            [
+                [12.0, 45.0, 90.0, 410.0],
+                [25.0, 80.0, 160.0, 720.0],
+            ]
+        )
+        fig = plot_memory_usage_vs_profile_size(sizes, mem, labels=["Numba", "JAX"])
+        ax = fig.axes[0]
+        assert len(ax.get_lines()) == 2
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_label_size_mismatch_raises(self) -> None:
+        sizes = np.array([10, 50])
+        mem = np.array([[12.0, 45.0], [25.0, 80.0]])
+        with pytest.raises(ValueError, match="len.labels"):
+            plot_memory_usage_vs_profile_size(sizes, mem, labels=["only_one"])
+
+
+class TestBackendComparisonHeatmap:
+    """Categoria (b) — diagnóstico: heatmap tempo (ms) backend × n_freq."""
+
+    def test_returns_figure(self) -> None:
+        times = np.array(
+            [
+                [1.2, 5.8, 28.0, 140.0],
+                [3.5, 8.0, 30.0, 110.0],
+            ]
+        )
+        fig = plot_backend_comparison_heatmap(
+            times, backends=["Numba", "JAX-hybrid"], n_freqs=[1, 4, 16, 64]
+        )
+        assert fig is not None
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_shape_validation_raises(self) -> None:
+        with pytest.raises(ValueError, match="2D"):
+            plot_backend_comparison_heatmap(np.array([1.0, 2.0]))
+
+
+class TestInferenceLatencyDistribution:
+    """Categoria (d) — ML/DL: histograma + boxplot latência por batch."""
+
+    def test_dict_input_returns_figure(self) -> None:
+        rng = np.random.default_rng(0)
+        data = {
+            1: rng.normal(15.0, 3.0, 80),
+            8: rng.normal(35.0, 6.0, 80),
+            32: rng.normal(85.0, 12.0, 80),
+        }
+        fig = plot_inference_latency_distribution(data)
+        assert fig is not None
+        # 2 painéis: histograma + boxplot
+        assert len(fig.axes) == 2
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_array_input_with_batch_sizes(self) -> None:
+        rng = np.random.default_rng(1)
+        arr = rng.normal(20.0, 4.0, (3, 50))
+        fig = plot_inference_latency_distribution(
+            arr, batch_sizes=[1, 8, 32], realtime_target_ms=50.0
+        )
+        assert fig is not None
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+    def test_array_input_missing_batch_sizes_raises(self) -> None:
+        arr = np.random.default_rng(2).normal(20.0, 4.0, (3, 50))
+        with pytest.raises(ValueError, match="batch_sizes"):
+            plot_inference_latency_distribution(arr)

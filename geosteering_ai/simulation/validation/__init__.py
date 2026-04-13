@@ -80,9 +80,13 @@ from geosteering_ai.simulation.validation.canonical_models import (
     list_canonical_models,
 )
 from geosteering_ai.simulation.validation.compare_empymod import (
+    COMPONENT_AB_MAP,
+    COMPONENT_TENSOR_INDEX,
     HAS_EMPYMOD,
     ComparisonResult,
+    TensorComparisonResult,
     compare_numba_empymod,
+    compare_numba_empymod_tensor,
     install_empymod_instruction,
 )
 from geosteering_ai.simulation.validation.half_space import (
@@ -113,4 +117,9 @@ __all__ = [
     "ComparisonResult",
     "compare_numba_empymod",
     "install_empymod_instruction",
+    # compare_empymod tensor (Sprint 4.2)
+    "COMPONENT_AB_MAP",
+    "COMPONENT_TENSOR_INDEX",
+    "TensorComparisonResult",
+    "compare_numba_empymod_tensor",
 ]
