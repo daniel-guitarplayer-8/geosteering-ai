@@ -132,6 +132,12 @@ from __future__ import annotations
 #   Sprint 1.2  →  SimulationConfig                      (entregue)
 #   Sprint 1.3  →  validation.half_space (submódulo)    (entregue)
 #   Fase 2+     →  simulate, _numba, _jax, forward      (pendente)
+from geosteering_ai.simulation._jacobian import (
+    JacobianResult,
+    compute_jacobian,
+    compute_jacobian_fd_numba,
+    compute_jacobian_jax,
+)
 from geosteering_ai.simulation.config import SimulationConfig
 from geosteering_ai.simulation.filters import FilterLoader, HankelFilter
 from geosteering_ai.simulation.forward import SimulationResult, simulate
@@ -139,8 +145,12 @@ from geosteering_ai.simulation.forward import SimulationResult, simulate
 __all__ = [
     "FilterLoader",
     "HankelFilter",
+    "JacobianResult",
     "SimulationConfig",
     "SimulationResult",
+    "compute_jacobian",
+    "compute_jacobian_fd_numba",
+    "compute_jacobian_jax",
     "simulate",
 ]
 
@@ -153,5 +163,9 @@ __all__ = [
 #   0.6.x → Sprints 2.3 + 2.4 (geometry + rotation + hankel + kernel)
 #   0.7.x → Sprints 2.5 + 2.6 (forward API + validação analítica)
 #   0.8.x → Sprint 2.7 (benchmark ≥ 40k mod/h — gate final Fase 2)
-#   1.0.0 → Fase 6 concluída (simulador 100% funcional)
-__version__ = "0.8.0"
+#   1.0.x → Sprints 2.8-2.10 (prange + cache) + 3.1-3.3 (JAX hybrid)
+#   1.1.x → Sprint 3.3.4 (ETAPAS 3+6 JAX native end-to-end, PR #12)
+#   1.2.0 → Sprint 5.1+5.2 (Jacobiano FD Numba + JAX jacfwd) + 4.x TIV analítico (PR #13)
+#   1.5.0 → Flip use_native_dipoles default + integração bench (próximo PR)
+#   2.0.0 → Fase 6 concluída (backend dispatch em PipelineConfig)
+__version__ = "1.2.0"
