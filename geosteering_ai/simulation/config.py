@@ -321,18 +321,18 @@ class SimulationConfig:
     # disponíveis via `multiprocessing.cpu_count()`). Valores > 0
     # forçam número específico. 0 é inválido.
     #
-    # Sprint 2.8 — campo `parallel` ativa paralelização via
-    # `ThreadPoolExecutor` no loop externo de posições em `forward.py`.
-    # Finding Sprint 2.8: com o orquestrador `fields_in_freqs` em Python
-    # puro (não-@njit), o GIL é retido entre as chamadas aos kernels
-    # Numba internos — contention elimina o ganho de threads (speedup
-    # ≈ 1.0× em benchmarks medium/large).
-    # Default=False: infraestrutura preservada para futuro quando
-    # `fields_in_freqs` for portado para @njit (Sprint 2.9?) ou
-    # substituído por vmap JAX (Sprint 3.x, onde XLA não sofre de GIL).
+    # Sprint 2.8/2.9 — campo `parallel` ativa paralelização via
+    # `@njit(parallel=True)` + `prange` no loop externo de posições em
+    # `forward.py::_simulate_positions_njit`. Sprint 2.9 portou
+    # `fields_in_freqs` para @njit, desbloqueando speedup real sem GIL.
+    #
+    # Default=True: com o kernel @njit puro, o prange é eficiente em
+    # CPUs com 4+ cores (speedup ~5–8× em perfis medium/large).
+    # Se Numba não estiver instalado, cai automaticamente no caminho
+    # serial sem erro (ver forward.py).
     num_threads: int = -1
     seed: int = 42
-    parallel: bool = False
+    parallel: bool = True
 
     # ┌───────────────────────────────────────────────────────────────┐
     # │  Grupo 7 — Exportadores Fortran-compatíveis (opt-in)          │

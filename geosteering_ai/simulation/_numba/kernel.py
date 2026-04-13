@@ -112,9 +112,9 @@ import numpy as np
 
 from geosteering_ai.simulation._numba.dipoles import hmd_tiv, vmd
 from geosteering_ai.simulation._numba.geometry import (
+    _sanitize_profile_kernel,
     find_layers_tr,
     layer_at_depth,
-    sanitize_profile,
 )
 from geosteering_ai.simulation._numba.propagation import (
     common_arrays,
@@ -252,26 +252,87 @@ def fields_in_freqs(
             f"wJ0.shape={wJ0.shape}, wJ1.shape={wJ1.shape}."
         )
 
+    # Sprint 2.9: delega para kernel @njit que aceita arrays já validados.
+    return _fields_in_freqs_kernel(
+        Tx,
+        Ty,
+        Tz,
+        cx,
+        cy,
+        cz,
+        dip_rad,
+        n,
+        rho_h,
+        rho_v,
+        esp,
+        freqs_hz,
+        krJ0J1,
+        wJ0,
+        wJ1,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _fields_in_freqs_kernel — versão @njit (Sprint 2.9)
+# ──────────────────────────────────────────────────────────────────────────────
+# Kernel 100% @njit do orquestrador forward. Recebe arrays já validados
+# (ascontiguousarray + shape check) do wrapper Python `fields_in_freqs`.
+# Toda a lógica está aqui — desde geometria até montagem do tensor.
+#
+# Por que separar em 2 funções:
+#   • Validações com `raise ValueError` com f-strings complexas não são
+#     suportadas em @njit 0.61 de forma robusta. Fica no wrapper Python.
+#   • `np.ascontiguousarray(..., dtype=...)` tem compatibilidade parcial
+#     em @njit. Fica no wrapper.
+#   • A função @njit pode ser chamada de dentro de outras @njit (ex.:
+#     `_simulate_positions_njit` em forward.py com prange paralelo),
+#     desbloqueando speedup real — ver finding Sprint 2.8.
+
+
+@njit(cache=True)
+def _fields_in_freqs_kernel(
+    Tx: float,
+    Ty: float,
+    Tz: float,
+    cx: float,
+    cy: float,
+    cz: float,
+    dip_rad: float,
+    n: int,
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    esp: np.ndarray,
+    freqs_hz: np.ndarray,
+    krJ0J1: np.ndarray,
+    wJ0: np.ndarray,
+    wJ1: np.ndarray,
+) -> np.ndarray:
+    """Kernel @njit do orquestrador forward (Sprint 2.9).
+
+    Idêntico a `fields_in_freqs` mas @njit-compatível. Sem validação
+    de shape — assume arrays já validados pelo wrapper.
+
+    Args e Returns: Ver :func:`fields_in_freqs`.
+
+    Note:
+        Chamável de dentro de outras funções @njit(parallel=True).
+        Este é o caminho que desbloqueia o paralelismo real com
+        `prange` no loop externo de posições (Sprint 2.9 + forward.py).
+    """
     npt = krJ0J1.shape[0]
     nf = freqs_hz.shape[0]
 
     # ── Geometria: sanitize + localização TX/RX ────────────────────
-    # Casos especiais:
-    #   n == 1: apenas 1 camada (full-space). Não existem "interfaces"
-    #           internas; TX e RX sempre na camada 0. Criamos h=[0] e
-    #           prof=[0, 1e300] manualmente para evitar esp de tamanho
-    #           negativo em sanitize_profile.
     if n == 1:
         h_arr = np.zeros(1, dtype=np.float64)
         # Sentinels: prof[0] = -1e300 (topo ∞), prof[1] = +1e300 (fundo ∞)
-        # Paridade com Fortran sanitize_hprof_well: prof(0) = -1.d300.
-        # CRÍTICO: sem o sentinel negativo, exp(s * (prof[0] - h0)) overflow
-        # quando h0 é negativo (TX acima de z=0).
-        prof_arr = np.array([-1.0e300, 1.0e300], dtype=np.float64)
+        prof_arr = np.empty(2, dtype=np.float64)
+        prof_arr[0] = -1.0e300
+        prof_arr[1] = 1.0e300
         camad_t = 0
         camad_r = 0
     else:
-        h_arr, prof_arr = sanitize_profile(n, esp)
+        h_arr, prof_arr = _sanitize_profile_kernel(n, esp)
         camad_t, camad_r = find_layers_tr(n, Tz, cz, prof_arr)
 
     # ── Admitividade eta[i, 0]=σh, eta[i, 1]=σv ───────────────────
@@ -288,11 +349,6 @@ def fields_in_freqs(
     # ── Output ─────────────────────────────────────────────────────
     cH = np.empty((nf, 9), dtype=np.complex128)
 
-    # ──────────────────────────────────────────────────────────────
-    # Loop sobre frequências (Fortran: `do i = 1, nf`)
-    # ──────────────────────────────────────────────────────────────
-    # Não paralelizamos aqui — a paralelização entra no loop externo
-    # de posições do poço via `prange` na Sprint 2.5.
     for i_f in range(nf):
         freq = freqs_hz[i_f]
         omega = 2.0 * math.pi * freq
@@ -458,17 +514,43 @@ def compute_zrho(
     rho_v = np.asarray(rho_v, dtype=np.float64)
     esp = np.asarray(esp, dtype=np.float64)
 
+    return _compute_zrho_kernel(Tz, cz, n, rho_h, rho_v, esp)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _compute_zrho_kernel — versão @njit (Sprint 2.9)
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper @njit que replica compute_zrho sem conversão de array. Permite
+# chamada de dentro de outra função @njit (ex: _simulate_positions_njit em
+# forward.py). Retorna tupla (float, float, float) — compatível com Numba.
+
+
+@njit(cache=True)
+def _compute_zrho_kernel(
+    Tz: float,
+    cz: float,
+    n: int,
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    esp: np.ndarray,
+) -> tuple:
+    """Kernel @njit de compute_zrho.
+
+    Idêntico a :func:`compute_zrho` mas @njit-compatível. Não faz
+    conversão de arrays (assume float64 contíguo).
+    """
     zobs = 0.5 * (Tz + cz)
     if n == 1:
-        # Full-space: só existe 1 camada
-        return zobs, float(rho_h[0]), float(rho_v[0])
+        return zobs, rho_h[0], rho_v[0]
 
-    _, prof_arr = sanitize_profile(n, esp)
+    _, prof_arr = _sanitize_profile_kernel(n, esp)
     layer_obs = layer_at_depth(n, zobs, prof_arr)
-    return zobs, float(rho_h[layer_obs]), float(rho_v[layer_obs])
+    return zobs, rho_h[layer_obs], rho_v[layer_obs]
 
 
 __all__ = [
     "fields_in_freqs",
+    "_fields_in_freqs_kernel",
     "compute_zrho",
+    "_compute_zrho_kernel",
 ]

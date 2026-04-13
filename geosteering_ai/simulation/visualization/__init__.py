@@ -64,6 +64,10 @@ Note:
 from geosteering_ai.simulation.visualization.plot_benchmark import (
     plot_benchmark_comparison,
 )
+from geosteering_ai.simulation.visualization.plot_canonical import (
+    plot_all_canonical_models,
+    plot_canonical_model,
+)
 from geosteering_ai.simulation.visualization.plot_tensor import (
     plot_resistivity_profile,
     plot_tensor_profile,
@@ -73,4 +77,6 @@ __all__ = [
     "plot_tensor_profile",
     "plot_resistivity_profile",
     "plot_benchmark_comparison",
+    "plot_canonical_model",
+    "plot_all_canonical_models",
 ]

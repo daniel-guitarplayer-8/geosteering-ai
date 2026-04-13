@@ -192,6 +192,8 @@ def plot_tensor_profile(
     *,
     freq_idx: int = 0,
     title: Optional[str] = None,
+    model_name: Optional[str] = None,
+    dip_deg: Optional[float] = None,
     figsize: tuple[float, float] = (28.0, 12.0),
     show_interfaces: bool = True,
 ) -> Figure:
@@ -210,8 +212,12 @@ def plot_tensor_profile(
             shape ``(n_positions, nf, 9)`` complex128.
         freq_idx: Índice da frequência a plotar (quando ``nf > 1``).
             Default: 0. Valores fora do range levantam ValueError.
-        title: Título da figura. Se None, auto-gera a partir do
-            :class:`SimulationConfig` do result.
+        title: Título da figura. Se None, auto-gera com nome do modelo,
+            frequência, TR, dip e filtro Hankel.
+        model_name: Nome legível do modelo (ex.: ``"Oklahoma 3"``) para
+            incluir no título. Se None, usa apenas ``"Tensor H"``.
+        dip_deg: Dip da ferramenta em graus (θ) para exibir no título.
+            Se None, omite.
         figsize: Tamanho da figura em polegadas. Default: (28, 12).
         show_interfaces: Se True, marca interfaces em todos os painéis.
 
@@ -251,15 +257,40 @@ def plot_tensor_profile(
     freq = float(result.freqs_hz[freq_idx])
     cfg = result.cfg
 
-    # ── Título auto-gerado ────────────────────────────────────────
+    # ── Título auto-gerado com metadados ricos ────────────────────
+    # Detecta número de camadas reais pela mudança de ρₕ (não pelo
+    # n_positions como era antes — bug da Sprint 2.8).
     if title is None:
-        n_layers = int(result.rho_h_at_obs.size)
-        title = (
-            f"Tensor H — {n_layers}-camadas | "
-            f"f = {freq / 1000:.3g} kHz | "
-            f"TR = {cfg.tr_spacing_m:.2f} m | "
-            f"filtro = {cfg.hankel_filter}"
-        )
+        interfaces = _detect_interfaces(result.rho_h_at_obs, z_obs)
+        n_layers_detected = len(interfaces) + 1  # N interfaces → N+1 camadas
+
+        parts = []
+        # Cabeçalho: nome do modelo (se fornecido) ou "Tensor H"
+        header = f"Tensor H — {model_name}" if model_name else "Tensor H"
+        parts.append(f"{header} ({n_layers_detected} cam.)")
+
+        # Frequência em unidades adequadas
+        if freq < 1e3:
+            parts.append(f"f = {freq:.1f} Hz")
+        elif freq < 1e6:
+            parts.append(f"f = {freq / 1e3:.3g} kHz")
+        else:
+            parts.append(f"f = {freq / 1e6:.3g} MHz")
+
+        # Espaçamento TR em m
+        parts.append(f"TR = {cfg.tr_spacing_m:.2f} m")
+
+        # Dip (theta) se fornecido
+        if dip_deg is not None:
+            parts.append(rf"$\theta$ = {dip_deg:.1f}°")
+
+        # Filtro Hankel
+        parts.append(f"filtro = {cfg.hankel_filter}")
+
+        # Número de posições
+        parts.append(f"N = {result.H_tensor.shape[0]} pts")
+
+        title = " | ".join(parts)
 
     # ── GridSpec(3, 7): ρ panel (col 0) + tensor 3×6 (cols 1-6) ──
     fig = plt.figure(figsize=figsize)

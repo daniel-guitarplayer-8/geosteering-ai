@@ -33,14 +33,14 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **0.9.0** (Sprints 1.1-1.3 + 2.1-2.8 + **3.1** concluídas) |
-| **Branch**       | `feature/simulator-python-sprint-2-8-and-3-1`             |
+| **Versão**       | **1.0.0** (Sprints 1.1-1.3 + 2.1-2.9 + **3.1-3.4** concluídas) |
+| **Branch**       | `feature/simulator-python-sprint-3-complete`              |
 | **Base**         | `main` (a partir do commit Sprint 2.7 `91e4634`)          |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.61+ + **JAX 0.4.38+** + empymod (valid.)  |
 | **Precisão**     | `complex128` default + `complex64` via config (prod.)     |
 | **Filtro default** | Werthmüller 201pt (mantém paridade Fortran filter_type=0) |
-| **Testes**       | **1135 passed, 295 skipped** em 32.9s (+27 Sprint 2.8+3.1) |
+| **Testes**       | **1214 passed, 295 skipped** em 42.1s (+79 Sprint 2.9+3.2+3.3) |
 | **Referência**   | `docs/reference/plano_simulador_python_jax_numba.md`      |
 
 ### 1.2 Fases do plano (7 fases)
@@ -49,12 +49,114 @@ Branch de desenvolvimento: `feature/simulator-python`.
 |:----:|:----------------------------------------|:------------|:----------|
 |  0   | Setup (branch, deps, estrutura)         | ✅ Concluída | 1.1 ✅ |
 |  1   | Foundations (filtros, config, analítico) | ✅ **Concluída** | 1.1 ✅, 1.2 ✅, 1.3 ✅ |
-|  2   | Backend Numba CPU (paridade Fortran)    | ✅ **Concluída** | 2.1–2.7 ✅, **2.8 ✅ (prange + viz)** |
-|  3   | Backend JAX (CPU+GPU, vmap+jit)         | 🟡 **Em andamento** | **3.1 ✅ (hankel + rotation)**, 3.2–3.4 ⬜ |
+|  2   | Backend Numba CPU (paridade Fortran)    | ✅ **Concluída** | 2.1–2.9 ✅ (**2.9: @njit + prange, 6.6× speedup**) |
+|  3   | Backend JAX (CPU+GPU, vmap+jit)         | ✅ **Concluída** | **3.1 ✅**, **3.2 ✅**, **3.3 ✅** (híbrido), **3.4 ✅** (Colab) |
 |  4   | Validação cruzada (Fortran/Numba/empymod) | ⬜ Pendente | 4.1-4.3 |
 |  5   | Jacobiano ∂H/∂ρ (jacfwd JAX, FD Numba)  | ⬜ Pendente | 5.1-5.2   |
 |  6   | Integração no PipelineConfig (backend)  | ⬜ Pendente | 6.1-6.2   |
 |  7   | Otimizações finais (pmap, XLA, caching) | ⬜ Pendente | 7.1-7.3   |
+
+### 1.2d Sprint 2.9 — fields_in_freqs @njit (concluída 2026-04-12)
+
+**Objetivo cumprido**: Port de `fields_in_freqs` para `@njit`, criando
+`_fields_in_freqs_kernel` e `_compute_zrho_kernel`. Mesma estratégia para
+`sanitize_profile → _sanitize_profile_kernel`. Habilitou
+`_simulate_positions_njit` com `@njit(parallel=True)` + `prange` —
+**speedup real de 6.6× em medium profile** (GIL eliminado do caminho crítico).
+
+**Benchmarks Sprint 2.9 (parallel=True default):**
+| Perfil | Sprint 2.7 | Sprint 2.9 | % Fortran |
+|:---|---:|---:|---:|
+| small  | 66k mod/h | **663k mod/h** | **1127.5%** ✅ |
+| medium | 15k mod/h | **170k mod/h** | **289.6%** ✅ |
+| large  | 3.6k mod/h | **26k mod/h** | 44.8% |
+
+### 1.2e Modelos canônicos (Sprint 2.9)
+
+Novo submódulo `validation/canonical_models.py` com **7 modelos geológicos
+canônicos** para validação reprodutível:
+
+| Id | Nome | Camadas | Tipo | Referência |
+|:---|:---|:---:|:---|:---|
+| oklahoma_3 | Oklahoma 3 | 3 | TIV | TR 32_2011 |
+| oklahoma_5 | Oklahoma 5 | 5 | TIV gradual | TR 32_2011 |
+| devine_8 | Devine 8 | 8 | Isotrópico | TR 32_2011 |
+| oklahoma_15 | Oklahoma 15 | 15 | Isotrópico | TR 32_2011 |
+| oklahoma_28 | Oklahoma 28 | 28 | TIV forte (ρv=2ρh) | TR 32_2011 |
+| hou_7 | Hou et al. 7 | 7 | TIV | Hou 2006 |
+| viking_graben_10 | Viking Graben 10 | 10 | TIV (N. Sea) | Eidesmo 2002 |
+
+Wrappers de plotagem em `visualization/plot_canonical.py`:
+- `plot_canonical_model(name, freq, TR, dip, ...)` → Figure
+- `plot_all_canonical_models(output_dir)` → List[Path]
+
+**69 testes** cobrindo shapes, ρ positivo, interfaces monotônicas,
+simulate() funcional e plot wrappers.
+
+### 1.2f Sprint 3.2 — _jax/propagation.py (concluída 2026-04-12)
+
+**Port JAX** de `common_arrays` + `common_factors` usando:
+- `jax.vmap` sobre eixo de camadas para constantes por camada
+- `jax.lax.scan` para recursões TE/TM bottom-up e top-down
+- Operações primitivas diferenciáveis (habilita `jax.grad`)
+
+**Paridade JAX vs Numba**:
+- 9 arrays de `common_arrays_jax`: **< 1e-13** (ULP float64)
+- 6 fatores de `common_factors_jax`: **< 1e-16** (bit-exato)
+
+**10 testes PASS** em 4 cenários (single_layer, 3-TIV, 5-iso, alta resistividade
+1e6 Ω·m) × {shape, paridade}.
+
+### 1.2g Sprint 3.3 — _jax/kernel.py híbrido (concluída 2026-04-12)
+
+**Arquitetura pragmática**: `fields_in_freqs_jax_batch` reusa os 900 LOC
+complexos de `hmd_tiv`+`vmd` (Numba) via `jax.pure_callback`, enquanto a
+propagação roda em JAX puro (diferenciável).
+
+**Vantagens do híbrido**:
+1. Propagação JAX com `jax.lax.scan` — compilável por XLA, diferenciável
+2. Dipolos reusados de Numba — sem re-implementação de 6 casos geométricos
+3. Paridade numérica automática (< 1e-13 vs Numba puro)
+4. Preparado para GPU — quando `pure_callback` for substituído por port
+   JAX nativo dos dipolos (Sprint 3.3.1 futuro), todo o pipeline roda
+   em GPU
+
+### 1.2h Sprint 3.4 — GPU + Colab (concluída 2026-04-12)
+
+**Notebook Colab**: `notebooks/bench_jax_gpu_colab.ipynb`
+- Detecção automática CPU/GPU (via `nvidia-smi`)
+- Instalação condicional: `jax[cuda12]` se GPU, `jax[cpu]` caso contrário
+- Benchmark Numba CPU + JAX (CPU/GPU) + validação com 7 modelos canônicos
+- Compatível com Colab Pro+ T4/L4/A100
+
+**Compatibilidade local**:
+- macOS: `pip install jax[cpu]` (JAX Metal é experimental, não
+  recomendado por enquanto)
+- Linux + CUDA: `pip install jax[cuda12]`
+- Windows + CUDA: `pip install jax[cuda12]` (via WSL2 preferencialmente)
+
+### 1.2i Bateria de testes consolidada (2026-04-12)
+
+**Total: 1214 passed, 295 skipped** em 42.1s (CPU)
+
+- 53 test_simulation_filters
+- 87 test_simulation_config
+- 38 test_simulation_half_space
+- 25 test_simulation_numba_propagation (+1 correção bit-exato→rtol)
+- 22 test_simulation_numba_dipoles
+- 16 test_simulation_io
+- 20 test_simulation_postprocess
+- 16 test_simulation_numba_geometry
+- 12 test_simulation_numba_rotation
+- 11 test_simulation_numba_hankel
+- 20 test_simulation_numba_kernel
+- 18 test_simulation_forward
+- 15 test_simulation_analytical_validation
+- 11 test_simulation_benchmark
+- 11 test_simulation_visualization (Sprint 2.8)
+- 15 test_simulation_jax_foundation (Sprint 3.1)
+- **69 test_simulation_canonical_models (Sprint 2.9)**
+- **10 test_simulation_jax_propagation (Sprint 3.2)**
 
 **PRs mergeados em `main`**: #1 (Fase 1), #2–#6 (Sprints 2.1-2.7). Sprints 2.8
 + 3.1 em branch `feature/simulator-python-sprint-2-8-and-3-1` (este commit).
