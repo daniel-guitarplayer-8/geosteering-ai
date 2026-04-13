@@ -76,6 +76,8 @@ from geosteering_ai.simulation.visualization.plot_canonical import (
     plot_canonical_model,
 )
 from geosteering_ai.simulation.visualization.plot_geophysical import (
+    plot_apparent_resistivity_curves,
+    plot_geosignal_response_vs_dip,
     plot_nyquist,
     plot_polar_directivity,
     plot_pseudosection,
@@ -83,9 +85,11 @@ from geosteering_ai.simulation.visualization.plot_geophysical import (
 )
 from geosteering_ai.simulation.visualization.plot_ml import (
     plot_augmentation_preview,
+    plot_pinn_loss_decomposition,
     plot_uncertainty_bands,
 )
 from geosteering_ai.simulation.visualization.plot_physics import (
+    plot_anisotropy_ratio_sensitivity,
     plot_attenuation_phase,
     plot_feature_views,
     plot_geosignals,
@@ -126,4 +130,9 @@ __all__ = [
     # ML/DL integration (Sprint 2.10+)
     "plot_augmentation_preview",
     "plot_uncertainty_bands",
+    # Sprint 3.3.2 — 4 plots LWD/PINN industriais
+    "plot_apparent_resistivity_curves",
+    "plot_geosignal_response_vs_dip",
+    "plot_anisotropy_ratio_sensitivity",
+    "plot_pinn_loss_decomposition",
 ]

@@ -325,15 +325,16 @@ def fields_in_freqs_jax_batch(
     krJ0J1: np.ndarray,
     wJ0: np.ndarray,
     wJ1: np.ndarray,
+    use_native_dipoles: bool = False,
 ) -> np.ndarray:
     """Forward JAX batch sobre posições do poço.
 
-    API **sem vmap real** mas com pipeline JAX (propagação) + Numba
-    (dipolos). Implementação com ``vmap`` real fica para Sprint 3.3.1,
-    quando `pure_callback` for substituído por port JAX nativo dos
-    dipolos. Por enquanto, loop Python externo + JAX/JIT para a
-    propagação (ainda mais rápido que chamada Python pura por conta do
-    JIT cache do propagation).
+    API híbrida: pipeline JAX (propagação via ``common_arrays_jax`` +
+    ``common_factors_jax``) + dipolos Numba via ``jax.pure_callback``.
+    Estratégia default (``use_native_dipoles=False``) preserva bit-
+    exatness vs Fortran em CPU e é a mais rápida para a maioria dos
+    casos — o ``pure_callback`` reutiliza os ~900 LOC validados do port
+    Numba.
 
     Args:
         positions_z: (n_positions,) — profundidades ponto-médio (m).
@@ -345,16 +346,43 @@ def fields_in_freqs_jax_batch(
         esp: (n-2,) espessuras internas.
         freqs_hz: (nf,) frequências.
         krJ0J1, wJ0, wJ1: (npt,) filtro Hankel.
+        use_native_dipoles: Se True, **tenta** usar o port JAX nativo dos
+            dipolos (Sprint 3.3.2: ``_hmd_tiv_full_jax`` com ``lax.switch``).
+            **IMPORTANTE** — na Sprint 3.3.2 (PR #10), apenas o kernel
+            ETAPA 5 do HMD está nativo em JAX. ETAPA 3 (potenciais
+            propagados ``Tudw/Txdw/Tuup/Txup``) e ETAPA 6 (assembly
+            Ward-Hohmann) ainda requerem trabalho adicional, assim como
+            o VMD nativo (Sprint 3.3.3 / PR #11). Por isso, quando
+            ``use_native_dipoles=True``, esta função emite um WARNING e
+            **cai de volta ao caminho híbrido**. A bandeira existe para
+            permitir que o caller valide a API e instrumente código de
+            benchmark preparatório para GPU (Sprint 3.4).
 
     Returns:
         H_tensor shape (n_positions, nf, 9) complex128.
 
     Note:
-        Na Sprint 3.3.1, ``_single_position_jax`` será paralelizado via
-        ``jax.vmap`` sobre positions_z, removendo o loop Python externo.
-        Atualmente, a vantagem é diferenciabilidade parcial (propagação)
-        e preparação para GPU na Sprint 3.4.
+        Quando ``use_native_dipoles=True`` ficar totalmente funcional
+        (PR #11), a função passará a:
+          1. Chamar ``compute_case_index_jax`` para cada posição
+          2. Usar ``_hmd_tiv_full_jax`` com ``lax.switch`` (6 cases)
+          3. Usar ``_vmd_native_jax`` (a ser implementado)
+          4. Permitir ``jax.grad``/``jax.jacfwd`` sobre ``rho_h``/``rho_v``
+             (PINN gradients)
+          5. Rodar em GPU T4/A100 via XLA kernel fusion
+
+        Até lá, o hybrid path (default) é o recomendado em produção.
     """
+    if use_native_dipoles:
+        import logging
+
+        _log = logging.getLogger(__name__)
+        _log.warning(
+            "use_native_dipoles=True — Sprint 3.3.2 (PR #10) fornece "
+            "apenas a ETAPA 5 do HMD em JAX (_hmd_tiv_full_jax). "
+            "VMD nativo e wiring completo ficam para Sprint 3.3.3 "
+            "(PR #11). Caindo de volta ao caminho híbrido (bit-exato)."
+        )
     n_positions = positions_z.shape[0]
     nf = freqs_hz.shape[0]
     npt = krJ0J1.shape[0]

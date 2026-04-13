@@ -29,8 +29,9 @@
 # ║                                                                           ║
 # ║  COMPLETUDE                                                               ║
 # ║    • decoupling_factors_jax(L) → (ACp, ACx)          ✅                 ║
-# ║    • _hmd_tiv_same_layer_jax(...)  caso camadR==camadT ✅               ║
-# ║    • _hmd_tiv_full_jax(...)        6 casos              ⏳ Sprint 3.3.2 ║
+# ║    • _dipole_phases_jax(...)        fatores exp       ✅                 ║
+# ║    • _hmd_tiv_kernel_case_{1..6}_jax kernels Ktm/Kte/Ktedz ✅ 3.3.2     ║
+# ║    • _hmd_tiv_full_jax(...)        6 casos via lax.switch ✅ 3.3.2     ║
 # ║    • _vmd_native_jax(...)          VMD nativo           ⏳ Sprint 3.3.3 ║
 # ║                                                                           ║
 # ║  REFERÊNCIAS                                                              ║
@@ -239,11 +240,419 @@ def _hmd_tiv_same_layer_jax(
 # Status de implementação (para consulta via código)
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 3.3.2 — Kernels dos 6 casos geométricos (ETAPA 5 do hmd_tiv)
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Cada caso computa (Ktm, Kte, Ktedz) — 3 arrays (npt,) complex128 — a partir
+# de arrays layer-slice (npt,) passados pelo caller. A ideia é que o caller
+# (_hmd_tiv_full_jax) pré-selecione `u[:, camad_r]`, `s[:, camad_r]`, etc.
+# e passe essas fatias para as funções abaixo. Isto evita indexação dinâmica
+# dentro das branches do lax.switch (que exigiria shapes uniformes).
+#
+# Assinatura comum dos 6 cases:
+#   Args (npt,) complex128:
+#     u_r, s_r          — constantes TE/TM na camada do RX
+#     RTEdw_r, RTEup_r  — reflexões TE (camada RX)
+#     RTMdw_r, RTMup_r  — reflexões TM (camada RX)
+#     Tudw_r, Tuup_r    — potenciais propagados TE na camada RX
+#     Txdw_r, Txup_r    — potenciais propagados TM na camada RX
+#     Mxdw, Mxup, Eudw, Euup — fatores comuns (common_factors)
+#   Args escalares (float):
+#     z, h0, prof_r, prof_r1, h_r — geometria (z do RX, h0 do TX,
+#       profundidades da camada RX, espessura da camada RX)
+#   Returns:
+#     Ktm, Kte, Ktedz — (npt,) complex128
+#
+# Referência: _numba/dipoles.py:547-644 (ETAPA 5 do hmd_tiv)
+
+
+@jax.jit
+def _hmd_tiv_kernel_case1_jax(
+    u_r: jax.Array,
+    s_r: jax.Array,
+    RTEdw_r: jax.Array,
+    RTEup_r: jax.Array,
+    RTMdw_r: jax.Array,
+    RTMup_r: jax.Array,
+    Tudw_r: jax.Array,
+    Tuup_r: jax.Array,
+    Txdw_r: jax.Array,
+    Txup_r: jax.Array,
+    Mxdw: jax.Array,
+    Mxup: jax.Array,
+    Eudw: jax.Array,
+    Euup: jax.Array,
+    z: float,
+    h0: float,
+    prof_r: float,
+    prof_r1: float,
+    h_r: float,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Caso 1 — camadR==0 and camadT!=0 (RX na camada topo, TX abaixo).
+
+    Referência Numba (linhas 547-551)::
+
+        Ktm = Txup[:, 0] * np.exp(s[:, 0] * z)
+        Kte = Tuup[:, 0] * np.exp(u[:, 0] * z)
+        Ktedz = u[:, 0] * Kte
+    """
+    Ktm = Txup_r * jnp.exp(s_r * z)
+    Kte = Tuup_r * jnp.exp(u_r * z)
+    Ktedz = u_r * Kte
+    return Ktm, Kte, Ktedz
+
+
+@jax.jit
+def _hmd_tiv_kernel_case2_jax(
+    u_r,
+    s_r,
+    RTEdw_r,
+    RTEup_r,
+    RTMdw_r,
+    RTMup_r,
+    Tudw_r,
+    Tuup_r,
+    Txdw_r,
+    Txup_r,
+    Mxdw,
+    Mxup,
+    Eudw,
+    Euup,
+    z,
+    h0,
+    prof_r,
+    prof_r1,
+    h_r,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Caso 2 — camadR < camadT (RX acima do TX, camada interna).
+
+    Referência Numba (linhas 552-572)::
+
+        Ktm = Txup[:, r] * (exp(s*(z - prof[r+1]))
+              + RTMup[:, r] * exp(-s*(z - prof[r] + h[r])))
+        Kte = Tuup[:, r] * (exp(u*(z - prof[r+1]))
+              + RTEup[:, r] * exp(-u*(z - prof[r] + h[r])))
+        Ktedz = u * Tuup * (exp(...) - RTEup * exp(...))
+    """
+    a_tm = jnp.exp(s_r * (z - prof_r1))
+    b_tm = RTMup_r * jnp.exp(-s_r * (z - prof_r + h_r))
+    Ktm = Txup_r * (a_tm + b_tm)
+
+    a_te = jnp.exp(u_r * (z - prof_r1))
+    b_te = RTEup_r * jnp.exp(-u_r * (z - prof_r + h_r))
+    Kte = Tuup_r * (a_te + b_te)
+
+    Ktedz = u_r * Tuup_r * (a_te - b_te)
+    return Ktm, Kte, Ktedz
+
+
+@jax.jit
+def _hmd_tiv_kernel_case3_jax(
+    u_r,
+    s_r,
+    RTEdw_r,
+    RTEup_r,
+    RTMdw_r,
+    RTMup_r,
+    Tudw_r,
+    Tuup_r,
+    Txdw_r,
+    Txup_r,
+    Mxdw,
+    Mxup,
+    Eudw,
+    Euup,
+    z,
+    h0,
+    prof_r,
+    prof_r1,
+    h_r,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Caso 3 — camadR==camadT and z <= h0 (mesma camada, RX acima do TX).
+
+    Referência Numba (linhas 573-595).
+    """
+    a_tm = jnp.exp(s_r * (z - h0))
+    b_tm = RTMup_r * Mxup * jnp.exp(-s_r * (z - prof_r))
+    c_tm = RTMdw_r * Mxdw * jnp.exp(s_r * (z - prof_r1))
+    Ktm = Txup_r * (a_tm + b_tm + c_tm)
+
+    a_te = jnp.exp(u_r * (z - h0))
+    b_te = RTEup_r * Euup * jnp.exp(-u_r * (z - prof_r))
+    c_te = RTEdw_r * Eudw * jnp.exp(u_r * (z - prof_r1))
+    Kte = Tuup_r * (a_te + b_te - c_te)
+
+    Ktedz = u_r * Tuup_r * (a_te - b_te - c_te)
+    return Ktm, Kte, Ktedz
+
+
+@jax.jit
+def _hmd_tiv_kernel_case4_jax(
+    u_r,
+    s_r,
+    RTEdw_r,
+    RTEup_r,
+    RTMdw_r,
+    RTMup_r,
+    Tudw_r,
+    Tuup_r,
+    Txdw_r,
+    Txup_r,
+    Mxdw,
+    Mxup,
+    Eudw,
+    Euup,
+    z,
+    h0,
+    prof_r,
+    prof_r1,
+    h_r,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Caso 4 — camadR==camadT and z > h0 (mesma camada, RX abaixo do TX).
+
+    Referência Numba (linhas 596-618).
+    """
+    a_tm = jnp.exp(-s_r * (z - h0))
+    b_tm = RTMup_r * Mxup * jnp.exp(-s_r * (z - prof_r))
+    c_tm = RTMdw_r * Mxdw * jnp.exp(s_r * (z - prof_r1))
+    Ktm = Txdw_r * (a_tm + b_tm + c_tm)
+
+    a_te = jnp.exp(-u_r * (z - h0))
+    b_te = RTEup_r * Euup * jnp.exp(-u_r * (z - prof_r))
+    c_te = RTEdw_r * Eudw * jnp.exp(u_r * (z - prof_r1))
+    Kte = Tudw_r * (a_te - b_te + c_te)
+
+    Ktedz = -u_r * Tudw_r * (a_te - b_te - c_te)
+    return Ktm, Kte, Ktedz
+
+
+@jax.jit
+def _hmd_tiv_kernel_case5_jax(
+    u_r,
+    s_r,
+    RTEdw_r,
+    RTEup_r,
+    RTMdw_r,
+    RTMup_r,
+    Tudw_r,
+    Tuup_r,
+    Txdw_r,
+    Txup_r,
+    Mxdw,
+    Mxup,
+    Eudw,
+    Euup,
+    z,
+    h0,
+    prof_r,
+    prof_r1,
+    h_r,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Caso 5 — camadR > camadT and camadR != n-1 (RX abaixo, interna).
+
+    Referência Numba (linhas 619-639).
+    """
+    a_tm = jnp.exp(-s_r * (z - prof_r))
+    b_tm = RTMdw_r * jnp.exp(s_r * (z - prof_r1 - h_r))
+    Ktm = Txdw_r * (a_tm + b_tm)
+
+    a_te = jnp.exp(-u_r * (z - prof_r))
+    b_te = RTEdw_r * jnp.exp(u_r * (z - prof_r1 - h_r))
+    Kte = Tudw_r * (a_te + b_te)
+
+    Ktedz = -u_r * Tudw_r * (a_te - b_te)
+    return Ktm, Kte, Ktedz
+
+
+@jax.jit
+def _hmd_tiv_kernel_case6_jax(
+    u_r,
+    s_r,
+    RTEdw_r,
+    RTEup_r,
+    RTMdw_r,
+    RTMup_r,
+    Tudw_r,
+    Tuup_r,
+    Txdw_r,
+    Txup_r,
+    Mxdw,
+    Mxup,
+    Eudw,
+    Euup,
+    z,
+    h0,
+    prof_r,
+    prof_r1,
+    h_r,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Caso 6 — camadR == n-1 (RX na última camada semi-infinita).
+
+    Referência Numba (linhas 640-644)::
+
+        Ktm = Txdw[:, r] * exp(-s*(z - prof[r]))
+        Kte = Tudw[:, r] * exp(-u*(z - prof[r]))
+        Ktedz = -u * Kte
+    """
+    Ktm = Txdw_r * jnp.exp(-s_r * (z - prof_r))
+    Kte = Tudw_r * jnp.exp(-u_r * (z - prof_r))
+    Ktedz = -u_r * Kte
+    return Ktm, Kte, Ktedz
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# compute_case_index_jax — determina índice 0..5 do caso geométrico
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def compute_case_index_jax(
+    camad_r: int, camad_t: int, n: int, z: float, h0: float
+) -> int:
+    """Mapeia `(camad_r, camad_t, z, h0)` → índice 0..5 do caso hmd_tiv.
+
+    Esta função é chamada no nível Python (fora de `@jit`) porque depende
+    de branching baseado em valores concretos. O `lax.switch` no
+    dispatcher recebe o inteiro retornado.
+
+    Args:
+        camad_r: Índice da camada do receptor (0-indexed).
+        camad_t: Índice da camada do transmissor (0-indexed).
+        n: Número total de camadas.
+        z: Profundidade do RX (m).
+        h0: Profundidade do TX (m).
+
+    Returns:
+        Inteiro em [0, 5] correspondente a um dos 6 casos:
+          0: camadR==0 and camadT!=0        (caso 1)
+          1: camadR < camadT                 (caso 2)
+          2: camadR==camadT and z <= h0      (caso 3)
+          3: camadR==camadT and z > h0       (caso 4)
+          4: camadR > camadT and camadR != n-1 (caso 5)
+          5: camadR == n-1                   (caso 6)
+
+    Note:
+        A ordem é importante — replica o `if/elif` do Numba em
+        `dipoles.py:547-644`.
+    """
+    if camad_r == 0 and camad_t != 0:
+        return 0
+    if camad_r < camad_t:
+        return 1
+    if camad_r == camad_t and z <= h0:
+        return 2
+    if camad_r == camad_t and z > h0:
+        return 3
+    if camad_r > camad_t and camad_r != (n - 1):
+        return 4
+    return 5
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _hmd_tiv_full_jax — dispatcher com lax.switch (Sprint 3.3.2)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _hmd_tiv_full_jax(
+    case_index: int,
+    u_r: jax.Array,
+    s_r: jax.Array,
+    RTEdw_r: jax.Array,
+    RTEup_r: jax.Array,
+    RTMdw_r: jax.Array,
+    RTMup_r: jax.Array,
+    Tudw_r: jax.Array,
+    Tuup_r: jax.Array,
+    Txdw_r: jax.Array,
+    Txup_r: jax.Array,
+    Mxdw: jax.Array,
+    Mxup: jax.Array,
+    Eudw: jax.Array,
+    Euup: jax.Array,
+    z: float,
+    h0: float,
+    prof_r: float,
+    prof_r1: float,
+    h_r: float,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Dispatcher ETAPA 5 do hmd_tiv via `lax.switch` nos 6 casos geométricos.
+
+    Esta função reproduz bit-a-bit os kernels Ktm/Kte/Ktedz da Fortran
+    `magneticdipoles.f08` (linhas 310-383) e do port Numba
+    (`_numba/dipoles.py:547-644`). A diferença chave é a substituição do
+    Python `if/elif` por `jax.lax.switch`, que:
+
+      - é rastreável por `jax.jit` (um compile para todas as 6 ramos)
+      - é diferenciável via `jax.grad` (nenhuma branch Python)
+      - suporta vectorização automática via `jax.vmap`
+
+    Args:
+        case_index: Inteiro em [0, 5] obtido via
+            :func:`compute_case_index_jax`.
+        u_r, s_r, ...: Arrays `(npt,) complex128` — slice da camada RX.
+        Mxdw, Mxup, Eudw, Euup: Fatores comuns `(npt,) complex128`.
+        z, h0, prof_r, prof_r1, h_r: Escalares geométricos (float).
+
+    Returns:
+        `(Ktm, Kte, Ktedz)` — 3 arrays `(npt,) complex128`.
+
+    Note:
+        Esta é a saída da **ETAPA 5** do hmd_tiv. Para obter `(Hx, Hy, Hz)`,
+        o caller deve continuar com a ETAPA 6 (assembly Ward-Hohmann 4.3)
+        que multiplica os kernels pelos pesos Hankel `wJ0`/`wJ1` e monta
+        as 6 componentes de saída. Veja `_jax/kernel.py` para a integração
+        completa.
+
+    Example:
+        >>> idx = compute_case_index_jax(camad_r=1, camad_t=1,
+        ...                              n=3, z=5.0, h0=4.0)
+        >>> # idx == 3 (caso 4: mesma camada, z > h0)
+        >>> Ktm, Kte, Ktedz = _hmd_tiv_full_jax(idx, ...)
+    """
+    branches = [
+        _hmd_tiv_kernel_case1_jax,
+        _hmd_tiv_kernel_case2_jax,
+        _hmd_tiv_kernel_case3_jax,
+        _hmd_tiv_kernel_case4_jax,
+        _hmd_tiv_kernel_case5_jax,
+        _hmd_tiv_kernel_case6_jax,
+    ]
+    return jax.lax.switch(
+        case_index,
+        branches,
+        u_r,
+        s_r,
+        RTEdw_r,
+        RTEup_r,
+        RTMdw_r,
+        RTMup_r,
+        Tudw_r,
+        Tuup_r,
+        Txdw_r,
+        Txup_r,
+        Mxdw,
+        Mxup,
+        Eudw,
+        Euup,
+        z,
+        h0,
+        prof_r,
+        prof_r1,
+        h_r,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Status de implementação (para consulta via código)
+# ──────────────────────────────────────────────────────────────────────────────
+
 IMPLEMENTATION_STATUS = {
     "decoupling_factors_jax": "✅ completo (diferenciável)",
     "_dipole_phases_jax": "✅ completo (caso camadR==camadT)",
-    "_hmd_tiv_same_layer_jax": "🟡 parcial (apenas caso 3 de 6)",
-    "_hmd_tiv_full_jax": "⏳ planejado para Sprint 3.3.2",
+    "_hmd_tiv_same_layer_jax": "🟡 parcial (apenas caso 3 de 6, scaffolding)",
+    "_hmd_tiv_kernel_case1_jax..case6_jax": "✅ completos (Sprint 3.3.2)",
+    "_hmd_tiv_full_jax": "✅ dispatcher lax.switch (Sprint 3.3.2)",
+    "compute_case_index_jax": "✅ mapeia geometria → índice 0..5",
     "_vmd_native_jax": "⏳ planejado para Sprint 3.3.3",
 }
 
@@ -252,5 +661,14 @@ __all__ = [
     "decoupling_factors_jax",
     "_dipole_phases_jax",
     "_hmd_tiv_same_layer_jax",
+    # Sprint 3.3.2 — kernels dos 6 casos
+    "_hmd_tiv_kernel_case1_jax",
+    "_hmd_tiv_kernel_case2_jax",
+    "_hmd_tiv_kernel_case3_jax",
+    "_hmd_tiv_kernel_case4_jax",
+    "_hmd_tiv_kernel_case5_jax",
+    "_hmd_tiv_kernel_case6_jax",
+    "compute_case_index_jax",
+    "_hmd_tiv_full_jax",
     "IMPLEMENTATION_STATUS",
 ]

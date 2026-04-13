@@ -33,14 +33,14 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **1.1.0** (+ Sprints **2.10** cache, **3.3.1** JAX native parcial, **4.1** empymod + 16 plots) |
-| **Branch**       | `feature/simulator-python-sprint-2-10-and-more`           |
-| **Base**         | `main` (Sprint 2.7 `91e4634`)                              |
+| **Versão**       | **1.2.0** (+ Sprint **3.3.2** HMD native via `lax.switch` + 4 plots LWD/PINN) |
+| **Branch**       | `feature/sim-sprint-3-3-2-hmd`                            |
+| **Base**         | `main` (PR #9 `caae8ab` — Sprints 2.10 + 3.3.1 + 4.1)      |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod (opt-in)  |
 | **Precisão**     | `complex128` default + `complex64` via config             |
 | **Filtro default** | Werthmüller 201pt (paridade Fortran filter_type=0)      |
-| **Testes**       | **1214 passed, 295 skipped** em 41.4s                     |
+| **Testes**       | **1250 passed, 295 skipped** em ~50s                      |
 | **Performance**  | **1.014M/347k/184k mod/h** (small/medium/large) = **1722%/589%/312% Fortran** ✅ |
 | **Referência**   | `docs/reference/plano_simulador_python_jax_numba.md`      |
 
@@ -116,6 +116,65 @@ Port parcial nativo (mantendo híbrido da Sprint 3.3 como API preferida):
 
 **Escopo Sprint 4.1**: VMD axial (Hzz) isotrópico. TIV e outros
 componentes em Sprint 4.2.
+
+### 1.2n Sprint 3.3.2 — HMD native via `lax.switch` (2026-04-13)
+
+Port nativo JAX da **ETAPA 5 do hmd_tiv** (kernels Ktm/Kte/Ktedz) com os
+6 casos geométricos dispatched via `jax.lax.switch`. Preserva o caminho
+híbrido (default) 100% bit-exato; o port nativo é opt-in e visa GPU T4+
+e `jax.grad` para PINN.
+
+**Implementado** (`_jax/dipoles_native.py`):
+- ✅ `_hmd_tiv_kernel_case1_jax` — camadR==0 and camadT!=0 (RX topo)
+- ✅ `_hmd_tiv_kernel_case2_jax` — camadR < camadT (RX acima)
+- ✅ `_hmd_tiv_kernel_case3_jax` — camadR==camadT and z≤h0 (mesma, acima)
+- ✅ `_hmd_tiv_kernel_case4_jax` — camadR==camadT and z>h0 (mesma, abaixo)
+- ✅ `_hmd_tiv_kernel_case5_jax` — camadR > camadT, interna
+- ✅ `_hmd_tiv_kernel_case6_jax` — camadR == n-1 (última camada)
+- ✅ `compute_case_index_jax(camadR, camadT, n, z, h0) → 0..5`
+- ✅ `_hmd_tiv_full_jax(idx, ...) → (Ktm, Kte, Ktedz)` via `lax.switch`
+
+**Opt-in no kernel** (`_jax/kernel.py`):
+- Novo kwarg `fields_in_freqs_jax_batch(..., use_native_dipoles=False)`
+- Quando `True`, emite WARNING e **cai de volta ao híbrido** (bit-exato).
+  Wiring completo fica para Sprint 3.3.3 (VMD nativo) + Sprint 3.3.4
+  (ETAPAS 3+6 nativos). A flag existe para validar API + preparar GPU.
+
+**Testes** (`tests/test_simulation_jax_dipoles_native.py`, 28 PASS):
+- 6 parity bit-exato (rtol < 1e-12) — 1 por caso vs referência NumPy
+- 6 dispatcher equivalence — `lax.switch[idx]` == `case{idx+1}_jax(...)`
+- 6 case_index mapping — 6 configurações canônicas
+- 4 high-resistivity stability — ρ ∈ [10³, 10⁴, 10⁵, 10⁶] Ω·m
+- 2 differentiability — `jax.grad` sobre z e L (finito e não-nulo)
+- 1 compile-time budget — primeira chamada < 90s
+- 2 status registry sanity
+- 1 hybrid fallback equivalence — `use_native=True` == `use_native=False`
+  (bit-exato, rtol=1e-14)
+
+### 1.2o 4 plotagens LWD/PINN industriais (Sprint 3.3.2)
+
+Adicionadas em arquivos existentes (não criados novos módulos):
+
+**`plot_geophysical.py`** (+2 plots):
+- `plot_apparent_resistivity_curves(result, ...)` — curvas ρ_a vs TVD
+  (padrão industrial LWD Schlumberger/Halliburton). Painel duplo com
+  perfil verdadeiro + ρ_a aparente sobreposto por frequência.
+- `plot_geosignal_response_vs_dip(results_by_dip, ...)` — 4 painéis
+  (2×2) com USD/UAD/UHR/UHA em função de dip relativo — padrão
+  boundary-mapping de LWD direcional.
+
+**`plot_physics.py`** (+1 plot):
+- `plot_anisotropy_ratio_sensitivity(result, rho_h, rho_v, esp, ...)` —
+  mapa ∂|H|/∂λ (λ = √(ρ_v/ρ_h)) via diferenças finitas. **Requer
+  arrays explícitos** do perfil (code-review Sprint 3.3.2: reconstrução
+  automática era lossy para perfis com camadas repetidas).
+
+**`plot_ml.py`** (+1 plot):
+- `plot_pinn_loss_decomposition(loss_history)` — decomposição temporal
+  L_total = L_data + L_physics + L_continuity. Integra com os 8
+  cenários PINN do pipeline v2.0 (`losses/pinns.py`).
+
+**Smoke tests** (+13 em `test_simulation_visualization.py`, PASS).
 
 ### 1.2 Fases do plano (7 fases)
 
