@@ -33,9 +33,9 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **1.5.0** (+ Sprint **5.1 JAX jacfwd** + Sprint **5.2 FD Numba** + Sprint **4.x TIV analítico**) |
-| **Branch**       | `feature/pr13-jacobiano-diferenciavel`                    |
-| **Base**         | `main` (PR #12 `869cfe9` — Sprint 3.3.4 JAX native e2e + 4.3 empymod bit-exact + I/O) |
+| **Versão**       | **1.6.0-alpha** (+ Sprint **4.4 Fortran↔Python direto** + bench real CPU Intel i9) |
+| **Branch**       | `feature/pr14a-fortran-direto-benchmarks`                 |
+| **Base**         | `main` (PR #13 `16a50ac` — Sprint 5.1+5.2 Jacobiano + TIV analítico) |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod 2.6+ (opt-in) |
 | **Precisão**     | `complex128` default + `complex64` via config             |
@@ -1303,3 +1303,66 @@ jac.method  # "fd_central"
 - **PR #14 — Notebook Colab**: `bench_jax_gpu_colab.ipynb` com demo jacfwd interativo (cell execution no lado do usuário).
 - **PR #15 — JAX jacfwd end-to-end nativo** (Sprint F7.5.1b): exige `fields_in_freqs_jax_batch` jit-compilable em `(rho_h, rho_v)`. Hoje o caminho nativo existe mas a diferenciação end-to-end em relação a `rho_h` requer wrapping adicional.
 - **Sprint F7.6.1**: integração no `PipelineConfig` via `simulator_backend` dispatch — `simulate()` passará a aceitar `backend="jax"` diretamente.
+
+---
+
+## 21. PR #14a — Sprint 4.4 Fortran↔Python direto + Benchmarks CPU Intel i9 (2026-04-13)
+
+### 21.1 Entregas
+
+| Sprint | Status | Detalhe |
+|:------:|:------:|:--------|
+| **4.4 Fortran↔Python direto** | ✅ | `compare_fortran.py` + 10 testes + `tatu.x` subprocess |
+| **Benchmarks CPU real** | ✅ | Intel Core i9 (16 threads) — 3 perfis medidos |
+
+### 21.2 Paridade binária (7 modelos canônicos, tol_abs 1e-6)
+
+| Modelo | Numba `max_abs` | Gate |
+|:-------|-----------------:|:-----|
+| oklahoma_3 | 1.78e-13 | ✅ |
+| oklahoma_5 | 9.50e-14 | ✅ |
+| devine_8 | 7.51e-14 | ✅ |
+| oklahoma_15 | 8.99e-14 | ✅ |
+| oklahoma_28 | 1.10e-13 | ✅ (ρ>1000 Ω·m) |
+| hou_7 | 1.62e-13 | ✅ |
+| viking_graben_10 | 1.36e-13 | ✅ |
+
+Paridade prática: **bit-a-bit** (ordem do epsilon de `complex128`).
+
+### 21.3 Benchmark forward CPU Intel i9 (5 iter + 2 warmup)
+
+| Perfil | Camadas | Pos. | Tempo/mod | Throughput | % Fortran |
+|:------:|--------:|-----:|----------:|-----------:|----------:|
+| small | 3 | 100 | 3.91 ms | **921.544 mod/h** | **1.566%** |
+| medium | 7 | 300 | 12.60 ms | **285.604 mod/h** | **485%** |
+| large | 22 | 601 | 25.51 ms | **141.139 mod/h** | **240%** |
+
+Baseline Fortran documentado: 58.856 mod/h. Python Numba supera em todos os perfis.
+
+### 21.4 Comparação direta tatu.x × Numba por modelo
+
+Média: Fortran 29.7 ms/modelo × Python 6.6 ms/modelo → **speedup 4.53×**.
+
+### 21.5 API pública nova
+
+```python
+from geosteering_ai.simulation.validation import (
+    run_tatu_x,                   # subprocess wrapper
+    read_fortran_dat_22col,       # parser 22-col
+    compare_fortran_python,       # orquestrador
+    FortranComparisonResult,      # dataclass frozen
+)
+```
+
+### 21.6 Arquivos
+
+| Arquivo | Tipo |
+|:--------|:-----|
+| `geosteering_ai/simulation/validation/compare_fortran.py` | NOVO (~480 LOC) |
+| `tests/test_simulation_compare_fortran.py` | NOVO (10 testes PASS em 2.6s) |
+| `docs/reference/sprint_4_4_fortran_direto.md` | NOVO (relatório técnico PT-BR) |
+
+### 21.7 Próximos PRs
+
+- **PR #14b** — Sprint 5.1b `jax.jacfwd` end-to-end nativo + notebook GPU Colab T4.
+- **PR #14c** — Sprints 6.1+6.2: `simulator_backend` em `PipelineConfig` + `SyntheticDataGenerator` substituindo `Fortran_Gerador/batch_runner.py`.

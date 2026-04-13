@@ -89,6 +89,15 @@ from geosteering_ai.simulation.validation.compare_empymod import (
     compare_numba_empymod_tensor,
     install_empymod_instruction,
 )
+from geosteering_ai.simulation.validation.compare_fortran import (
+    DEFAULT_FORTRAN_EXEC,
+    DEFAULT_TOL_ABS,
+    DEFAULT_TOL_ABS_JAX_NATIVE,
+    FortranComparisonResult,
+    compare_fortran_python,
+    read_fortran_dat_22col,
+    run_tatu_x,
+)
 from geosteering_ai.simulation.validation.half_space import (
     MU_0,
     hmd_fullspace_tiv,
@@ -130,4 +139,12 @@ __all__ = [
     "COMPONENT_TENSOR_INDEX",
     "TensorComparisonResult",
     "compare_numba_empymod_tensor",
+    # compare_fortran (Sprint 4.4 — PR #14a)
+    "DEFAULT_FORTRAN_EXEC",
+    "DEFAULT_TOL_ABS",
+    "DEFAULT_TOL_ABS_JAX_NATIVE",
+    "FortranComparisonResult",
+    "compare_fortran_python",
+    "read_fortran_dat_22col",
+    "run_tatu_x",
 ]
