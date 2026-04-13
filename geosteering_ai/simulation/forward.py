@@ -63,19 +63,263 @@ Example:
 """
 from __future__ import annotations
 
-import dataclasses
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
-from geosteering_ai.simulation._numba.kernel import compute_zrho, fields_in_freqs
+from geosteering_ai.simulation._numba.kernel import (
+    _compute_zrho_kernel,
+    _fields_in_freqs_kernel,
+    compute_zrho,
+    fields_in_freqs,
+)
+from geosteering_ai.simulation._numba.propagation import HAS_NUMBA, njit
 from geosteering_ai.simulation.config import SimulationConfig
 from geosteering_ai.simulation.filters import FilterLoader
 
+# Sprint 2.9: import de prange para paralelismo real de threads Numba.
+try:
+    from numba import prange as _prange  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    _prange = range  # type: ignore[assignment]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Paralelização via ThreadPoolExecutor — Sprint 2.8
+# ──────────────────────────────────────────────────────────────────────────────
+# Arquitetura: o orquestrador `fields_in_freqs` (kernel.py) é uma função
+# Python pura que internamente chama kernels `@njit` (common_arrays,
+# common_factors, hmd_tiv, vmd, rotate_tensor). Esses kernels **liberam o
+# GIL** durante a execução nativa (LLVM), permitindo paralelismo real via
+# Python threads — sem necessidade de refatorar a arquitetura.
+#
+# Escolha de `ThreadPoolExecutor` (e não ProcessPoolExecutor):
+#   • Threads compartilham memória → zero serialização de arrays
+#     grandes (H_tensor, perfis geológicos, filtros Hankel).
+#   • Processos exigiriam pickle+IPC de ~86 MB por posição (H_tensor
+#     slice) — overhead maior que o ganho.
+#   • GIL é liberado dentro dos kernels @njit — threads paralelizam de fato.
+#
+# Escolha de `num_threads`:
+#   • cfg.num_threads = -1 (default) → `os.cpu_count()` threads.
+#   • Valores ≥ 1 → número explícito de threads.
+#   • Pools são criados por chamada de `simulate()`; não há pool global
+#     (evita race conditions entre chamadas concorrentes).
+
 logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _simulate_positions_njit — @njit(parallel=True) + prange (Sprint 2.9)
+# ──────────────────────────────────────────────────────────────────────────────
+# Com o orquestrador `_fields_in_freqs_kernel` agora @njit (Sprint 2.9), o
+# loop de posições pode ser decorado com `@njit(parallel=True)` e usar
+# `prange`. Isso elimina completamente o GIL do caminho crítico — o
+# paralelismo é feito pelas threads LLVM nativas (pthreads/OpenMP).
+#
+# Este é o caminho PREFERIDO de paralelização quando Numba está disponível.
+# O ThreadPool (_simulate_positions_parallel) é mantido como fallback para
+# comparação/debug.
+#
+# Cada iteração `j` é independente — escrita em H_tensor[j, :, :] é
+# mutuamente exclusiva, sem data race.
+
+
+@njit(parallel=True, cache=True)
+def _simulate_positions_njit(
+    positions_z: np.ndarray,
+    dz_half: float,
+    r_half: float,
+    dip_rad: float,
+    n: int,
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    esp: np.ndarray,
+    freqs_hz: np.ndarray,
+    krJ0J1: np.ndarray,
+    wJ0: np.ndarray,
+    wJ1: np.ndarray,
+    H_tensor: np.ndarray,
+    z_obs: np.ndarray,
+    rho_h_at_obs: np.ndarray,
+    rho_v_at_obs: np.ndarray,
+) -> None:
+    """Loop paralelo @njit sobre posições do poço (Sprint 2.9).
+
+    Versão 100% @njit com ``prange`` para paralelismo real (sem GIL).
+    Chamada preferida em ``simulate(cfg)`` quando ``cfg.parallel=True``.
+
+    Args:
+        positions_z: (n_positions,) — profundidades ponto-médio.
+        dz_half: metade da separação vertical (L·cos(dip)/2).
+        r_half: metade do afastamento horizontal (L·sin(dip)/2).
+        dip_rad: dip da ferramenta em radianos.
+        n: número de camadas (inclui semi-espaços).
+        rho_h, rho_v: resistividades por camada (n,).
+        esp: espessuras internas (n-2,).
+        freqs_hz: frequências (nf,).
+        krJ0J1, wJ0, wJ1: filtro Hankel (npt,).
+        H_tensor: saída (n_positions, nf, 9) — pré-alocado.
+        z_obs, rho_h_at_obs, rho_v_at_obs: saídas (n_positions,) pré-alocadas.
+
+    Note:
+        Função sem retorno: preenche arrays inplace. O decorador
+        ``@njit(parallel=True)`` faz ``prange`` distribuir as iterações
+        entre todas as threads Numba (controladas por
+        ``numba.set_num_threads()`` ou env var ``NUMBA_NUM_THREADS``).
+    """
+    n_positions = positions_z.shape[0]
+
+    for j in _prange(n_positions):
+        z_mid = positions_z[j]
+
+        Tz = z_mid - dz_half
+        cz = z_mid + dz_half
+        Tx = -r_half
+        cx = r_half
+        Ty = 0.0
+        cy = 0.0
+
+        # Chamada ao kernel @njit do orquestrador forward (Sprint 2.9)
+        cH = _fields_in_freqs_kernel(
+            Tx,
+            Ty,
+            Tz,
+            cx,
+            cy,
+            cz,
+            dip_rad,
+            n,
+            rho_h,
+            rho_v,
+            esp,
+            freqs_hz,
+            krJ0J1,
+            wJ0,
+            wJ1,
+        )
+        H_tensor[j, :, :] = cH
+
+        # Metadados da posição via kernel @njit de compute_zrho (Sprint 2.9)
+        z_obs_j, rh_j, rv_j = _compute_zrho_kernel(Tz, cz, n, rho_h, rho_v, esp)
+        z_obs[j] = z_obs_j
+        rho_h_at_obs[j] = rh_j
+        rho_v_at_obs[j] = rv_j
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _simulate_positions_parallel — Pool de threads sobre posições (Sprint 2.8)
+# ──────────────────────────────────────────────────────────────────────────────
+# LEGADO da Sprint 2.8 — kept como fallback/debug. A Sprint 2.9 tornou
+# `_simulate_positions_njit` o caminho preferido com speedup real via
+# @njit(parallel=True).
+
+
+def _simulate_positions_parallel(
+    positions_z: np.ndarray,
+    dz_half: float,
+    r_half: float,
+    dip_rad: float,
+    n: int,
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    esp: np.ndarray,
+    freqs_hz: np.ndarray,
+    krJ0J1: np.ndarray,
+    wJ0: np.ndarray,
+    wJ1: np.ndarray,
+    H_tensor: np.ndarray,
+    z_obs: np.ndarray,
+    rho_h_at_obs: np.ndarray,
+    rho_v_at_obs: np.ndarray,
+    num_threads: int,
+) -> None:
+    """Distribui o loop de posições entre threads Python.
+
+    Preenche ``H_tensor``, ``z_obs``, ``rho_h_at_obs`` e ``rho_v_at_obs``
+    inplace. Usa :class:`concurrent.futures.ThreadPoolExecutor` com
+    ``num_threads`` workers. O GIL é liberado durante a execução dos
+    kernels Numba, permitindo paralelismo real.
+
+    Args:
+        positions_z: Profundidades ponto-médio (n_positions,).
+        dz_half: Metade da separação vertical (L·cos(dip)/2).
+        r_half: Metade do afastamento horizontal (L·sin(dip)/2).
+        dip_rad: Dip da ferramenta em radianos.
+        n: Número de camadas (inclui semi-espaços).
+        rho_h, rho_v: Resistividades por camada (n,).
+        esp: Espessuras internas (n-2,).
+        freqs_hz: Frequências (nf,).
+        krJ0J1, wJ0, wJ1: Filtro Hankel (npt,).
+        H_tensor: Saída (n_positions, nf, 9) complex128 — pré-alocado.
+        z_obs: Saída (n_positions,) float64 — pré-alocado.
+        rho_h_at_obs, rho_v_at_obs: Saída (n_positions,) — pré-alocados.
+        num_threads: Número de threads. Se -1, usa ``os.cpu_count()``.
+
+    Note:
+        Função sem retorno: saída via mutação dos arrays pré-alocados.
+        Exceções levantadas em threads são re-lançadas pelo `executor.map`.
+    """
+    import os
+
+    n_positions = positions_z.shape[0]
+    cpu_count = os.cpu_count() or 1
+    max_workers = cpu_count if num_threads == -1 else max(1, num_threads)
+
+    # Chunking: cada worker processa um range contíguo de posições.
+    # Isto reduz o overhead de submit/retrieve do ThreadPoolExecutor (em
+    # vez de `n_positions` pequenas tasks, distribuímos `max_workers`
+    # tasks maiores). Vantagens:
+    #   • Acesso sequencial a memória (cache L2/L3 melhor aproveitado).
+    #   • Cada thread entra no código Numba várias vezes seguidas →
+    #     amortiza o custo de entrada/saída do regime sem-GIL.
+    #   • Reduz pressure no scheduler Python.
+    chunk_size = max(1, (n_positions + max_workers - 1) // max_workers)
+
+    def _worker_chunk(start: int) -> None:
+        end = min(start + chunk_size, n_positions)
+        for j in range(start, end):
+            z_mid = positions_z[j]
+
+            # Transmissor acima do ponto-médio, receptor abaixo
+            Tz = z_mid - dz_half
+            cz = z_mid + dz_half
+            Tx = -r_half
+            cx = r_half
+            Ty = 0.0
+            cy = 0.0
+
+            cH = fields_in_freqs(
+                Tx,
+                Ty,
+                Tz,
+                cx,
+                cy,
+                cz,
+                dip_rad,
+                n,
+                rho_h,
+                rho_v,
+                esp,
+                freqs_hz,
+                krJ0J1,
+                wJ0,
+                wJ1,
+            )
+            H_tensor[j, :, :] = cH
+
+            z_obs_j, rh_j, rv_j = compute_zrho(Tz, cz, n, rho_h, rho_v, esp)
+            z_obs[j] = z_obs_j
+            rho_h_at_obs[j] = rh_j
+            rho_v_at_obs[j] = rv_j
+
+    chunk_starts = list(range(0, n_positions, chunk_size))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Consome o iterador para propagar exceções dos workers.
+        list(executor.map(_worker_chunk, chunk_starts))
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SimulationResult — container de saída
@@ -258,55 +502,83 @@ def simulate(
     rho_h_at_obs = np.empty(n_positions, dtype=np.float64)
     rho_v_at_obs = np.empty(n_positions, dtype=np.float64)
 
-    # ── Loop sobre posições ───────────────────────────────────────
-    # Este loop será paralelizável via prange na Sprint 2.7 (benchmark).
-    # Por agora, serial — correto e portável.
+    # ── Loop sobre posições (Sprint 2.8 — paralelo opcional) ──────
+    # Se `cfg.parallel=True` e Numba disponível, delega a
+    # `_simulate_positions_parallel` (njit + prange). Caso contrário,
+    # executa serial no Python puro (debug-friendly, portável).
     logger.debug(
-        "simulate: n_positions=%d, nf=%d, n_layers=%d, dip=%.1f°, L=%.2f m",
+        "simulate: n_positions=%d, nf=%d, n_layers=%d, dip=%.1f°, L=%.2f m, parallel=%s",
         n_positions,
         nf,
         n,
         dip_deg,
         L,
+        cfg.parallel,
     )
 
-    for j in range(n_positions):
-        z_mid = positions_z[j]
+    if cfg.parallel and HAS_NUMBA and n_positions > 1:
+        # Sprint 2.9: caminho paralelo via @njit(parallel=True) + prange.
+        # Speedup real (sem GIL) graças ao port do orquestrador para @njit.
+        # Configura num_threads se o usuário especificou explicitamente.
+        if cfg.num_threads > 0:
+            import numba
 
-        # Transmissor acima do ponto-médio, receptor abaixo
-        Tz = z_mid - dz_half
-        cz = z_mid + dz_half
-        # Afastamento horizontal (simétrico em x)
-        Tx = -r_half
-        cx = r_half
-        Ty = 0.0
-        cy = 0.0
+            numba.set_num_threads(cfg.num_threads)
 
-        # Forward para todas as frequências nesta posição
-        cH = fields_in_freqs(
-            Tx=Tx,
-            Ty=Ty,
-            Tz=Tz,
-            cx=cx,
-            cy=cy,
-            cz=cz,
-            dip_rad=dip_rad,
-            n=n,
-            rho_h=rho_h,
-            rho_v=rho_v,
-            esp=esp,
-            freqs_hz=freqs_hz,
-            krJ0J1=krJ0J1,
-            wJ0=wJ0,
-            wJ1=wJ1,
+        _simulate_positions_njit(
+            positions_z,
+            dz_half,
+            r_half,
+            dip_rad,
+            n,
+            rho_h,
+            rho_v,
+            esp,
+            freqs_hz,
+            krJ0J1,
+            wJ0,
+            wJ1,
+            H_tensor,
+            z_obs,
+            rho_h_at_obs,
+            rho_v_at_obs,
         )
-        H_tensor[j, :, :] = cH
+    else:
+        # Caminho serial: executa no Python puro (para debug ou quando
+        # Numba não está instalado / parallel foi desabilitado por config).
+        for j in range(n_positions):
+            z_mid = positions_z[j]
 
-        # Metadados da posição
-        z_obs_j, rh_j, rv_j = compute_zrho(Tz, cz, n, rho_h, rho_v, esp)
-        z_obs[j] = z_obs_j
-        rho_h_at_obs[j] = rh_j
-        rho_v_at_obs[j] = rv_j
+            Tz = z_mid - dz_half
+            cz = z_mid + dz_half
+            Tx = -r_half
+            cx = r_half
+            Ty = 0.0
+            cy = 0.0
+
+            cH = fields_in_freqs(
+                Tx,
+                Ty,
+                Tz,
+                cx,
+                cy,
+                cz,
+                dip_rad,
+                n,
+                rho_h,
+                rho_v,
+                esp,
+                freqs_hz,
+                krJ0J1,
+                wJ0,
+                wJ1,
+            )
+            H_tensor[j, :, :] = cH
+
+            z_obs_j, rh_j, rv_j = compute_zrho(Tz, cz, n, rho_h, rho_v, esp)
+            z_obs[j] = z_obs_j
+            rho_h_at_obs[j] = rh_j
+            rho_v_at_obs[j] = rv_j
 
     logger.debug(
         "simulate: concluída — H_tensor shape=%s, all finite=%s",

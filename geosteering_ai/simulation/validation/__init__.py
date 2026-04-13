@@ -72,6 +72,13 @@ Note:
 """
 from __future__ import annotations
 
+from geosteering_ai.simulation.validation.canonical_models import (
+    CanonicalModel,
+    ModelId,
+    get_all_canonical_models,
+    get_canonical_model,
+    list_canonical_models,
+)
 from geosteering_ai.simulation.validation.half_space import (
     MU_0,
     skin_depth,
@@ -82,10 +89,17 @@ from geosteering_ai.simulation.validation.half_space import (
 )
 
 __all__ = [
+    # half_space (Sprint 1.3)
     "MU_0",
     "skin_depth",
     "static_decoupling_factors",
     "vmd_fullspace_axial",
     "vmd_fullspace_broadside",
     "wavenumber_quasi_static",
+    # canonical_models (Sprint 2.9)
+    "CanonicalModel",
+    "ModelId",
+    "get_canonical_model",
+    "list_canonical_models",
+    "get_all_canonical_models",
 ]
