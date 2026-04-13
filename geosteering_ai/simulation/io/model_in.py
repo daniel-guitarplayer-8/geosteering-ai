@@ -326,4 +326,257 @@ def export_model_in(
     return output_path.resolve()
 
 
-__all__ = ["export_model_in"]
+# ──────────────────────────────────────────────────────────────────────────────
+# read_model_in — Parser do formato model.in v10.0 (Sprint 3.3.4+)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def read_model_in(path: str | Path) -> dict:
+    """Lê um arquivo ``model.in`` v10.0 e retorna dict com parâmetros.
+
+    Parser do mesmo formato que :func:`export_model_in` grava. Permite
+    roundtrip: ``export_model_in(cfg, ...) → model.in → read_model_in()
+    → dict → simulate()``.
+
+    Args:
+        path: Caminho para o arquivo ``model.in``.
+
+    Returns:
+        Dict com chaves:
+          - ``n_layers`` (int)
+          - ``rho_h`` (np.ndarray float64)
+          - ``rho_v`` (np.ndarray float64)
+          - ``esp`` (np.ndarray float64)
+          - ``frequencies_hz`` (list[float])
+          - ``tr_spacings_m`` (list[float])
+          - ``dip_angles_deg`` (list[float])
+          - ``h1`` (float), ``tj`` (float), ``pmed`` (float)
+          - ``filename`` (str)
+          - ``filter_type`` (int)
+          - ``use_arbitrary_freq`` (bool)
+          - ``use_tilted`` (bool)
+          - ``use_compensation`` (bool)
+
+    Raises:
+        FileNotFoundError: Se ``path`` não existe.
+        ValueError: Se o formato do arquivo é inválido.
+
+    Example:
+        >>> params = read_model_in("model.in")
+        >>> params["n_layers"]
+        3
+        >>> params["rho_h"]
+        array([1., 100., 1.])
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"model.in não encontrado: {path}")
+
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    idx = 0
+
+    def _next_line() -> str:
+        nonlocal idx
+        if idx >= len(lines):
+            raise ValueError(f"model.in truncado na linha {idx + 1}")
+        line = lines[idx].strip()
+        idx += 1
+        # Remove comentários Fortran (tudo após '!')
+        if "!" in line:
+            line = line[: line.index("!")].strip()
+        return line
+
+    try:
+        # Frequências
+        nf = int(_next_line())
+        freqs = [float(_next_line()) for _ in range(nf)]
+
+        # Ângulos
+        ntheta = int(_next_line())
+        dip_angles = [float(_next_line()) for _ in range(ntheta)]
+
+        # Geometria
+        h1 = float(_next_line())
+        tj = float(_next_line())
+        pmed = float(_next_line())
+
+        # TR spacings
+        nTR = int(_next_line())
+        tr_spacings = [float(_next_line()) for _ in range(nTR)]
+
+        # Filename
+        filename = _next_line()
+
+        # Camadas
+        n = int(_next_line())
+        rho_h_list = []
+        rho_v_list = []
+        for _ in range(n):
+            parts = _next_line().split()
+            rho_h_list.append(float(parts[0]))
+            rho_v_list.append(float(parts[1]))
+        rho_h = np.array(rho_h_list, dtype=np.float64)
+        rho_v = np.array(rho_v_list, dtype=np.float64)
+
+        # Espessuras internas
+        esp_list = []
+        for _ in range(max(0, n - 2)):
+            esp_list.append(float(_next_line()))
+        esp = np.array(esp_list, dtype=np.float64)
+
+        # modelm nmaxmodel
+        _next_line()  # "1 1" (ignorado)
+
+        # Flags F5, F7, F6, filter_type
+        use_arbitrary_freq = int(_next_line()) != 0
+        use_tilted = int(_next_line()) != 0
+        if use_tilted:
+            # Pula linhas de tilted configs (não implementado em detail)
+            n_tilted = int(_next_line())
+            for _ in range(n_tilted):
+                _next_line()  # beta phi pares
+        use_compensation = int(_next_line()) != 0
+        if use_compensation:
+            n_comp = int(_next_line())
+            for _ in range(n_comp):
+                _next_line()  # near far pares
+        filter_type = int(_next_line())
+
+    except (ValueError, IndexError) as exc:
+        raise ValueError(
+            f"Formato inválido no model.in '{path}' na linha ~{idx}: {exc}"
+        ) from exc
+
+    return {
+        "n_layers": n,
+        "rho_h": rho_h,
+        "rho_v": rho_v,
+        "esp": esp,
+        "frequencies_hz": freqs,
+        "tr_spacings_m": tr_spacings,
+        "dip_angles_deg": dip_angles,
+        "h1": h1,
+        "tj": tj,
+        "pmed": pmed,
+        "filename": filename,
+        "filter_type": filter_type,
+        "use_arbitrary_freq": use_arbitrary_freq,
+        "use_tilted": use_tilted,
+        "use_compensation": use_compensation,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# simulate_from_model_in — wrapper de conveniência (Sprint 3.3.4+)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def simulate_from_model_in(
+    path: str | Path,
+    output_dir: str | Path = ".",
+    export_dat: bool = True,
+    export_out: bool = True,
+    positions_z: np.ndarray | None = None,
+    parallel: bool = True,
+):
+    """Lê model.in, executa simulação e opcionalmente exporta .dat/.out.
+
+    Wrapper de conveniência que replica o fluxo do simulador Fortran:
+    ``model.in → tatu.x → .dat + .out``. Usa o backend Numba (default).
+
+    Args:
+        path: Caminho para o arquivo ``model.in``.
+        output_dir: Diretório de saída para .dat e .out.
+        export_dat: Se True, exporta arquivo .dat binário 22-col.
+        export_out: Se True, exporta arquivo .out metadata.
+        positions_z: Posições de medição (m). Se None, gera a partir de
+            ``h1``, ``tj``, ``pmed`` do model.in.
+        parallel: Se True, usa backend paralelo (cache + prange).
+
+    Returns:
+        ``SimulationResult`` com o tensor H completo.
+
+    Raises:
+        FileNotFoundError: Se ``path`` não existe.
+        ValueError: Se o formato do model.in é inválido.
+
+    Example:
+        >>> result = simulate_from_model_in("model.in", output_dir="output/")
+        >>> result.H_tensor.shape
+        (600, 1, 9)
+    """
+    from geosteering_ai.simulation import SimulationConfig, simulate
+    from geosteering_ai.simulation.io.binary_dat import (
+        export_binary_dat,
+        export_out_metadata,
+    )
+
+    params = read_model_in(path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Constrói posições se não fornecidas
+    if positions_z is None:
+        h1 = params["h1"]
+        tj = params["tj"]
+        pmed = params["pmed"]
+        n_positions = max(1, int(tj / pmed)) if pmed > 0 else 100
+        positions_z = np.linspace(h1, h1 + tj, n_positions)
+
+    # Constrói SimulationConfig
+    freqs = params["frequencies_hz"]
+    cfg = SimulationConfig(
+        frequency_hz=freqs[0] if freqs else 20000.0,
+        frequencies_hz=freqs if len(freqs) > 1 else None,
+        tr_spacing_m=params["tr_spacings_m"][0] if params["tr_spacings_m"] else 1.0,
+        parallel=parallel,
+        hankel_filter={0: "werthmuller_201pt", 1: "kong_61pt", 2: "anderson_801pt"}.get(
+            params["filter_type"], "werthmuller_201pt"
+        ),
+    )
+
+    # Executa simulação
+    dip_deg = params["dip_angles_deg"][0] if params["dip_angles_deg"] else 0.0
+    result = simulate(
+        rho_h=params["rho_h"],
+        rho_v=params["rho_v"],
+        esp=params["esp"],
+        positions_z=positions_z,
+        dip_deg=dip_deg,
+        cfg=cfg,
+    )
+
+    # Exporta .dat/.out se solicitado
+    if export_dat or export_out:
+        cfg_export = SimulationConfig(
+            export_model_in=False,
+            export_binary_dat=export_dat,
+            output_dir=str(output_dir),
+            output_filename=params.get("filename", "simulation"),
+            frequency_hz=cfg.frequency_hz,
+            tr_spacing_m=cfg.tr_spacing_m,
+            parallel=parallel,
+        )
+        if export_dat:
+            export_binary_dat(
+                cfg_export,
+                result.H_tensor[np.newaxis, ...],  # (1, n_pos, nf, 9)
+                result.z_obs,
+                result.rho_h_at_obs,
+                result.rho_v_at_obs,
+            )
+            logger.info("Arquivo .dat exportado em %s", output_dir)
+        if export_out:
+            export_out_metadata(
+                cfg_export,
+                n_models=1,
+                angulos_deg=np.array(params.get("dip_angles_deg", [0.0])),
+                freqs_hz=np.array(params.get("frequencies_hz", [20000.0])),
+                nmeds_per_theta=np.array([result.H_tensor.shape[0]]),
+            )
+            logger.info("Arquivo .out exportado em %s", output_dir)
+
+    return result
+
+
+__all__ = ["export_model_in", "read_model_in", "simulate_from_model_in"]

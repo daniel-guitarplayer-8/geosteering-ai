@@ -227,8 +227,15 @@ def _single_position_jax(
     krJ0J1: jax.Array,
     wJ0: jax.Array,
     wJ1: jax.Array,
+    use_native_dipoles: bool = False,
 ) -> jax.Array:
     """Calcula H para uma frequência numa posição via backend JAX.
+
+    Args:
+        use_native_dipoles: Se True, usa ``native_dipoles_full_jax``
+            (JAX puro end-to-end, diferenciável, GPU-ready). Se False
+            (default), usa ``pure_callback`` → Numba host (bit-exato,
+            mais rápido em CPU).
 
     Retorna array (9,) complex128 — Hxx, Hxy, Hxz, Hyx, Hyy, Hyz, Hzx, Hzy, Hzz.
     """
@@ -262,43 +269,84 @@ def _single_position_jax(
     )
     Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz = cf
 
-    # Dipolos via pure_callback — 900 LOC reusadas do Numba
-    result_shape = jax.ShapeDtypeStruct((3, 3), jnp.complex128)
-    matH = jax.pure_callback(
-        _dipoles_numba_host,
-        result_shape,
-        Tx,
-        Ty,
-        Tz,
-        n,
-        camad_r,
-        camad_t,
-        npt,
-        krJ0J1,
-        wJ0,
-        wJ1,
-        h_arr,
-        prof_arr,
-        zeta,
-        eta,
-        cx,
-        cy,
-        cz,
-        u,
-        s,
-        uh,
-        sh,
-        RTEdw,
-        RTEup,
-        RTMdw,
-        RTMup,
-        Mxdw,
-        Mxup,
-        Eudw,
-        Euup,
-        FEdwz,
-        FEupz,
-    )
+    # Sprint 3.3.4: escolhe entre JAX nativo end-to-end (diferenciável,
+    # GPU-ready) ou callback Numba host (bit-exato, rápido em CPU).
+    if use_native_dipoles:
+        from geosteering_ai.simulation._jax.dipoles_native import (
+            native_dipoles_full_jax,
+        )
+
+        matH = native_dipoles_full_jax(
+            Tx,
+            Ty,
+            Tz,
+            n,
+            camad_r,
+            camad_t,
+            npt,
+            krJ0J1,
+            wJ0,
+            wJ1,
+            h_arr,
+            prof_arr,
+            zeta,
+            eta,
+            cx,
+            cy,
+            cz,
+            u,
+            s,
+            uh,
+            sh,
+            RTEdw,
+            RTEup,
+            RTMdw,
+            RTMup,
+            Mxdw,
+            Mxup,
+            Eudw,
+            Euup,
+            FEdwz,
+            FEupz,
+        )
+    else:
+        # Caminho híbrido (default) — callback para Numba @njit host
+        result_shape = jax.ShapeDtypeStruct((3, 3), jnp.complex128)
+        matH = jax.pure_callback(
+            _dipoles_numba_host,
+            result_shape,
+            Tx,
+            Ty,
+            Tz,
+            n,
+            camad_r,
+            camad_t,
+            npt,
+            krJ0J1,
+            wJ0,
+            wJ1,
+            h_arr,
+            prof_arr,
+            zeta,
+            eta,
+            cx,
+            cy,
+            cz,
+            u,
+            s,
+            uh,
+            sh,
+            RTEdw,
+            RTEup,
+            RTMdw,
+            RTMup,
+            Mxdw,
+            Mxup,
+            Eudw,
+            Euup,
+            FEdwz,
+            FEupz,
+        )
 
     # Rotação
     tH = rotate_tensor(dip_rad, 0.0, 0.0, matH)
@@ -346,45 +394,34 @@ def fields_in_freqs_jax_batch(
         esp: (n-2,) espessuras internas.
         freqs_hz: (nf,) frequências.
         krJ0J1, wJ0, wJ1: (npt,) filtro Hankel.
-        use_native_dipoles: Se True, **tenta** usar o port JAX nativo dos
-            dipolos (Sprint 3.3.2: ``_hmd_tiv_full_jax`` com ``lax.switch``).
-            **IMPORTANTE** — na Sprint 3.3.2 (PR #10), apenas o kernel
-            ETAPA 5 do HMD está nativo em JAX. ETAPA 3 (potenciais
-            propagados ``Tudw/Txdw/Tuup/Txup``) e ETAPA 6 (assembly
-            Ward-Hohmann) ainda requerem trabalho adicional, assim como
-            o VMD nativo (Sprint 3.3.3 / PR #11). Por isso, quando
-            ``use_native_dipoles=True``, esta função emite um WARNING e
-            **cai de volta ao caminho híbrido**. A bandeira existe para
-            permitir que o caller valide a API e instrumente código de
-            benchmark preparatório para GPU (Sprint 3.4).
+        use_native_dipoles: Se True, usa ``native_dipoles_full_jax``
+            (Sprint 3.3.4) — JAX puro end-to-end, diferenciável via
+            ``jax.grad``, executável em GPU T4/A100 sem callback para
+            CPU host. Se False (default), usa ``pure_callback`` →
+            Numba @njit host (bit-exato, mais rápido em CPU puro).
 
     Returns:
         H_tensor shape (n_positions, nf, 9) complex128.
 
     Note:
-        Quando ``use_native_dipoles=True`` ficar totalmente funcional
-        (PR #11), a função passará a:
-          1. Chamar ``compute_case_index_jax`` para cada posição
-          2. Usar ``_hmd_tiv_full_jax`` com ``lax.switch`` (6 cases)
-          3. Usar ``_vmd_native_jax`` (a ser implementado)
-          4. Permitir ``jax.grad``/``jax.jacfwd`` sobre ``rho_h``/``rho_v``
-             (PINN gradients)
-          5. Rodar em GPU T4/A100 via XLA kernel fusion
+        Com ``use_native_dipoles=True`` (Sprint 3.3.4 — PR #12):
+          1. ETAPA 3: propagação TM/TE via Python loops (unrolled por JAX)
+          2. ETAPA 5: kernels via ``lax.switch`` (Sprints 3.3.2/3.3.3)
+          3. ETAPA 6: assembly Ward-Hohmann com ``jnp.sum``
+          4. ``jax.grad`` / ``jax.jacfwd`` sobre ``rho_h`` / ``rho_v``
+          5. GPU T4/A100 via XLA kernel fusion (sem callback CPU)
 
-        Até lá, o hybrid path (default) é o recomendado em produção.
+        O hybrid path (``use_native_dipoles=False``) permanece default
+        e recomendado para produção em CPU — é mais rápido por evitar
+        overhead de compilação JAX.
     """
     if use_native_dipoles:
         import logging
 
         _log = logging.getLogger(__name__)
-        _log.warning(
-            "use_native_dipoles=True — Sprints 3.3.2+3.3.3 (PRs #10/#11) "
-            "fornecem ETAPA 5 nativa em JAX para HMD (_hmd_tiv_full_jax) "
-            "e VMD (_vmd_full_jax). As ETAPAS 3 (propagação dos potenciais "
-            "TEdwz/TEupz/TMdw/TMup entre camadas) e 6 (assembly final do "
-            "tensor 9-comp via Hankel + Ward-Hohmann) ainda usam o caminho "
-            "híbrido para preservar bit-exactness. Wiring end-to-end é "
-            "Sprint 3.3.4. Caindo de volta ao caminho híbrido (bit-exato)."
+        _log.info(
+            "use_native_dipoles=True — usando JAX nativo end-to-end "
+            "(Sprint 3.3.4). ETAPAS 3+5+6 sem pure_callback."
         )
     n_positions = positions_z.shape[0]
     nf = freqs_hz.shape[0]
@@ -449,6 +486,7 @@ def fields_in_freqs_jax_batch(
                 krJ0J1_j,
                 wJ0_j,
                 wJ1_j,
+                use_native_dipoles=use_native_dipoles,
             )
             H_tensor[j, i_f, :] = np.asarray(cH_9)
 

@@ -71,11 +71,18 @@ from geosteering_ai.simulation.io.binary_dat import (
     export_binary_dat,
     export_out_metadata,
 )
-from geosteering_ai.simulation.io.model_in import export_model_in
+from geosteering_ai.simulation.io.model_in import (
+    export_model_in,
+    read_model_in,
+    simulate_from_model_in,
+)
 
 __all__ = [
     "DTYPE_22COL",
     "export_binary_dat",
     "export_model_in",
     "export_out_metadata",
+    # Sprint 3.3.4+ — leitor + runner
+    "read_model_in",
+    "simulate_from_model_in",
 ]

@@ -941,6 +941,611 @@ def _vmd_full_jax(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Sprint 3.3.4 — ETAPAS 3+6 Nativas JAX (propagação + assembly)
+# ──────────────────────────────────────────────────────────────────────────────
+# Port completo end-to-end dos dipolos HMD e VMD em JAX puro, eliminando
+# a dependência de `jax.pure_callback` → Numba host. Permite:
+#   • `jax.grad` end-to-end sobre rho_h, rho_v, esp
+#   • Execução 100% em GPU (sem callback para CPU host)
+#   • `jax.vmap` e `jax.pmap` sobre posições/frequências
+#
+# ESTRATÉGIA: n, camad_r, camad_t são Python ints (concretos no trace time),
+# então usamos Python loops/if que JAX unroll durante tracing. Cada
+# combinação (n, camad_r, camad_t) gera um XLA program especializado.
+# Para n típico (3-22 camadas), o overhead de compilação é aceitável
+# (< 120s, regression guard em test_native_compile_time_budget).
+#
+# REFERÊNCIAS:
+#   • _numba/dipoles.py:340-522 (HMD ETAPA 3 propagação)
+#   • _numba/dipoles.py:524-535 (ETAPA 4 fatores geométricos)
+#   • _numba/dipoles.py:646-697 (HMD ETAPA 6 assembly Ward-Hohmann)
+#   • _numba/dipoles.py:787-854 (VMD ETAPA 3 propagação)
+#   • _numba/dipoles.py:947-960 (VMD ETAPA 6 assembly)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_MX = 1.0  # Momento magnético unitário (A·m²)
+_MZ = 1.0
+_PI_NATIVE = jnp.pi
+_TWO_PI_NATIVE = 2.0 * jnp.pi
+_EPS_SINGULARITY = 1e-12
+_R_GUARD = 0.01  # Guard para r → 0 (paridade Fortran utils.f08:195)
+
+
+def _hmd_tiv_native_jax(
+    Tx: float,
+    Ty: float,
+    h0: float,
+    n: int,
+    camad_r: int,
+    camad_t: int,
+    npt: int,
+    krJ0J1: jax.Array,
+    wJ0: jax.Array,
+    wJ1: jax.Array,
+    h: jax.Array,
+    prof: jax.Array,
+    zeta: complex,
+    eta: jax.Array,
+    cx: float,
+    cy: float,
+    z: float,
+    u: jax.Array,
+    s: jax.Array,
+    uh: jax.Array,
+    sh: jax.Array,
+    RTEdw: jax.Array,
+    RTEup: jax.Array,
+    RTMdw: jax.Array,
+    RTMup: jax.Array,
+    Mxdw: jax.Array,
+    Mxup: jax.Array,
+    Eudw: jax.Array,
+    Euup: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """HMD TIV end-to-end em JAX nativo (ETAPAS 3+4+5+6).
+
+    Port line-for-line de ``_numba/dipoles.py:hmd_tiv`` (1300 LOC).
+    Retorna ``(Hx_p, Hy_p, Hz_p)`` — cada array ``(2,) complex128``
+    onde índice 0 = hmdx, índice 1 = hmdy.
+
+    Args:
+        Mesmos que ``hmd_tiv`` Numba. Arrays ``u, s, uh, sh, RTE*, RTM*``
+        são ``(npt, n) complex128`` de ``common_arrays_jax``.
+        ``Mxdw, Mxup, Eudw, Euup`` são ``(npt,) complex128`` de
+        ``common_factors_jax``.
+    """
+    # ── Geometria local ─────────────────────────────────────────────
+    dx = cx - Tx
+    dy = cy - Ty
+    x = jnp.where(jnp.abs(dx) < _EPS_SINGULARITY, 0.0, dx)
+    y = jnp.where(jnp.abs(dy) < _EPS_SINGULARITY, 0.0, dy)
+    r = jnp.sqrt(x * x + y * y)
+    r = jnp.where(r < _EPS_SINGULARITY, _R_GUARD, r)
+    kr = krJ0J1 / r
+
+    # ── ETAPA 3: Propagação dos potenciais TM/TE entre camadas ──────
+    Txdw = jnp.zeros((npt, n), dtype=jnp.complex128)
+    Tudw = jnp.zeros((npt, n), dtype=jnp.complex128)
+    Txup = jnp.zeros((npt, n), dtype=jnp.complex128)
+    Tuup = jnp.zeros((npt, n), dtype=jnp.complex128)
+
+    if camad_r > camad_t:
+        # Caso A: RX abaixo do TX — propagação descendente
+        for j in range(camad_t, camad_r + 1):
+            if j == camad_t:
+                Txdw = Txdw.at[:, j].set(_MX / (2.0 * s[:, camad_t]))
+                Tudw = Tudw.at[:, j].set(-_MX / 2.0)
+            elif j == (camad_t + 1) and j == (n - 1):
+                if n > 1:
+                    Txdw = Txdw.at[:, j].set(
+                        s[:, j - 1]
+                        * Txdw[:, j - 1]
+                        * (
+                            jnp.exp(-s[:, j - 1] * (prof[camad_t + 1] - h0))
+                            + RTMup[:, j - 1] * Mxup * jnp.exp(-sh[:, j - 1])
+                            - RTMdw[:, j - 1] * Mxdw
+                        )
+                        / s[:, j]
+                    )
+                    Tudw = Tudw.at[:, j].set(
+                        u[:, j - 1]
+                        * Tudw[:, j - 1]
+                        * (
+                            jnp.exp(-u[:, j - 1] * (prof[camad_t + 1] - h0))
+                            - RTEup[:, j - 1] * Euup * jnp.exp(-uh[:, j - 1])
+                            - RTEdw[:, j - 1] * Eudw
+                        )
+                        / u[:, j]
+                    )
+                else:
+                    Txdw = Txdw.at[:, j].set(
+                        s[:, j - 1]
+                        * Txdw[:, j - 1]
+                        * (jnp.exp(s[:, j - 1] * h0) - RTMdw[:, j - 1] * Mxdw)
+                        / s[:, j]
+                    )
+                    Tudw = Tudw.at[:, j].set(
+                        u[:, j - 1]
+                        * Tudw[:, j - 1]
+                        * (jnp.exp(u[:, j - 1] * h0) - RTEdw[:, j - 1] * Eudw)
+                        / u[:, j]
+                    )
+            elif j == (camad_t + 1) and j != (n - 1):
+                Txdw = Txdw.at[:, j].set(
+                    s[:, j - 1]
+                    * Txdw[:, j - 1]
+                    * (
+                        jnp.exp(-s[:, j - 1] * (prof[camad_t + 1] - h0))
+                        + RTMup[:, j - 1] * Mxup * jnp.exp(-sh[:, j - 1])
+                        - RTMdw[:, j - 1] * Mxdw
+                    )
+                    / ((1.0 - RTMdw[:, j] * jnp.exp(-2.0 * sh[:, j])) * s[:, j])
+                )
+                Tudw = Tudw.at[:, j].set(
+                    u[:, j - 1]
+                    * Tudw[:, j - 1]
+                    * (
+                        jnp.exp(-u[:, j - 1] * (prof[camad_t + 1] - h0))
+                        - RTEup[:, j - 1] * Euup * jnp.exp(-uh[:, j - 1])
+                        - RTEdw[:, j - 1] * Eudw
+                    )
+                    / ((1.0 - RTEdw[:, j] * jnp.exp(-2.0 * uh[:, j])) * u[:, j])
+                )
+            elif j != (n - 1):
+                Txdw = Txdw.at[:, j].set(
+                    s[:, j - 1]
+                    * Txdw[:, j - 1]
+                    * jnp.exp(-sh[:, j - 1])
+                    * (1.0 - RTMdw[:, j - 1])
+                    / ((1.0 - RTMdw[:, j] * jnp.exp(-2.0 * sh[:, j])) * s[:, j])
+                )
+                Tudw = Tudw.at[:, j].set(
+                    u[:, j - 1]
+                    * Tudw[:, j - 1]
+                    * jnp.exp(-uh[:, j - 1])
+                    * (1.0 - RTEdw[:, j - 1])
+                    / ((1.0 - RTEdw[:, j] * jnp.exp(-2.0 * uh[:, j])) * u[:, j])
+                )
+            else:  # j == n - 1
+                Txdw = Txdw.at[:, j].set(
+                    s[:, j - 1]
+                    * Txdw[:, j - 1]
+                    * jnp.exp(-sh[:, j - 1])
+                    * (1.0 - RTMdw[:, j - 1])
+                    / s[:, j]
+                )
+                Tudw = Tudw.at[:, j].set(
+                    u[:, j - 1]
+                    * Tudw[:, j - 1]
+                    * jnp.exp(-uh[:, j - 1])
+                    * (1.0 - RTEdw[:, j - 1])
+                    / u[:, j]
+                )
+    elif camad_r < camad_t:
+        # Caso B: RX acima do TX — propagação ascendente
+        for j in range(camad_t, camad_r - 1, -1):
+            if j == camad_t:
+                Txup = Txup.at[:, j].set(_MX / (2.0 * s[:, camad_t]))
+                Tuup = Tuup.at[:, j].set(_MX / 2.0)
+            elif j == (camad_t - 1) and j == 0:
+                Txup = Txup.at[:, j].set(
+                    s[:, j + 1]
+                    * Txup[:, j + 1]
+                    * (
+                        jnp.exp(-s[:, j + 1] * h0)
+                        - RTMup[:, j + 1] * Mxup
+                        + RTMdw[:, j + 1] * Mxdw * jnp.exp(-sh[:, j + 1])
+                    )
+                    / s[:, j]
+                )
+                Tuup = Tuup.at[:, j].set(
+                    u[:, j + 1]
+                    * Tuup[:, j + 1]
+                    * (
+                        jnp.exp(-u[:, j + 1] * h0)
+                        - RTEup[:, j + 1] * Euup
+                        - RTEdw[:, j + 1] * Eudw * jnp.exp(-uh[:, j + 1])
+                    )
+                    / u[:, j]
+                )
+            elif j == (camad_t - 1) and j != 0:
+                Txup = Txup.at[:, j].set(
+                    s[:, j + 1]
+                    * Txup[:, j + 1]
+                    * (
+                        jnp.exp(s[:, j + 1] * (prof[j + 1] - h0))
+                        + RTMdw[:, j + 1] * Mxdw * jnp.exp(-sh[:, j + 1])
+                        - RTMup[:, j + 1] * Mxup
+                    )
+                    / ((1.0 - RTMup[:, j] * jnp.exp(-2.0 * sh[:, j])) * s[:, j])
+                )
+                Tuup = Tuup.at[:, j].set(
+                    u[:, j + 1]
+                    * Tuup[:, j + 1]
+                    * (
+                        jnp.exp(u[:, j + 1] * (prof[camad_t] - h0))
+                        - RTEup[:, j + 1] * Euup
+                        - RTEdw[:, j + 1] * Eudw * jnp.exp(-uh[:, j + 1])
+                    )
+                    / ((1.0 - RTEup[:, j] * jnp.exp(-2.0 * uh[:, j])) * u[:, j])
+                )
+            elif j != 0:
+                Txup = Txup.at[:, j].set(
+                    s[:, j + 1]
+                    * Txup[:, j + 1]
+                    * jnp.exp(-sh[:, j + 1])
+                    * (1.0 - RTMup[:, j + 1])
+                    / ((1.0 - RTMup[:, j] * jnp.exp(-2.0 * sh[:, j])) * s[:, j])
+                )
+                Tuup = Tuup.at[:, j].set(
+                    u[:, j + 1]
+                    * Tuup[:, j + 1]
+                    * jnp.exp(-uh[:, j + 1])
+                    * (1.0 - RTEup[:, j + 1])
+                    / ((1.0 - RTEup[:, j] * jnp.exp(-2.0 * uh[:, j])) * u[:, j])
+                )
+            else:  # j == 0
+                Txup = Txup.at[:, j].set(
+                    s[:, j + 1]
+                    * Txup[:, j + 1]
+                    * jnp.exp(-sh[:, j + 1])
+                    * (1.0 - RTMup[:, j + 1])
+                    / s[:, j]
+                )
+                Tuup = Tuup.at[:, j].set(
+                    u[:, j + 1]
+                    * Tuup[:, j + 1]
+                    * jnp.exp(-uh[:, j + 1])
+                    * (1.0 - RTEup[:, j + 1])
+                    / u[:, j]
+                )
+    else:
+        # Caso C: mesma camada
+        Tudw = Tudw.at[:, camad_t].set(-_MX / 2.0)
+        Tuup = Tuup.at[:, camad_t].set(_MX / 2.0)
+        Txdw = Txdw.at[:, camad_t].set(_MX / (2.0 * s[:, camad_t]))
+        Txup = Txup.at[:, camad_t].set(Txdw[:, camad_t])
+
+    # ── ETAPA 4: Fatores geométricos ────────────────────────────────
+    x2_r2 = x * x / (r * r)
+    y2_r2 = y * y / (r * r)
+    xy_r2 = x * y / (r * r)
+    twox2_r2m1 = 2.0 * x2_r2 - 1.0
+    twoy2_r2m1 = 2.0 * y2_r2 - 1.0
+    twopir = _TWO_PI_NATIVE * r
+    kh2_r = -zeta * eta[camad_r, 0]
+
+    # ── ETAPA 5: Kernels via dispatcher existente ───────────────────
+    case_idx = compute_case_index_jax(camad_r, camad_t, n, z, h0)
+    Ktm, Kte, Ktedz = _hmd_tiv_full_jax(
+        case_idx,
+        u[:, camad_r],
+        s[:, camad_r],
+        RTEdw[:, camad_r],
+        RTEup[:, camad_r],
+        RTMdw[:, camad_r],
+        RTMup[:, camad_r],
+        Tudw[:, camad_r],
+        Tuup[:, camad_r],
+        Txdw[:, camad_r],
+        Txup[:, camad_r],
+        Mxdw,
+        Mxup,
+        Eudw,
+        Euup,
+        z,
+        h0,
+        prof[camad_r],
+        prof[camad_r + 1],
+        h[camad_r],
+    )
+
+    # ── ETAPA 6: Assembly Ward-Hohmann (hmdx + hmdy) ────────────────
+    Ktm_J0 = Ktm * wJ0
+    Ktm_J1 = Ktm * wJ1
+    Kte_J1 = Kte * wJ1
+    Ktedz_J0 = Ktedz * wJ0
+    Ktedz_J1 = Ktedz * wJ1
+
+    sum_Ktedz_J1 = jnp.sum(Ktedz_J1)
+    sum_Ktm_J1 = jnp.sum(Ktm_J1)
+    sum_Ktedz_J0_kr = jnp.sum(Ktedz_J0 * kr)
+    sum_Ktm_J0_kr = jnp.sum(Ktm_J0 * kr)
+    sum_add_J1 = jnp.sum(Ktedz_J1 + kh2_r * Ktm_J1)
+    sum_add_J0_kr = jnp.sum((Ktedz_J0 + kh2_r * Ktm_J0) * kr)
+    sum_Kte_J1_kr2 = jnp.sum(Kte_J1 * kr * kr)
+
+    # HMDX (índice 0)
+    kernelHxJ1 = (twox2_r2m1 * sum_Ktedz_J1 - kh2_r * twoy2_r2m1 * sum_Ktm_J1) / r
+    kernelHxJ0 = x2_r2 * sum_Ktedz_J0_kr - kh2_r * y2_r2 * sum_Ktm_J0_kr
+    Hx0 = (kernelHxJ1 - kernelHxJ0) / twopir
+    kernelHyJ1 = sum_add_J1 / r
+    kernelHyJ0 = sum_add_J0_kr / 2.0
+    Hy0 = xy_r2 * (kernelHyJ1 - kernelHyJ0) / _PI_NATIVE / r
+    kernelHzJ1 = x * sum_Kte_J1_kr2 / r
+    Hz0 = -kernelHzJ1 / twopir
+
+    # HMDY (índice 1)
+    Hx1 = Hy0  # simetria: Hx_hmdy = Hy_hmdx
+    kernelHyJ1_y = (twoy2_r2m1 * sum_Ktedz_J1 - kh2_r * twox2_r2m1 * sum_Ktm_J1) / r
+    kernelHyJ0_y = y2_r2 * sum_Ktedz_J0_kr - kh2_r * x2_r2 * sum_Ktm_J0_kr
+    Hy1 = (kernelHyJ1_y - kernelHyJ0_y) / twopir
+    kernelHzJ1_y = y * sum_Kte_J1_kr2 / r
+    Hz1 = -kernelHzJ1_y / twopir
+
+    Hx_p = jnp.array([Hx0, Hx1])
+    Hy_p = jnp.array([Hy0, Hy1])
+    Hz_p = jnp.array([Hz0, Hz1])
+    return Hx_p, Hy_p, Hz_p
+
+
+def _vmd_native_jax(
+    Tx: float,
+    Ty: float,
+    h0: float,
+    n: int,
+    camad_r: int,
+    camad_t: int,
+    npt: int,
+    krJ0J1: jax.Array,
+    wJ0: jax.Array,
+    wJ1: jax.Array,
+    h: jax.Array,
+    prof: jax.Array,
+    zeta: complex,
+    cx: float,
+    cy: float,
+    z: float,
+    u: jax.Array,
+    uh: jax.Array,
+    AdmInt: jax.Array,
+    RTEdw: jax.Array,
+    RTEup: jax.Array,
+    FEdwz: jax.Array,
+    FEupz: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """VMD end-to-end em JAX nativo (ETAPAS 3+5+6).
+
+    Port line-for-line de ``_numba/dipoles.py:vmd`` (260 LOC).
+    Retorna ``(Hx_p, Hy_p, Hz_p)`` — escalares complex128.
+    """
+    # ── Geometria local ─────────────────────────────────────────────
+    dx = cx - Tx
+    dy = cy - Ty
+    x = jnp.where(jnp.abs(dx) < _EPS_SINGULARITY, 0.0, dx)
+    y = jnp.where(jnp.abs(dy) < _EPS_SINGULARITY, 0.0, dy)
+    r = jnp.sqrt(x * x + y * y)
+    r = jnp.where(r < _EPS_SINGULARITY, _R_GUARD, r)
+    kr = krJ0J1 / r
+
+    # ── ETAPA 3: Propagação TEdwz / TEupz ───────────────────────────
+    TEdwz = jnp.zeros((npt, n), dtype=jnp.complex128)
+    TEupz = jnp.zeros((npt, n), dtype=jnp.complex128)
+
+    if camad_r > camad_t:
+        for j in range(camad_t, camad_r + 1):
+            if j == camad_t:
+                TEdwz = TEdwz.at[:, j].set(zeta * _MZ / (2.0 * u[:, j]))
+            elif j == (camad_t + 1) and j == (n - 1):
+                TEdwz = TEdwz.at[:, j].set(
+                    TEdwz[:, j - 1]
+                    * (
+                        jnp.exp(-u[:, camad_t] * (prof[camad_t + 1] - h0))
+                        + RTEup[:, camad_t] * FEupz * jnp.exp(-uh[:, camad_t])
+                        + RTEdw[:, camad_t] * FEdwz
+                    )
+                )
+            elif j == (camad_t + 1) and j != (n - 1):
+                TEdwz = TEdwz.at[:, j].set(
+                    TEdwz[:, j - 1]
+                    * (
+                        jnp.exp(-u[:, camad_t] * (prof[camad_t + 1] - h0))
+                        + RTEup[:, camad_t] * FEupz * jnp.exp(-uh[:, camad_t])
+                        + RTEdw[:, camad_t] * FEdwz
+                    )
+                    / (1.0 + RTEdw[:, j] * jnp.exp(-2.0 * uh[:, j]))
+                )
+            elif j != (n - 1):
+                TEdwz = TEdwz.at[:, j].set(
+                    TEdwz[:, j - 1]
+                    * (1.0 + RTEdw[:, j - 1])
+                    * jnp.exp(-uh[:, j - 1])
+                    / (1.0 + RTEdw[:, j] * jnp.exp(-2.0 * uh[:, j]))
+                )
+            else:  # j == n - 1
+                TEdwz = TEdwz.at[:, j].set(
+                    TEdwz[:, j - 1] * (1.0 + RTEdw[:, j - 1]) * jnp.exp(-uh[:, j - 1])
+                )
+    elif camad_r < camad_t:
+        for j in range(camad_t, camad_r - 1, -1):
+            if j == camad_t:
+                TEupz = TEupz.at[:, j].set(zeta * _MZ / (2.0 * u[:, j]))
+            elif j == (camad_t - 1) and j == 0:
+                TEupz = TEupz.at[:, j].set(
+                    TEupz[:, j + 1]
+                    * (
+                        jnp.exp(-u[:, camad_t] * h0)
+                        + RTEup[:, camad_t] * FEupz
+                        + RTEdw[:, camad_t] * FEdwz * jnp.exp(-uh[:, camad_t])
+                    )
+                )
+            elif j == (camad_t - 1) and j != 0:
+                TEupz = TEupz.at[:, j].set(
+                    TEupz[:, j + 1]
+                    * (
+                        jnp.exp(u[:, camad_t] * (prof[camad_t] - h0))
+                        + RTEup[:, camad_t] * FEupz
+                        + RTEdw[:, camad_t] * FEdwz * jnp.exp(-uh[:, camad_t])
+                    )
+                    / (1.0 + RTEup[:, j] * jnp.exp(-2.0 * uh[:, j]))
+                )
+            elif j != 0:
+                TEupz = TEupz.at[:, j].set(
+                    TEupz[:, j + 1]
+                    * (1.0 + RTEup[:, j + 1])
+                    * jnp.exp(-uh[:, j + 1])
+                    / (1.0 + RTEup[:, j] * jnp.exp(-2.0 * uh[:, j]))
+                )
+            else:  # j == 0
+                TEupz = TEupz.at[:, j].set(
+                    TEupz[:, j + 1] * (1.0 + RTEup[:, j + 1]) * jnp.exp(-uh[:, j + 1])
+                )
+    else:
+        # Mesma camada
+        TEdwz = TEdwz.at[:, camad_r].set(zeta * _MZ / (2.0 * u[:, camad_t]))
+        TEupz = TEupz.at[:, camad_r].set(TEdwz[:, camad_r])
+
+    # ── ETAPA 5: Kernels via dispatcher existente ───────────────────
+    case_idx = compute_case_index_jax(camad_r, camad_t, n, z, h0)
+    KtezJ0, KtedzzJ1 = _vmd_full_jax(
+        case_idx,
+        TEdwz[:, camad_r],
+        TEupz[:, camad_r],
+        u[:, camad_r],
+        RTEdw[:, camad_r],
+        RTEup[:, camad_r],
+        AdmInt[:, camad_r],
+        FEdwz,
+        FEupz,
+        wJ0,
+        wJ1,
+        z,
+        h0,
+        prof[camad_r],
+        prof[camad_r + 1],
+        h[camad_r],
+    )
+
+    # ── ETAPA 6: Assembly Hx, Hy, Hz ───────────────────────────────
+    twopir = _TWO_PI_NATIVE * r
+    sum_KtedzzJ1_kr2 = jnp.sum(KtedzzJ1 * kr * kr)
+    sum_KtezJ0_kr3 = jnp.sum(KtezJ0 * kr * kr * kr)
+    Hx_p = -x * sum_KtedzzJ1_kr2 / twopir / r
+    Hy_p = -y * sum_KtedzzJ1_kr2 / twopir / r
+    Hz_p = sum_KtezJ0_kr3 / 2.0 / _PI_NATIVE / zeta / r
+    return Hx_p, Hy_p, Hz_p
+
+
+def native_dipoles_full_jax(
+    Tx: float,
+    Ty: float,
+    Tz: float,
+    n: int,
+    camad_r: int,
+    camad_t: int,
+    npt: int,
+    krJ0J1: jax.Array,
+    wJ0: jax.Array,
+    wJ1: jax.Array,
+    h_arr: jax.Array,
+    prof_arr: jax.Array,
+    zeta: complex,
+    eta: jax.Array,
+    cx: float,
+    cy: float,
+    cz: float,
+    u: jax.Array,
+    s: jax.Array,
+    uh: jax.Array,
+    sh: jax.Array,
+    RTEdw: jax.Array,
+    RTEup: jax.Array,
+    RTMdw: jax.Array,
+    RTMup: jax.Array,
+    Mxdw: jax.Array,
+    Mxup: jax.Array,
+    Eudw: jax.Array,
+    Euup: jax.Array,
+    FEdwz: jax.Array,
+    FEupz: jax.Array,
+) -> jax.Array:
+    """Orquestrador end-to-end: HMD (hmdx+hmdy) + VMD → matH (3,3).
+
+    Substitui ``_dipoles_numba_host`` (``pure_callback``) no kernel JAX
+    quando ``use_native_dipoles=True``. Mesma interface de saída:
+    array ``(3,3) complex128`` com::
+
+        matH[0,:] = [Hxx, Hxy, Hxz]   (hmdx)
+        matH[1,:] = [Hyx, Hyy, Hyz]   (hmdy)
+        matH[2,:] = [Hzx, Hzy, Hzz]   (vmd)
+
+    **Diferenciável** via ``jax.grad`` sobre qualquer input JAX.
+    """
+    h0 = Tz  # profundidade do TX (convenção Numba: h0 = Tz)
+
+    # HMD: retorna (Hx[2], Hy[2], Hz[2])
+    Hx_hmd, Hy_hmd, Hz_hmd = _hmd_tiv_native_jax(
+        Tx,
+        Ty,
+        h0,
+        n,
+        camad_r,
+        camad_t,
+        npt,
+        krJ0J1,
+        wJ0,
+        wJ1,
+        h_arr,
+        prof_arr,
+        zeta,
+        eta,
+        cx,
+        cy,
+        cz,
+        u,
+        s,
+        uh,
+        sh,
+        RTEdw,
+        RTEup,
+        RTMdw,
+        RTMup,
+        Mxdw,
+        Mxup,
+        Eudw,
+        Euup,
+    )
+
+    # VMD: AdmInt = u / zeta (recalc como em _dipoles_numba_host)
+    AdmInt = u / zeta
+    Hx_vmd, Hy_vmd, Hz_vmd = _vmd_native_jax(
+        Tx,
+        Ty,
+        h0,
+        n,
+        camad_r,
+        camad_t,
+        npt,
+        krJ0J1,
+        wJ0,
+        wJ1,
+        h_arr,
+        prof_arr,
+        zeta,
+        cx,
+        cy,
+        cz,
+        u,
+        uh,
+        AdmInt,
+        RTEdw,
+        RTEup,
+        FEdwz,
+        FEupz,
+    )
+
+    # Assembly (3,3) — mesma ordem que _dipoles_numba_host
+    matH = jnp.array(
+        [
+            [Hx_hmd[0], Hy_hmd[0], Hz_hmd[0]],
+            [Hx_hmd[1], Hy_hmd[1], Hz_hmd[1]],
+            [Hx_vmd, Hy_vmd, Hz_vmd],
+        ]
+    )
+    return matH
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Status de implementação (para consulta via código)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -953,7 +1558,9 @@ IMPLEMENTATION_STATUS = {
     "compute_case_index_jax": "✅ mapeia geometria → índice 0..5",
     "_vmd_kernel_case1_jax..case6_jax": "✅ completos (Sprint 3.3.3)",
     "_vmd_full_jax": "✅ dispatcher lax.switch (Sprint 3.3.3)",
-    "ETAPAS 3+6 (TEdwz/TEupz prop + tensor assembly)": "⏳ Sprint 3.3.4",
+    "_hmd_tiv_native_jax": "✅ HMD end-to-end ETAPAS 3+4+5+6 (Sprint 3.3.4)",
+    "_vmd_native_jax": "✅ VMD end-to-end ETAPAS 3+5+6 (Sprint 3.3.4)",
+    "native_dipoles_full_jax": "✅ orquestrador HMD+VMD → matH (3,3) (Sprint 3.3.4)",
 }
 
 
@@ -978,5 +1585,9 @@ __all__ = [
     "_vmd_kernel_case5_jax",
     "_vmd_kernel_case6_jax",
     "_vmd_full_jax",
+    # Sprint 3.3.4 — ETAPAS 3+6 end-to-end
+    "_hmd_tiv_native_jax",
+    "_vmd_native_jax",
+    "native_dipoles_full_jax",
     "IMPLEMENTATION_STATUS",
 ]

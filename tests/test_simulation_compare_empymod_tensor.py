@@ -61,8 +61,8 @@ class TestComponentAbMap:
         assert sorted(COMPONENT_TENSOR_INDEX.values()) == list(range(9))
 
     def test_ab_codes_are_valid(self) -> None:
-        """Códigos `ab` devem ser combinações 1/2/5 dos eixos x/y/z."""
-        valid_digits = {1, 2, 5}
+        """Códigos `ab` devem ser combinações 1/2/3 dos eixos x/y/z."""
+        valid_digits = {1, 2, 3}
         for comp, ab in COMPONENT_AB_MAP.items():
             tens, units = divmod(ab, 10)
             assert tens in valid_digits, f"{comp}: dezena {tens} inválida"

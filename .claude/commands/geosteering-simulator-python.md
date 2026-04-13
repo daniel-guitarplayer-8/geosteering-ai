@@ -33,16 +33,17 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **1.3.0** (+ Sprint **3.3.3** VMD native + Sprint **4.2** empymod 9-comp + 6 plots curados + notebook GPU T4) |
-| **Branch**       | `feature/sim-pr-11`                                       |
-| **Base**         | `main` (PR #10 `8995acb` — Sprint 3.3.2 HMD native + 4 plots LWD/PINN) |
+| **Versão**       | **1.4.0** (+ Sprint **3.3.4** native e2e + Sprint **4.3** empymod bit-exact + I/O utility) |
+| **Branch**       | `feature/sim-pr-12`                                       |
+| **Base**         | `main` (PR #11 `e643a01` — Sprint 3.3.3 VMD native + Sprint 4.2 empymod INFRA) |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod 2.6+ (opt-in) |
 | **Precisão**     | `complex128` default + `complex64` via config             |
 | **Filtro default** | Werthmüller 201pt (paridade Fortran filter_type=0)      |
-| **Testes**       | **1311 passed, 295 skipped** em ~59s                      |
+| **Testes**       | **1325 passed, 295 skipped** em ~153s                     |
 | **Performance**  | **1.014M/347k/184k mod/h** (small/medium/large) = **1722%/589%/312% Fortran** ✅ |
-| **Plots**        | **26 totais** (20 + 6 curados PR #11)                    |
+| **Plots**        | **31 totais** (20 + 6 PR #11 + 5 helper)                 |
+| **JAX native**   | **end-to-end** (ETAPAS 3+5+6) — `jax.grad` sobre rho_h ✅ |
 | **Referência**   | `docs/reference/plano_simulador_python_jax_numba.md`      |
 
 ### 1.2j Sprint 2.10 — Cache `common_arrays` (Fase 4 Fortran) — 2026-04-13
