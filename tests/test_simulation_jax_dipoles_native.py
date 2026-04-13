@@ -423,9 +423,16 @@ class TestImplementationStatus:
         assert "_hmd_tiv_full_jax" in IMPLEMENTATION_STATUS
         assert "✅" in IMPLEMENTATION_STATUS["_hmd_tiv_full_jax"]
 
-    def test_status_marks_vmd_pending(self) -> None:
-        assert "_vmd_native_jax" in IMPLEMENTATION_STATUS
-        assert "⏳" in IMPLEMENTATION_STATUS["_vmd_native_jax"]
+    def test_status_marks_vmd_complete(self) -> None:
+        # Sprint 3.3.3 (PR #11): VMD nativo completo — ETAPAS 3+6 ainda
+        # pendentes para Sprint 3.3.4 (PR #12).
+        assert "_vmd_full_jax" in IMPLEMENTATION_STATUS
+        assert "✅" in IMPLEMENTATION_STATUS["_vmd_full_jax"]
+        assert "ETAPAS 3+6 (TEdwz/TEupz prop + tensor assembly)" in IMPLEMENTATION_STATUS
+        assert (
+            "⏳"
+            in IMPLEMENTATION_STATUS["ETAPAS 3+6 (TEdwz/TEupz prop + tensor assembly)"]
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

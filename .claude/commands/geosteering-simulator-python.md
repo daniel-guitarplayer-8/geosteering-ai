@@ -33,15 +33,16 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **1.2.0** (+ Sprint **3.3.2** HMD native via `lax.switch` + 4 plots LWD/PINN) |
-| **Branch**       | `feature/sim-sprint-3-3-2-hmd`                            |
-| **Base**         | `main` (PR #9 `caae8ab` — Sprints 2.10 + 3.3.1 + 4.1)      |
+| **Versão**       | **1.3.0** (+ Sprint **3.3.3** VMD native + Sprint **4.2** empymod 9-comp + 6 plots curados + notebook GPU T4) |
+| **Branch**       | `feature/sim-pr-11`                                       |
+| **Base**         | `main` (PR #10 `8995acb` — Sprint 3.3.2 HMD native + 4 plots LWD/PINN) |
 | **Autor**        | Daniel Leal                                               |
-| **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod (opt-in)  |
+| **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod 2.6+ (opt-in) |
 | **Precisão**     | `complex128` default + `complex64` via config             |
 | **Filtro default** | Werthmüller 201pt (paridade Fortran filter_type=0)      |
-| **Testes**       | **1250 passed, 295 skipped** em ~50s                      |
+| **Testes**       | **1311 passed, 295 skipped** em ~59s                      |
 | **Performance**  | **1.014M/347k/184k mod/h** (small/medium/large) = **1722%/589%/312% Fortran** ✅ |
+| **Plots**        | **26 totais** (20 + 6 curados PR #11)                    |
 | **Referência**   | `docs/reference/plano_simulador_python_jax_numba.md`      |
 
 ### 1.2j Sprint 2.10 — Cache `common_arrays` (Fase 4 Fortran) — 2026-04-13
@@ -175,6 +176,128 @@ Adicionadas em arquivos existentes (não criados novos módulos):
   cenários PINN do pipeline v2.0 (`losses/pinns.py`).
 
 **Smoke tests** (+13 em `test_simulation_visualization.py`, PASS).
+
+### 1.2p Sprint 3.3.3 — VMD native via `lax.switch` (PR #11, 2026-04-13)
+
+Replica a estratégia HMD (Sprint 3.3.2) para o `vmd()` (Vertical Magnetic
+Dipole). Diferente do HMD, o VMD usa **apenas o potencial TE** (não TM),
+então a assinatura dos kernels é mais enxuta (15 args vs 19 do HMD).
+
+**Implementado em `_jax/dipoles_native.py`** (~340 LOC):
+- `_vmd_kernel_case1_jax` … `_vmd_kernel_case6_jax` (6 ramos com
+  assinatura uniforme — exigência de `lax.switch`)
+- `_vmd_full_jax(case_index, ...)` — dispatcher que reusa
+  `compute_case_index_jax` da Sprint 3.3.2
+- Cada kernel retorna `(KtezJ0, KtedzzJ1)` shape `(npt,) complex128`
+
+**Status (`IMPLEMENTATION_STATUS`):**
+| Item | Estado |
+|:---|:---:|
+| `_hmd_tiv_full_jax` | ✅ Sprint 3.3.2 |
+| `_vmd_full_jax` | ✅ Sprint 3.3.3 (esta PR) |
+| ETAPAS 3+6 (TEdwz/TEupz prop + tensor assembly) | ⏳ Sprint 3.3.4 |
+
+**Wiring em `_jax/kernel.py`:** O parâmetro `use_native_dipoles=True`
+agora indica que ETAPA 5 está disponível em JAX para HMD **e** VMD,
+mas o caminho hybrid permanece default e ETAPAS 3+6 ainda usam
+`pure_callback` (Sprint 3.3.4 fará o end-to-end nativo).
+
+**Testes** (`tests/test_simulation_jax_vmd_native.py`, **26 PASS**):
+- Paridade bit-exata (rtol < 1e-12) vs referência NumPy pura por caso
+- Dispatcher matches direct call para todos os 6 índices
+- Estabilidade ρ ∈ {10³, 10⁴, 10⁵, 10⁶} Ω·m
+- `jax.grad(_vmd_full_jax)` retorna gradiente finito em todos os 6 casos
+- Compile-time < 90s (regression guard)
+
+### 1.2q Sprint 4.2 — empymod 9 componentes TIV (PR #11)
+
+Estende `compare_numba_empymod()` (Sprint 4.1, apenas Hzz axial) para os
+**9 componentes do tensor magnético** com mapeamento de anisotropia λ².
+
+**Novos artefatos em `validation/compare_empymod.py`:**
+- `COMPONENT_AB_MAP: dict[str, int]` — mapeia `Hxx,...,Hzz` → códigos
+  empymod `ab ∈ {11, 22, 55, 12, 21, 15, 51, 25, 52}`
+- `COMPONENT_TENSOR_INDEX: dict[str, int]` — mapeia componente → coluna
+  do tensor 9-col (`H_tensor[pos, freq, idx]`)
+- `TensorComparisonResult` (dataclass) — erros por componente, lista de
+  componentes falhos, summary formatado
+- `compare_numba_empymod_tensor(rho_h, rho_v, esp, ...)` — chama
+  `empymod.dipole(ab=AB[comp], aniso=√(ρv/ρh))` para cada componente
+  solicitado e retorna o `TensorComparisonResult`
+
+**Convenção λ² (anisotropia TIV):**
+- Geosteering AI: `rho_h, rho_v` separados (arrays `(n,)`)
+- empymod: `aniso = sqrt(ρv/ρh) = λ` (eleva ao quadrado internamente)
+
+**Status — INFRA completa, bit-exactness pendente:**
+A diferença observada entre Numba e empymod inclui um fator complexo
+≈ `1/(iπ)` compatível com divergência de convenção temporal (e^(-iωt)
+Numba vs convenção empymod). Sprint 4.3 (PR #12) reconciliará. Por
+enquanto a infra serve como:
+1. Smoke test (ambos rodam, retornam finito)
+2. Detecção de simetrias (Hxy ≈ 0 em geometria axial)
+3. Scaffolding para Sprint 4.3
+
+**Testes** (`tests/test_simulation_compare_empymod_tensor.py`, **14 PASS**):
+- `COMPONENT_AB_MAP` cobre 9 elementos, índices únicos 0..8
+- `TensorComparisonResult` shape correto, sem NaN/Inf
+- TIV λ²=2 emite nota de detecção
+- Subset de componentes funciona; componente inválido vai para `failed`
+
+### 1.2r 6 plotagens curadas (PR #11) — categorias a/b/c/d
+
+Adicionadas em arquivos existentes (sem novos módulos):
+
+**`plot_physics.py`** (categoria **a** — física complementar):
+- `plot_induction_number_heatmap(spacing_m=1.0, ...)` — mapa do número
+  de indução adimensional `B = ωμ₀σL²` vs `(freq, ρ)` com contornos em
+  `B = 0.01, 0.1, 1.0, 10.0` para diferenciar regimes quase-estático,
+  transição e dinâmico.
+
+**`plot_geophysical.py`** (categoria **c** — geofísica avançada):
+- `plot_multi_frequency_hodograph(result, component, freq_indices, ...)`
+  — hodógrafo Re×Im para várias freqs sobrepostas, com marcadores ◆
+  (início) e ▲ (fim) para indicar direção espacial. Útil para detecção
+  qualitativa de boundaries em dados LWD reais.
+- `plot_geometric_factor_sensitivity(result, component, freq_idx, ...)`
+  — `G(z) = |dH/dz|` (proxy do fator geométrico) em painel duplo:
+  `|H(z)|` semilog + `G(z)` normalizado, eixo y invertido (convenção
+  geológica). Picos em interfaces.
+
+**`plot_benchmark_advanced.py`** (categoria **b** — diagnóstico):
+- `plot_memory_usage_vs_profile_size(profile_sizes, memory_mb, labels, ...)`
+  — log-log scaling de pico de RAM (MB) vs tamanho do perfil; suporta
+  múltiplas curvas (Numba/JAX/empymod).
+- `plot_backend_comparison_heatmap(times_ms, backends, n_freqs, ...)`
+  — heatmap log-norm de tempos (ms) por backend × n_freq, com
+  anotações em cada célula; `ValueError` se todos times <= 0.
+
+**`plot_ml.py`** (categoria **d** — ML/DL integration):
+- `plot_inference_latency_distribution(latencies_ms, batch_sizes,
+  realtime_target_ms, ...)` — histograma + box plot de latência por
+  batch size, com linha vermelha tracejada no target realtime
+  (default 50 ms, típico LWD 20 Hz). Aceita dict ou array 2D.
+
+**Smoke tests** (+15 em `test_simulation_visualization.py`, PASS).
+
+### 1.2s Notebook Colab GPU T4 — Sprint 3.3.3 + 4.2 (PR #11)
+
+`notebooks/sprint_3_3_4_2_validation.ipynb` (~16 células):
+
+| Célula | Função |
+|:---|:---|
+| 1 | GPU detection via `nvidia-smi` |
+| 2 | Install condicional `jax[cuda12]` ou `jax[cpu]` |
+| 3 | Verifica `jax.default_backend()` + `jax.devices()` |
+| 4 | Compile-time HMD + VMD (alvo < 120s CPU / < 60s GPU) |
+| 5 | `jax.grad` HMD + VMD — gradientes finitos |
+| 6 | Benchmark hybrid em 3 perfis (small/medium/large) + % Fortran |
+| 7 | Cross-validation 9-comp vs empymod (3 cenários TIV) |
+| 8 | 6 plots curados (a/b/c/d) gerados em sequência |
+| 9 | Resumo tabular + próximos passos PR #12 |
+
+Funciona em CPU local (macOS/Linux) **e** Colab Pro+ GPU T4. Pula
+células GPU automaticamente quando `nvidia-smi` ausente.
 
 ### 1.2 Fases do plano (7 fases)
 

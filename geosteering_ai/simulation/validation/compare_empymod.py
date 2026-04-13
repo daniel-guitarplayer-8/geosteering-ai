@@ -316,9 +316,326 @@ def install_empymod_instruction() -> str:
     )
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 4.2 — Validação 9 componentes TIV (mapeamento λ²)
+# ──────────────────────────────────────────────────────────────────────────────
+# Estende a Sprint 4.1 (Hzz isotrópico) para os 9 componentes do tensor H
+# em meios TIV (transversalmente isotrópicos verticais). Os componentes são
+# os 6 distintos do tensor magnético + suas permutações (Hxy=Hyx etc.):
+#
+#   Componente   ab (empymod)   Significado
+#   ──────────   ────────────   ───────────────────────────
+#   Hxx          11             dipolo horizontal-x → receptor horizontal-x
+#   Hxy          12             dipolo horizontal-x → receptor horizontal-y
+#   Hxz          15             dipolo horizontal-x → receptor vertical
+#   Hyx          21             dipolo horizontal-y → receptor horizontal-x
+#   Hyy          22             dipolo horizontal-y → receptor horizontal-y
+#   Hyz          25             dipolo horizontal-y → receptor vertical
+#   Hzx          51             dipolo vertical    → receptor horizontal-x
+#   Hzy          52             dipolo vertical    → receptor horizontal-y
+#   Hzz          55             dipolo vertical    → receptor vertical
+#
+# Convenção λ²: o tensor 9-col Numba ordena os componentes como
+# [Hxx, Hxy, Hxz, Hyx, Hyy, Hyz, Hzx, Hzy, Hzz] (índices 0..8). empymod
+# usa `aniso = sqrt(rho_v / rho_h) = λ` — ao chamar `empymod.dipole`,
+# passamos `aniso = λ` (não λ²) pois o pacote eleva ao quadrado
+# internamente.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Mapeamento componente → código `ab` empymod
+COMPONENT_AB_MAP: dict[str, int] = {
+    "Hxx": 11,
+    "Hxy": 12,
+    "Hxz": 15,
+    "Hyx": 21,
+    "Hyy": 22,
+    "Hyz": 25,
+    "Hzx": 51,
+    "Hzy": 52,
+    "Hzz": 55,
+}
+
+# Mapeamento componente → índice na coluna 9 do `H_tensor` Numba
+COMPONENT_TENSOR_INDEX: dict[str, int] = {
+    "Hxx": 0,
+    "Hxy": 1,
+    "Hxz": 2,
+    "Hyx": 3,
+    "Hyy": 4,
+    "Hyz": 5,
+    "Hzx": 6,
+    "Hzy": 7,
+    "Hzz": 8,
+}
+
+
+@dataclass
+class TensorComparisonResult:
+    """Resultado de uma comparação tensor 9-comp Numba vs empymod (Sprint 4.2).
+
+    Attributes:
+        H_numba: ``(n_positions, nf, 9) complex128`` — tensor completo Numba.
+        H_empymod_per_component: dict ``{comp: array (nf,)}`` — empymod por comp.
+        max_rel_error_per_component: dict ``{comp: float}`` — erro relativo máximo.
+        max_rel_error_global: maior erro relativo entre todos os componentes
+            comparados (excluindo os que falharam).
+        components_compared: lista dos componentes efetivamente comparados.
+        components_failed: lista dos componentes onde empymod falhou (com motivo).
+        empymod_version: versão do empymod usada.
+        backend_numba: "numba" ou "fortran_f2py".
+        notes: mensagens informativas.
+    """
+
+    H_numba: np.ndarray
+    H_empymod_per_component: dict
+    max_rel_error_per_component: dict
+    max_rel_error_global: float
+    components_compared: list
+    components_failed: list
+    empymod_version: str
+    backend_numba: str = "numba"
+    notes: list = field(default_factory=list)
+
+    def summary(self) -> str:
+        """Retorna resumo formatado da comparação 9 componentes."""
+        lines = [
+            "─" * 72,
+            "Comparação Numba ↔ empymod — Tensor 9 componentes (Sprint 4.2)",
+            "─" * 72,
+            f"  Backend Numba:        {self.backend_numba}",
+            f"  empymod version:      {self.empymod_version}",
+            f"  Componentes OK:       {len(self.components_compared)} / 9",
+            f"  Componentes falhos:   {len(self.components_failed)}",
+            f"  Erro relativo máx (global): {self.max_rel_error_global:.3e}",
+            "  Por componente:",
+        ]
+        for comp in self.components_compared:
+            err = self.max_rel_error_per_component.get(comp, float("nan"))
+            lines.append(f"    {comp:<5s}  err_rel = {err:.3e}")
+        for comp, reason in self.components_failed:
+            lines.append(f"    {comp:<5s}  FALHOU — {reason}")
+        for n in self.notes:
+            lines.append(f"  Note: {n}")
+        lines.append("─" * 72)
+        return "\n".join(lines)
+
+
+def compare_numba_empymod_tensor(
+    rho_h: np.ndarray,
+    rho_v: Optional[np.ndarray] = None,
+    esp: Optional[np.ndarray] = None,
+    depth_src: float = 0.0,
+    depth_rec: float = 1.0,
+    offset_x: float = 0.5,
+    freqs_hz: Optional[np.ndarray] = None,
+    components: Optional[list] = None,
+    verb: int = 0,
+) -> TensorComparisonResult:
+    """Compara tensor 9-componentes Numba vs empymod em meio TIV (Sprint 4.2).
+
+    .. warning::
+
+       **Status Sprint 4.2:** infraestrutura completa (mapa AB, dispatcher
+       por componente, dataclass, mapeamento λ²), porém a bit-exactness
+       numérica entre Numba e empymod **ainda não foi alcançada**. A
+       diferença observada inclui um fator complexo (≈ ``1/π · e^{-iπ/2}``)
+       compatível com divergência de convenção (temporal e^(-iωt) Numba
+       vs convenção empymod e/ou normalização ``H`` vs ``B = μ₀H``).
+       Sprint 4.3 (PR #12) tratará da reconciliação completa de
+       convenções. Por enquanto, o resultado serve como:
+
+       1. **Smoke test** — confirma que ambos códigos rodam e produzem
+          resultados finitos para os 9 componentes.
+       2. **Detecção de simetrias** — componentes que devem ser ≈ 0
+          (e.g. ``Hxy`` em geometria axial) são consistentemente
+          pequenos em ambos.
+       3. **Scaffolding** para Sprint 4.3 ajustar fatores de conversão.
+
+    Estende :func:`compare_numba_empymod` para validar as 9 componentes do
+    tensor magnético em meios isotrópicos OU TIV (anisotrópicos verticais).
+    A anisotropia é mapeada via ``aniso = sqrt(rho_v / rho_h) = λ`` (empymod
+    eleva ao quadrado internamente para obter λ²).
+
+    Args:
+        rho_h: ``(n,)`` resistividades horizontais (Ω·m).
+        rho_v: ``(n,)`` resistividades verticais. Se None, usa ``rho_h``
+            (caso isotrópico).
+        esp: ``(n-2,)`` espessuras internas (m).
+        depth_src: profundidade do TX (m).
+        depth_rec: profundidade do RX (m).
+        offset_x: offset horizontal RX-TX em x (m). Default 0.5 m → cria
+            um perfil ligeiramente off-axial onde TODAS as componentes
+            cruzadas (Hxy, Hxz, etc.) são não-nulas.
+        freqs_hz: ``(nf,)`` frequências em Hz. Default ``[20000.0]``.
+        components: Lista de componentes a comparar. Default = TODAS as 9
+            chaves de :data:`COMPONENT_AB_MAP`.
+        verb: verbosity do empymod (0=quiet, 2=verbose).
+
+    Returns:
+        :class:`TensorComparisonResult` com erros por componente.
+
+    Raises:
+        ImportError: Se empymod não instalado.
+
+    Example:
+        >>> import numpy as np
+        >>> result = compare_numba_empymod_tensor(
+        ...     rho_h=np.array([1.0, 100.0, 1.0]),
+        ...     rho_v=np.array([1.0, 200.0, 1.0]),  # λ²=2
+        ...     esp=np.array([5.0]),
+        ...     freqs_hz=np.array([20000.0]),
+        ... )
+        >>> print(result.summary())
+        >>> assert result.max_rel_error_global < 1e-2  # TIV pode divergir mais
+    """
+    if not HAS_EMPYMOD:
+        raise ImportError(
+            "empymod não instalado. Para Sprint 4.2 (validação tensor),"
+            " instale via: `pip install empymod`."
+        )
+
+    rho_h = np.ascontiguousarray(rho_h, dtype=np.float64)
+    n = rho_h.shape[0]
+    if rho_v is None:
+        rho_v = rho_h.copy()
+    else:
+        rho_v = np.ascontiguousarray(rho_v, dtype=np.float64)
+    if esp is None:
+        esp = np.zeros(max(0, n - 2), dtype=np.float64)
+    else:
+        esp = np.ascontiguousarray(esp, dtype=np.float64)
+    if freqs_hz is None:
+        freqs_hz = np.array([20000.0], dtype=np.float64)
+    if components is None:
+        components = list(COMPONENT_AB_MAP.keys())
+
+    nf = freqs_hz.shape[0]
+    notes: list = []
+
+    # ── Convenção empymod: aniso = sqrt(ρv/ρh) = λ ──────────────────────────
+    # empymod eleva ao quadrado internamente: σ_v = σ_h / λ².
+    # Para meios isotrópicos (rho_v == rho_h), aniso = 1.0.
+    aniso = np.sqrt(rho_v / rho_h)
+    if not np.allclose(aniso, 1.0):
+        notes.append(
+            f"Meio TIV detectado: aniso=λ ∈ [{aniso.min():.3f}, {aniso.max():.3f}]"
+            " (empymod usa λ²=ρv/ρh internamente)."
+        )
+
+    # ── Roda simulador Numba (1 vez, retorna tensor completo 9-comp) ────────
+    from geosteering_ai.simulation import SimulationConfig, simulate
+
+    L = depth_rec - depth_src
+    z_mid = 0.5 * (depth_src + depth_rec)
+    cfg = SimulationConfig(
+        frequencies_hz=list(freqs_hz) if nf > 1 else None,
+        frequency_hz=float(freqs_hz[0]),
+        tr_spacing_m=L,
+        parallel=False,
+    )
+    result_numba = simulate(
+        rho_h=rho_h,
+        rho_v=rho_v,
+        esp=esp,
+        positions_z=np.array([z_mid]),
+        cfg=cfg,
+    )
+    H_numba = result_numba.H_tensor  # (1, nf, 9)
+
+    # ── Constrói perfil de interfaces para empymod ──────────────────────────
+    # empymod espera ``len(depth) = n - 1`` interfaces para ``n`` camadas.
+    # Nosso ``esp`` tem ``n - 2`` espessuras internas, então prependemos
+    # ``0.0`` como topo de referência (a primeira interface). Isso é
+    # equivalente à convenção do simulador Numba (``prof[0]=-1e300`` é
+    # apenas sentinela; as interfaces físicas começam em z=0).
+    if n >= 2:
+        depth_interfaces = [0.0] + list(np.cumsum(esp))
+    else:
+        depth_interfaces = []  # half-space (1 camada)
+
+    # Posições TX e RX — replica geometria do `compare_numba_empymod` da
+    # Sprint 4.1 (TX em +x/2, RX em -x/2) para preservar o alinhamento que
+    # já produzia err_rel < 1e-4 no caso Hzz axial. Para Sprint 4.2,
+    # offset_x > 0 garante que os componentes cruzados (Hxy, Hxz, etc.)
+    # sejam não-nulos.
+    src = [offset_x / 2.0, 0.0, depth_src]
+    rec = [-offset_x / 2.0, 0.0, depth_rec]
+
+    # ── Compara cada componente solicitado ──────────────────────────────────
+    H_emp_per: dict = {}
+    err_per: dict = {}
+    failed: list = []
+    compared: list = []
+
+    for comp in components:
+        if comp not in COMPONENT_AB_MAP:
+            failed.append(
+                (comp, f"componente desconhecido (válidos: {list(COMPONENT_AB_MAP)})")
+            )
+            continue
+        ab = COMPONENT_AB_MAP[comp]
+        idx = COMPONENT_TENSOR_INDEX[comp]
+        try:
+            H_emp_arr = empymod.dipole(
+                src=src,
+                rec=rec,
+                depth=depth_interfaces,
+                res=list(rho_h),
+                aniso=list(aniso),
+                freqtime=list(freqs_hz),
+                signal=None,
+                ab=ab,
+                verb=verb,
+            )
+            H_emp_arr = np.asarray(H_emp_arr, dtype=np.complex128).reshape(-1)
+            H_numba_comp = H_numba[0, :, idx]  # (nf,)
+            # Shape mismatch — não trunca silenciosamente (mascararia bugs
+            # de degeneração de freqs ou problemas internos do empymod).
+            # Reporta como falha individual e pula este componente.
+            if H_emp_arr.shape[0] != H_numba_comp.shape[0]:
+                failed.append(
+                    (
+                        comp,
+                        f"shape mismatch: empymod={H_emp_arr.shape[0]} "
+                        f"vs numba={H_numba_comp.shape[0]}",
+                    )
+                )
+                continue
+            H_emp_per[comp] = H_emp_arr
+            abs_err = np.abs(H_numba_comp - H_emp_arr)
+            rel_err = abs_err / np.maximum(np.abs(H_emp_arr), 1e-15)
+            err_per[comp] = float(np.max(rel_err))
+            compared.append(comp)
+        except Exception as exc:  # pragma: no cover — defensivo
+            failed.append((comp, str(exc)))
+
+    # Erro global = max entre os componentes comparados (ignora falhos)
+    if err_per:
+        max_rel_global = max(err_per.values())
+    else:
+        max_rel_global = float("nan")
+
+    return TensorComparisonResult(
+        H_numba=H_numba,
+        H_empymod_per_component=H_emp_per,
+        max_rel_error_per_component=err_per,
+        max_rel_error_global=max_rel_global,
+        components_compared=compared,
+        components_failed=failed,
+        empymod_version=_EMPYMOD_VERSION,
+        backend_numba="numba",
+        notes=notes,
+    )
+
+
 __all__ = [
     "HAS_EMPYMOD",
     "ComparisonResult",
     "compare_numba_empymod",
     "install_empymod_instruction",
+    # Sprint 4.2
+    "COMPONENT_AB_MAP",
+    "COMPONENT_TENSOR_INDEX",
+    "TensorComparisonResult",
+    "compare_numba_empymod_tensor",
 ]

@@ -646,6 +646,304 @@ def _hmd_tiv_full_jax(
 # Status de implementação (para consulta via código)
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 3.3.3 — VMD native (Vertical Magnetic Dipole)
+# ──────────────────────────────────────────────────────────────────────────────
+# NOTA DE DESIGN — parâmetros não usados em alguns kernels:
+#   `lax.switch` exige que TODOS os branches tenham EXATAMENTE a mesma
+#   assinatura (mesmo número, ordem e tipo de argumentos). Por isso cada
+#   `_vmd_kernel_caseN_jax` declara os 15 parâmetros completos mesmo
+#   quando alguns não aparecem no corpo (caso 1 não usa TEdwz_r/FEdwz/
+#   FEupz/prof_r, etc.). É o mesmo padrão dos kernels HMD acima — não é
+#   um bug, é o trade-off para single-compile do dispatcher.
+# ──────────────────────────────────────────────────────────────────────────────
+# Port da ETAPA 5 do `vmd()` (Numba `_numba/dipoles.py:856-945`,
+# Fortran `magneticdipoles.f08:527-623`) para JAX nativo via 6 kernels +
+# `lax.switch`. Diferente do HMD, o VMD utiliza APENAS o potencial TE
+# vertical (TEdwz/TEupz), não TM — por isso a assinatura é mais enxuta
+# (não precisa de `s, RTM*, Tudw/Tuup, Txdw/Txup, Mxdw/Mxup, Eudw/Euup`).
+#
+# Os kernels retornam `(KtezJ0, KtedzzJ1)` shape `(npt,) complex128`.
+# A propagação dos potenciais TEdwz/TEupz através das camadas (lógica
+# Numba 787-854) é deferida ao caller (caminho hybrid em `_jax/kernel.py`)
+# enquanto Sprint 3.3.4 não é entregue. O dispatcher pode ser usado em
+# isolamento para análises de sensibilidade locais (uma camada).
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@jax.jit
+def _vmd_kernel_case1_jax(
+    TEdwz_r: jax.Array,
+    TEupz_r: jax.Array,
+    u_r: jax.Array,
+    RTEdw_r: jax.Array,
+    RTEup_r: jax.Array,
+    AdmInt_r: jax.Array,
+    FEdwz: jax.Array,
+    FEupz: jax.Array,
+    wJ0: jax.Array,
+    wJ1: jax.Array,
+    z: float,
+    h0: float,
+    prof_r: float,
+    prof_r1: float,
+    h_r: float,
+) -> tuple[jax.Array, jax.Array]:
+    """VMD ETAPA 5 — caso 1: ``camad_r==0 and camad_t!=0`` (RX na superfície).
+
+    Replica Numba ``_numba/dipoles.py:863-867``::
+
+        fac = TEupz[:, 0] * exp(u[:, 0] * z)
+        KtedzzJ1 = AdmInt[:, 0] * fac * wJ1
+    """
+    fac = TEupz_r * jnp.exp(u_r * z)
+    KtezJ0 = fac * wJ0
+    KtedzzJ1 = AdmInt_r * fac * wJ1
+    return KtezJ0, KtedzzJ1
+
+
+@jax.jit
+def _vmd_kernel_case2_jax(
+    TEdwz_r: jax.Array,
+    TEupz_r: jax.Array,
+    u_r: jax.Array,
+    RTEdw_r: jax.Array,
+    RTEup_r: jax.Array,
+    AdmInt_r: jax.Array,
+    FEdwz: jax.Array,
+    FEupz: jax.Array,
+    wJ0: jax.Array,
+    wJ1: jax.Array,
+    z: float,
+    h0: float,
+    prof_r: float,
+    prof_r1: float,
+    h_r: float,
+) -> tuple[jax.Array, jax.Array]:
+    """VMD ETAPA 5 — caso 2: ``camad_r < camad_t`` (RX acima do TX).
+
+    Replica Numba ``_numba/dipoles.py:868-884``.
+    """
+    a = jnp.exp(u_r * (z - prof_r1))
+    b = RTEup_r * jnp.exp(-u_r * (z - prof_r + h_r))
+    fac = TEupz_r * (a + b)
+    KtezJ0 = fac * wJ0
+    KtedzzJ1 = AdmInt_r * TEupz_r * (a - b) * wJ1
+    return KtezJ0, KtedzzJ1
+
+
+@jax.jit
+def _vmd_kernel_case3_jax(
+    TEdwz_r: jax.Array,
+    TEupz_r: jax.Array,
+    u_r: jax.Array,
+    RTEdw_r: jax.Array,
+    RTEup_r: jax.Array,
+    AdmInt_r: jax.Array,
+    FEdwz: jax.Array,
+    FEupz: jax.Array,
+    wJ0: jax.Array,
+    wJ1: jax.Array,
+    z: float,
+    h0: float,
+    prof_r: float,
+    prof_r1: float,
+    h_r: float,
+) -> tuple[jax.Array, jax.Array]:
+    """VMD ETAPA 5 — caso 3: ``camad_r==camad_t and z<=h0`` (mesma camada, RX acima).
+
+    Replica Numba ``_numba/dipoles.py:885-903``.
+    """
+    a = jnp.exp(u_r * (z - h0))
+    b = RTEup_r * FEupz * jnp.exp(-u_r * (z - prof_r))
+    c = RTEdw_r * FEdwz * jnp.exp(u_r * (z - prof_r1))
+    fac = TEupz_r * (a + b + c)
+    KtezJ0 = fac * wJ0
+    KtedzzJ1 = AdmInt_r * TEupz_r * (a - b + c) * wJ1
+    return KtezJ0, KtedzzJ1
+
+
+@jax.jit
+def _vmd_kernel_case4_jax(
+    TEdwz_r: jax.Array,
+    TEupz_r: jax.Array,
+    u_r: jax.Array,
+    RTEdw_r: jax.Array,
+    RTEup_r: jax.Array,
+    AdmInt_r: jax.Array,
+    FEdwz: jax.Array,
+    FEupz: jax.Array,
+    wJ0: jax.Array,
+    wJ1: jax.Array,
+    z: float,
+    h0: float,
+    prof_r: float,
+    prof_r1: float,
+    h_r: float,
+) -> tuple[jax.Array, jax.Array]:
+    """VMD ETAPA 5 — caso 4: ``camad_r==camad_t and z>h0`` (mesma camada, RX abaixo).
+
+    Replica Numba ``_numba/dipoles.py:904-922``.
+    """
+    a = jnp.exp(-u_r * (z - h0))
+    b = RTEup_r * FEupz * jnp.exp(-u_r * (z - prof_r))
+    c = RTEdw_r * FEdwz * jnp.exp(u_r * (z - prof_r1))
+    fac = TEdwz_r * (a + b + c)
+    KtezJ0 = fac * wJ0
+    KtedzzJ1 = -AdmInt_r * TEdwz_r * (a + b - c) * wJ1
+    return KtezJ0, KtedzzJ1
+
+
+@jax.jit
+def _vmd_kernel_case5_jax(
+    TEdwz_r: jax.Array,
+    TEupz_r: jax.Array,
+    u_r: jax.Array,
+    RTEdw_r: jax.Array,
+    RTEup_r: jax.Array,
+    AdmInt_r: jax.Array,
+    FEdwz: jax.Array,
+    FEupz: jax.Array,
+    wJ0: jax.Array,
+    wJ1: jax.Array,
+    z: float,
+    h0: float,
+    prof_r: float,
+    prof_r1: float,
+    h_r: float,
+) -> tuple[jax.Array, jax.Array]:
+    """VMD ETAPA 5 — caso 5: ``camad_r > camad_t and camad_r != n-1`` (RX abaixo, intermediária).
+
+    Replica Numba ``_numba/dipoles.py:923-939``.
+    """
+    a = jnp.exp(-u_r * (z - prof_r))
+    b = RTEdw_r * jnp.exp(u_r * (z - prof_r1 - h_r))
+    fac = TEdwz_r * (a + b)
+    KtezJ0 = fac * wJ0
+    KtedzzJ1 = -AdmInt_r * TEdwz_r * (a - b) * wJ1
+    return KtezJ0, KtedzzJ1
+
+
+@jax.jit
+def _vmd_kernel_case6_jax(
+    TEdwz_r: jax.Array,
+    TEupz_r: jax.Array,
+    u_r: jax.Array,
+    RTEdw_r: jax.Array,
+    RTEup_r: jax.Array,
+    AdmInt_r: jax.Array,
+    FEdwz: jax.Array,
+    FEupz: jax.Array,
+    wJ0: jax.Array,
+    wJ1: jax.Array,
+    z: float,
+    h0: float,
+    prof_r: float,
+    prof_r1: float,
+    h_r: float,
+) -> tuple[jax.Array, jax.Array]:
+    """VMD ETAPA 5 — caso 6: ``camad_r == n-1`` (RX na última camada).
+
+    Replica Numba ``_numba/dipoles.py:940-945``.
+    """
+    fac = TEdwz_r * jnp.exp(-u_r * (z - prof_r))
+    KtezJ0 = fac * wJ0
+    KtedzzJ1 = -AdmInt_r * fac * wJ1
+    return KtezJ0, KtedzzJ1
+
+
+def _vmd_full_jax(
+    case_index: int,
+    TEdwz_r: jax.Array,
+    TEupz_r: jax.Array,
+    u_r: jax.Array,
+    RTEdw_r: jax.Array,
+    RTEup_r: jax.Array,
+    AdmInt_r: jax.Array,
+    FEdwz: jax.Array,
+    FEupz: jax.Array,
+    wJ0: jax.Array,
+    wJ1: jax.Array,
+    z: float,
+    h0: float,
+    prof_r: float,
+    prof_r1: float,
+    h_r: float,
+) -> tuple[jax.Array, jax.Array]:
+    """Dispatcher VMD ETAPA 5 via ``lax.switch`` nos 6 casos geométricos.
+
+    Análogo a :func:`_hmd_tiv_full_jax`, mas com assinatura enxuta (apenas
+    arrays TE e ``AdmInt`` — não consome RTM/Tudw/Mxdw como o HMD).
+
+    Args:
+        case_index: Inteiro em [0, 5] obtido via :func:`compute_case_index_jax`.
+        TEdwz_r, TEupz_r: Potenciais TE descendente/ascendente da camada do
+            RX, ``(npt,) complex128`` — propagados pelo caller (loops da
+            propagação Fortran 479-524 / Numba 787-854 ainda no path hybrid).
+        u_r: ``(npt,) complex128`` — kernel vertical TE da camada do RX.
+        RTEdw_r, RTEup_r: ``(npt,) complex128`` — coeficientes de reflexão TE.
+        AdmInt_r: ``(npt,) complex128`` — admitância intrínseca da camada.
+        FEdwz, FEupz: ``(npt,) complex128`` — fatores comuns (de
+            ``common_factors_jax``).
+        wJ0, wJ1: ``(npt,) float64`` — pesos do filtro Hankel.
+        z, h0, prof_r, prof_r1, h_r: Escalares geométricos (float).
+
+    Returns:
+        ``(KtezJ0, KtedzzJ1)`` — 2 arrays ``(npt,) complex128`` que o caller
+        deve combinar com ``kr`` para obter ``(Hx, Hy, Hz)`` finais (Numba
+        947-959)::
+
+            sum_KtedzzJ1_kr2 = sum(KtedzzJ1 * kr * kr)
+            sum_KtezJ0_kr3   = sum(KtezJ0 * kr * kr * kr)
+            Hx = -x * sum_KtedzzJ1_kr2 / (2π r) / r
+            Hy = -y * sum_KtedzzJ1_kr2 / (2π r) / r
+            Hz =       sum_KtezJ0_kr3   / (2π ζ r)
+
+    Note:
+        Esta função é **diferenciável via** ``jax.grad`` e suporta ``vmap``.
+        Útil para PINNs locais de uma camada e para análises de sensibilidade
+        ∂Hz/∂rho_h por camada-alvo. O wiring no kernel completo (HMD+VMD
+        end-to-end + ETAPAS 3+6 da propagação) é Sprint 3.3.4.
+
+    Example:
+        >>> idx = compute_case_index_jax(camad_r=1, camad_t=1,
+        ...                              n=3, z=5.0, h0=4.0)
+        >>> # idx == 3 (caso 4: mesma camada, z > h0)
+        >>> KtezJ0, KtedzzJ1 = _vmd_full_jax(idx, TEdwz, TEupz, u, ...)
+    """
+    branches = [
+        _vmd_kernel_case1_jax,
+        _vmd_kernel_case2_jax,
+        _vmd_kernel_case3_jax,
+        _vmd_kernel_case4_jax,
+        _vmd_kernel_case5_jax,
+        _vmd_kernel_case6_jax,
+    ]
+    return jax.lax.switch(
+        case_index,
+        branches,
+        TEdwz_r,
+        TEupz_r,
+        u_r,
+        RTEdw_r,
+        RTEup_r,
+        AdmInt_r,
+        FEdwz,
+        FEupz,
+        wJ0,
+        wJ1,
+        z,
+        h0,
+        prof_r,
+        prof_r1,
+        h_r,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Status de implementação (para consulta via código)
+# ──────────────────────────────────────────────────────────────────────────────
+
 IMPLEMENTATION_STATUS = {
     "decoupling_factors_jax": "✅ completo (diferenciável)",
     "_dipole_phases_jax": "✅ completo (caso camadR==camadT)",
@@ -653,7 +951,9 @@ IMPLEMENTATION_STATUS = {
     "_hmd_tiv_kernel_case1_jax..case6_jax": "✅ completos (Sprint 3.3.2)",
     "_hmd_tiv_full_jax": "✅ dispatcher lax.switch (Sprint 3.3.2)",
     "compute_case_index_jax": "✅ mapeia geometria → índice 0..5",
-    "_vmd_native_jax": "⏳ planejado para Sprint 3.3.3",
+    "_vmd_kernel_case1_jax..case6_jax": "✅ completos (Sprint 3.3.3)",
+    "_vmd_full_jax": "✅ dispatcher lax.switch (Sprint 3.3.3)",
+    "ETAPAS 3+6 (TEdwz/TEupz prop + tensor assembly)": "⏳ Sprint 3.3.4",
 }
 
 
@@ -661,7 +961,7 @@ __all__ = [
     "decoupling_factors_jax",
     "_dipole_phases_jax",
     "_hmd_tiv_same_layer_jax",
-    # Sprint 3.3.2 — kernels dos 6 casos
+    # Sprint 3.3.2 — kernels HMD dos 6 casos
     "_hmd_tiv_kernel_case1_jax",
     "_hmd_tiv_kernel_case2_jax",
     "_hmd_tiv_kernel_case3_jax",
@@ -670,5 +970,13 @@ __all__ = [
     "_hmd_tiv_kernel_case6_jax",
     "compute_case_index_jax",
     "_hmd_tiv_full_jax",
+    # Sprint 3.3.3 — kernels VMD dos 6 casos
+    "_vmd_kernel_case1_jax",
+    "_vmd_kernel_case2_jax",
+    "_vmd_kernel_case3_jax",
+    "_vmd_kernel_case4_jax",
+    "_vmd_kernel_case5_jax",
+    "_vmd_kernel_case6_jax",
+    "_vmd_full_jax",
     "IMPLEMENTATION_STATUS",
 ]

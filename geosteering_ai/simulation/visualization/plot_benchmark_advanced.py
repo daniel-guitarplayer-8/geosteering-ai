@@ -508,10 +508,215 @@ def measure_component_times(
     }
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 3.3.3+ — plot_memory_usage_vs_profile_size (categoria b — diagnóstico)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def plot_memory_usage_vs_profile_size(
+    profile_sizes,
+    memory_mb,
+    *,
+    labels=None,
+    title: str = "Pico de memória vs tamanho do perfil (decisão de hardware)",
+    figsize: tuple = (9.0, 5.5),
+):
+    """Curvas de pico de RAM (MB) em função do tamanho do perfil geológico.
+
+    Útil para dimensionamento de hardware em produção (GPU/CPU): permite
+    estimar quanta RAM o simulador consome para perfis de N camadas e/ou
+    M frequências antes de fazer deploy.
+
+    Args:
+        profile_sizes: ``(n_pts,)`` array de tamanhos (n_camadas ou
+            n_freq×n_camadas, depende de como o caller mediu).
+        memory_mb: ``(n_curves, n_pts)`` array — uma curva por backend
+            ou config. Pode passar ``(n_pts,)`` para 1 curva única.
+        labels: Lista de strings para a legenda (1 por curva). Default
+            ``["Backend"]``.
+        title: Título da figura.
+        figsize: Tamanho da figura.
+
+    Returns:
+        ``Figure`` com 1 painel — eixos log-log para escalabilidade.
+
+    Raises:
+        ValueError: Se ``len(memory_mb)`` (curvas) ≠ ``len(labels)``.
+
+    Example:
+        >>> sizes = np.array([10, 50, 100, 500, 1000])
+        >>> mem = np.array([
+        ...     [12, 45, 90, 410, 820],   # Numba CPU
+        ...     [25, 80, 160, 720, 1450], # JAX GPU
+        ... ])
+        >>> fig = plot_memory_usage_vs_profile_size(
+        ...     sizes, mem, labels=["Numba", "JAX"]
+        ... )
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    profile_sizes = np.asarray(profile_sizes, dtype=np.float64)
+    memory_mb = np.asarray(memory_mb, dtype=np.float64)
+
+    if memory_mb.ndim == 1:
+        memory_mb = memory_mb[None, :]
+    n_curves = memory_mb.shape[0]
+
+    if labels is None:
+        labels = [f"Curva {i + 1}" for i in range(n_curves)]
+    if len(labels) != n_curves:
+        raise ValueError(f"len(labels)={len(labels)} != n_curves={n_curves}")
+
+    fig, ax = plt.subplots(figsize=figsize)
+    cmap = plt.get_cmap("viridis")
+    for i in range(n_curves):
+        color = cmap(i / max(1, n_curves - 1))
+        ax.loglog(
+            profile_sizes,
+            memory_mb[i],
+            "o-",
+            color=color,
+            lw=1.8,
+            markersize=6,
+            label=labels[i],
+        )
+
+    ax.set_xlabel("Tamanho do perfil (n_camadas × n_freq)")
+    ax.set_ylabel("Pico de RAM (MB)")
+    ax.set_title(title)
+    ax.grid(True, which="both", linestyle=":", alpha=0.5)
+    ax.legend(loc="best", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 3.3.3+ — plot_backend_comparison_heatmap (categoria b — diagnóstico)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def plot_backend_comparison_heatmap(
+    times_ms,
+    *,
+    backends=None,
+    n_freqs=None,
+    title: str = "Tempo de execução (ms) — backend × frequências (decisão deployment)",
+    figsize: tuple = (9.0, 5.5),
+    cmap: str = "viridis",
+):
+    """Heatmap comparativo de tempo de execução entre backends e n_freq.
+
+    Permite ao engenheiro escolher o backend ideal (Numba/JAX/empymod)
+    para uma carga típica de inferência: para cada combinação de
+    backend × número de frequências, mostra o tempo médio em milissegundos.
+
+    Args:
+        times_ms: ``(n_backends, n_freqs)`` array de tempos em ms.
+        backends: Lista de nomes ``["Numba", "JAX-hybrid", "JAX-native"]``.
+        n_freqs: Lista de quantidades de frequências testadas.
+        title: Título da figura.
+        figsize: Tamanho da figura.
+        cmap: Colormap (sequencial recomendado).
+
+    Returns:
+        ``Figure`` com 1 painel heatmap + colorbar (escala log).
+
+    Note:
+        Anotações em cada célula mostram o tempo absoluto. Para detectar
+        regimes de escala, observe se o crescimento é linear ou
+        super-linear ao longo das colunas.
+
+    Example:
+        >>> import numpy as np
+        >>> times = np.array([
+        ...     [1.2, 5.8, 28.0, 140.0],   # Numba
+        ...     [3.5, 8.0, 30.0, 110.0],   # JAX hybrid
+        ... ])
+        >>> fig = plot_backend_comparison_heatmap(
+        ...     times, backends=["Numba", "JAX-hybrid"],
+        ...     n_freqs=[1, 4, 16, 64]
+        ... )
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    times_ms = np.asarray(times_ms, dtype=np.float64)
+    if times_ms.ndim != 2:
+        raise ValueError(
+            f"times_ms deve ser 2D (n_backends, n_freqs); shape={times_ms.shape}"
+        )
+    nb, nf = times_ms.shape
+    if backends is None:
+        backends = [f"Backend {i + 1}" for i in range(nb)]
+    if n_freqs is None:
+        n_freqs = [2**i for i in range(nf)]
+    if len(backends) != nb or len(n_freqs) != nf:
+        raise ValueError(
+            f"backends ({len(backends)}) e n_freqs ({len(n_freqs)}) "
+            f"devem ter tamanhos compatíveis com times_ms shape {times_ms.shape}"
+        )
+
+    fig, ax = plt.subplots(figsize=figsize)
+    # Log-norm requer todos > 0; substitui zeros por NaN (cinza no plot)
+    # para evitar fallback silencioso para escala linear (que contraria o
+    # label "Tempo (ms, log10)" abaixo).
+    times_for_norm = np.where(times_ms > 0, times_ms, np.nan)
+    log_norm = _make_log_norm(times_for_norm)
+    if log_norm is None:
+        raise ValueError("times_ms não contém valores positivos — log-norm impossível.")
+    pcm = ax.pcolormesh(
+        np.arange(nf + 1),
+        np.arange(nb + 1),
+        times_for_norm,
+        norm=log_norm,
+        cmap=cmap,
+        shading="flat",
+    )
+    ax.set_xticks(np.arange(nf) + 0.5, [str(f) for f in n_freqs])
+    ax.set_yticks(np.arange(nb) + 0.5, backends)
+    ax.invert_yaxis()  # backend index 0 no topo
+    ax.set_xlabel("Número de frequências")
+    ax.set_ylabel("Backend")
+    ax.set_title(title)
+
+    # Anotações com tempos
+    for i in range(nb):
+        for j in range(nf):
+            txt = f"{times_ms[i, j]:.1f}"
+            ax.text(
+                j + 0.5,
+                i + 0.5,
+                txt,
+                ha="center",
+                va="center",
+                color="white" if times_ms[i, j] > times_ms.mean() else "black",
+                fontsize=9,
+            )
+
+    plt.colorbar(pcm, ax=ax, label="Tempo (ms, log10)")
+    fig.tight_layout()
+    return fig
+
+
+def _make_log_norm(arr):
+    """LogNorm com fallback para arrays com valores ≤ 0."""
+    from matplotlib.colors import LogNorm
+
+    arr = np.asarray(arr)
+    positive = arr[arr > 0]
+    if positive.size == 0:
+        return None
+    return LogNorm(vmin=positive.min(), vmax=positive.max())
+
+
 __all__ = [
     "plot_speedup_curve",
     "plot_filter_convergence",
     "plot_error_heatmap",
     "plot_component_times",
     "measure_component_times",
+    # Sprint 3.3.3+ — Categoria (b)
+    "plot_memory_usage_vs_profile_size",
+    "plot_backend_comparison_heatmap",
 ]

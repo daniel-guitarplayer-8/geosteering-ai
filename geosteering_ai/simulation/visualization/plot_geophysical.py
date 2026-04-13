@@ -636,6 +636,208 @@ def plot_geosignal_response_vs_dip(
     return fig
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 3.3.3+ — plot_multi_frequency_hodograph (categoria c — geofísica)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def plot_multi_frequency_hodograph(
+    result,
+    *,
+    component: str = "Hzz",
+    freq_indices=None,
+    title: str = "Hodógrafo multi-frequência (Re vs Im)",
+    figsize: tuple = (8.0, 8.0),
+    cmap: str = "viridis",
+):
+    """Hodógrafo complexo Re(H) vs Im(H) para várias frequências sobrepostas.
+
+    O hodógrafo é a curva paramétrica ``(Re(H(z)), Im(H(z)))`` indexada
+    pela profundidade. Para um meio homogêneo, é uma espiral logarítmica
+    (skin effect). Em meio estratificado, a topologia da curva muda nas
+    interfaces — útil para detecção qualitativa de boundaries em dados
+    LWD reais.
+
+    Args:
+        result: ``SimulationResult`` da função :func:`simulate`.
+        component: Nome do componente (``Hxx, Hxy, ..., Hzz``).
+        freq_indices: Lista de índices de frequência para sobrepor. Se
+            None, usa todas (até 6 para legibilidade).
+        title: Título da figura.
+        figsize: Tamanho da figura.
+        cmap: Colormap para diferenciar frequências.
+
+    Returns:
+        ``Figure`` com 1 painel quadrado contendo as curvas hodográficas.
+
+    Note:
+        Marca o ponto inicial (z=z[0]) com ``◆`` e o final (z=z[-1]) com
+        ``▲`` para indicar direção temporal/espacial da curva.
+
+    Example:
+        >>> from geosteering_ai.simulation import simulate, SimulationConfig
+        >>> r = simulate(rho_h=np.array([1.,100.,1.]), esp=np.array([5.]),
+        ...              positions_z=np.linspace(-2, 7, 50),
+        ...              cfg=SimulationConfig(parallel=False))
+        >>> fig = plot_multi_frequency_hodograph(r)
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    comp_map = {
+        "Hxx": 0,
+        "Hxy": 1,
+        "Hxz": 2,
+        "Hyx": 3,
+        "Hyy": 4,
+        "Hyz": 5,
+        "Hzx": 6,
+        "Hzy": 7,
+        "Hzz": 8,
+    }
+    if component not in comp_map:
+        raise ValueError(
+            f"Componente desconhecido: {component} (válidos: {list(comp_map)})"
+        )
+    idx = comp_map[component]
+
+    nf = result.H_tensor.shape[1]
+    if freq_indices is None:
+        freq_indices = list(range(min(nf, 6)))
+
+    fig, ax = plt.subplots(figsize=figsize)
+    cmap_obj = plt.get_cmap(cmap)
+    n_curves = max(1, len(freq_indices))
+
+    for k, i_f in enumerate(freq_indices):
+        if not (0 <= i_f < nf):
+            continue
+        Hk = result.H_tensor[:, i_f, idx]
+        color = cmap_obj(k / max(1, n_curves - 1))
+        freq_lbl = f"{result.freqs_hz[i_f] / 1000:.1f} kHz"
+        ax.plot(np.real(Hk), np.imag(Hk), "-", color=color, lw=1.6, label=freq_lbl)
+        ax.plot(
+            np.real(Hk[0]),
+            np.imag(Hk[0]),
+            marker="D",
+            color=color,
+            markersize=8,
+            markeredgecolor="black",
+            linestyle="none",
+        )
+        ax.plot(
+            np.real(Hk[-1]),
+            np.imag(Hk[-1]),
+            marker="^",
+            color=color,
+            markersize=10,
+            markeredgecolor="black",
+            linestyle="none",
+        )
+
+    ax.axhline(0.0, color="grey", lw=0.5, alpha=0.5)
+    ax.axvline(0.0, color="grey", lw=0.5, alpha=0.5)
+    ax.set_xlabel(f"Re({component})  (A/m)")
+    ax.set_ylabel(f"Im({component})  (A/m)")
+    ax.set_title(f"{title} — {component}")
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.grid(True, linestyle=":", alpha=0.5)
+    ax.legend(loc="best", fontsize=9, title="Freq")
+    fig.tight_layout()
+    return fig
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 3.3.3+ — plot_geometric_factor_sensitivity (categoria c — geofísica)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def plot_geometric_factor_sensitivity(
+    result,
+    *,
+    component: str = "Hzz",
+    freq_idx: int = 0,
+    title: str = "Fator geométrico G(z) — sensibilidade vertical da ferramenta",
+    figsize: tuple = (8.0, 6.0),
+):
+    """Fator geométrico ``G(z)`` da ferramenta LWD computado via diferenças.
+
+    O fator geométrico é a sensibilidade local ``∂σ_apparent / ∂σ_local``,
+    usado em geosteering para entender qual camada o sensor "vê" mais.
+    Aqui aproximamos G(z) como ``|H(z+Δ) - H(z-Δ)| / (2·Δ)`` (gradiente
+    central de finite differences).
+
+    Args:
+        result: ``SimulationResult`` da função :func:`simulate`.
+        component: Componente do tensor (``Hxx`` … ``Hzz``).
+        freq_idx: Índice da frequência a usar (default 0).
+        title: Título da figura.
+        figsize: Tamanho da figura.
+
+    Returns:
+        ``Figure`` com 2 painéis: (esquerda) ``|H(z)|`` em escala log,
+        (direita) ``G(z)`` em escala linear normalizada.
+
+    Note:
+        Picos de G(z) marcam interfaces — útil em conjunto com perfil
+        de resistividade verdadeiro para validar bridge cap entre
+        modelo direto e Picasso DOD.
+
+    Example:
+        >>> fig = plot_geometric_factor_sensitivity(result, component="Hzz")
+    """
+    _require_mpl()
+    import matplotlib.pyplot as plt
+
+    comp_map = {
+        "Hxx": 0,
+        "Hxy": 1,
+        "Hxz": 2,
+        "Hyx": 3,
+        "Hyy": 4,
+        "Hyz": 5,
+        "Hzx": 6,
+        "Hzy": 7,
+        "Hzz": 8,
+    }
+    if component not in comp_map:
+        raise ValueError(
+            f"Componente desconhecido: {component} (válidos: {list(comp_map)})"
+        )
+    idx = comp_map[component]
+    nf = result.H_tensor.shape[1]
+    if not (0 <= freq_idx < nf):
+        raise ValueError(f"freq_idx={freq_idx} fora de [0, {nf - 1}]")
+
+    z = np.asarray(result.z_obs)
+    H = np.abs(result.H_tensor[:, freq_idx, idx])
+
+    # Gradiente central: G(z) = |dH/dz| → proxy do fator geométrico
+    dz = np.gradient(z)
+    dH = np.gradient(H)
+    G = np.abs(dH / np.maximum(dz, 1e-12))
+    G_norm = G / np.maximum(G.max(), 1e-30)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize, sharey=True)
+    ax1.semilogx(H, z, color="darkblue", lw=1.8)
+    ax1.set_xlabel(f"|{component}|  (A/m)")
+    ax1.set_ylabel("Profundidade (m)")
+    ax1.set_title("Resposta")
+    ax1.grid(True, which="both", linestyle=":", alpha=0.5)
+    ax1.invert_yaxis()
+
+    ax2.plot(G_norm, z, color="darkred", lw=1.8)
+    ax2.fill_betweenx(z, 0.0, G_norm, color="tomato", alpha=0.3)
+    ax2.set_xlabel("G(z) normalizado")
+    ax2.set_title("Fator geométrico")
+    ax2.grid(True, linestyle=":", alpha=0.5)
+    ax2.set_xlim(0.0, 1.05)
+
+    fig.suptitle(f"{title} — {component} @ {result.freqs_hz[freq_idx] / 1000:.1f} kHz")
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    return fig
+
+
 __all__ = [
     "plot_pseudosection",
     "plot_polar_directivity",
@@ -643,4 +845,7 @@ __all__ = [
     "plot_tornado",
     "plot_apparent_resistivity_curves",
     "plot_geosignal_response_vs_dip",
+    # Sprint 3.3.3+ — Categoria (c)
+    "plot_multi_frequency_hodograph",
+    "plot_geometric_factor_sensitivity",
 ]
