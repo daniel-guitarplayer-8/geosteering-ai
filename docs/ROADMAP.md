@@ -777,9 +777,12 @@ F7.I/O ✅ — read_model_in + simulate_from_model_in → .dat/.out             
 F7.4.4 ✅ — TIV analítico (half_space): wavenumber_tiv + VMD/HMD TIV         [CONCLUÍDA 2026-04-13 PR #13]
 F7.5.1 ✅ — JAX jacfwd dispatcher + fallback FD (experimental)               [CONCLUÍDA 2026-04-13 PR #13]
 F7.5.2 ✅ — Numba FD centrada (política δ=clip(ε·|ρ|,1e-6,0.1·|ρ|))          [CONCLUÍDA 2026-04-13 PR #13]
-F7.4   — Fortran↔Python direto .dat comparison (tatu.x subprocess)          [PENDENTE — PR #14]
-F7.5.1b — jax.jacfwd end-to-end nativo (remove fallback FD)                 [PENDENTE — PR #15]
-F7.6   — Integração no PipelineConfig (backend='numba'|'jax')               [PENDENTE]
+F7.4.5 ✅ — Fortran↔Python direto .dat comparison (tatu.x subprocess)        [CONCLUÍDA 2026-04-13 PR #14a]
+F7.BENCH ✅ — Benchmarks reais CPU Intel i9: 239–1566% Fortran (3 perfis)    [CONCLUÍDA 2026-04-13 PR #14a]
+F7.5.1b — jax.jacfwd end-to-end nativo (remove fallback FD)                 [PENDENTE — PR #14b]
+F7.6.1  — Integração simulator_backend em PipelineConfig                    [PENDENTE — PR #14c]
+F7.6.2  — SyntheticDataGenerator substitui Fortran batch_runner            [PENDENTE — PR #14c]
+F7.7   — Otimizações finais (pmap multi-GPU, XLA, caching)                  [PENDENTE]
 F7.7   — Otimizações finais (pmap multi-GPU, XLA, caching)                  [PENDENTE]
 ```
 
