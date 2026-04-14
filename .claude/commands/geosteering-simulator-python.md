@@ -1445,3 +1445,52 @@ import os; os.environ['JAX_ENABLE_X64'] = 'True'
 ### 22.7 Próximo PR
 
 - **PR #14c** — Sprints 6.1+6.2: `simulator_backend` em `PipelineConfig` + `SyntheticDataGenerator` substituindo `Fortran_Gerador/batch_runner.py`.
+
+---
+
+## 23. PR #14c — Sprints 6.1 + 6.2 (PipelineConfig + DataPipeline) (2026-04-13)
+
+### 23.1 Sprint 6.1 — simulator_backend em PipelineConfig
+
+5 novos campos + validação `__post_init__`:
+
+```python
+from geosteering_ai.config import PipelineConfig
+
+cfg = PipelineConfig(
+    simulator_backend='numba',       # default: 'fortran_f2py'
+    simulator_precision='complex128',
+    simulator_device='cpu',
+    simulator_jax_mode='native',     # ignorado se backend != 'jax'
+    simulator_cache_common_arrays=True,
+)
+# Erros validados:
+PipelineConfig(simulator_backend='fortran_f2py', simulator_device='gpu')  # AssertionError
+PipelineConfig(simulator_backend='numba', simulator_device='gpu')         # AssertionError
+```
+
+### 23.2 Sprint 6.2 — SyntheticDataGenerator
+
+```python
+from geosteering_ai.data.synthetic_generator import SyntheticDataGenerator
+
+cfg = PipelineConfig(simulator_backend='numba')
+gen = SyntheticDataGenerator(cfg)
+batch = gen.generate_batch(n_models=100, n_positions=100, seed=42)
+# batch.H_tensor: (100, 100, 1, 9) complex128
+# batch.dat_22col: compatível com DTYPE_22COL → loading.py
+# batch.metadata: {'backend': 'numba', 'throughput_mod_h': ..., ...}
+```
+
+Substitui `Fortran_Gerador/batch_runner.py` (ProcessPoolExecutor + subprocess).
+
+### 23.3 Testes 12/12 PASS
+
+`tests/test_pipeline_simulator_backend.py`:
+- 6 testes Sprint 6.1 (defaults + validações + mutual exclusivity)
+- 6 testes Sprint 6.2 (shape, determinismo, round-trip .dat, alta ρ, throughput)
+
+### 23.4 Regressão total
+
+**230/230 PASS em 49,69s** (config + simulação + pipeline). Zero regressão.
+

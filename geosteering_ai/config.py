@@ -589,6 +589,47 @@ class PipelineConfig:
     experiment_tag: Optional[str] = None
 
     # ══════════════════════════════════════════════════════════════════
+    # SECAO 15.5: SIMULADOR PYTHON (PR #14c — Sprint 6.1)
+    # Dispatcher entre os 4 backends de simulação disponíveis:
+    #   • fortran_f2py — subprocess tatu.x (legacy, default)
+    #   • numba        — @njit cache (CPU, paridade Fortran ≤ 1e-13)
+    #   • jax          — híbrido (pure_callback Numba) OU nativo (jit+vmap)
+    # O modo JAX é refinado via simulator_jax_mode = 'hybrid' | 'native'.
+    # Default conservador: fortran_f2py (não altera pipelines legacy).
+    # ══════════════════════════════════════════════════════════════════
+    simulator_backend: str = "fortran_f2py"
+    """Backend do simulador. Opções: 'fortran_f2py', 'numba', 'jax'.
+
+    Default: 'fortran_f2py' (legacy, subprocess tatu.x). Alterar para
+    'numba' habilita simulador Python em CPU (≥4× Fortran, paridade
+    < 1e-13). 'jax' habilita GPU + jacfwd diferenciável.
+    """
+    simulator_precision: str = "complex128"
+    """Precisão dos arrays do simulador. 'complex128' (default) ou 'complex64'.
+
+    'complex64' reduz memória em ~50% mas degrada precisão para ~1e-7
+    (aceitável apenas em GPU com XLA fusion). Em CPU, prefira
+    'complex128'.
+    """
+    simulator_device: str = "cpu"
+    """Dispositivo do simulador. 'cpu' (default) ou 'gpu'.
+
+    'gpu' válido APENAS com simulator_backend='jax'. Numba é CPU-only;
+    fortran_f2py é CPU-only via OpenMP.
+    """
+    simulator_jax_mode: str = "native"
+    """Modo do backend JAX. 'native' (default) ou 'hybrid'.
+
+    'native' → forward_pure_jax (jit+vmap, diferenciável, GPU-ready).
+    'hybrid' → fields_in_freqs_jax_batch com pure_callback → Numba
+    (mantém bit-exatness com Numba em CPU; mais rápido em CPU puro).
+
+    Ignorado se simulator_backend != 'jax'.
+    """
+    simulator_cache_common_arrays: bool = True
+    """Ativa cache de common_arrays (Sprint 2.10). Válido apenas para Numba."""
+
+    # ══════════════════════════════════════════════════════════════════
     # SECAO 16: VALIDACAO (__post_init__)
     # Validacao centralizada fail-fast: errata, ranges, mutual
     # exclusivity, inference mode, enum values.
@@ -646,6 +687,35 @@ class PipelineConfig:
         assert (
             self.target_scaling == "log10"
         ), "TARGET_SCALING DEVE ser 'log10' (NUNCA 'log')"
+
+        # ── Errata v2.0.14c (simulator backend — Sprint 6.1) ──────────
+        _valid_backends = {"fortran_f2py", "numba", "jax"}
+        assert self.simulator_backend in _valid_backends, (
+            f"simulator_backend={self.simulator_backend!r} inválido. "
+            f"Opções: {_valid_backends}."
+        )
+        _valid_precisions = {"complex64", "complex128"}
+        assert self.simulator_precision in _valid_precisions, (
+            f"simulator_precision={self.simulator_precision!r} inválido. "
+            f"Opções: {_valid_precisions}."
+        )
+        _valid_devices = {"cpu", "gpu"}
+        assert self.simulator_device in _valid_devices, (
+            f"simulator_device={self.simulator_device!r} inválido. "
+            f"Opções: {_valid_devices}."
+        )
+        _valid_jax_modes = {"native", "hybrid"}
+        assert self.simulator_jax_mode in _valid_jax_modes, (
+            f"simulator_jax_mode={self.simulator_jax_mode!r} inválido. "
+            f"Opções: {_valid_jax_modes}."
+        )
+        # Mutual exclusivity: fortran_f2py + gpu inválido; numba + gpu inválido
+        if self.simulator_device == "gpu":
+            assert self.simulator_backend == "jax", (
+                f"simulator_device='gpu' requer simulator_backend='jax' "
+                f"(Numba e Fortran são CPU-only). "
+                f"Obtido: backend={self.simulator_backend!r}."
+            )
 
         # ── Errata v5.0.15 (mapeamento 22-col) ──────────────────────
         # Validacao semantica: baseline [1,4,5,20,21] OBRIGATORIO como
