@@ -141,17 +141,23 @@ from geosteering_ai.simulation._jacobian import (
 from geosteering_ai.simulation.config import SimulationConfig
 from geosteering_ai.simulation.filters import FilterLoader, HankelFilter
 from geosteering_ai.simulation.forward import SimulationResult, simulate
+from geosteering_ai.simulation.multi_forward import (
+    MultiSimulationResult,
+    simulate_multi,
+)
 
 __all__ = [
     "FilterLoader",
     "HankelFilter",
     "JacobianResult",
+    "MultiSimulationResult",
     "SimulationConfig",
     "SimulationResult",
     "compute_jacobian",
     "compute_jacobian_fd_numba",
     "compute_jacobian_jax",
     "simulate",
+    "simulate_multi",
 ]
 
 # Versão do subpacote. Sobe conforme Sprints concluídas.
@@ -166,6 +172,7 @@ __all__ = [
 #   1.0.x → Sprints 2.8-2.10 (prange + cache) + 3.1-3.3 (JAX hybrid)
 #   1.1.x → Sprint 3.3.4 (ETAPAS 3+6 JAX native end-to-end, PR #12)
 #   1.2.0 → Sprint 5.1+5.2 (Jacobiano FD Numba + JAX jacfwd) + 4.x TIV analítico (PR #13)
+#   1.4.0 → Sprint 11 (PR #15: multi-TR + multi-ângulo Numba nativo + F6/F7 wiring)
 #   1.5.0 → Flip use_native_dipoles default + integração bench (próximo PR)
 #   2.0.0 → Fase 6 concluída (backend dispatch em PipelineConfig)
-__version__ = "1.3.3"  # PR #14f (Sprint 8+9: warmup + chunked + pmap multi-GPU)
+__version__ = "1.4.0"  # PR #15 (Sprint 11: multi-TR + multi-ângulo Numba nativo)
