@@ -785,6 +785,7 @@ F7.6.2 ✅ — SyntheticDataGenerator substitui Fortran batch_runner (log-unifor
 F7.7.1 ✅ — Performance JAX: bucketing + jit + vmap (1.723× speedup CPU)     [CONCLUÍDA 2026-04-13 PR #14d]
 F7.7.2 ✅ — compute_case_index_jax JAX-friendly (jnp.where para tracers z)  [CONCLUÍDA 2026-04-13 PR #14d]
 F7.7.3 ✅ — Notebook Colab GPU T4 revisado + monitoramento VRAM             [CONCLUÍDA 2026-04-13 PR #14d]
+F7.7.4 ✅ — Cache LRU bounded (VRAM fix): clear_jit_cache+set_maxsize       [CONCLUÍDA 2026-04-14 PR #14e]
 F7.7   — Otimizações finais restantes (pmap multi-GPU, JAX híbrido, etc.)   [PENDENTE]
 ```
 
