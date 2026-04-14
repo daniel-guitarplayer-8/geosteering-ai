@@ -33,8 +33,8 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **1.6.0** (+ Sprint **5.1b jacfwd nativo** + Colab GPU T4 + bench 4-way CPU) |
-| **Branch**       | `feature/pr14b-jacfwd-nativo-colab`                       |
+| **Versão**       | **1.7.0** (+ Sprint **7.x Performance JAX** — 1.723× speedup CPU) |
+| **Branch**       | `feature/pr14d-jax-performance`                           |
 | **Base**         | `main` (PR #13 `16a50ac` — Sprint 5.1+5.2 Jacobiano + TIV analítico) |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod 2.6+ (opt-in) |
@@ -1494,3 +1494,72 @@ Substitui `Fortran_Gerador/batch_runner.py` (ProcessPoolExecutor + subprocess).
 
 **230/230 PASS em 49,69s** (config + simulação + pipeline). Zero regressão.
 
+
+---
+
+## 24. PR #14d — Sprint 7.x Performance JAX (2026-04-13)
+
+### 24.1 Problema reportado
+
+Execução real do `forward_pure_jax` (PR #14b) revelou performance inaceitável:
+- **CPU macOS Intel i9**: ~34.000 ms/modelo (~100 mod/h)
+- **GPU T4 Colab**: 58.794 ms/modelo (61 mod/h), ~12 GB VRAM
+
+Como referência, Numba CPU faz 3,9 ms/modelo — JAX era **8.700× mais lento**.
+
+### 24.2 Root causes identificados
+
+1. **Ausência de `@jax.jit`** em `forward_pure_jax` → retrace por chamada.
+2. **Loops Python duplos** sobre posições × frequências (sem `vmap` / fusion).
+3. `camad_t`/`camad_r` como Python ints → recompila por combinação geométrica.
+4. `compute_case_index_jax` usava `if z <= h0` → quebra com tracers em vmap.
+
+### 24.3 Solução implementada (Sprint 7.x)
+
+**Bucketing + JIT + vmap duplo** em `_forward_pure_jax_bucketed_impl`:
+
+1. Agrupa posições por bucket `(camad_t, camad_r)` em NumPy puro.
+2. Para cada bucket, compila um `jax.jit(forward_bucket)` com `ct, cr` **estáticos** (closure).
+3. Dentro do bucket, `jax.vmap(jax.vmap(_single_pos_freq, in_axes=(None, 0)), in_axes=(0, None))` fusa todas as posições × frequências.
+4. Cache global `_BUCKET_JIT_CACHE` reutiliza compilações entre chamadas.
+5. `compute_case_index_jax` aceita tracers via `jnp.where(z <= h0, 2, 3)`.
+
+### 24.4 Resultados medidos CPU Intel i9 (3 canônicos, 100 pos)
+
+| Modelo | Antes (ms) | **Depois (ms)** | **Speedup** | vs Fortran |
+|:-------|-----------:|----------------:|------------:|:----------:|
+| oklahoma_3 | 17.135 | **15,26** | **1.123×** | **1,84× mais rápido** |
+| oklahoma_5 | 17.111 | **23,86** | **717×** | **9,71× mais rápido** |
+| oklahoma_28 | 17.359 | **113,19** | **153×** | **3,71× mais rápido** |
+
+### 24.5 Preservação
+
+- ✅ Paridade bit-a-bit vs Numba mantida: `max_abs = 3,63 × 10⁻¹⁴`
+- ✅ JAX híbrido (`use_native_dipoles=False`) **intacto**
+- ✅ `jax.jacfwd` end-to-end **continua funcional** (todos testes jacfwd PASS)
+- ✅ Alta ρ (1500 Ω·m) estável
+
+### 24.6 Testes novos (4/4 PASS)
+
+- `tests/test_simulation_jax_performance.py`:
+  - test_forward_pure_jit_cache_reused (< 300ms/chamada após warmup)
+  - test_forward_pure_matches_numba_post_optim (max_abs < 1e-10)
+  - test_forward_pure_cpu_under_500ms (gate Sprint 7.4)
+  - test_forward_pure_high_rho_post_optim (ρ=1500 Ω·m)
+
+### 24.7 Arquivos
+
+| Arquivo | Tipo | LOC |
+|:--------|:-----|----:|
+| `geosteering_ai/simulation/_jax/forward_pure.py` | MOD | +130/−25 |
+| `geosteering_ai/simulation/_jax/dipoles_native.py` | MOD | +18 |
+| `tests/test_simulation_jax_performance.py` | NOVO | ~150 |
+| `notebooks/bench_jax_gpu_colab_pr14d.ipynb` | NOVO | Colab T4 atualizado |
+| `docs/reference/sprint_7_performance_jax.md` | NOVO | ~220 |
+
+### 24.8 Pendências futuras (Sprint F7.7+)
+
+- Otimizar JAX híbrido (`fields_in_freqs_jax_batch`) — hoje ainda ~31s/modelo.
+- `jax.pmap` multi-GPU (A100).
+- Integração `SyntheticDataGenerator` ↔ `forward_pure_jax` (datasets GPU).
+- Medição real GPU T4 pelo usuário via notebook.

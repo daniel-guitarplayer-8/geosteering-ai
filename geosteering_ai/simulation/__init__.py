@@ -168,4 +168,4 @@ __all__ = [
 #   1.2.0 → Sprint 5.1+5.2 (Jacobiano FD Numba + JAX jacfwd) + 4.x TIV analítico (PR #13)
 #   1.5.0 → Flip use_native_dipoles default + integração bench (próximo PR)
 #   2.0.0 → Fase 6 concluída (backend dispatch em PipelineConfig)
-__version__ = "1.3.0"  # PR #14a (Fortran direto) + PR #14b (jacfwd nativo e2e)
+__version__ = "1.3.1"  # PR #14d (Sprint 7.x: Performance JAX — 1.723× speedup CPU)

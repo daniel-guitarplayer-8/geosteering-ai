@@ -535,6 +535,25 @@ def compute_case_index_jax(
         A ordem é importante — replica o `if/elif` do Numba em
         `dipoles.py:547-644`.
     """
+    # Sprint 7.x (PR #14d): versão JAX-friendly — `z` e `h0` podem ser
+    # tracers (vmap) desde que `camad_r`/`camad_t` sejam concretos (static
+    # no bucket). Substitui a cadeia de ``if`` Python por ``jnp.where``
+    # aninhado para permitir diferenciação através de ``z``.
+    if isinstance(camad_r, int) and isinstance(camad_t, int) and isinstance(n, int):
+        # Caminho fast-path — todos os argumentos inteiros são concretos.
+        # Usa ``jnp.where`` apenas quando ``z``/``h0`` são tracers.
+        if camad_r == 0 and camad_t != 0:
+            return 0
+        if camad_r < camad_t:
+            return 1
+        if camad_r == camad_t:
+            # z vs h0 pode ser tracer → resolve via jnp.where.
+            return jnp.where(z <= h0, 2, 3)
+        if camad_r > camad_t and camad_r != (n - 1):
+            return 4
+        return 5
+    # Caminho legado (tudo concreto) — mantém compatibilidade com callers
+    # que passam Python ints/floats antigos.
     if camad_r == 0 and camad_t != 0:
         return 0
     if camad_r < camad_t:

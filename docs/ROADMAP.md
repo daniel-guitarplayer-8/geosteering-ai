@@ -782,8 +782,10 @@ F7.BENCH ✅ — Benchmarks reais CPU Intel i9: 239–1566% Fortran (3 perfis)  
 F7.5.1b ✅ — jax.jacfwd end-to-end nativo via forward_pure_jax + notebook    [CONCLUÍDA 2026-04-13 PR #14b]
 F7.6.1 ✅ — Integração simulator_backend em PipelineConfig (5 campos+validação) [CONCLUÍDA 2026-04-13 PR #14c]
 F7.6.2 ✅ — SyntheticDataGenerator substitui Fortran batch_runner (log-uniform) [CONCLUÍDA 2026-04-13 PR #14c]
-F7.7   — Otimizações finais (pmap multi-GPU, XLA, caching)                  [PENDENTE]
-F7.7   — Otimizações finais (pmap multi-GPU, XLA, caching)                  [PENDENTE]
+F7.7.1 ✅ — Performance JAX: bucketing + jit + vmap (1.723× speedup CPU)     [CONCLUÍDA 2026-04-13 PR #14d]
+F7.7.2 ✅ — compute_case_index_jax JAX-friendly (jnp.where para tracers z)  [CONCLUÍDA 2026-04-13 PR #14d]
+F7.7.3 ✅ — Notebook Colab GPU T4 revisado + monitoramento VRAM             [CONCLUÍDA 2026-04-13 PR #14d]
+F7.7   — Otimizações finais restantes (pmap multi-GPU, JAX híbrido, etc.)   [PENDENTE]
 ```
 
 **Fase 1 concluída** ✅ em 2026-04-11: todos os entregáveis de Foundations
