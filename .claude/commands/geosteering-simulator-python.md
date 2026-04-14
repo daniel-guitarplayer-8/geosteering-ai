@@ -33,8 +33,8 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **1.7.1** (+ Sprint **7.x+ LRU VRAM fix** — 44→16 buckets T4-safe) |
-| **Branch**       | `feature/pr14e-jax-vram-optim`                            |
+| **Versão**       | **1.7.2** (+ Sprint **8 warmup+chunked** + Sprint **9 pmap multi-GPU**) |
+| **Branch**       | `feature/pr14f-jax-warmup-chunked-pmap`                   |
 | **Base**         | `main` (PR #13 `16a50ac` — Sprint 5.1+5.2 Jacobiano + TIV analítico) |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod 2.6+ (opt-in) |
@@ -1604,3 +1604,54 @@ set_jit_cache_maxsize(32)
 
 - **Execução real Colab T4/A100 pelo usuário** com notebook `bench_jax_gpu_colab_pr14e.ipynb`
 - **Sprint 8**: unificar 44 buckets em 1 JIT via `jnp.take_along_axis` (elimina fanout XLA)
+
+---
+
+## 26. PR #14f — Sprint 8 warmup+chunked + Sprint 9 pmap multi-GPU (2026-04-14)
+
+### 26.1 Problema
+
+T4 com maxsize auto-detect ainda reportava 44 buckets para oklahoma_28 e
+~11 GB VRAM. Consolidar buckets via tracers requer reescrita extensa dos
+loops Python em `_hmd_tiv_full_jax`/`_vmd_full_jax` cases 5+6.
+
+### 26.2 Solução pragmática — 3 novas APIs
+
+```python
+from geosteering_ai.simulation._jax.forward_pure import (
+    warmup_all_buckets,       # Sprint 8a — pre-compila todos buckets
+    forward_pure_jax_chunked, # Sprint 8b — reduz pico VRAM
+    forward_pure_jax_pmap,    # Sprint 9 — multi-GPU A100×4
+)
+
+# Amortiza JIT
+warmup_all_buckets(ctx)  # retorna n_buckets compilados
+
+# Chunking (T4 recomendado: chunk_size=16)
+H = forward_pure_jax_chunked(rho_h, rho_v, ctx, chunk_size=16)
+
+# Multi-GPU (A100 × 4)
+rho_h_batch = jnp.stack([rh1, rh2, rh3, rh4])  # (4, n_layers)
+H_batch = forward_pure_jax_pmap(rho_h_batch, rho_v_batch, ctx)
+```
+
+### 26.3 Validação CPU Intel i9
+
+- oklahoma_28: warmup 63,7s → forward pós-warmup **334 ms** (vs 17s sem warmup)
+- Paridade chunked vs default: `max_abs = 2,84 × 10⁻¹⁵`
+- Paridade vs Numba: `max_abs = 5,66 × 10⁻¹⁴`
+
+### 26.4 Testes (6 novos, 29 total PASS em 192s)
+
+- warmup_all_buckets retorna n_buckets
+- chunked paridade bit-a-bit
+- chunked passes-through com n_pos ≤ chunk_size
+- chunked valida chunk_size ≥ 1
+- pmap single-device funcional
+- pmap rejeita batch mismatch
+
+### 26.5 Pendências
+
+- Validação notebook `bench_jax_gpu_colab_pr14f.ipynb` em T4/A100 pelo usuário
+- Sprint 10: unificar buckets via `lax.fori_loop` (reescrita de dipoles_native)
+- Sprint 11: `complex64` em GPU (reduz VRAM pela metade)

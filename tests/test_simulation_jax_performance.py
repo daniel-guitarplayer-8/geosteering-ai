@@ -261,3 +261,138 @@ def test_set_jit_cache_maxsize_validation() -> None:
         set_jit_cache_maxsize(0)
     with pytest.raises(ValueError):
         set_jit_cache_maxsize(-5)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 6 — Sprint 8: warmup_all_buckets + forward_pure_jax_chunked (PR #14f)
+# ═════════════════════════════════════════════════════════════════════════
+
+
+def test_warmup_all_buckets_returns_bucket_count() -> None:
+    """warmup_all_buckets retorna número de buckets compilados."""
+    from geosteering_ai.simulation._jax.forward_pure import warmup_all_buckets
+
+    clear_jit_cache()
+    rho_h = np.array([10.0, 100.0, 10.0])
+    rho_v = np.array([10.0, 100.0, 10.0])
+    esp = np.array([5.0])
+    z = np.linspace(-2.0, 7.0, 50)
+    ctx = build_static_context(
+        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0, dip_deg=0.0,
+    )
+    n = warmup_all_buckets(ctx)
+    assert n >= 1
+    info = get_jit_cache_info()
+    assert info["n_entries"] == n
+    clear_jit_cache()
+
+
+def test_forward_pure_jax_chunked_parity() -> None:
+    """forward_pure_jax_chunked retorna resultado bit-a-bit idêntico ao default."""
+    from geosteering_ai.simulation._jax.forward_pure import (
+        forward_pure_jax_chunked,
+    )
+
+    clear_jit_cache()
+    rho_h = np.array([10.0, 50.0, 5.0])
+    rho_v = np.array([10.0, 100.0, 5.0])
+    esp = np.array([4.0])
+    z = np.linspace(-1.0, 8.0, 64)
+    ctx = build_static_context(
+        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0, dip_deg=0.0,
+    )
+    H_default = np.asarray(forward_pure_jax(ctx.rho_h_jnp, ctx.rho_v_jnp, ctx))
+    H_chunk = np.asarray(
+        forward_pure_jax_chunked(ctx.rho_h_jnp, ctx.rho_v_jnp, ctx, chunk_size=16)
+    )
+    max_diff = float(np.max(np.abs(H_default - H_chunk)))
+    assert max_diff < 1e-13, (
+        f"chunked diverge do default: max_diff={max_diff:.2e}"
+    )
+    clear_jit_cache()
+
+
+def test_forward_pure_jax_chunked_small_passes_through() -> None:
+    """n_pos <= chunk_size: passa direto (1 chunk)."""
+    from geosteering_ai.simulation._jax.forward_pure import (
+        forward_pure_jax_chunked,
+    )
+
+    rho_h = np.array([10.0, 100.0, 10.0])
+    rho_v = np.array([10.0, 100.0, 10.0])
+    esp = np.array([5.0])
+    z = np.linspace(-2.0, 7.0, 10)
+    ctx = build_static_context(
+        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0, dip_deg=0.0,
+    )
+    H = forward_pure_jax_chunked(ctx.rho_h_jnp, ctx.rho_v_jnp, ctx, chunk_size=64)
+    assert H.shape == (10, 1, 9)
+    H.block_until_ready()
+
+
+def test_forward_pure_jax_chunked_validates_chunk_size() -> None:
+    """chunk_size < 1 levanta ValueError."""
+    from geosteering_ai.simulation._jax.forward_pure import (
+        forward_pure_jax_chunked,
+    )
+
+    rho_h = np.array([10.0, 100.0, 10.0])
+    rho_v = np.array([10.0, 100.0, 10.0])
+    esp = np.array([5.0])
+    z = np.linspace(-2.0, 7.0, 20)
+    ctx = build_static_context(
+        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0, dip_deg=0.0,
+    )
+    with pytest.raises(ValueError):
+        forward_pure_jax_chunked(ctx.rho_h_jnp, ctx.rho_v_jnp, ctx, chunk_size=0)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 7 — Sprint 9: forward_pure_jax_pmap (PR #14f)
+# ═════════════════════════════════════════════════════════════════════════
+
+
+def test_forward_pure_jax_pmap_single_device() -> None:
+    """forward_pure_jax_pmap com n_devices=1 funciona (ambiente mono-GPU/CPU)."""
+    from geosteering_ai.simulation._jax.forward_pure import forward_pure_jax_pmap
+
+    n_devices = jax.local_device_count()
+    # Ambiente mono-device: testa com batch igual a n_devices (=1).
+    rho_h = np.array([10.0, 100.0, 10.0])
+    rho_v = np.array([10.0, 100.0, 10.0])
+    esp = np.array([5.0])
+    z = np.linspace(-2.0, 7.0, 20)
+    ctx = build_static_context(
+        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0, dip_deg=0.0,
+    )
+    # Cria batch com shape (n_devices, n_layers).
+    rho_h_batch = jax.numpy.stack([ctx.rho_h_jnp] * n_devices, axis=0)
+    rho_v_batch = jax.numpy.stack([ctx.rho_v_jnp] * n_devices, axis=0)
+
+    H_pmap = forward_pure_jax_pmap(rho_h_batch, rho_v_batch, ctx)
+    assert H_pmap.shape == (n_devices, 20, 1, 9)
+    assert np.all(np.isfinite(np.asarray(H_pmap).real))
+
+
+def test_forward_pure_jax_pmap_mismatch_raises() -> None:
+    """pmap rejeita batch com shape[0] != n_devices."""
+    from geosteering_ai.simulation._jax.forward_pure import forward_pure_jax_pmap
+
+    n_devices = jax.local_device_count()
+    rho_h = np.array([10.0, 100.0, 10.0])
+    rho_v = np.array([10.0, 100.0, 10.0])
+    esp = np.array([5.0])
+    z = np.linspace(-2.0, 7.0, 10)
+    ctx = build_static_context(
+        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0, dip_deg=0.0,
+    )
+    # Batch deliberadamente com shape[0]=n_devices+1 → deve raise.
+    wrong = jax.numpy.stack([ctx.rho_h_jnp] * (n_devices + 1), axis=0)
+    with pytest.raises(ValueError, match="n_devices"):
+        forward_pure_jax_pmap(wrong, wrong, ctx)
