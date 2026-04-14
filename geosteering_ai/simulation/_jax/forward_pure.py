@@ -341,12 +341,88 @@ def forward_pure_jax(
 # Implementação interna — bucketing + jit + vmap (Sprint 7.x — PR #14d)
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Cache global por assinatura (ct, cr, n, npt, nf, n_pos_bucket) de forma a
-# reutilizar JIT compilado entre chamadas sucessivas. Funções JIT-compiladas
-# são armazenadas em `_BUCKET_JIT_CACHE` para reuso implícito; na prática a
-# `jax.jit` já cacheia internamente, mas mantemos a referência para evitar
-# pressão no garbage collector.
-_BUCKET_JIT_CACHE: dict = {}
+# ──────────────────────────────────────────────────────────────────────────────
+# Cache LRU bounded — Sprint 7.x+ (PR #14e) — controla VRAM no GPU
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# MOTIVAÇÃO
+#   Oklahoma_28 gera 44 buckets distintos (camad_t, camad_r), cada um
+#   compilando um XLA program separado. Sem bound, o cache cresce até vazar
+#   VRAM (12 GB em T4, 60 GB em A100 — observados em execução real 2026-04-14).
+#
+# SOLUÇÃO
+#   • `OrderedDict` com `maxsize` → evict LRU quando cheio.
+#   • `clear_jit_cache()` pública → usuário limpa antes de novo batch de modelos.
+#   • `get_jit_cache_info()` → monitoramento diagnóstico.
+#
+# OBSERVAÇÃO
+#   Para um único modelo geológico, cada bucket é compilado 1× e reutilizado
+#   em todas as chamadas subsequentes (`forward_pure_jax` ou `jax.jacfwd`).
+#   Para N modelos distintos em sequência, N×n_buckets compilações acumulam.
+#   O LRU limita ao `maxsize` mais recentes — suficiente para um único modelo
+#   com até ~28 camadas, e evita OOM no treino on-the-fly.
+from collections import OrderedDict
+
+_BUCKET_JIT_CACHE_MAXSIZE: int = 64
+"""Tamanho máximo do cache LRU por processo. 64 cobre modelos até ~28 camadas.
+
+Configurável via :func:`set_jit_cache_maxsize`. Valores maiores reduzem
+recompilações em sequências longas; menores liberam VRAM agressivamente.
+"""
+
+_BUCKET_JIT_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
+
+
+def set_jit_cache_maxsize(maxsize: int) -> None:
+    """Ajusta o tamanho máximo do cache LRU de JIT-compilações por bucket.
+
+    Args:
+        maxsize: Número máximo de XLA programs compilados simultaneamente.
+            Cada entrada consome ~10-100 MB de VRAM em GPU T4. Para A100 com
+            80 GB, valor pode ser 128+. Para T4 com 16 GB, recomendado ≤ 32.
+
+    Note:
+        A chamada NÃO invalida entradas existentes. Use :func:`clear_jit_cache`
+        para invalidação explícita. Em caso de `maxsize < len(cache)`,
+        evicções LRU acontecerão na próxima inserção.
+    """
+    global _BUCKET_JIT_CACHE_MAXSIZE
+    if maxsize < 1:
+        raise ValueError(f"maxsize deve ser >= 1 (recebido {maxsize})")
+    _BUCKET_JIT_CACHE_MAXSIZE = int(maxsize)
+
+
+def clear_jit_cache() -> int:
+    """Limpa o cache de JIT-compilações por bucket.
+
+    Retorna o número de entradas removidas. Chame antes de mudar para um
+    novo modelo geológico para liberar VRAM.
+
+    Example:
+        >>> H = forward_pure_jax(rh, rv, ctx1)          # popula cache
+        >>> n_removed = clear_jit_cache()               # libera VRAM
+        >>> H = forward_pure_jax(rh, rv, ctx2)          # recompila para ctx2
+    """
+    n = len(_BUCKET_JIT_CACHE)
+    _BUCKET_JIT_CACHE.clear()
+    return n
+
+
+def get_jit_cache_info() -> dict:
+    """Retorna dicionário com estatísticas do cache JIT.
+
+    Returns:
+        dict com chaves:
+
+        - ``n_entries`` (int): buckets compilados atualmente.
+        - ``maxsize`` (int): limite antes de eviction.
+        - ``keys`` (list): chaves ``(ct, cr, n, npt)`` das entradas presentes.
+    """
+    return {
+        "n_entries": len(_BUCKET_JIT_CACHE),
+        "maxsize": _BUCKET_JIT_CACHE_MAXSIZE,
+        "keys": list(_BUCKET_JIT_CACHE.keys()),
+    }
 
 
 def _get_bucket_jit(ct: int, cr: int, n: int, npt: int):
@@ -354,11 +430,16 @@ def _get_bucket_jit(ct: int, cr: int, n: int, npt: int):
 
     A função aceita ``(rho_h, rho_v, z_bucket, freqs, ctx_arrays)`` e retorna
     ``H_bucket`` com shape ``(n_pos_bucket, nf, 9)``.
+
+    O cache é ``OrderedDict`` com LRU bounded em
+    :data:`_BUCKET_JIT_CACHE_MAXSIZE` — previne vazamento de VRAM em GPU.
     """
     from geosteering_ai.simulation._jax.kernel import _single_position_jax
 
     key = (int(ct), int(cr), int(n), int(npt))
     if key in _BUCKET_JIT_CACHE:
+        # Move to end (LRU tracking: este é o MRU agora)
+        _BUCKET_JIT_CACHE.move_to_end(key)
         return _BUCKET_JIT_CACHE[key]
 
     def _forward_bucket(
@@ -411,7 +492,15 @@ def _get_bucket_jit(ct: int, cr: int, n: int, npt: int):
         vmap_both = jax.vmap(vmap_freq, in_axes=(0, None))
         return vmap_both(z_bucket, freqs)
 
+    # Nota: `donate_argnums` foi considerado para reuso de buffer, mas
+    # quebra chamadas repetidas com os mesmos `rho_h`/`rho_v` (e também
+    # o fluxo de `jax.jacfwd`). Deixamos sem doação para manter
+    # compatibilidade com o padrão de uso (warmup + múltiplas chamadas).
     jitted = jax.jit(_forward_bucket, static_argnames=())
+
+    # LRU eviction — mantém cache limitado para evitar OOM em GPU.
+    if len(_BUCKET_JIT_CACHE) >= _BUCKET_JIT_CACHE_MAXSIZE:
+        _BUCKET_JIT_CACHE.popitem(last=False)  # evict oldest (LRU)
     _BUCKET_JIT_CACHE[key] = jitted
     return jitted
 
@@ -478,5 +567,8 @@ __all__ = [
     "HAS_JAX",
     "ForwardPureContext",
     "build_static_context",
+    "clear_jit_cache",
     "forward_pure_jax",
+    "get_jit_cache_info",
+    "set_jit_cache_maxsize",
 ]

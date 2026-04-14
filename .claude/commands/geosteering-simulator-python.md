@@ -33,8 +33,8 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **1.7.0** (+ Sprint **7.x Performance JAX** — 1.723× speedup CPU) |
-| **Branch**       | `feature/pr14d-jax-performance`                           |
+| **Versão**       | **1.7.1** (+ Sprint **7.x+ LRU VRAM fix** — 44→16 buckets T4-safe) |
+| **Branch**       | `feature/pr14e-jax-vram-optim`                            |
 | **Base**         | `main` (PR #13 `16a50ac` — Sprint 5.1+5.2 Jacobiano + TIV analítico) |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod 2.6+ (opt-in) |
@@ -1563,3 +1563,44 @@ Como referência, Numba CPU faz 3,9 ms/modelo — JAX era **8.700× mais lento**
 - `jax.pmap` multi-GPU (A100).
 - Integração `SyntheticDataGenerator` ↔ `forward_pure_jax` (datasets GPU).
 - Medição real GPU T4 pelo usuário via notebook.
+
+---
+
+## 25. PR #14e — Sprint 7.x+ Cache LRU para VRAM GPU (2026-04-14)
+
+### 25.1 Problema reportado (GPU real)
+
+Execução do notebook PR #14d em Colab Pro+:
+- **T4**: oklahoma_3 em 23 ms (156k mod/h) mas **~12 GB VRAM** (75% de 16 GB)
+- **A100**: oklahoma_3 em 19 ms mas **~60 GB VRAM**
+- oklahoma_28: **44 buckets distintos** compilados simultaneamente
+
+### 25.2 Solução — LRU bounded cache
+
+`_BUCKET_JIT_CACHE` trocado de `dict` infinito para `OrderedDict` com
+maxsize configurável (default 64). Nova API pública:
+
+```python
+from geosteering_ai.simulation._jax.forward_pure import (
+    set_jit_cache_maxsize,  # ajusta limite
+    clear_jit_cache,         # libera VRAM entre batches
+    get_jit_cache_info,      # diagnóstico
+)
+
+# T4 (16 GB)
+set_jit_cache_maxsize(16)
+
+# A100 40 GB
+set_jit_cache_maxsize(32)
+```
+
+### 25.3 Validação CPU Intel i9
+
+- 5 testes novos em `test_simulation_jax_performance.py` (9 total PASS)
+- oklahoma_28 com `maxsize=10`: limita a 10 entradas (antes: 44)
+- Paridade vs Numba mantida: `max_abs = 5,66 × 10⁻¹⁴`
+
+### 25.4 Pendências
+
+- **Execução real Colab T4/A100 pelo usuário** com notebook `bench_jax_gpu_colab_pr14e.ipynb`
+- **Sprint 8**: unificar 44 buckets em 1 JIT via `jnp.take_along_axis` (elimina fanout XLA)
