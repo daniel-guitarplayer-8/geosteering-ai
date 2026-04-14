@@ -1655,3 +1655,135 @@ H_batch = forward_pure_jax_pmap(rho_h_batch, rho_v_batch, ctx)
 - Validação notebook `bench_jax_gpu_colab_pr14f.ipynb` em T4/A100 pelo usuário
 - Sprint 10: unificar buckets via `lax.fori_loop` (reescrita de dipoles_native)
 - Sprint 11: `complex64` em GPU (reduz VRAM pela metade)
+
+---
+
+## 27. PR #15 — Sprint 11: Multi-TR + Multi-Ângulo Numba nativo (2026-04-14)
+
+**Versão**: v1.7.2 → **v1.8.0**
+
+### 27.1 Motivação
+
+O simulador Python Numba (v1.3.3) não tinha suporte nativo a multi-TR nem
+multi-ângulo. Impedia paridade de capacidades físicas com Fortran `tatu.x`
+v10.0 (loops `do itr=1,nTR` e `do k=1,ntheta`). F6 (CDR compensação)
+estava implementada mas inacessível.
+
+### 27.2 Entregas
+
+**API pública `simulate_multi()`** em `geosteering_ai/simulation/multi_forward.py`:
+
+```python
+from geosteering_ai.simulation import simulate_multi
+
+result = simulate_multi(
+    rho_h=..., rho_v=..., esp=..., positions_z=...,
+    tr_spacings_m=[0.5, 1.0, 1.5],
+    dip_degs=[0.0, 30.0, 60.0],
+    frequencies_hz=[20000.0, 200000.0],
+    use_compensation=True, comp_pairs=((0, 2),),
+    use_tilted=True, tilted_configs=((0.0, 0.0), (45.0, 0.0)),
+)
+# result.H_tensor: (nTR, nAngles, n_pos, nf, 9) complex128
+# result.H_comp:   (n_pairs, nAngles, n_pos, nf, 9) — F6 automático
+# result.H_tilted: (n_tilted, nTR, nAngles, n_pos, nf) — F7 automático
+```
+
+**`MultiSimulationResult.to_single()`** — desembrulha (nTR=1, nAngles=1)
+em `SimulationResult` legado para backward-compat.
+
+**Shim `simulate()`** — `forward.py::simulate()` agora é 10 linhas que
+chamam `simulate_multi()` e desembrulham. Zero breaking change; teste de
+paridade single-TR vira invariante estrutural (`assert_array_equal`).
+
+**Dedup de cache por hordist** — `_build_unique_hordist_caches()` reduz
+`O(nTR × nAngles)` compute de `precompute_common_arrays_cache` para
+`O(unique_hordist)`. Para dip=0° (poço vertical): **1 cache único**.
+
+**Exportação `.dat` Fortran-compatível** em `io/binary_dat_multi.py`:
+
+```python
+from geosteering_ai.simulation.io.binary_dat_multi import export_multi_tr_dat
+
+paths = export_multi_tr_dat(result, "output", "/tmp/sim")
+# ['output_TR1.dat', 'output_TR2.dat', 'output_TR3.dat']
+# + infooutput.out com metadados ASCII
+```
+
+Layout validado empiricamente (`xxd` vs `tatu.x` real): `struct '<i21d'`
+little-endian, 172 bytes/record, loop `for k→for j→for i` idêntico a
+`writes_files` Fortran linhas 1290-1311.
+
+### 27.3 Benchmark Fortran vs Python (dip=0°)
+
+| Configuração | Fortran (ms) | Python (ms) | Speedup | max_abs_err |
+|:-------------|-------------:|------------:|:-------:|:-----------:|
+| oklahoma_3 (1TR×1θ) | 45.2 | 38.8 | **1.16×** | 1.92e-13 |
+| oklahoma_3 (3TR×1θ) | 142.8 | 117.4 | **1.22×** | 1.94e-13 |
+| oklahoma_3 (5TR×1θ) | 170.1 | 134.2 | **1.27×** | 1.98e-13 |
+| oklahoma_5 (1TR×1θ) | 53.1 | 24.8 | **2.14×** | 8.46e-14 |
+| oklahoma_5 (3TR×1θ) | 87.4 | 62.3 | **1.40×** | 1.25e-13 |
+| oklahoma_28 (1TR×1θ) | 48.3 | 30.8 | **1.57×** | 9.31e-14 |
+| oklahoma_28 (3TR×1θ) | 102.6 | 88.5 | **1.16×** | 1.05e-13 |
+
+Python Numba **1.16× a 2.14× mais rápido** que Fortran OpenMP, com paridade
+numérica 7 ordens de magnitude melhor que o gate padrão `1e-6`.
+
+### 27.4 Testes (17 novos, 1391 total PASS)
+
+**Funcionais** (10):
+- `test_single_tr_single_angle_parity` (invariante estrutural via shim)
+- `test_multi_tr_matches_single_calls` (bit-exato vs N chamadas independentes)
+- `test_multi_angle_matches_single_calls` (idem multi-ângulo)
+- `test_mixed_multi_tr_multi_angle` (nTR>1 AND nAngles>1 bit-exato)
+- `test_high_rho_multi` (oklahoma_28 ρ>1000 Ω·m × 3TR × 3θ finito)
+- `test_f6_wiring` (H_comp ≡ apply_compensation direto)
+- `test_f7_wiring` (H_tilted ≡ apply_tilted_antennas direto)
+- `test_cache_dedup_vertical` (unique_hordist=1 para dip=0° × 5 ângulos)
+- `test_cache_dedup_collision_distinct_results` (mesmo cache, H distintos)
+- `test_fortran_numerical_parity_dat` (@fortran_required, max_err < 1e-12)
+
+**Validação** (7): TestInputValidation (ranges, F6/F7 pré-requisitos, fail-fast).
+
+### 27.5 Arquivos criados/modificados
+
+**Novos**:
+- `geosteering_ai/simulation/multi_forward.py` (+450 LOC)
+- `geosteering_ai/simulation/io/binary_dat_multi.py` (+340 LOC)
+- `tests/test_simulation_multi.py` (+440 LOC, 17 testes)
+- `benchmarks/bench_multi_vs_fortran.py` (+250 LOC)
+- `docs/reference/sprint_11_multi_tr_angle_numba.md` (+250 LOC)
+- `docs/reference/sprint_11_benchmark.md` (auto-gerado)
+
+**Modificados**:
+- `geosteering_ai/simulation/forward.py` (-266 / +30 — simulate() vira shim)
+- `geosteering_ai/simulation/__init__.py` (+8 — exporta simulate_multi/MultiSimulationResult; v1.3.3 → v1.4.0)
+- `docs/ROADMAP.md` (+3 — F7.14 ✅)
+
+### 27.6 Uso recomendado
+
+```python
+# Produção: multi-TR (F6 CDR) em poço vertical
+from geosteering_ai.simulation import simulate_multi
+from geosteering_ai.simulation.io.binary_dat_multi import export_multi_tr_dat
+
+result = simulate_multi(
+    rho_h=rho_h, rho_v=rho_v, esp=esp, positions_z=positions_z,
+    tr_spacings_m=[0.5, 1.0, 1.5],   # CDR tool: 3 receivers
+    dip_degs=[0.0],                   # poço vertical
+    frequencies_hz=[20000.0],
+    use_compensation=True,
+    comp_pairs=((0, 2),),             # near=TR1 far=TR3
+)
+
+# Exporta .dat Fortran-compatíveis para pipeline de treino existente
+export_multi_tr_dat(result, "wellA", "/data/datasets/")
+# Gera: wellA_TR1.dat, wellA_TR2.dat, wellA_TR3.dat + infowellA.out
+```
+
+### 27.7 Pendências
+
+- Sprint 10 (JAX unified JIT via `lax.fori_loop`): desbloqueia multi-TR em GPU
+- Sprint 11-JAX: port de `simulate_multi` para backend JAX (depende de Sprint 10)
+- `SyntheticDataGenerator` ainda usa rota single-TR (Sprint 6.4 backlog)
+- Multi-ângulo em benchmark Fortran requer nmed variável por ângulo (não crítico)

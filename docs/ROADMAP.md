@@ -788,7 +788,11 @@ F7.7.3 ✅ — Notebook Colab GPU T4 revisado + monitoramento VRAM             [
 F7.7.4 ✅ — Cache LRU bounded (VRAM fix): clear_jit_cache+set_maxsize       [CONCLUÍDA 2026-04-14 PR #14e]
 F7.7.5 ✅ — warmup_all_buckets + forward_pure_jax_chunked (Sprint 8)        [CONCLUÍDA 2026-04-14 PR #14f]
 F7.9.1 ✅ — forward_pure_jax_pmap multi-GPU (Sprint 9)                      [CONCLUÍDA 2026-04-14 PR #14f]
+F7.14  ✅ — Multi-TR + Multi-Ângulo Numba nativo + F6/F7 wiring + .dat       [CONCLUÍDA 2026-04-14 PR #15]
+        (simulate_multi + MultiSimulationResult + dedup hordist + paridade Fortran < 2e-13 + 17 testes + 1.16-2.14× vs OpenMP)
 F7.7   — Otimizações finais restantes (pmap multi-GPU, JAX híbrido, etc.)   [PENDENTE]
+F7.10  — JAX unified JIT (lax.fori_loop): 44 buckets → 1 XLA program        [PENDENTE — desbloqueador multi-TR/ângulo GPU]
+F7.11  — Multi-TR + multi-ângulo em JAX GPU (depende de F7.10)              [PENDENTE]
 ```
 
 **Fase 1 concluída** ✅ em 2026-04-11: todos os entregáveis de Foundations
