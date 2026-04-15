@@ -328,5 +328,229 @@ def test_sprint10_unified_accepts_tracers(synthetic_propagation_arrays):
     assert Txdw2.shape == (arr["npt"], arr["n"])
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 10 Phase 2 — Testes para VMD unified (_vmd_propagation_unified)
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Adicionados em PR #24 (v1.5.0b1). VMD é TE-only (sem TM), então retorna
+# apenas 2 arrays: (TEdwz, TEupz). Segue o mesmo padrão de testes do HMD,
+# adaptado para a assinatura VMD reduzida.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def synthetic_vmd_arrays():
+    """Gera arrays sintéticos para VMD (TE-only, sem TM).
+
+    Reutiliza o mesmo padrão de ``synthetic_propagation_arrays`` mas com
+    FEdwz/FEupz (fatores de dipolo vertical) em vez de Mxdw/Mxup/Eudw/Euup.
+    """
+    import jax.numpy as jnp
+
+    npt = 201
+    n = 5
+    u = jnp.linspace(0.15, 2.5, npt * n).reshape(npt, n).astype(jnp.complex128) * (
+        1.0 + 0.15j
+    )
+    uh = u * 0.6
+    RTEdw = jnp.ones((npt, n), dtype=jnp.complex128) * (0.2 + 0.04j)
+    RTEup = jnp.ones((npt, n), dtype=jnp.complex128) * (0.25 - 0.05j)
+    FEdwz = jnp.ones(npt, dtype=jnp.complex128) * (0.4 - 0.08j)
+    FEupz = jnp.ones(npt, dtype=jnp.complex128) * (0.45 - 0.1j)
+    prof = jnp.array([-1e300, 0.0, 2.0, 5.0, 7.0, 1e300])
+    h0 = 1.0
+    # zeta = iωμ₀ em freq ~20 kHz (escalar complex)
+    zeta = 1j * 2.0 * jnp.pi * 20000.0 * 4.0e-7 * jnp.pi
+
+    return {
+        "npt": npt,
+        "n": n,
+        "u": u,
+        "uh": uh,
+        "RTEdw": RTEdw,
+        "RTEup": RTEup,
+        "FEdwz": FEdwz,
+        "FEupz": FEupz,
+        "prof": prof,
+        "h0": h0,
+        "zeta": zeta,
+    }
+
+
+@jax_required
+def test_sprint10_vmd_unified_no_nan_inf(synthetic_vmd_arrays):
+    """VMD unified: arrays finitos em todos os 3 casos geométricos (TE only)."""
+    import jax.numpy as jnp
+
+    from geosteering_ai.simulation._jax.dipoles_unified import (
+        _vmd_propagation_unified,
+    )
+
+    arr = synthetic_vmd_arrays
+    n = arr["n"]
+    npt = arr["npt"]
+
+    # Testa 3 configurações: descente, ascente, mesma camada
+    for camad_t, camad_r, case_name in [
+        (1, 3, "descente"),
+        (3, 1, "ascente"),
+        (2, 2, "mesma"),
+    ]:
+        TEdwz, TEupz = _vmd_propagation_unified(
+            camad_t,
+            camad_r,
+            n,
+            npt,
+            arr["u"],
+            arr["uh"],
+            arr["RTEdw"],
+            arr["RTEup"],
+            arr["FEdwz"],
+            arr["FEupz"],
+            arr["prof"],
+            arr["h0"],
+            arr["zeta"],
+        )
+
+        # Shapes
+        assert TEdwz.shape == (npt, n), f"{case_name}: TEdwz shape"
+        assert TEupz.shape == (npt, n), f"{case_name}: TEupz shape"
+
+        # Sem NaN/Inf nas COLUNAS ATIVAS
+        if camad_r > camad_t:
+            # Descente: TEdwz nas colunas [camad_t, camad_r] preenchidas
+            active = TEdwz[:, camad_t : camad_r + 1]
+            assert not bool(jnp.isnan(active).any()), f"{case_name}: NaN em TEdwz"
+            assert not bool(jnp.isinf(active).any()), f"{case_name}: Inf em TEdwz"
+        elif camad_r < camad_t:
+            active = TEupz[:, camad_r : camad_t + 1]
+            assert not bool(jnp.isnan(active).any()), f"{case_name}: NaN em TEupz"
+            assert not bool(jnp.isinf(active).any()), f"{case_name}: Inf em TEupz"
+        else:
+            # Mesma camada: coluna camad_t ativa em ambos TEdwz e TEupz
+            assert not bool(
+                jnp.isnan(TEdwz[:, camad_t]).any()
+            ), f"{case_name}: NaN TEdwz[camad_t]"
+            assert not bool(
+                jnp.isnan(TEupz[:, camad_t]).any()
+            ), f"{case_name}: NaN TEupz[camad_t]"
+
+
+@jax_required
+def test_sprint10_vmd_descent_initialization(synthetic_vmd_arrays):
+    """VMD descent: TEdwz[camad_t] = zeta·_MZ/(2·u[camad_t]), TEupz ≡ 0."""
+    import jax.numpy as jnp
+
+    from geosteering_ai.simulation._jax.dipoles_unified import (
+        _MZ,
+        _vmd_propagation_unified,
+    )
+
+    arr = synthetic_vmd_arrays
+    camad_t, camad_r = 1, 3
+
+    TEdwz, TEupz = _vmd_propagation_unified(
+        camad_t,
+        camad_r,
+        arr["n"],
+        arr["npt"],
+        arr["u"],
+        arr["uh"],
+        arr["RTEdw"],
+        arr["RTEup"],
+        arr["FEdwz"],
+        arr["FEupz"],
+        arr["prof"],
+        arr["h0"],
+        arr["zeta"],
+    )
+
+    # Valor esperado em j = camad_t (inicialização TE)
+    expected = arr["zeta"] * _MZ / (2.0 * arr["u"][:, camad_t])
+    max_diff = float(jnp.max(jnp.abs(TEdwz[:, camad_t] - expected)))
+    assert max_diff < 1e-14, f"TEdwz[camad_t] inicialização errada: {max_diff}"
+
+    # No caso descendente, TEupz permanece identicamente zero
+    assert bool((TEupz == 0).all()), "Descent deveria deixar TEupz zerado"
+
+
+@jax_required
+def test_sprint10_vmd_same_layer_symmetry(synthetic_vmd_arrays):
+    """VMD mesma camada (camad_r == camad_t): TEdwz[ct] == TEupz[ct]."""
+    import jax.numpy as jnp
+
+    from geosteering_ai.simulation._jax.dipoles_unified import (
+        _MZ,
+        _vmd_propagation_unified,
+    )
+
+    arr = synthetic_vmd_arrays
+    ct = 2  # camad_t == camad_r
+
+    TEdwz, TEupz = _vmd_propagation_unified(
+        ct,
+        ct,
+        arr["n"],
+        arr["npt"],
+        arr["u"],
+        arr["uh"],
+        arr["RTEdw"],
+        arr["RTEup"],
+        arr["FEdwz"],
+        arr["FEupz"],
+        arr["prof"],
+        arr["h0"],
+        arr["zeta"],
+    )
+
+    # Simetria: TEdwz[ct] ≡ TEupz[ct] (paridade `dipoles_native.py:1415`)
+    max_diff_sym = float(jnp.max(jnp.abs(TEdwz[:, ct] - TEupz[:, ct])))
+    assert max_diff_sym < 1e-14, f"Simetria TEdwz ≡ TEupz falhou: {max_diff_sym}"
+
+    # Valor esperado
+    expected = arr["zeta"] * _MZ / (2.0 * arr["u"][:, ct])
+    max_diff_val = float(jnp.max(jnp.abs(TEdwz[:, ct] - expected)))
+    assert max_diff_val < 1e-14, f"TEdwz[ct] valor errado: {max_diff_val}"
+
+
+@jax_required
+def test_sprint10_vmd_accepts_tracers(synthetic_vmd_arrays):
+    """VMD Sprint 10 goal: camad_t e camad_r como tracers → 1 JIT global."""
+    import jax
+    import jax.numpy as jnp
+
+    from geosteering_ai.simulation._jax.dipoles_unified import (
+        _vmd_propagation_unified,
+    )
+
+    arr = synthetic_vmd_arrays
+
+    @jax.jit
+    def _run(camad_t, camad_r, u, uh):
+        return _vmd_propagation_unified(
+            camad_t,
+            camad_r,
+            arr["n"],
+            arr["npt"],
+            u,
+            uh,
+            arr["RTEdw"],
+            arr["RTEup"],
+            arr["FEdwz"],
+            arr["FEupz"],
+            arr["prof"],
+            arr["h0"],
+            arr["zeta"],
+        )
+
+    # Passa tracers inteiros — meta Sprint 10
+    TEdwz, TEupz = _run(jnp.int32(1), jnp.int32(3), arr["u"], arr["uh"])
+    assert TEdwz.shape == (arr["npt"], arr["n"])
+
+    # Reutiliza MESMO JIT para diferentes valores (1 programa XLA compartilhado)
+    TEdwz2, _ = _run(jnp.int32(0), jnp.int32(4), arr["u"], arr["uh"])
+    assert TEdwz2.shape == (arr["npt"], arr["n"])
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

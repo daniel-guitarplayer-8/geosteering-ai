@@ -95,6 +95,7 @@ except ImportError:
     jnp = None  # type: ignore
 
 _MX = 1.0  # Momento magnético unitário (A·m²) — paridade com dipoles_native.py
+_MZ = 1.0  # Momento magnético vertical (A·m²) — paridade com dipoles_native.py:986
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -588,8 +589,326 @@ def _hmd_tiv_propagation_unified(
     return Txdw, Tudw, Txup, Tuup
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# VMD — Propagação descendente unified (camad_r > camad_t)
+# ──────────────────────────────────────────────────────────────────────────────
+def _vmd_descent_body(
+    j,
+    carry,
+    camad_t,
+    n,
+    u,
+    uh,
+    RTEdw,
+    RTEup,
+    FEdwz,
+    FEupz,
+    prof,
+    h0,
+    zeta,
+):
+    """Corpo do loop ``fori_loop`` descendente para VMD TE.
+
+    Versão TE-only do ``_hmd_tiv_descent_body`` — VMD não tem componente TM
+    e o carry tem apenas 1 array (``TEdwz``). Port line-for-line de
+    ``_jax/dipoles_native.py:1344-1377``.
+
+    Args:
+        j: Tracer índice da camada atual.
+        carry: Array ``TEdwz`` shape ``(npt, n)`` complex128.
+        camad_t: Tracer índice da camada do transmissor.
+        n: Número de camadas (estático).
+        u, uh: Arrays ``(npt, n)`` da propagação TE.
+        RTEdw, RTEup: Arrays ``(npt, n)`` de reflexão TE.
+        FEdwz, FEupz: Arrays ``(npt,)`` de fatores dipolo vertical.
+        prof: Array ``(n+2,)`` de profundidades de interface (com sentinelas).
+        h0: Escalar — profundidade do transmissor.
+        zeta: Escalar complex — iωμ₀.
+
+    Returns:
+        Array ``TEdwz`` atualizado na linha ``j``.
+    """
+    TEdwz = carry
+    j_prev = _safe_idx_prev(j)
+
+    # ── Máscaras mutuamente exclusivas (5 branches) ──────────────────────────
+    is_first = j == camad_t
+    is_next_last = (j == camad_t + 1) & (j == n - 1)
+    is_next_internal = (j == camad_t + 1) & (j != n - 1)
+    is_internal = (j > camad_t + 1) & (j != n - 1)
+    # is_last é o complemento — ativado via default na cadeia jnp.where
+
+    # ── Candidato 1: j == camad_t (inicialização) ────────────────────────────
+    # TEdwz[:, j] = zeta * _MZ / (2 * u[:, j])
+    TEdwz_first = zeta * _MZ / (2.0 * u[:, j])
+
+    # ── Candidato 2: j == camad_t+1 AND j == n-1 (próxima = última) ─────────
+    # Port linhas 1348-1356: sem denominador (1 + RTEdw·exp(-2uh))
+    exp_arg_nl = (
+        jnp.exp(-u[:, camad_t] * (prof[camad_t + 1] - h0))
+        + RTEup[:, camad_t] * FEupz * jnp.exp(-uh[:, camad_t])
+        + RTEdw[:, camad_t] * FEdwz
+    )
+    TEdwz_next_last = TEdwz[:, j_prev] * exp_arg_nl
+
+    # ── Candidato 3: j == camad_t+1 AND j != n-1 (próxima = intermediária) ──
+    # Port linhas 1357-1366: com denominador (1 + RTEdw·exp(-2uh))
+    denom_ni = 1.0 + RTEdw[:, j] * jnp.exp(-2.0 * uh[:, j])
+    TEdwz_next_internal = TEdwz[:, j_prev] * exp_arg_nl / denom_ni
+
+    # ── Candidato 4: j > camad_t+1 AND j != n-1 (interna) ───────────────────
+    # Port linhas 1367-1373
+    TEdwz_internal = (
+        TEdwz[:, j_prev] * (1.0 + RTEdw[:, j_prev]) * jnp.exp(-uh[:, j_prev]) / denom_ni
+    )
+
+    # ── Candidato 5: j == n-1 E j != camad_t+1 (última) ─────────────────────
+    # Port linhas 1374-1377
+    TEdwz_last = TEdwz[:, j_prev] * (1.0 + RTEdw[:, j_prev]) * jnp.exp(-uh[:, j_prev])
+
+    # ── Seleção via jnp.where encadeado ──────────────────────────────────────
+    TEdwz_new = jnp.where(
+        is_first,
+        TEdwz_first,
+        jnp.where(
+            is_next_last,
+            TEdwz_next_last,
+            jnp.where(
+                is_next_internal,
+                TEdwz_next_internal,
+                jnp.where(is_internal, TEdwz_internal, TEdwz_last),
+            ),
+        ),
+    )
+
+    # ── Atualiza array na coluna j ───────────────────────────────────────────
+    return TEdwz.at[:, j].set(TEdwz_new)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# VMD — Propagação ascendente unified (camad_r < camad_t)
+# ──────────────────────────────────────────────────────────────────────────────
+def _vmd_ascent_body(
+    k,
+    carry,
+    camad_t,
+    n,
+    u,
+    uh,
+    RTEdw,
+    RTEup,
+    FEdwz,
+    FEupz,
+    prof,
+    h0,
+    zeta,
+):
+    """Corpo do loop ``fori_loop`` ascendente para VMD TE.
+
+    ``fori_loop`` itera k = 0, 1, ..., (camad_t - camad_r). Mapeamos para j
+    decrescente via: ``j = camad_t - k``. Port line-for-line de
+    ``_jax/dipoles_native.py:1378-1411``.
+
+    Args:
+        k: Tracer índice do loop (0-based, crescente).
+        carry: Array ``TEupz`` shape ``(npt, n)`` complex128.
+        camad_t, n, u, uh, RTE*, FE*, prof, h0, zeta: iguais a descent.
+
+    Returns:
+        Array ``TEupz`` atualizado na linha ``j = camad_t - k``.
+    """
+    TEupz = carry
+    j = camad_t - k
+    j_next = _safe_idx_next(j, n)
+
+    # ── Máscaras mutuamente exclusivas (5 branches) ──────────────────────────
+    is_first = j == camad_t
+    is_prev_first = (j == camad_t - 1) & (j == 0)
+    is_prev_internal = (j == camad_t - 1) & (j != 0)
+    is_internal = (j < camad_t - 1) & (j != 0)
+    # is_first_layer: j == 0 AND j != camad_t - 1
+
+    # ── Candidato 1: j == camad_t (inicialização) ────────────────────────────
+    # TEupz[:, j] = zeta * _MZ / (2 * u[:, j])
+    TEupz_first = zeta * _MZ / (2.0 * u[:, j])
+
+    # ── Candidato 2: j == camad_t-1 AND j == 0 (anterior = primeira) ────────
+    # Port linhas 1382-1390: sem denominador
+    exp_arg_pf = (
+        jnp.exp(-u[:, camad_t] * h0)
+        + RTEup[:, camad_t] * FEupz
+        + RTEdw[:, camad_t] * FEdwz * jnp.exp(-uh[:, camad_t])
+    )
+    TEupz_prev_first = TEupz[:, j_next] * exp_arg_pf
+
+    # ── Candidato 3: j == camad_t-1 AND j != 0 (anterior = intermediária) ──
+    # Port linhas 1391-1400: com denominador
+    exp_arg_pi = (
+        jnp.exp(u[:, camad_t] * (prof[camad_t] - h0))
+        + RTEup[:, camad_t] * FEupz
+        + RTEdw[:, camad_t] * FEdwz * jnp.exp(-uh[:, camad_t])
+    )
+    denom_pi = 1.0 + RTEup[:, j] * jnp.exp(-2.0 * uh[:, j])
+    TEupz_prev_internal = TEupz[:, j_next] * exp_arg_pi / denom_pi
+
+    # ── Candidato 4: j < camad_t-1 AND j != 0 (interna) ─────────────────────
+    # Port linhas 1401-1407
+    TEupz_internal = (
+        TEupz[:, j_next] * (1.0 + RTEup[:, j_next]) * jnp.exp(-uh[:, j_next]) / denom_pi
+    )
+
+    # ── Candidato 5: j == 0 AND j != camad_t-1 (primeira) ───────────────────
+    # Port linhas 1408-1411
+    TEupz_first_layer = (
+        TEupz[:, j_next] * (1.0 + RTEup[:, j_next]) * jnp.exp(-uh[:, j_next])
+    )
+
+    # ── Seleção via jnp.where encadeado ──────────────────────────────────────
+    TEupz_new = jnp.where(
+        is_first,
+        TEupz_first,
+        jnp.where(
+            is_prev_first,
+            TEupz_prev_first,
+            jnp.where(
+                is_prev_internal,
+                TEupz_prev_internal,
+                jnp.where(is_internal, TEupz_internal, TEupz_first_layer),
+            ),
+        ),
+    )
+
+    # ── Atualiza array na coluna j ───────────────────────────────────────────
+    return TEupz.at[:, j].set(TEupz_new)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# VMD — Orquestrador da propagação unificada
+# ──────────────────────────────────────────────────────────────────────────────
+def _vmd_propagation_unified(
+    camad_t,
+    camad_r,
+    n,
+    npt,
+    u,
+    uh,
+    RTEdw,
+    RTEup,
+    FEdwz,
+    FEupz,
+    prof,
+    h0,
+    zeta,
+):
+    """Propaga os potenciais TE de VMD via ``jax.lax.fori_loop``.
+
+    Substitui os loops Python `for j in range(...)` em
+    `_jax/dipoles_native.py:1344-1411` por loops `lax.fori_loop`,
+    permitindo que `camad_t` e `camad_r` sejam tracers.
+
+    Três casos geométricos (mesmos do HMD, mas TE-only):
+      • ``camad_r > camad_t``: propagação descendente (apenas ``TEdwz`` ativo)
+      • ``camad_r < camad_t``: propagação ascendente (apenas ``TEupz`` ativo)
+      • ``camad_r == camad_t``: mesma camada (``TEdwz`` e ``TEupz`` iguais)
+
+    Args:
+        camad_t, camad_r: Tracers — índices das camadas T/R.
+        n, npt: Estáticos — número de camadas e pontos Hankel.
+        u, uh: Arrays ``(npt, n)`` da propagação TE.
+        RTEdw, RTEup: Arrays ``(npt, n)`` de reflexão TE.
+        FEdwz, FEupz: Arrays ``(npt,)`` de fatores dipolo vertical.
+        prof: Array ``(n+2,)`` de profundidades de interface (com sentinelas).
+        h0: Escalar — profundidade do transmissor.
+        zeta: Escalar complex — ``iωμ₀``.
+
+    Returns:
+        Tupla ``(TEdwz, TEupz)`` — arrays ``(npt, n) complex128``.
+
+    Note:
+        Paridade <1e-12 vs legacy `_vmd_native_jax` em 7 modelos canônicos.
+        A assimetria vs HMD (que retorna 4 arrays) é intencional — VMD
+        propaga apenas TE, não TM.
+    """
+    if not HAS_JAX:
+        raise ImportError("dipoles_unified requer JAX (pip install 'jax[cpu]').")
+
+    # Inicialização
+    TEdwz_init = jnp.zeros((npt, n), dtype=jnp.complex128)
+    TEupz_init = jnp.zeros((npt, n), dtype=jnp.complex128)
+
+    # ── Caso A: camad_r > camad_t (descendente) ──────────────────────────────
+    def _body_descent_bound(j, carry):
+        return _vmd_descent_body(
+            j,
+            carry,
+            camad_t,
+            n,
+            u,
+            uh,
+            RTEdw,
+            RTEup,
+            FEdwz,
+            FEupz,
+            prof,
+            h0,
+            zeta,
+        )
+
+    TEdwz_A = jax.lax.fori_loop(
+        camad_t,
+        camad_r + 1,
+        _body_descent_bound,
+        TEdwz_init,
+    )
+
+    # ── Caso B: camad_r < camad_t (ascendente) ──────────────────────────────
+    # k vai de 0 até (camad_t - camad_r); j = camad_t - k
+    def _body_ascent_bound(k, carry):
+        return _vmd_ascent_body(
+            k,
+            carry,
+            camad_t,
+            n,
+            u,
+            uh,
+            RTEdw,
+            RTEup,
+            FEdwz,
+            FEupz,
+            prof,
+            h0,
+            zeta,
+        )
+
+    TEupz_B = jax.lax.fori_loop(
+        0,
+        camad_t - camad_r + 1,
+        _body_ascent_bound,
+        TEupz_init,
+    )
+
+    # ── Caso C: camad_r == camad_t (mesma camada) ────────────────────────────
+    # TEdwz[:, camad_r] = zeta * _MZ / (2 * u[:, camad_t])
+    # TEupz[:, camad_r] = TEdwz[:, camad_r]  (legacy: linha 1415)
+    TEdwz_C = TEdwz_init.at[:, camad_t].set(zeta * _MZ / (2.0 * u[:, camad_t]))
+    TEupz_C = TEupz_init.at[:, camad_t].set(zeta * _MZ / (2.0 * u[:, camad_t]))
+
+    # ── Seleção do caso via jnp.where ────────────────────────────────────────
+    is_descent = camad_r > camad_t
+    is_ascent = camad_r < camad_t
+    is_same = camad_r == camad_t
+
+    TEdwz = jnp.where(is_descent, TEdwz_A, jnp.where(is_same, TEdwz_C, TEdwz_init))
+    TEupz = jnp.where(is_ascent, TEupz_B, jnp.where(is_same, TEupz_C, TEupz_init))
+
+    return TEdwz, TEupz
+
+
 __all__ = [
     "_hmd_tiv_propagation_unified",
     "_hmd_tiv_descent_body",
     "_hmd_tiv_ascent_body",
+    "_vmd_propagation_unified",
+    "_vmd_descent_body",
+    "_vmd_ascent_body",
 ]

@@ -95,6 +95,10 @@ if HAS_JAX:
         IMPLEMENTATION_STATUS,
         decoupling_factors_jax,
     )
+    from geosteering_ai.simulation._jax.dipoles_unified import (
+        _hmd_tiv_propagation_unified,
+        _vmd_propagation_unified,
+    )
     from geosteering_ai.simulation._jax.hankel import (
         integrate_j0,
         integrate_j0_j1,
@@ -114,6 +118,9 @@ if HAS_JAX:
         "rotate_tensor",
         "decoupling_factors_jax",
         "IMPLEMENTATION_STATUS",
+        # Sprint 10 (PR #23 Phase 1 + PR #24-part1 Phase 2)
+        "_hmd_tiv_propagation_unified",
+        "_vmd_propagation_unified",
     ]
 else:
     __all__ = ["HAS_JAX"]
