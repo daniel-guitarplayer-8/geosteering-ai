@@ -93,11 +93,18 @@ except ImportError:
 if HAS_JAX:
     from geosteering_ai.simulation._jax.dipoles_native import (
         IMPLEMENTATION_STATUS,
+        _hmd_tiv_native_jax_unified,
+        _vmd_native_jax_unified,
         decoupling_factors_jax,
+        native_dipoles_full_jax_unified,
     )
     from geosteering_ai.simulation._jax.dipoles_unified import (
         _hmd_tiv_propagation_unified,
         _vmd_propagation_unified,
+    )
+    from geosteering_ai.simulation._jax.forward_pure import (
+        clear_unified_jit_cache,
+        count_compiled_xla_programs,
     )
     from geosteering_ai.simulation._jax.hankel import (
         integrate_j0,
@@ -121,6 +128,12 @@ if HAS_JAX:
         # Sprint 10 (PR #23 Phase 1 + PR #24-part1 Phase 2)
         "_hmd_tiv_propagation_unified",
         "_vmd_propagation_unified",
+        # Sprint 10 Phase 2 final (PR #24-part2): wrappers unified cabeados
+        "_hmd_tiv_native_jax_unified",
+        "_vmd_native_jax_unified",
+        "native_dipoles_full_jax_unified",
+        "count_compiled_xla_programs",
+        "clear_unified_jit_cache",
     ]
 else:
     __all__ = ["HAS_JAX"]

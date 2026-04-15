@@ -587,6 +587,7 @@ def _compute_jacobian_jacfwd_native(
         tr_spacing_m=tr,
         dip_deg=float(dip_deg),
         hankel_filter=cfg.hankel_filter,
+        strategy=getattr(cfg, "jax_strategy", "bucketed"),
     )
 
     def _fwd(rh, rv):

@@ -190,8 +190,9 @@ if _HAS_JAX_MULTI:
 #   1.4.0 → Sprint 11 (PR #15: multi-TR + multi-ângulo Numba nativo + F6/F7 wiring)
 #   1.4.1 → PR #21 (fix convenção T/R Numba+JAX + teste regressão dip≠0°)
 #   1.5.0-alpha → PR #23 (Sprint 10 Phase 1 fori_loop + Sprint 11-JAX wrapper)
-#   1.5.0-beta1 → PR #24-part1 (Sprint 10 Phase 2: _vmd_propagation_unified
+#   1.5.0-beta1 → PR #24-part1 (Sprint 10 Phase 2 infra: _vmd_propagation_unified
 #                 + SimulationConfig.jax_strategy flag — opt-in "unified")
-#   1.5.0 → Sprint 10 Phase 2 final (wiring forward_pure + vmap multi) [PENDENTE]
+#   1.5.0 → PR #24-part2 (Sprint 10 Phase 2 final: wrappers _hmd/_vmd_native_jax_unified
+#           cabeados em forward_pure; 44→1 XLA em oklahoma_28; paridade 3.5e-14)
 #   2.0.0 → Fase 6 concluída (backend dispatch em PipelineConfig)
-__version__ = "1.5.0b1"  # PR #24-part1: VMD unified + jax_strategy flag
+__version__ = "1.5.0"  # PR #24-part2: Sprint 10 Phase 2 cabeado end-to-end

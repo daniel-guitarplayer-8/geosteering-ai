@@ -535,10 +535,9 @@ def compute_case_index_jax(
         A ordem é importante — replica o `if/elif` do Numba em
         `dipoles.py:547-644`.
     """
-    # Sprint 7.x (PR #14d): versão JAX-friendly — `z` e `h0` podem ser
-    # tracers (vmap) desde que `camad_r`/`camad_t` sejam concretos (static
-    # no bucket). Substitui a cadeia de ``if`` Python por ``jnp.where``
-    # aninhado para permitir diferenciação através de ``z``.
+    # Sprint 7.x (PR #14d): fast-path quando camad_r/camad_t/n são Python ints
+    # concretos (bucketed). Sprint 10 Phase 2 (PR #24-part2): tracer-path
+    # quando camad_r/camad_t são JAX tracers (unified, vmap sobre posições).
     if isinstance(camad_r, int) and isinstance(camad_t, int) and isinstance(n, int):
         # Caminho fast-path — todos os argumentos inteiros são concretos.
         # Usa ``jnp.where`` apenas quando ``z``/``h0`` são tracers.
@@ -552,19 +551,31 @@ def compute_case_index_jax(
         if camad_r > camad_t and camad_r != (n - 1):
             return 4
         return 5
-    # Caminho legado (tudo concreto) — mantém compatibilidade com callers
-    # que passam Python ints/floats antigos.
-    if camad_r == 0 and camad_t != 0:
-        return 0
-    if camad_r < camad_t:
-        return 1
-    if camad_r == camad_t and z <= h0:
-        return 2
-    if camad_r == camad_t and z > h0:
-        return 3
-    if camad_r > camad_t and camad_r != (n - 1):
-        return 4
-    return 5
+    # Caminho tracer (Sprint 10 Phase 2): camad_r/camad_t são tracers int32.
+    # Toda a árvore de decisão usa ``jnp.where`` encadeado. Ordem equivalente
+    # ao if/elif do fast-path — o primeiro branch verdadeiro vence.
+    case = jnp.where(
+        (camad_r == 0) & (camad_t != 0),
+        0,
+        jnp.where(
+            camad_r < camad_t,
+            1,
+            jnp.where(
+                (camad_r == camad_t) & (z <= h0),
+                2,
+                jnp.where(
+                    camad_r == camad_t,  # z > h0 implícito (já filtrou z<=h0)
+                    3,
+                    jnp.where(
+                        (camad_r > camad_t) & (camad_r != (n - 1)),
+                        4,
+                        5,  # fallback: camad_r == n-1 (caso 6)
+                    ),
+                ),
+            ),
+        ),
+    )
+    return case
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1565,6 +1576,371 @@ def native_dipoles_full_jax(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Sprint 10 Phase 2 — Wrappers unified (PR #24-part2)
+# ──────────────────────────────────────────────────────────────────────────────
+# Diferença dos wrappers legados:
+#   • ETAPA 3 (propagação TE/TM) usa `_hmd_tiv_propagation_unified` /
+#     `_vmd_propagation_unified` (jax.lax.fori_loop + jnp.where encadeado) em
+#     vez de `for j in range(camad_t, camad_r+1)` Python → `camad_t`/`camad_r`
+#     viram tracers int32.
+#   • ETAPAS 4/5/6 permanecem inalteradas (já tracer-compat via
+#     `compute_case_index_jax`, `_hmd_tiv_full_jax` e `_vmd_full_jax`).
+#   • Consequência: 44 programas XLA → 1 por (n, npt) → VRAM T4 ~11 GB → 250 MB.
+#
+# Usados apenas quando `cfg.jax_strategy="unified"` (opt-in). O caminho legacy
+# (`_hmd_tiv_native_jax`, `_vmd_native_jax`, `native_dipoles_full_jax`)
+# permanece default e intocado (backward-compat com testes LRU).
+#
+# Referências:
+#   • `dipoles_unified._hmd_tiv_propagation_unified:L451-594`
+#   • `dipoles_unified._vmd_propagation_unified:L788-911`
+# ──────────────────────────────────────────────────────────────────────────────
+from geosteering_ai.simulation._jax.dipoles_unified import (  # noqa: E402
+    _hmd_tiv_propagation_unified,
+    _vmd_propagation_unified,
+)
+
+
+def _hmd_tiv_native_jax_unified(
+    Tx: float,
+    Ty: float,
+    h0: float,
+    n: int,
+    camad_r,  # ← tracer int32 (Sprint 10 Phase 2)
+    camad_t,  # ← tracer int32 (Sprint 10 Phase 2)
+    npt: int,
+    krJ0J1: "jax.Array",
+    wJ0: "jax.Array",
+    wJ1: "jax.Array",
+    h: "jax.Array",
+    prof: "jax.Array",
+    zeta: complex,
+    eta: "jax.Array",
+    cx: float,
+    cy: float,
+    z: float,
+    u: "jax.Array",
+    s: "jax.Array",
+    uh: "jax.Array",
+    sh: "jax.Array",
+    RTEdw: "jax.Array",
+    RTEup: "jax.Array",
+    RTMdw: "jax.Array",
+    RTMup: "jax.Array",
+    Mxdw: "jax.Array",
+    Mxup: "jax.Array",
+    Eudw: "jax.Array",
+    Euup: "jax.Array",
+):
+    """HMD TIV unified (Sprint 10 Phase 2) — espelho de ``_hmd_tiv_native_jax``.
+
+    Substitui a ETAPA 3 (propagação TE/TM) por
+    :func:`_hmd_tiv_propagation_unified`, permitindo que ``camad_t``/``camad_r``
+    sejam tracers int32 (não mais Python ints). ETAPAS 4/5/6 permanecem
+    idênticas ao legacy — reutilizam ``compute_case_index_jax`` e
+    ``_hmd_tiv_full_jax`` (já tracer-compat).
+
+    Returns:
+        ``(Hx_p, Hy_p, Hz_p)`` — cada array ``(2,) complex128`` (idx 0 = hmdx,
+        idx 1 = hmdy). Semântica idêntica a :func:`_hmd_tiv_native_jax`.
+    """
+    # ── Geometria local (idem legacy) ───────────────────────────────
+    dx = cx - Tx
+    dy = cy - Ty
+    x = jnp.where(jnp.abs(dx) < _EPS_SINGULARITY, 0.0, dx)
+    y = jnp.where(jnp.abs(dy) < _EPS_SINGULARITY, 0.0, dy)
+    r = jnp.sqrt(x * x + y * y)
+    r = jnp.where(r < _EPS_SINGULARITY, _R_GUARD, r)
+    kr = krJ0J1 / r
+
+    # ── ETAPA 3 UNIFIED: propagação via fori_loop ───────────────────
+    Txdw, Tudw, Txup, Tuup = _hmd_tiv_propagation_unified(
+        camad_t,
+        camad_r,
+        n,
+        npt,
+        s,
+        u,
+        sh,
+        uh,
+        RTMdw,
+        RTMup,
+        RTEdw,
+        RTEup,
+        Mxdw,
+        Mxup,
+        Eudw,
+        Euup,
+        prof,
+        h0,
+    )
+
+    # ── ETAPA 4: Fatores geométricos (idem legacy) ──────────────────
+    x2_r2 = x * x / (r * r)
+    y2_r2 = y * y / (r * r)
+    xy_r2 = x * y / (r * r)
+    twox2_r2m1 = 2.0 * x2_r2 - 1.0
+    twoy2_r2m1 = 2.0 * y2_r2 - 1.0
+    twopir = _TWO_PI_NATIVE * r
+    kh2_r = -zeta * eta[camad_r, 0]  # dynamic_slice (tracer-safe)
+
+    # ── ETAPA 5: Kernels via lax.switch (tracer-safe) ───────────────
+    case_idx = compute_case_index_jax(camad_r, camad_t, n, z, h0)
+    Ktm, Kte, Ktedz = _hmd_tiv_full_jax(
+        case_idx,
+        u[:, camad_r],
+        s[:, camad_r],
+        RTEdw[:, camad_r],
+        RTEup[:, camad_r],
+        RTMdw[:, camad_r],
+        RTMup[:, camad_r],
+        Tudw[:, camad_r],
+        Tuup[:, camad_r],
+        Txdw[:, camad_r],
+        Txup[:, camad_r],
+        Mxdw,
+        Mxup,
+        Eudw,
+        Euup,
+        z,
+        h0,
+        prof[camad_r],
+        prof[camad_r + 1],
+        h[camad_r],
+    )
+
+    # ── ETAPA 6: Assembly Ward-Hohmann (idem legacy) ────────────────
+    Ktm_J0 = Ktm * wJ0
+    Ktm_J1 = Ktm * wJ1
+    Kte_J1 = Kte * wJ1
+    Ktedz_J0 = Ktedz * wJ0
+    Ktedz_J1 = Ktedz * wJ1
+
+    sum_Ktedz_J1 = jnp.sum(Ktedz_J1)
+    sum_Ktm_J1 = jnp.sum(Ktm_J1)
+    sum_Ktedz_J0_kr = jnp.sum(Ktedz_J0 * kr)
+    sum_Ktm_J0_kr = jnp.sum(Ktm_J0 * kr)
+    sum_add_J1 = jnp.sum(Ktedz_J1 + kh2_r * Ktm_J1)
+    sum_add_J0_kr = jnp.sum((Ktedz_J0 + kh2_r * Ktm_J0) * kr)
+    sum_Kte_J1_kr2 = jnp.sum(Kte_J1 * kr * kr)
+
+    # HMDX (índice 0)
+    kernelHxJ1 = (twox2_r2m1 * sum_Ktedz_J1 - kh2_r * twoy2_r2m1 * sum_Ktm_J1) / r
+    kernelHxJ0 = x2_r2 * sum_Ktedz_J0_kr - kh2_r * y2_r2 * sum_Ktm_J0_kr
+    Hx0 = (kernelHxJ1 - kernelHxJ0) / twopir
+    kernelHyJ1 = sum_add_J1 / r
+    kernelHyJ0 = sum_add_J0_kr / 2.0
+    Hy0 = xy_r2 * (kernelHyJ1 - kernelHyJ0) / _PI_NATIVE / r
+    kernelHzJ1 = x * sum_Kte_J1_kr2 / r
+    Hz0 = -kernelHzJ1 / twopir
+
+    # HMDY (índice 1)
+    Hx1 = Hy0
+    kernelHyJ1_y = (twoy2_r2m1 * sum_Ktedz_J1 - kh2_r * twox2_r2m1 * sum_Ktm_J1) / r
+    kernelHyJ0_y = y2_r2 * sum_Ktedz_J0_kr - kh2_r * x2_r2 * sum_Ktm_J0_kr
+    Hy1 = (kernelHyJ1_y - kernelHyJ0_y) / twopir
+    kernelHzJ1_y = y * sum_Kte_J1_kr2 / r
+    Hz1 = -kernelHzJ1_y / twopir
+
+    return jnp.array([Hx0, Hx1]), jnp.array([Hy0, Hy1]), jnp.array([Hz0, Hz1])
+
+
+def _vmd_native_jax_unified(
+    Tx: float,
+    Ty: float,
+    h0: float,
+    n: int,
+    camad_r,  # ← tracer int32
+    camad_t,  # ← tracer int32
+    npt: int,
+    krJ0J1: "jax.Array",
+    wJ0: "jax.Array",
+    wJ1: "jax.Array",
+    h: "jax.Array",
+    prof: "jax.Array",
+    zeta: complex,
+    cx: float,
+    cy: float,
+    z: float,
+    u: "jax.Array",
+    uh: "jax.Array",
+    AdmInt: "jax.Array",
+    RTEdw: "jax.Array",
+    RTEup: "jax.Array",
+    FEdwz: "jax.Array",
+    FEupz: "jax.Array",
+):
+    """VMD unified (Sprint 10 Phase 2) — espelho de ``_vmd_native_jax``.
+
+    Substitui a ETAPA 3 (propagação TE) por
+    :func:`_vmd_propagation_unified`; ETAPAS 5/6 permanecem idênticas ao legacy.
+    Retorna ``(Hx_p, Hy_p, Hz_p)`` — escalares complex128.
+    """
+    # ── Geometria local (idem legacy) ───────────────────────────────
+    dx = cx - Tx
+    dy = cy - Ty
+    x = jnp.where(jnp.abs(dx) < _EPS_SINGULARITY, 0.0, dx)
+    y = jnp.where(jnp.abs(dy) < _EPS_SINGULARITY, 0.0, dy)
+    r = jnp.sqrt(x * x + y * y)
+    r = jnp.where(r < _EPS_SINGULARITY, _R_GUARD, r)
+    kr = krJ0J1 / r
+
+    # ── ETAPA 3 UNIFIED: propagação TE via fori_loop ────────────────
+    TEdwz, TEupz = _vmd_propagation_unified(
+        camad_t,
+        camad_r,
+        n,
+        npt,
+        u,
+        uh,
+        RTEdw,
+        RTEup,
+        FEdwz,
+        FEupz,
+        prof,
+        h0,
+        zeta,
+    )
+
+    # ── ETAPA 5: Kernels via lax.switch (tracer-safe) ───────────────
+    case_idx = compute_case_index_jax(camad_r, camad_t, n, z, h0)
+    KtezJ0, KtedzzJ1 = _vmd_full_jax(
+        case_idx,
+        TEdwz[:, camad_r],
+        TEupz[:, camad_r],
+        u[:, camad_r],
+        RTEdw[:, camad_r],
+        RTEup[:, camad_r],
+        AdmInt[:, camad_r],
+        FEdwz,
+        FEupz,
+        wJ0,
+        wJ1,
+        z,
+        h0,
+        prof[camad_r],
+        prof[camad_r + 1],
+        h[camad_r],
+    )
+
+    # ── ETAPA 6: Assembly (idem legacy) ─────────────────────────────
+    twopir = _TWO_PI_NATIVE * r
+    sum_KtedzzJ1_kr2 = jnp.sum(KtedzzJ1 * kr * kr)
+    sum_KtezJ0_kr3 = jnp.sum(KtezJ0 * kr * kr * kr)
+    Hx_p = -x * sum_KtedzzJ1_kr2 / twopir / r
+    Hy_p = -y * sum_KtedzzJ1_kr2 / twopir / r
+    Hz_p = sum_KtezJ0_kr3 / 2.0 / _PI_NATIVE / zeta / r
+    return Hx_p, Hy_p, Hz_p
+
+
+def native_dipoles_full_jax_unified(
+    Tx,
+    Ty,
+    Tz,
+    n,
+    camad_r,
+    camad_t,
+    npt,
+    krJ0J1,
+    wJ0,
+    wJ1,
+    h_arr,
+    prof_arr,
+    zeta,
+    eta,
+    cx,
+    cy,
+    cz,
+    u,
+    s,
+    uh,
+    sh,
+    RTEdw,
+    RTEup,
+    RTMdw,
+    RTMup,
+    Mxdw,
+    Mxup,
+    Eudw,
+    Euup,
+    FEdwz,
+    FEupz,
+):
+    """Orquestrador unified: HMD + VMD → matH (3,3). Paridade 1:1 com
+    :func:`native_dipoles_full_jax` (legacy) mas aceita ``camad_t``/``camad_r``
+    como tracers. **Diferenciável** via ``jax.grad``/``jax.jacfwd``.
+    """
+    h0 = Tz
+
+    Hx_hmd, Hy_hmd, Hz_hmd = _hmd_tiv_native_jax_unified(
+        Tx,
+        Ty,
+        h0,
+        n,
+        camad_r,
+        camad_t,
+        npt,
+        krJ0J1,
+        wJ0,
+        wJ1,
+        h_arr,
+        prof_arr,
+        zeta,
+        eta,
+        cx,
+        cy,
+        cz,
+        u,
+        s,
+        uh,
+        sh,
+        RTEdw,
+        RTEup,
+        RTMdw,
+        RTMup,
+        Mxdw,
+        Mxup,
+        Eudw,
+        Euup,
+    )
+
+    AdmInt = u / zeta
+    Hx_vmd, Hy_vmd, Hz_vmd = _vmd_native_jax_unified(
+        Tx,
+        Ty,
+        h0,
+        n,
+        camad_r,
+        camad_t,
+        npt,
+        krJ0J1,
+        wJ0,
+        wJ1,
+        h_arr,
+        prof_arr,
+        zeta,
+        cx,
+        cy,
+        cz,
+        u,
+        uh,
+        AdmInt,
+        RTEdw,
+        RTEup,
+        FEdwz,
+        FEupz,
+    )
+
+    return jnp.array(
+        [
+            [Hx_hmd[0], Hy_hmd[0], Hz_hmd[0]],
+            [Hx_hmd[1], Hy_hmd[1], Hz_hmd[1]],
+            [Hx_vmd, Hy_vmd, Hz_vmd],
+        ]
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Status de implementação (para consulta via código)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1580,6 +1956,9 @@ IMPLEMENTATION_STATUS = {
     "_hmd_tiv_native_jax": "✅ HMD end-to-end ETAPAS 3+4+5+6 (Sprint 3.3.4)",
     "_vmd_native_jax": "✅ VMD end-to-end ETAPAS 3+5+6 (Sprint 3.3.4)",
     "native_dipoles_full_jax": "✅ orquestrador HMD+VMD → matH (3,3) (Sprint 3.3.4)",
+    "_hmd_tiv_native_jax_unified": "✅ HMD unified — camad tracers (Sprint 10 Phase 2)",
+    "_vmd_native_jax_unified": "✅ VMD unified — camad tracers (Sprint 10 Phase 2)",
+    "native_dipoles_full_jax_unified": "✅ orquestrador unified (Sprint 10 Phase 2)",
 }
 
 
@@ -1608,5 +1987,9 @@ __all__ = [
     "_hmd_tiv_native_jax",
     "_vmd_native_jax",
     "native_dipoles_full_jax",
+    # Sprint 10 Phase 2 — wrappers unified (PR #24-part2)
+    "_hmd_tiv_native_jax_unified",
+    "_vmd_native_jax_unified",
+    "native_dipoles_full_jax_unified",
     "IMPLEMENTATION_STATUS",
 ]

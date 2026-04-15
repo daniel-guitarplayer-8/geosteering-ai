@@ -228,6 +228,7 @@ def _single_position_jax(
     wJ0: jax.Array,
     wJ1: jax.Array,
     use_native_dipoles: bool = False,
+    use_unified: bool = False,
 ) -> jax.Array:
     """Calcula H para uma frequência numa posição via backend JAX.
 
@@ -236,6 +237,12 @@ def _single_position_jax(
             (JAX puro end-to-end, diferenciável, GPU-ready). Se False
             (default), usa ``pure_callback`` → Numba host (bit-exato,
             mais rápido em CPU).
+        use_unified: Sprint 10 Phase 2 (PR #24-part2). Se True, e
+            ``use_native_dipoles=True``, usa ``native_dipoles_full_jax_unified``
+            — propagação TE/TM via ``jax.lax.fori_loop`` aceitando
+            ``camad_t``/``camad_r`` como tracers int32. Consolida 44 buckets
+            XLA em 1 único JIT por ``(n, npt)``. Ignorado quando
+            ``use_native_dipoles=False``.
 
     Retorna array (9,) complex128 — Hxx, Hxy, Hxz, Hyx, Hyy, Hyz, Hzx, Hzy, Hzz.
     """
@@ -272,11 +279,18 @@ def _single_position_jax(
     # Sprint 3.3.4: escolhe entre JAX nativo end-to-end (diferenciável,
     # GPU-ready) ou callback Numba host (bit-exato, rápido em CPU).
     if use_native_dipoles:
-        from geosteering_ai.simulation._jax.dipoles_native import (
-            native_dipoles_full_jax,
-        )
+        if use_unified:
+            # Sprint 10 Phase 2: camad_t/camad_r como tracers → 1 JIT global.
+            from geosteering_ai.simulation._jax.dipoles_native import (
+                native_dipoles_full_jax_unified as _dipoles_impl,
+            )
+        else:
+            # Sprint 3.3.4 legacy: camad_t/camad_r como Python ints (44 buckets).
+            from geosteering_ai.simulation._jax.dipoles_native import (
+                native_dipoles_full_jax as _dipoles_impl,
+            )
 
-        matH = native_dipoles_full_jax(
+        matH = _dipoles_impl(
             Tx,
             Ty,
             Tz,
