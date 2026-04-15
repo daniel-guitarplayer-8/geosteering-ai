@@ -197,6 +197,20 @@ _VALID_HANKEL_FILTERS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Sprint 10 Phase 2 (PR #24, v1.5.0b1) — estratégia de consolidação JAX XLA.
+# "bucketed" é o default legacy (Sprint 7.x): agrupa posições por (camad_t,
+# camad_r) e compila 1 programa XLA por bucket. Para oklahoma_28 isso gera
+# 44 programas (~11 GB VRAM T4). "unified" usa `lax.fori_loop` em
+# `dipoles_unified.py` para aceitar `camad_t`/`camad_r` como tracers → 1
+# único programa XLA (~250 MB VRAM). Em v1.5.0b1 "unified" é opt-in;
+# flip default em v1.5.0 final após validação Colab GPU.
+_VALID_JAX_STRATEGIES: Final[frozenset[str]] = frozenset(
+    {
+        "bucketed",  # ★ default Sprint 7.x; 44 buckets para oklahoma_28
+        "unified",  # Sprint 10 Phase 2; 1 JIT global (camad_t/camad_r tracers)
+    }
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -248,6 +262,11 @@ class SimulationConfig:
             auto-detecta (usa todos os cores disponíveis). Default: -1.
         seed: Seed para inicialização reprodutível (futuro uso em
             benchmarks estocásticos). Default: 42.
+        jax_strategy: Estratégia de compilação JAX XLA (Sprint 10 Phase 2,
+            PR #24). Opções: ``"bucketed"`` (default, Sprint 7.x — 44 programas
+            XLA em oklahoma_28) ou ``"unified"`` (opt-in — 1 programa XLA via
+            ``lax.fori_loop``, reduz VRAM T4 de ~11 GB para ~250 MB). Default:
+            ``"bucketed"``. Flip em v1.5.0 final após validação GPU.
 
     Example:
         Configuração padrão (paridade Fortran baseline)::
@@ -395,6 +414,29 @@ class SimulationConfig:
     use_tilted_antennas: bool = False
     tilted_configs: Optional[Tuple[Tuple[float, float], ...]] = None
 
+    # ┌───────────────────────────────────────────────────────────────┐
+    # │  Grupo 10 — Estratégia JAX XLA (Sprint 10 Phase 2, PR #24)    │
+    # └───────────────────────────────────────────────────────────────┘
+    # `jax_strategy` seleciona entre:
+    #
+    #   • "bucketed" (★ default, Sprint 7.x): `_forward_pure_jax_bucketed_impl`
+    #     agrupa posições por (camad_t, camad_r) única. Cada bucket gera 1
+    #     programa XLA via `@jax.jit` com `camad_t, camad_r` estáticos.
+    #     Oklahoma_28 → 44 programas → ~11 GB VRAM T4 observado.
+    #
+    #   • "unified" (opt-in, Sprint 10 Phase 2): `_forward_pure_jax_unified_impl`
+    #     usa `lax.fori_loop` em `dipoles_unified.py` + vmap aninhado sobre
+    #     posições e frequências. `camad_t`/`camad_r` são tracer arrays. Todo
+    #     modelo compila em 1 único programa XLA → ~250 MB VRAM T4 (target).
+    #
+    # Em v1.5.0b1 "bucketed" permanece default (backward compat). Flip para
+    # "unified" em v1.5.0 final após validação manual em Colab T4/A100.
+    #
+    # Impacto em testes: `test_jit_cache_eviction_lru` hardcoda 44 buckets
+    # (assume "bucketed") — não quebra pois default preserva esse comportamento.
+    # Cobertura "unified" em `tests/test_simulation_jax_sprint10_wired.py`.
+    jax_strategy: str = "bucketed"
+
     # ─────────────────────────────────────────────────────────────────
     # VALIDAÇÃO (errata imutável, inspired by PipelineConfig)
     # ─────────────────────────────────────────────────────────────────
@@ -466,6 +508,15 @@ class SimulationConfig:
             f"hankel_filter={self.hankel_filter!r} inválido. Opções: "
             f"{sorted(_VALID_HANKEL_FILTERS)}. werthmuller_201pt é o "
             f"default (paridade filter_type=0 do Fortran)."
+        )
+
+        # Sprint 10 Phase 2 (PR #24) — estratégia JAX XLA.
+        assert self.jax_strategy in _VALID_JAX_STRATEGIES, (
+            f"jax_strategy={self.jax_strategy!r} inválido. Opções: "
+            f"{sorted(_VALID_JAX_STRATEGIES)}. 'bucketed' é default (Sprint 7.x "
+            f"— 44 programas XLA em oklahoma_28); 'unified' é opt-in Sprint 10 "
+            f"Phase 2 — consolida em 1 único programa via lax.fori_loop. "
+            f"Flip default em v1.5.0 final após validação Colab GPU."
         )
 
         # ── Conflitos mútuos entre backend e device ──────────────────

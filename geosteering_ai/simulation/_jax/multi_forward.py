@@ -352,6 +352,15 @@ def simulate_multi_jax(
     z_obs_filled = np.zeros(nAngles, dtype=bool)
 
     # ── Loop sobre (iTR, iAng): reutiliza cache por hordist ──────────────────
+    # Sprint 10 Phase 2 (PR #24-part2): propaga `cfg.jax_strategy` — quando
+    # "unified", cada forward interno usa 1 JIT único por (n, npt) em vez de
+    # 44 JITs por bucket. Isso reduz VRAM GPU linear × nTR × nAngles.
+    #
+    # Vmap REAL sobre (iTR, iAng) está bloqueado porque `find_layers_tr`
+    # permanece NumPy/Numba (decisão D3 do plano cosmic-riding-garden):
+    # port para JAX exigiria `lax.cond` + recomputar camada a cada trace.
+    # Ganho adicional de vmap aninhado diferido para Sprint 12 (PINN-on-esp).
+    _strategy = getattr(cfg, "jax_strategy", "bucketed")
     for hordist_key, group in hordist_groups.items():
         for i_tr, i_ang, L, theta in group:
             # Build static context JAX (inclui camad_t_array, camad_r_array)
@@ -364,6 +373,7 @@ def simulate_multi_jax(
                 tr_spacing_m=L,
                 dip_deg=theta,
                 hankel_filter=hankel_filter,
+                strategy=_strategy,
             )
 
             # Forward JAX → (n_pos, nf, 9)

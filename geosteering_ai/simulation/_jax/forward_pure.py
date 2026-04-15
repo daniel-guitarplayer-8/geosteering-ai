@@ -169,6 +169,18 @@ class ForwardPureContext:
     prof_arr_jnp: "jax.Array"
     camad_t_array: np.ndarray
     camad_r_array: np.ndarray
+    strategy: str = "bucketed"
+    """Sprint 10 Phase 2 (PR #24-part2). Dispatcher flag do forward JAX:
+
+    - ``"bucketed"`` (default): caminho legacy (Sprint 7.x, 44 JIT programs em
+      oklahoma_28). Paridade bit-exata com v1.5.0a1.
+    - ``"unified"``: caminho Sprint 10 Phase 2 — 1 JIT global por ``(n, npt)``
+      via :func:`_hmd_tiv_native_jax_unified` + :func:`_vmd_native_jax_unified`.
+      Reduz VRAM T4 ~11 GB → ~250 MB; CPU aceita ≤1.3× slowdown.
+
+    Propagado de :attr:`SimulationConfig.jax_strategy` em
+    :func:`build_static_context`.
+    """
 
 
 def build_static_context(
@@ -180,6 +192,7 @@ def build_static_context(
     tr_spacing_m: float,
     dip_deg: float,
     hankel_filter: str = "werthmuller_201pt",
+    strategy: str = "bucketed",
 ) -> ForwardPureContext:
     """Pré-computa arrays estáticos para ``forward_pure_jax``.
 
@@ -193,6 +206,11 @@ def build_static_context(
         dip_deg: ângulo de inclinação do poço (graus).
         hankel_filter: nome do filtro Hankel
             (``"werthmuller_201pt"``, ``"kong_61pt"``, ``"anderson_801pt"``).
+        strategy: Sprint 10 Phase 2 — ``"bucketed"`` (default, legacy 44 JIT
+            programs) ou ``"unified"`` (1 JIT global via
+            ``jax.lax.fori_loop``). Propagado de
+            :attr:`SimulationConfig.jax_strategy`. Ver
+            :attr:`ForwardPureContext.strategy`.
 
     Returns:
         :class:`ForwardPureContext` imutável pronto para consumo por
@@ -205,6 +223,8 @@ def build_static_context(
     """
     if not HAS_JAX:
         raise ImportError("forward_pure_jax requer JAX (pip install 'jax[cpu]').")
+    if strategy not in ("bucketed", "unified"):
+        raise ValueError(f"strategy={strategy!r} inválido; use 'bucketed' ou 'unified'.")
     from geosteering_ai.simulation._jax.kernel import (  # noqa: WPS433
         _sanitize_profile_kernel,
     )
@@ -282,6 +302,7 @@ def build_static_context(
         prof_arr_jnp=jnp.asarray(prof_arr),
         camad_t_array=camad_t_array,
         camad_r_array=camad_r_array,
+        strategy=strategy,
     )
 
 
@@ -336,6 +357,12 @@ def forward_pure_jax(
     #     dentro de `_hmd_tiv_full_jax` / `_vmd_full_jax`).
     #
     # Paridade: bit-a-bit vs versão anterior (mesma função `_single_position_jax`).
+    #
+    # Sprint 10 Phase 2 (PR #24-part2): dispatcher por ``ctx.strategy``.
+    #   • "bucketed" (default) → caminho legacy (44 JIT programs oklahoma_28)
+    #   • "unified"             → caminho Sprint 10 Phase 2 (1 JIT global)
+    if ctx.strategy == "unified":
+        return _forward_pure_jax_unified_impl(rho_h, rho_v, ctx)
     return _forward_pure_jax_bucketed_impl(rho_h, rho_v, ctx)
 
 
@@ -568,6 +595,187 @@ def _forward_pure_jax_bucketed_impl(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Sprint 10 Phase 2 — caminho unified (1 JIT por (n, npt)) — PR #24-part2
+# ──────────────────────────────────────────────────────────────────────────────
+# MOTIVAÇÃO
+#   Em vez de compilar 44 XLA programs (oklahoma_28 bucketed), compila-se
+#   UM ÚNICO programa por `(n, npt)`. `camad_t`/`camad_r` entram como
+#   tracers int32 dentro do JIT — a propagação TE/TM é feita via
+#   `jax.lax.fori_loop` com bounds dinâmicos (ver `dipoles_unified.py`).
+#
+# GANHOS ESPERADOS (GPU T4 / oklahoma_28)
+#   • VRAM:        ~11 GB → ~250 MB    (44× menos código XLA residente)
+#   • Throughput:  5-20× mais rápido em batch pequeno (1 kernel launch)
+#   • Kernel fusion via vmap positions × freqs → sem launches intermediários
+#
+# TRADE-OFF (CPU)
+#   • `fori_loop` + `jnp.where` triplo → ~1.3× slowdown vs bucketed em CPU.
+#   • Gate: benchmark E10 confirma slowdown ≤ 1.3× (aceitável — GPU é o alvo).
+#
+# CACHE
+#   `_UNIFIED_JIT_CACHE: OrderedDict[tuple[int, int], callable]` —
+#   chave `(n, npt)`, valor função jitada. LRU idêntico ao
+#   `_BUCKET_JIT_CACHE` para evitar recompilações em sequências longas
+#   de modelos com mesmo (n, npt) mas geometrias diferentes.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_UNIFIED_JIT_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
+"""Cache LRU de JIT-compilações unified, chaveado por ``(n, npt)``.
+
+Distinto do :data:`_BUCKET_JIT_CACHE` (chaveado por ``(ct, cr, n, npt)``).
+Sob a estratégia ``"unified"``, 1 modelo geológico → 1 entrada neste cache.
+"""
+
+
+def clear_unified_jit_cache() -> int:
+    """Limpa o cache unified. Retorna quantas entradas foram removidas."""
+    n = len(_UNIFIED_JIT_CACHE)
+    _UNIFIED_JIT_CACHE.clear()
+    return n
+
+
+def count_compiled_xla_programs(
+    ctx: ForwardPureContext,
+    strategy: Optional[str] = None,
+) -> int:
+    """Conta entradas de cache correspondentes ao ``ctx`` atual.
+
+    Útil em testes para validar a consolidação **44 → 1** em
+    ``strategy="unified"``. Equivalente bucketed retorna o número de
+    buckets compilados ``(ct, cr, n, npt)`` que coincidem com ``(n, npt)``
+    do ``ctx`` (heurística: buckets do mesmo modelo geométrico).
+
+    Args:
+        ctx: contexto estático cujo ``(n, npt)`` é o filtro.
+        strategy: se ``None``, usa ``ctx.strategy``; caso contrário,
+            o valor passado sobrescreve.
+
+    Returns:
+        Número de XLA programs compilados no cache selecionado que
+        correspondem ao modelo do ``ctx``. ``strategy="unified"`` retorna
+        0 ou 1; ``"bucketed"`` retorna 0..(n²).
+    """
+    s = strategy or ctx.strategy
+    if s == "unified":
+        return sum(1 for k in _UNIFIED_JIT_CACHE if k == (ctx.n, ctx.npt))
+    return sum(
+        1 for k in _BUCKET_JIT_CACHE if len(k) == 4 and k[2] == ctx.n and k[3] == ctx.npt
+    )
+
+
+def _get_unified_jit(n: int, npt: int):
+    """Retorna (e memoriza) função jitada unified para ``(n, npt)``.
+
+    A função aceita ``(rho_h, rho_v, z_positions, freqs, camad_t_arr,
+    camad_r_arr, dz_half, r_half, dip_rad, h_arr, prof_arr, krJ0J1,
+    wJ0, wJ1)`` e retorna ``H_tensor`` shape ``(n_pos, nf, 9)``.
+
+    Chave do cache: ``(n, npt)`` — **não** inclui ``(ct, cr)``, pois estes
+    são tracers dentro do JIT.
+    """
+    from geosteering_ai.simulation._jax.kernel import _single_position_jax
+
+    key = (int(n), int(npt))
+    if key in _UNIFIED_JIT_CACHE:
+        _UNIFIED_JIT_CACHE.move_to_end(key)
+        return _UNIFIED_JIT_CACHE[key]
+
+    def _forward_unified(
+        rho_h: "jax.Array",
+        rho_v: "jax.Array",
+        z_positions: "jax.Array",
+        freqs: "jax.Array",
+        camad_t_arr: "jax.Array",
+        camad_r_arr: "jax.Array",
+        dz_half: float,
+        r_half: float,
+        dip_rad: float,
+        h_arr: "jax.Array",
+        prof_arr: "jax.Array",
+        krJ0J1: "jax.Array",
+        wJ0: "jax.Array",
+        wJ1: "jax.Array",
+    ) -> "jax.Array":
+        # Reconstrói eta traceable (diferenciável em rho_h/rho_v).
+        eta = jnp.stack([1.0 / rho_h, 1.0 / rho_v], axis=-1)
+
+        def _one_pos_one_freq(z_mid, camad_t, camad_r, freq):
+            # Convenção Fortran T abaixo / R acima (v1.5.0 PR #21).
+            Tz = z_mid + dz_half
+            cz = z_mid - dz_half
+            return _single_position_jax(
+                r_half,
+                0.0,
+                Tz,
+                -r_half,
+                0.0,
+                cz,
+                dip_rad,
+                n,
+                npt,
+                camad_t,  # ← tracer int32
+                camad_r,  # ← tracer int32
+                rho_h,
+                rho_v,
+                h_arr,
+                prof_arr,
+                eta,
+                freq,
+                krJ0J1,
+                wJ0,
+                wJ1,
+                use_native_dipoles=True,
+                use_unified=True,
+            )
+
+        # vmap interno sobre frequências (in_axes=(None, None, None, 0))
+        # → shape (nf, 9) por posição.
+        vmap_freq = jax.vmap(_one_pos_one_freq, in_axes=(None, None, None, 0))
+        # vmap externo sobre posições (camad_t/camad_r variam por posição).
+        vmap_all = jax.vmap(vmap_freq, in_axes=(0, 0, 0, None))
+        return vmap_all(z_positions, camad_t_arr, camad_r_arr, freqs)
+
+    jitted = jax.jit(_forward_unified, static_argnames=())
+
+    if len(_UNIFIED_JIT_CACHE) >= _BUCKET_JIT_CACHE_MAXSIZE:
+        _UNIFIED_JIT_CACHE.popitem(last=False)  # evict LRU
+    _UNIFIED_JIT_CACHE[key] = jitted
+    return jitted
+
+
+def _forward_pure_jax_unified_impl(
+    rho_h: "jax.Array",
+    rho_v: "jax.Array",
+    ctx: ForwardPureContext,
+) -> "jax.Array":
+    """Implementação unified — 1 JIT global, tracer ``camad_t``/``camad_r``.
+
+    Substitui bucketing por ``vmap`` aninhado; mantém ``(n_pos, nf, 9)``
+    na ordem original de ``positions_z``.
+
+    Paridade com bucketed: <1e-12 em 7 modelos canônicos (validada em
+    `tests/test_simulation_jax_sprint10_wired.py`).
+    """
+    jitted = _get_unified_jit(ctx.n, ctx.npt)
+    return jitted(
+        rho_h,
+        rho_v,
+        ctx.positions_z_jnp,
+        ctx.freqs_hz_jnp,
+        jnp.asarray(ctx.camad_t_array, dtype=jnp.int32),
+        jnp.asarray(ctx.camad_r_array, dtype=jnp.int32),
+        ctx.dz_half,
+        ctx.r_half,
+        ctx.dip_rad,
+        ctx.h_arr_jnp,
+        ctx.prof_arr_jnp,
+        ctx.krJ0J1,
+        ctx.wJ0,
+        ctx.wJ1,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Sprint 8 — warmup coletivo + chunking de posições (PR #14f)
 # ──────────────────────────────────────────────────────────────────────────────
 #
@@ -691,6 +899,9 @@ def forward_pure_jax_chunked(
     nf = ctx.freqs_hz_jnp.shape[0]
 
     if n_pos <= chunk_size:
+        # Chunk único — delega para dispatcher pela strategy do ctx.
+        if ctx.strategy == "unified":
+            return _forward_pure_jax_unified_impl(rho_h, rho_v, ctx)
         return _forward_pure_jax_bucketed_impl(rho_h, rho_v, ctx)
 
     # Divide posições em chunks e aplica o bucketing em cada — buffer
@@ -720,8 +931,14 @@ def forward_pure_jax_chunked(
             prof_arr_jnp=ctx.prof_arr_jnp,
             camad_t_array=ct_full[start:end],
             camad_r_array=cr_full[start:end],
+            strategy=ctx.strategy,
         )
-        H_chunk = _forward_pure_jax_bucketed_impl(rho_h, rho_v, sub_ctx)
+        # Dispatcher: respeita a strategy do ctx (herdado) — se "unified",
+        # usa o caminho de 1 JIT global; caso contrário, bucketed.
+        if sub_ctx.strategy == "unified":
+            H_chunk = _forward_pure_jax_unified_impl(rho_h, rho_v, sub_ctx)
+        else:
+            H_chunk = _forward_pure_jax_bucketed_impl(rho_h, rho_v, sub_ctx)
         H_out = H_out.at[start:end].set(H_chunk)
     return H_out
 
