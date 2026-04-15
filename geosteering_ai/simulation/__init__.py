@@ -173,6 +173,7 @@ __all__ = [
 #   1.1.x → Sprint 3.3.4 (ETAPAS 3+6 JAX native end-to-end, PR #12)
 #   1.2.0 → Sprint 5.1+5.2 (Jacobiano FD Numba + JAX jacfwd) + 4.x TIV analítico (PR #13)
 #   1.4.0 → Sprint 11 (PR #15: multi-TR + multi-ângulo Numba nativo + F6/F7 wiring)
-#   1.5.0 → Flip use_native_dipoles default + integração bench (próximo PR)
+#   1.4.1 → PR #21 (fix convenção T/R Numba+JAX + teste regressão dip≠0°)
+#   1.5.0 → Sprint 10 (JAX unified JIT) + Sprint 11-JAX (multi-TR/angle GPU) [PENDENTE]
 #   2.0.0 → Fase 6 concluída (backend dispatch em PipelineConfig)
-__version__ = "1.4.0"  # PR #15 (Sprint 11: multi-TR + multi-ângulo Numba nativo)
+__version__ = "1.4.1"  # PR #21 (fix T/R Numba+JAX + teste regressão dip≠0°)
