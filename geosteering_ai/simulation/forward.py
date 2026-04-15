@@ -178,10 +178,16 @@ def _simulate_positions_njit(
     for j in _prange(n_positions):
         z_mid = positions_z[j]
 
-        Tz = z_mid - dz_half
-        cz = z_mid + dz_half
-        Tx = -r_half
-        cx = r_half
+        # ── Convenção Fortran (PerfilaAnisoOmp.f08:677-679): transmissor ─────
+        # ABAIXO do receptor (Tz > cz), ambos em lados opostos do ponto-médio.
+        # Transmissor em +x/+z, receptor em −x/−z. Esta é a configuração dos
+        # arranjos de dados Petrobras (comentário Fortran linha 673). A
+        # convenção Python anterior (Tx=−r_half, Tz=z_mid−dz_half) invertia
+        # T e R, produzindo Hxz/Hzx com sinal trocado em relação ao Fortran.
+        Tz = z_mid + dz_half
+        cz = z_mid - dz_half
+        Tx = r_half
+        cx = -r_half
         Ty = 0.0
         cy = 0.0
 
@@ -281,10 +287,12 @@ def _simulate_positions_njit_cached(
     for j in _prange(n_positions):
         z_mid = positions_z[j]
 
-        Tz = z_mid - dz_half
-        cz = z_mid + dz_half
-        Tx = -r_half
-        cx = r_half
+        # Convenção Fortran (PerfilaAnisoOmp.f08:677-679): T abaixo, R acima.
+        # Transmissor em +x/+z relativo ao ponto-médio; receptor em −x/−z.
+        Tz = z_mid + dz_half
+        cz = z_mid - dz_half
+        Tx = r_half
+        cx = -r_half
         Ty = 0.0
         cy = 0.0
 
@@ -399,11 +407,12 @@ def _simulate_positions_parallel(
         for j in range(start, end):
             z_mid = positions_z[j]
 
-            # Transmissor acima do ponto-médio, receptor abaixo
-            Tz = z_mid - dz_half
-            cz = z_mid + dz_half
-            Tx = -r_half
-            cx = r_half
+            # Convenção Fortran (PerfilaAnisoOmp.f08:677-679): T ABAIXO do
+            # ponto-médio, R ACIMA. Transmissor em +x/+z, receptor em −x/−z.
+            Tz = z_mid + dz_half
+            cz = z_mid - dz_half
+            Tx = r_half
+            cx = -r_half
             Ty = 0.0
             cy = 0.0
 
@@ -525,5 +534,6 @@ def simulate(
         hankel_filter=hankel_filter,
     )
     return multi_result.to_single()
+
 
 __all__ = ["SimulationResult", "simulate"]

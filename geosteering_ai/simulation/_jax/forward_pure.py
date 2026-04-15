@@ -256,8 +256,10 @@ def build_static_context(
         camad_r_array[:] = 0
     else:
         for i, z_mid in enumerate(positions_z):
-            Tz = float(z_mid) - dz_half
-            cz = float(z_mid) + dz_half
+            # Convenção Fortran (PerfilaAnisoOmp.f08:677-679): T abaixo, R acima.
+            # Corrigido em v1.5.0 (PR #21) — usado para mapear camada de T e R.
+            Tz = float(z_mid) + dz_half
+            cz = float(z_mid) - dz_half
             ct, cr = find_layers_tr(n, Tz, cz, prof_arr)
             camad_t_array[i] = ct
             camad_r_array[i] = cr
@@ -460,13 +462,15 @@ def _get_bucket_jit(ct: int, cr: int, n: int, npt: int):
         eta = jnp.stack([1.0 / rho_h, 1.0 / rho_v], axis=-1)
 
         def _one_pos_one_freq(z_mid, freq):
-            Tz = z_mid - dz_half
-            cz = z_mid + dz_half
+            # Convenção Fortran (PerfilaAnisoOmp.f08:677-679): T abaixo, R acima.
+            # Corrigido em v1.5.0 (PR #21) para bater com Numba em dip ≠ 0°.
+            Tz = z_mid + dz_half
+            cz = z_mid - dz_half
             return _single_position_jax(
-                -r_half,
+                r_half,
                 0.0,
                 Tz,
-                r_half,
+                -r_half,
                 0.0,
                 cz,
                 dip_rad,

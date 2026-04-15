@@ -423,6 +423,273 @@ def test_fortran_numerical_parity_dat(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Teste 9b (PR #21 v1.5.0) — paridade numérica DIP ≠ 0° vs Fortran
+# ──────────────────────────────────────────────────────────────────────────────
+# Este teste protege a convenção Transmissor/Receptor (T/R) contra regressões.
+# Em poços inclinados (dip ≠ 0°) as componentes off-diagonal Hxz e Hzx são
+# não-nulas e sensíveis à convenção de posicionamento:
+#   • Fortran (PerfilaAnisoOmp.f08:677-679): T em +x/+z, R em −x/−z
+#   • Python (pós-fix v1.5.0):              T em +x/+z, R em −x/−z ← MESMA
+#
+# Historicamente (v1.4.0), o Python usava a convenção INVERTIDA, o que
+# produzia Hxz e Hzx com sinal trocado vs o Fortran — invisível em dip=0°
+# (onde Hxz=Hzx=0 exatamente) mas visível em plots dip=30°/60°.
+#
+# Se este teste falhar, verificar lines de posicionamento T/R em:
+#   • geosteering_ai/simulation/forward.py:287-295, 290-297, 411-416
+#   • geosteering_ai/simulation/multi_forward.py:683-691
+#   • geosteering_ai/simulation/_jax/kernel.py:456-459 (JAX — teste 9c)
+#   • geosteering_ai/simulation/_jax/forward_pure.py:259-260, 463-464
+# ──────────────────────────────────────────────────────────────────────────────
+@fortran_required
+def test_fortran_byte_exact_dat_nonzero_dip(tmp_path):
+    """Python `.dat` com dip=30° tem paridade numérica <1e-12 vs Fortran.
+
+    Validação de regressão permanente para a convenção T/R. Garante que
+    Hxz e Hzx (componentes off-diagonal sensíveis ao dip) casam bit-a-bit
+    com o Fortran em poço inclinado.
+
+    Executa:
+      1. `tatu.x` com `model.in` para oklahoma_3 × dip=30° × nTR=1
+      2. `simulate_multi(dip_degs=[30.0])` no Python
+      3. Exporta via `export_multi_tr_dat`
+      4. Compara campo-a-campo via `read_multi_tr_dat` (tolerância 1e-12)
+
+    Para dip=30°:
+      • pz = p_med * cos(30°) ≈ 0.1732 m
+      • n_pos = ceil(tj / pz) = 693 posições (vs 600 para dip=0°)
+      • Hxz e Hzx são ≠ 0 (gate anti-regressão)
+
+    Note:
+        Teste adicionado após descoberta (via comparação visual) de bug
+        de convenção T/R no Numba em v1.4.0. Corrigido em PR #21 (v1.5.0).
+        Fortran refs: PerfilaAnisoOmp.f08:674-679.
+    """
+    from tests._fortran_helpers import (
+        compute_n_pos_for_dip,
+        compute_pz_for_dip,
+        write_model_in_multi,
+    )
+
+    model_name = "oklahoma_3"
+    dip_deg = 30.0
+    tr_list = [1.0]
+    h1, tj, p_med = 29.5418, 120.0, 0.2
+
+    # ── Setup Fortran: gera model.in via helper compartilhado ───────────
+    fort_workdir = tmp_path / "fort"
+    n_pos = write_model_in_multi(
+        workdir=fort_workdir,
+        model_name=model_name,
+        tr_list=tr_list,
+        dip_list=[dip_deg],
+        h1=h1,
+        tj=tj,
+        p_med=p_med,
+        filename="trivial30",
+    )
+    assert n_pos == 693, f"n_pos esperado 693 para dip=30°, obtido {n_pos}"
+
+    shutil.copy(DEFAULT_FORTRAN_EXEC, fort_workdir / "tatu.x")
+    result = subprocess.run(
+        ["./tatu.x"],
+        cwd=fort_workdir,
+        capture_output=True,
+        timeout=120,
+        text=True,
+    )
+    assert result.returncode == 0, f"tatu.x falhou: {result.stderr}"
+
+    # ── Python: simulate_multi com mesmos parâmetros ────────────────────
+    m = get_canonical_model(model_name)
+    rho_h = np.asarray(m.rho_h, dtype=np.float64)
+    rho_v = np.asarray(m.rho_v, dtype=np.float64)
+    esp = np.asarray(m.esp, dtype=np.float64)
+
+    pz = compute_pz_for_dip(dip_deg, p_med=p_med)
+    positions_z = -h1 + np.arange(n_pos) * pz
+
+    res = simulate_multi(
+        rho_h=rho_h,
+        rho_v=rho_v,
+        esp=esp,
+        positions_z=positions_z,
+        frequencies_hz=[20000.0],
+        tr_spacings_m=tr_list,
+        dip_degs=[dip_deg],
+    )
+    assert res.H_tensor.shape == (1, 1, n_pos, 1, 9)
+
+    py_workdir = tmp_path / "py"
+    py_workdir.mkdir()
+    export_multi_tr_dat(res, "trivial30", py_workdir)
+
+    # ── Compara por registro (struct 22-col) ─────────────────────────────
+    # n_records = nAngles × nf × n_pos = 1 × 1 × 693 = 693
+    n_records = 1 * 1 * n_pos
+    fort_dat = fort_workdir / "trivial30.dat"  # nTR=1 → sem sufixo _TR
+    if not fort_dat.exists():
+        # Fortran pode nomear como trivial30_TR1.dat se nTR > 1 for interpretado
+        fort_dat = fort_workdir / "trivial30_TR1.dat"
+    py_dat = py_workdir / "trivial30.dat"
+    if not py_dat.exists():
+        py_dat = py_workdir / "trivial30_TR1.dat"
+
+    assert fort_dat.exists(), f"tatu.x não gerou .dat esperado em {fort_workdir}"
+    assert py_dat.exists(), f"Python não gerou .dat esperado em {py_workdir}"
+
+    fort_data = read_multi_tr_dat(fort_dat, n_records)
+    py_data = read_multi_tr_dat(py_dat, n_records)
+
+    # Índices: bit-exatos
+    np.testing.assert_array_equal(fort_data["i"], py_data["i"])
+
+    # ── Sanity: Hxz e Hzx não-nulos (anti-regressão do bug de convenção) ─
+    re_hxz_max = float(np.max(np.abs(fort_data["Re_Hxz"])))
+    re_hzx_max = float(np.max(np.abs(fort_data["Re_Hzx"])))
+    assert re_hxz_max > 1e-10, (
+        f"Hxz deveria ser não-nulo para dip=30°, obtido max={re_hxz_max}. "
+        "Se 0, verifique geometria T-R."
+    )
+    assert (
+        re_hzx_max > 1e-10
+    ), f"Hzx deveria ser não-nulo para dip=30°, obtido max={re_hzx_max}."
+
+    # ── Campos float: tolerância 1e-12 (anti-regressão T/R) ─────────────
+    max_err_global = 0.0
+    worst_field = ""
+    for field in fort_data.dtype.names:
+        if field == "i":
+            continue
+        fort_vals = fort_data[field]
+        py_vals = py_data[field]
+        diff = np.abs(fort_vals - py_vals)
+        max_diff = float(np.nanmax(diff))
+        if max_diff > max_err_global:
+            max_err_global = max_diff
+            worst_field = field
+        assert max_diff < 1e-12, (
+            f"dip=30° field {field}: max_abs_diff = {max_diff} > 1e-12. "
+            "Indica possível regressão de convenção T/R — verifique "
+            "forward.py e multi_forward.py."
+        )
+
+    # Sanity final
+    assert max_err_global < 1e-12, f"Pior erro: {max_err_global} em {worst_field}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Teste 9c (PR #21 v1.5.0) — paridade JAX vs Numba em dip ≠ 0° (transitivo Fortran)
+# ──────────────────────────────────────────────────────────────────────────────
+# Valida que a correção de convenção T/R no path JAX (aplicada em v1.5.0)
+# produz resultados bit-compatíveis com o Numba em dip = 30°.
+#
+# Estratégia: como `simulate_multi_jax` ainda não existe (Sprint 11-JAX),
+# usamos `forward_pure_jax` diretamente para 1 TR × 1 ângulo e comparamos
+# com `simulate_multi(Numba)`.H_tensor[0, 0].
+#
+# Paridade transitiva:
+#   • E2: Numba ≡ Fortran (byte-exact, max_abs_err < 1e-12)
+#   • E4 (este): JAX ≡ Numba (< 1e-10 por diferença LLVM vs JAX IR)
+#   • ∴ JAX ≡ Fortran em dip ≠ 0°
+# ──────────────────────────────────────────────────────────────────────────────
+HAS_JAX = False
+try:
+    import jax  # noqa: F401
+
+    HAS_JAX = True
+except ImportError:
+    pass
+
+jax_required = pytest.mark.skipif(not HAS_JAX, reason="JAX não instalado")
+
+
+@jax_required
+def test_jax_dip_nonzero_matches_numba():
+    """JAX forward_pure_jax ≡ Numba simulate_multi em dip=30° (paridade <1e-10).
+
+    Valida a correção de convenção T/R no path JAX aplicada em v1.5.0.
+    Se o JAX ainda usasse a convenção antiga (T acima, R abaixo), este teste
+    falharia com diferença ~2× nos valores de Hxz/Hzx (sinal trocado).
+
+    Note:
+        Tolerância 1e-10 (vs 1e-12 do test Fortran-Numba): diferenças no
+        último ULP (~1e-14) entre kernels Numba LLVM e JAX XLA são
+        esperadas por ordem diferente de operações internas.
+    """
+    from geosteering_ai.simulation._jax.forward_pure import (
+        build_static_context,
+        forward_pure_jax,
+    )
+    from tests._fortran_helpers import compute_pz_for_dip
+
+    dip_deg = 30.0
+    h1 = 29.5418
+    p_med = 0.2
+    n_pos = 100  # menor que E2 para velocidade (JAX tem overhead JIT)
+
+    # Modelo oklahoma_3
+    m = get_canonical_model("oklahoma_3")
+    rho_h = np.asarray(m.rho_h, dtype=np.float64)
+    rho_v = np.asarray(m.rho_v, dtype=np.float64)
+    esp = np.asarray(m.esp, dtype=np.float64)
+
+    pz = compute_pz_for_dip(dip_deg, p_med=p_med)
+    positions_z = -h1 + np.arange(n_pos) * pz
+
+    freqs_hz = np.array([20000.0])
+    tr_spacing_m = 1.0
+
+    # ── Numba (baseline) ────────────────────────────────────────────────
+    res_numba = simulate_multi(
+        rho_h=rho_h,
+        rho_v=rho_v,
+        esp=esp,
+        positions_z=positions_z,
+        frequencies_hz=freqs_hz.tolist(),
+        tr_spacings_m=[tr_spacing_m],
+        dip_degs=[dip_deg],
+    )
+    H_numba = res_numba.H_tensor[0, 0]  # shape: (n_pos, 1, 9)
+
+    # ── JAX forward_pure_jax ────────────────────────────────────────────
+    ctx = build_static_context(
+        rho_h=rho_h,
+        rho_v=rho_v,
+        esp=esp,
+        positions_z=positions_z,
+        freqs_hz=freqs_hz,
+        tr_spacing_m=tr_spacing_m,
+        dip_deg=dip_deg,
+    )
+    H_jax = np.asarray(forward_pure_jax(rho_h, rho_v, ctx))  # (n_pos, 1, 9)
+
+    # ── Compara ─────────────────────────────────────────────────────────
+    assert (
+        H_jax.shape == H_numba.shape
+    ), f"Shapes diferentes: JAX={H_jax.shape} Numba={H_numba.shape}"
+
+    # Sanity: Hxz e Hzx não-nulos (anti-regressão T/R)
+    re_hxz_max = float(np.max(np.abs(H_numba[:, 0, 2].real)))
+    assert (
+        re_hxz_max > 1e-10
+    ), f"Hxz Numba deveria ser não-nulo em dip=30°, max={re_hxz_max}"
+
+    # Paridade componentwise
+    max_err = 0.0
+    for comp_idx, comp_name in enumerate(
+        ["Hxx", "Hxy", "Hxz", "Hyx", "Hyy", "Hyz", "Hzx", "Hzy", "Hzz"]
+    ):
+        diff = np.abs(H_jax[:, :, comp_idx] - H_numba[:, :, comp_idx])
+        max_diff = float(np.nanmax(diff))
+        max_err = max(max_err, max_diff)
+        assert max_diff < 1e-10, (
+            f"Componente {comp_name} dip=30° max_abs_err={max_diff} > 1e-10. "
+            "Verifique convenção T/R em _jax/kernel.py e _jax/forward_pure.py."
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Teste 10 (bônus) — validação de entradas (fail-fast ValueError)
 # ──────────────────────────────────────────────────────────────────────────────
 class TestInputValidation:
