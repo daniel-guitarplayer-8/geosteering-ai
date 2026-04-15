@@ -29,13 +29,54 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 ## 1. Estado Atual e Roadmap
 
+### 1.0 Sprint 10 Phase 2 (v1.5.0, PR #24) — unified JIT cabeado (2026-04-15)
+
+**Meta atingida**: `oklahoma_28` consolidou **44 XLA programs → 1** com paridade 3.5e-14 vs bucketed. Viabiliza meta GPU T4 VRAM ~11 GB → ~250 MB.
+
+**Dispatcher `cfg.jax_strategy`**:
+- `"bucketed"` (default): caminho legacy Sprint 7.x (44 JITs em oklahoma_28)
+- `"unified"` (opt-in): 1 JIT global por `(n, npt)` via `jax.lax.fori_loop`
+
+**Wrappers novos** (em `_jax/dipoles_native.py`):
+- `_hmd_tiv_native_jax_unified` (substitui L1053/1145 Python loops)
+- `_vmd_native_jax_unified` (substitui L1345/1379 Python loops)
+- `native_dipoles_full_jax_unified` (orquestrador)
+
+**Forward flow**:
+```
+cfg.jax_strategy → build_static_context → ForwardPureContext.strategy
+    → forward_pure_jax → {bucketed, unified}_impl → single_position(use_unified)
+    → native_dipoles_full_jax_unified → _hmd_tiv_propagation_unified + _vmd_propagation_unified
+```
+
+**Cache unified**: `_UNIFIED_JIT_CACHE: OrderedDict[(n, npt), callable]` em `forward_pure.py`. Helpers: `count_compiled_xla_programs(ctx, strategy)` + `clear_unified_jit_cache()`.
+
+**Paridade bit-exata vs bucketed**:
+| Modelo | XLA bucketed | XLA unified | max abs err |
+|:-------|:------------:|:-----------:|:-----------:|
+| oklahoma_3 | 5 | 1 | 7.85e-14 |
+| oklahoma_5 | 9 | 1 | 3.67e-14 |
+| oklahoma_28 | **44** | **1** | 3.50e-14 |
+
+**Bug crítico corrigido**: `compute_case_index_jax:557` não aceitava tracers (só fast-path concreto). Fix adicionou 3º caminho fully-JAX via `jnp.where` encadeado cobrindo os 6 casos geométricos.
+
+**Backward compat total**: default `"bucketed"` preserva v1.5.0a1. Fortran e Numba intocados.
+
+**Testes**: `tests/test_simulation_jax_sprint10_wired.py` (7 PASS) + `test_simulation_jax_sprint10_parity.py` (8 PASS).
+
+**Benchmark CPU**: `benchmarks/bench_sprint10_unified_vs_bucketed.py` (soft gate ≤1.3×).
+
+**Pendentes v1.5.1+**: validação GPU Colab T4/A100 manual → flip default `"unified"` → deprecação bucketed (v1.6.0).
+
+Docs: `docs/reference/sprint_10_phase2_unified_jit.md` + `relatorio_final_sprint_10_11_jax.md`.
+
 ### 1.1 Versão e progresso
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **1.7.2** (+ Sprint **8 warmup+chunked** + Sprint **9 pmap multi-GPU**) |
-| **Branch**       | `feature/pr14f-jax-warmup-chunked-pmap`                   |
-| **Base**         | `main` (PR #13 `16a50ac` — Sprint 5.1+5.2 Jacobiano + TIV analítico) |
+| **Versão**       | **v1.10.0** (Sprint 10 Phase 2 cabeado end-to-end, PR #24 v1.5.0) |
+| **Branch**       | `feature/pr24-part2-sprint10-phase2-wired`                 |
+| **Base**         | `main` (PR #24 — consolida 44 XLA → 1, v1.5.0 estável)    |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod 2.6+ (opt-in) |
 | **Precisão**     | `complex128` default + `complex64` via config             |

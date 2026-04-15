@@ -791,8 +791,11 @@ F7.9.1 ✅ — forward_pure_jax_pmap multi-GPU (Sprint 9)                      [
 F7.14  ✅ — Multi-TR + Multi-Ângulo Numba nativo + F6/F7 wiring + .dat       [CONCLUÍDA 2026-04-14 PR #15]
         (simulate_multi + MultiSimulationResult + dedup hordist + paridade Fortran < 2e-13 + 17 testes + 1.16-2.14× vs OpenMP)
 F7.7   — Otimizações finais restantes (pmap multi-GPU, JAX híbrido, etc.)   [PENDENTE]
-F7.10  — JAX unified JIT (lax.fori_loop): 44 buckets → 1 XLA program        [PENDENTE — desbloqueador multi-TR/ângulo GPU]
-F7.11  — Multi-TR + multi-ângulo em JAX GPU (depende de F7.10)              [PENDENTE]
+F7.10  ✅ — JAX unified JIT (lax.fori_loop): 44 buckets → 1 XLA program     [CONCLUÍDA 2026-04-15 PR #24 v1.5.0]
+        (Phase 1 PR #23 unified HMD + Phase 2 PR #24 VMD unified + wrappers cabeados
+         + cfg.jax_strategy + 7 testes E2E + paridade 3.5e-14 + docs completos)
+F7.11  ✅ — Multi-TR + multi-ângulo propagando cfg.jax_strategy (part2)     [CONCLUÍDA 2026-04-15 PR #24]
+        (vmap REAL sobre iTR/iAng diferido para Sprint 12 — requer find_layers_tr_jax)
 ```
 
 **Fase 1 concluída** ✅ em 2026-04-11: todos os entregáveis de Foundations
