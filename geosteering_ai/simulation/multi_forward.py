@@ -681,10 +681,13 @@ def simulate_multi(
                 # Caminho serial (debug ou Numba ausente)
                 for j in range(n_pos):
                     z_mid = positions_z[j]
-                    Tz = z_mid - dz_half
-                    cz = z_mid + dz_half
-                    Tx = -r_half
-                    cx = r_half
+                    # Convenção Fortran (PerfilaAnisoOmp.f08:677-679):
+                    # Transmissor ABAIXO do ponto-médio (+z), Receptor ACIMA (−z).
+                    # Transmissor em +x, Receptor em −x.
+                    Tz = z_mid + dz_half
+                    cz = z_mid - dz_half
+                    Tx = r_half
+                    cx = -r_half
                     Ty = 0.0
                     cy = 0.0
                     cH = fields_in_freqs(

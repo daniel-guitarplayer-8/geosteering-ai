@@ -453,10 +453,13 @@ def fields_in_freqs_jax_batch(
 
     for j in range(n_positions):
         z_mid = float(positions_z[j])
-        Tz = z_mid - dz_half
-        cz = z_mid + dz_half
-        Tx = -r_half
-        cx = r_half
+        # Convenção Fortran (PerfilaAnisoOmp.f08:677-679): T abaixo, R acima.
+        # Transmissor em +x/+z relativo ao ponto-médio; receptor em −x/−z.
+        # Corrigido em v1.5.0 (PR #21) para bater com Numba path.
+        Tz = z_mid + dz_half
+        cz = z_mid - dz_half
+        Tx = r_half
+        cx = -r_half
 
         if n == 1:
             camad_t, camad_r = 0, 0
