@@ -66,3 +66,4 @@ Fortran_Gerador/*.out
 
 # ── Pacotes de Skill legados ─────────────────────────────────────────────────
 *.skill
+.claude/worktrees/

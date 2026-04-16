@@ -438,6 +438,22 @@ class SimulationConfig:
     jax_strategy: str = "bucketed"
 
     # ─────────────────────────────────────────────────────────────────
+    # SPRINT 12 (PR #25 / v1.6.0) — vmap real multi-TR/multi-ângulo
+    # ─────────────────────────────────────────────────────────────────
+    # `jax_vmap_real=True` ativa `_simulate_multi_jax_vmap_real` que substitui
+    # o Python loop sobre (iTR, iAng) em `simulate_multi_jax` por `jax.vmap`
+    # aninhado. Usa `find_layers_tr_jax` tracer-safe (Sprint 12) para computar
+    # camad_t/camad_r dentro do trace.
+    #
+    # Ganho esperado: 1.5-3× speedup em GPU T4 para cenários multi-dip
+    # (nTR≥2, nAngles≥3) onde dedup por hordist é parcial. Para poços
+    # verticais (dip=0° → 1 grupo hordist único), dedup loop Python é mais
+    # eficiente — mantenha `jax_vmap_real=False` (default).
+    #
+    # Backward-compat: default False. Flip para True em v1.6.1 após soak.
+    jax_vmap_real: bool = False
+
+    # ─────────────────────────────────────────────────────────────────
     # VALIDAÇÃO (errata imutável, inspired by PipelineConfig)
     # ─────────────────────────────────────────────────────────────────
     def __post_init__(self) -> None:

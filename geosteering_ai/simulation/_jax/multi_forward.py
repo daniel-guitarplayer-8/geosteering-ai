@@ -341,6 +341,39 @@ def simulate_multi_jax(
     nTR = tr_arr.shape[0]
     nAngles = dip_arr.shape[0]
 
+    # ── Sprint 12 (PR #25) — Dispatcher vmap_real ────────────────────────────
+    # Se cfg.jax_vmap_real=True, usa `_simulate_multi_jax_vmap_real` que
+    # substitui o Python loop abaixo por `jax.vmap` aninhado sobre
+    # (iTR, iAng) flat. Mantém paridade bit-exata e mesma API de saída.
+    # Default False preserva backward-compat com v1.5.0.
+    _use_vmap_real = bool(getattr(cfg, "jax_vmap_real", False))
+    if _use_vmap_real:
+        H_tensor_jax, z_obs_np, rho_h_at_obs_np, rho_v_at_obs_np = (
+            _simulate_multi_jax_vmap_real(
+                rho_h_np=rho_h_np,
+                rho_v_np=rho_v_np,
+                esp_np=esp_np,
+                positions_z_np=positions_z_np,
+                freqs_arr=freqs_arr,
+                tr_arr=tr_arr,
+                dip_arr=dip_arr,
+                hankel_filter=hankel_filter,
+            )
+        )
+        hordist_groups_count = len(
+            _build_hordist_groups(tr_arr.tolist(), dip_arr.tolist())
+        )
+        return MultiSimulationResultJAX(
+            H_tensor=np.asarray(H_tensor_jax),
+            z_obs=z_obs_np,
+            rho_h_at_obs=rho_h_at_obs_np,
+            rho_v_at_obs=rho_v_at_obs_np,
+            freqs_hz=freqs_arr,
+            tr_spacings_m=tr_arr,
+            dip_degs=dip_arr,
+            unique_hordist_count=hordist_groups_count,
+        )
+
     # ── Deduplicação de cache por hordist ────────────────────────────────────
     hordist_groups = _build_hordist_groups(tr_arr.tolist(), dip_arr.tolist())
 
@@ -423,7 +456,199 @@ def simulate_multi_jax(
     )
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 12 (PR #25 / v1.6.0) — vmap real sobre (iTR, iAng)
+# ──────────────────────────────────────────────────────────────────────────────
+# MOTIVAÇÃO
+#   A implementação `simulate_multi_jax` acima itera (iTR, iAng) em LOOP PYTHON
+#   com dedup por `hordist = L·|sin(θ)|`. Para poços verticais (dip=0°) todas
+#   as combinações colapsam em 1 hordist → dedup é 100% eficaz. Para multi-dip
+#   reais (ex.: θ ∈ {0, 30, 60°}) o dedup é parcial e o loop Python gera
+#   overhead significativo em GPU — cada iteração é um dispatch JAX separado
+#   que impede fusão cross-config.
+#
+# DESIGN (Sprint 12)
+#   `_simulate_multi_jax_vmap_real` substitui o loop por `jax.vmap` sobre o
+#   grid achatado `(nTR × nAngles,)`. Para cada par (L, θ), calcula:
+#     1. `dz_half = 0.5·L·cos(θ)`, `r_half = 0.5·L·sin(θ)`   — tracers float
+#     2. `camad_t_array, camad_r_array` via `find_layers_tr_jax_vmap`
+#        sobre `(n_pos,)` posições — tracers int32
+#     3. Forward via `_get_unified_jit(n, npt)` — mesma função compilada
+#        (1 XLA program, chave invariante em (n, npt))
+#
+#   O dispatcher em `simulate_multi_jax` verifica `cfg.jax_vmap_real` e chama
+#   este path; caso contrário, mantém o Python loop original (preserva dedup
+#   fast-path para poços verticais).
+#
+# GARANTIAS
+#   ✅ Paridade bit-exata com `simulate_multi_jax` Python loop (validada em
+#      `test_simulation_jax_sprint12.py::test_vmap_real_parity_*`)
+#   ✅ Mesma API/shape de saída: `MultiSimulationResultJAX` com
+#      `H_tensor = (nTR, nAngles, n_pos, nf, 9)`
+#   ✅ Diferenciável (`jacfwd` preservado)
+#   ✅ Compatível com `strategy="unified"` — default Sprint 12 usa unified
+#      porque `_get_unified_jit` tem chave (n, npt), reutilizável entre configs
+
+
+def _simulate_multi_jax_vmap_real(
+    rho_h_np,
+    rho_v_np,
+    esp_np,
+    positions_z_np,
+    freqs_arr,
+    tr_arr,
+    dip_arr,
+    hankel_filter: str,
+) -> Tuple["jax.Array", "jax.Array", "jax.Array", "jax.Array"]:
+    """Forward multi-TR/multi-ângulo via ``jax.vmap`` real sobre (iTR, iAng).
+
+    Substitui o Python loop de :func:`simulate_multi_jax` por ``jax.vmap``
+    aplicando ``find_layers_tr_jax_vmap`` dentro do trace para computar
+    ``camad_t/camad_r`` como tracers int32.
+
+    Args:
+        rho_h_np: (n,) Ω·m.
+        rho_v_np: (n,) Ω·m.
+        esp_np: (n-2,) m — espessuras internas.
+        positions_z_np: (n_pos,) m.
+        freqs_arr: (nf,) Hz.
+        tr_arr: (nTR,) m.
+        dip_arr: (nAngles,) graus.
+        hankel_filter: nome do filtro Hankel.
+
+    Returns:
+        Tupla ``(H_tensor, z_obs, rho_h_at_obs, rho_v_at_obs)``:
+
+        - H_tensor: ``(nTR, nAngles, n_pos, nf, 9)`` complex128.
+        - z_obs: ``(nAngles, n_pos)`` float64 — profundidades ponto-médio.
+        - rho_h_at_obs: ``(nAngles, n_pos)`` float64.
+        - rho_v_at_obs: ``(nAngles, n_pos)`` float64.
+
+    Note:
+        Gera 1 compilação XLA por ``(n, npt)`` — todas as configs ``(L, θ)``
+        reutilizam a mesma função jitada. Em GPU T4 isso elimina o custo de
+        dispatch Python entre combinações, esperado ganho 1.5-3× em configs
+        multi-dip (nTR≥2, nAngles≥3).
+    """
+    from geosteering_ai.simulation._jax.forward_pure import _get_unified_jit
+    from geosteering_ai.simulation._jax.geometry_jax import (
+        find_layers_tr_jax_vmap,
+    )
+    from geosteering_ai.simulation._jax.kernel import _sanitize_profile_kernel
+    from geosteering_ai.simulation._numba.geometry import layer_at_depth
+    from geosteering_ai.simulation.filters import FilterLoader
+
+    n = rho_h_np.shape[0]
+    n_pos = positions_z_np.shape[0]
+    nTR = tr_arr.shape[0]
+    nAngles = dip_arr.shape[0]
+
+    # ── Pré-computa estruturas estáticas (uma vez) ────────────────────────
+    filt = FilterLoader().load(hankel_filter)
+    krJ0J1 = np.asarray(filt.abscissas, dtype=np.float64)
+    wJ0 = np.asarray(filt.weights_j0, dtype=np.float64)
+    wJ1 = np.asarray(filt.weights_j1, dtype=np.float64)
+    npt = krJ0J1.shape[0]
+
+    if n == 1:
+        h_arr = np.zeros(1, dtype=np.float64)
+        prof_arr = np.array([-1.0e300, 1.0e300], dtype=np.float64)
+    else:
+        h_arr, prof_arr = _sanitize_profile_kernel(n, esp_np)
+
+    # ── Converte para jnp uma única vez (compartilhado em todas as configs) ─
+    rho_h_jnp = jnp.asarray(rho_h_np, dtype=jnp.float64)
+    rho_v_jnp = jnp.asarray(rho_v_np, dtype=jnp.float64)
+    positions_z_jnp = jnp.asarray(positions_z_np, dtype=jnp.float64)
+    freqs_jnp = jnp.asarray(freqs_arr, dtype=jnp.float64)
+    h_arr_jnp = jnp.asarray(h_arr, dtype=jnp.float64)
+    prof_arr_jnp = jnp.asarray(prof_arr, dtype=jnp.float64)
+    krJ0J1_jnp = jnp.asarray(krJ0J1, dtype=jnp.float64)
+    wJ0_jnp = jnp.asarray(wJ0, dtype=jnp.float64)
+    wJ1_jnp = jnp.asarray(wJ1, dtype=jnp.float64)
+
+    # ── Recupera o JIT unificado (1 programa XLA por (n, npt)) ────────────
+    jitted = _get_unified_jit(n, npt)
+
+    # ── Função por configuração (L, θ) — todos args tracers ou estáticos ──
+    def _one_config(L, theta_deg, rho_h, rho_v):
+        """Forward para um par (L, θ) — chamada dentro de vmap.
+
+        L, theta_deg viram tracers float64; rho_h/rho_v são arrays jnp
+        (diferenciáveis); o restante é estático.
+        """
+        theta_rad = jnp.deg2rad(theta_deg)
+        cos_t = jnp.cos(theta_rad)
+        sin_t = jnp.sin(theta_rad)
+        dz_half = 0.5 * L * cos_t
+        r_half = 0.5 * L * sin_t
+
+        # Convenção Fortran (v1.4.1 / PR #21): T abaixo, R acima
+        Tz_arr = positions_z_jnp + dz_half
+        Rz_arr = positions_z_jnp - dz_half
+
+        # Camad arrays via searchsorted tracer-safe (Sprint 12, PR #25)
+        camad_t_arr, camad_r_arr = find_layers_tr_jax_vmap(
+            Tz_arr, Rz_arr, prof_arr_jnp, n
+        )
+
+        # Chama o unified JIT existente
+        return jitted(
+            rho_h,
+            rho_v,
+            positions_z_jnp,
+            freqs_jnp,
+            camad_t_arr,
+            camad_r_arr,
+            dz_half,
+            r_half,
+            theta_rad,
+            h_arr_jnp,
+            prof_arr_jnp,
+            krJ0J1_jnp,
+            wJ0_jnp,
+            wJ1_jnp,
+        )
+
+    # ── Flatten grid (nTR × nAngles) → batch ──────────────────────────────
+    # L_flat[k] = tr_arr[k // nAngles]; theta_flat[k] = dip_arr[k % nAngles]
+    L_flat_np = np.repeat(tr_arr, nAngles).astype(np.float64)
+    theta_flat_np = np.tile(dip_arr, nTR).astype(np.float64)
+    L_flat = jnp.asarray(L_flat_np)
+    theta_flat = jnp.asarray(theta_flat_np)
+
+    # ── vmap sobre batch achatado ─────────────────────────────────────────
+    vmap_fn = jax.vmap(_one_config, in_axes=(0, 0, None, None))
+    H_flat = vmap_fn(L_flat, theta_flat, rho_h_jnp, rho_v_jnp)
+    # H_flat shape: (nTR*nAngles, n_pos, nf, 9)
+
+    # Reshape para (nTR, nAngles, n_pos, nf, 9)
+    H_tensor_jax = H_flat.reshape(nTR, nAngles, n_pos, -1, 9)
+    H_tensor_jax.block_until_ready()
+
+    # ── Metadados z_obs / rho_*_at_obs (NumPy, por ângulo) ────────────────
+    z_obs = np.empty((nAngles, n_pos), dtype=np.float64)
+    rho_h_at_obs = np.empty((nAngles, n_pos), dtype=np.float64)
+    rho_v_at_obs = np.empty((nAngles, n_pos), dtype=np.float64)
+    if n >= 2:
+        prof_mid = np.concatenate([np.array([0.0]), np.cumsum(esp_np)])
+    else:
+        prof_mid = np.array([0.0])
+
+    for i_ang in range(nAngles):
+        # z_mid é o próprio positions_z (ponto médio por convenção)
+        z_obs[i_ang] = positions_z_np
+        for i_pos in range(n_pos):
+            lay = layer_at_depth(n, float(positions_z_np[i_pos]), prof_mid)
+            rho_h_at_obs[i_ang, i_pos] = rho_h_np[lay]
+            rho_v_at_obs[i_ang, i_pos] = rho_v_np[lay]
+
+    return H_tensor_jax, z_obs, rho_h_at_obs, rho_v_at_obs
+
+
 __all__ = [
     "MultiSimulationResultJAX",
     "simulate_multi_jax",
+    # Sprint 12 (PR #25): vmap real multi-TR/multi-ang
+    "_simulate_multi_jax_vmap_real",
 ]
