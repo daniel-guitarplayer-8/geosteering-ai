@@ -796,6 +796,13 @@ F7.10  ✅ — JAX unified JIT (lax.fori_loop): 44 buckets → 1 XLA program    
          + cfg.jax_strategy + 7 testes E2E + paridade 3.5e-14 + docs completos)
 F7.11  ✅ — Multi-TR + multi-ângulo propagando cfg.jax_strategy (part2)     [CONCLUÍDA 2026-04-15 PR #24]
         (vmap REAL sobre iTR/iAng diferido para Sprint 12 — requer find_layers_tr_jax)
+F7.17  ✅ — Sprint 12: find_layers_tr_jax tracer-safe + vmap real           [CONCLUÍDA 2026-04-16 PR #25 v1.6.0]
+        (`_jax/geometry_jax.py` via jnp.searchsorted + `_simulate_multi_jax_vmap_real`
+         opt-in via cfg.jax_vmap_real=True; 21 testes PASS; paridade bit-exata
+         0.000e+00 vs Python loop; bench_sprint12_regression.py scaffold)
+F7.18  🔜 — Flip cfg.jax_strategy default → "unified" + jax_vmap_real True    [PENDENTE v1.6.1 após soak]
+F7.19  🔜 — complex64 mixed precision GPU (VRAM ÷ 2)                         [PENDENTE Sprint 13 v1.7.0]
+F7.20  🔜 — Deprecação path bucketed                                          [PENDENTE v1.7.0+]
 ```
 
 **Fase 1 concluída** ✅ em 2026-04-11: todos os entregáveis de Foundations

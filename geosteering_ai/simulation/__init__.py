@@ -194,5 +194,7 @@ if _HAS_JAX_MULTI:
 #                 + SimulationConfig.jax_strategy flag — opt-in "unified")
 #   1.5.0 → PR #24-part2 (Sprint 10 Phase 2 final: wrappers _hmd/_vmd_native_jax_unified
 #           cabeados em forward_pure; 44→1 XLA em oklahoma_28; paridade 3.5e-14)
+#   1.6.0 → PR #25 (Sprint 12: find_layers_tr_jax tracer-safe + _simulate_multi_jax_vmap_real
+#           opt-in via cfg.jax_vmap_real; 21 testes + matriz regressão)
 #   2.0.0 → Fase 6 concluída (backend dispatch em PipelineConfig)
-__version__ = "1.5.0"  # PR #24-part2: Sprint 10 Phase 2 cabeado end-to-end
+__version__ = "1.6.0"  # PR #25: Sprint 12 — find_layers_tr_jax + vmap real

@@ -29,6 +29,31 @@ Branch de desenvolvimento: `feature/simulator-python`.
 
 ## 1. Estado Atual e Roadmap
 
+### 1.0-0 Sprint 12 (v1.6.0, PR #25) — find_layers_tr_jax + vmap real (2026-04-16)
+
+**Entregas**:
+- `_jax/geometry_jax.py` (novo): `find_layers_tr_jax` + `find_layers_tr_jax_vmap`
+  via `jnp.searchsorted`. Convenção assimétrica paridade Fortran:
+  RX `>=` (`side="right"`) × TX estrito `>` (`side="left"`).
+  Validada em 1876+ pontos com `diff == 0`.
+- `_jax/multi_forward.py::_simulate_multi_jax_vmap_real`: vmap aninhado sobre
+  `(iTR, iAng)` flat via `_get_unified_jit` compartilhado.
+- `SimulationConfig.jax_vmap_real: bool = False` (opt-in, backward-compat total).
+- 21 testes em `tests/test_simulation_jax_sprint12.py` (100% PASS):
+  10 `find_layers_tr_jax` (sweep, boundaries, semi-espaços, vmap, jit, tracer, 4 modelos)
+  + 11 vmap_real (paridade 3 modelos, shape, multi-dip exótico, alta-ρ, multi-freq,
+  vertical well, 1×1×1, oklahoma_28, bucketed+vmap_real).
+- Paridade vmap_real vs Python loop: **0.000e+00** (bit-exato em CPU).
+- `benchmarks/bench_sprint12_regression.py` scaffold CLI
+  `--matrix {short,full,critical}` × CPU/GPU.
+- Docs: `docs/reference/sprint_12_vmap_real.md` completo.
+
+**Pendências pós-v1.6.0**:
+- 🔴 Validação GPU Colab T4 manual: confirmar regressão 600×3 recuperada
+  (≥ 2× speedup em cenários multi-dip)
+- 🟡 Flip `jax_strategy` default → `"unified"` em v1.6.1 (após soak)
+- 🟡 complex64 mixed precision → Sprint 13 (v1.7.0)
+
 ### 1.0 Sprint 10 Phase 2 (v1.5.0, PR #24) — unified JIT cabeado (2026-04-15)
 
 **Meta atingida**: `oklahoma_28` consolidou **44 XLA programs → 1** com paridade 3.5e-14 vs bucketed. Viabiliza meta GPU T4 VRAM ~11 GB → ~250 MB.
@@ -74,9 +99,9 @@ Docs: `docs/reference/sprint_10_phase2_unified_jit.md` + `relatorio_final_sprint
 
 | Campo            | Valor                                                     |
 |:-----------------|:----------------------------------------------------------|
-| **Versão**       | **v1.10.0** (Sprint 10 Phase 2 cabeado end-to-end, PR #24 v1.5.0) |
-| **Branch**       | `feature/pr24-part2-sprint10-phase2-wired`                 |
-| **Base**         | `main` (PR #24 — consolida 44 XLA → 1, v1.5.0 estável)    |
+| **Versão**       | **v1.11.0** (Sprint 12: find_layers_tr_jax + vmap real, PR #25 v1.6.0) |
+| **Branch**       | `feature/pr25-sprint12-vmap-real`                         |
+| **Base**         | `main` (PR #25 — v1.6.0 estável sobre v1.5.0 Sprint 10 Phase 2) |
 | **Autor**        | Daniel Leal                                               |
 | **Framework**    | NumPy 2.x + Numba 0.61+ + JAX 0.4.38+ + empymod 2.6+ (opt-in) |
 | **Precisão**     | `complex128` default + `complex64` via config             |

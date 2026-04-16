@@ -106,6 +106,10 @@ if HAS_JAX:
         clear_unified_jit_cache,
         count_compiled_xla_programs,
     )
+    from geosteering_ai.simulation._jax.geometry_jax import (
+        find_layers_tr_jax,
+        find_layers_tr_jax_vmap,
+    )
     from geosteering_ai.simulation._jax.hankel import (
         integrate_j0,
         integrate_j0_j1,
@@ -134,6 +138,9 @@ if HAS_JAX:
         "native_dipoles_full_jax_unified",
         "count_compiled_xla_programs",
         "clear_unified_jit_cache",
+        # Sprint 12 (PR #25): geometria tracer-safe para vmap real multi-TR/multi-ang
+        "find_layers_tr_jax",
+        "find_layers_tr_jax_vmap",
     ]
 else:
     __all__ = ["HAS_JAX"]
