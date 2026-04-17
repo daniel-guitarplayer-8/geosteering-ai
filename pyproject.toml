@@ -60,6 +60,9 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["geosteering_ai*"]
 
+[tool.setuptools.package-data]
+"geosteering_ai.simulation.filters" = ["*.npz", "*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
