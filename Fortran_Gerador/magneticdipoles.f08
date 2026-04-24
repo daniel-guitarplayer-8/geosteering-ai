@@ -67,27 +67,16 @@ module magneticdipoles
   !             docs/reference/relatorio_fase3_fortran.md
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   type :: thread_workspace
-    ! ── Fase 3 — arrays de transmissão/potencial (npt × n) ──────────────
     complex(dp), allocatable :: Tudw(:,:)   ! (npt, 1:n) — coef. transmissão TE descendente
     complex(dp), allocatable :: Txdw(:,:)   ! (npt, 1:n) — coef. transmissão TM descendente
     complex(dp), allocatable :: Tuup(:,:)   ! (npt, 1:n) — coef. transmissão TE ascendente
     complex(dp), allocatable :: Txup(:,:)   ! (npt, 1:n) — coef. transmissão TM ascendente
     complex(dp), allocatable :: TEdwz(:,:)  ! (npt, 1:n) — potencial VMD TE z descendente
     complex(dp), allocatable :: TEupz(:,:)  ! (npt, 1:n) — potencial VMD TE z ascendente
-    ! ── Fase 3b — fatores de onda de commonfactorsMD (npt) ──────────────
-    ! Antes eram automatic arrays em fieldsinfreqs_cached_ws (~19 KB/thread).
-    ! Para n ≥ 30 camadas e muitos threads, a pressão de stack acumula-se.
-    ! Movidos para heap via workspace para robustez e suporte a n grande.
-    complex(dp), allocatable :: Mxdw(:)    ! (npt) — fator reflexão TM descendente
-    complex(dp), allocatable :: Mxup(:)    ! (npt) — fator reflexão TM ascendente
-    complex(dp), allocatable :: Eudw(:)    ! (npt) — fator reflexão TE descendente
-    complex(dp), allocatable :: Euup(:)    ! (npt) — fator reflexão TE ascendente
-    complex(dp), allocatable :: FEdwz(:)   ! (npt) — fator TE z-potencial descendente (VMD)
-    complex(dp), allocatable :: FEupz(:)   ! (npt) — fator TE z-potencial ascendente (VMD)
   end type thread_workspace
 
 contains
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§��§§§§§§§
+!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 subroutine hmd_TIV_optimized(Tx, Ty, h0, n, camadR, camadT, npt, krJ0J1, wJ0, wJ1, h, prof, zeta, eta, &
                               cx, cy, z, u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, Mxdw, Mxup, Eudw, Euup, &
                               Hx_p, Hy_p, Hz_p, dipolo)
@@ -652,15 +641,9 @@ subroutine hmd_TIV_optimized_ws(ws, Tx, Ty, h0, n, camadR, camadT, npt, krJ0J1, 
   implicit none
   type(thread_workspace), intent(inout) :: ws
   integer,intent(in) :: n, camadT, camadR, npt
-  ! Débito B7 corrigido: contiguous attribute adicionado aos dummy arguments
-  ! que recebem slices de arrays maiores (e.g. krwJ0J1(:,1), u_cache(:,:,i)).
-  ! Em Fortran 2008, contiguous garante que o compilador não gere cópia
-  ! temporária para slices que já são contíguas em memória (column-major).
-  real(dp), intent(in) :: Tx, Ty, h0, h(1:n), prof(0:n)
-  real(dp), intent(in), contiguous :: krJ0J1(:), wJ0(:), wJ1(:)
+  real(dp), intent(in) :: Tx, Ty, h0, h(1:n), prof(0:n), krJ0J1(npt), wJ0(npt), wJ1(npt)
   real(dp), intent(in) :: cx, cy, z, eta(1:n,2)
-  complex(dp), intent(in) :: zeta
-  complex(dp), intent(in), contiguous :: Mxdw(:), Mxup(:), Eudw(:), Euup(:)
+  complex(dp), intent(in) :: zeta, Mxdw(npt), Mxup(npt), Eudw(npt), Euup(npt)
   complex(dp), dimension(npt,1:n), intent(in) :: u, s, uh, sh, RTEdw, RTMdw, RTEup, RTMup
   complex(dp), dimension(1,2), intent(out) :: Hx_p, Hy_p, Hz_p
   character(5), intent(in) :: dipolo
@@ -931,12 +914,8 @@ subroutine vmd_optimized_ws(ws, Tx, Ty, h0, n, camadR, camadT, npt, krJ0J1, wJ0,
   implicit none
   type(thread_workspace), intent(inout) :: ws
   integer, intent(in) :: n, camadT, camadR, npt
-  ! Débito B7 corrigido: contiguous attribute em dummy arguments de slices.
-  real(dp), intent(in) :: Tx, Ty, h0, h(1:n), prof(0:n)
-  real(dp), intent(in), contiguous :: krJ0J1(:), wJ0(:), wJ1(:)
-  real(dp), intent(in) :: cx, cy, z
-  complex(dp), intent(in) :: zeta
-  complex(dp), intent(in), contiguous :: FEdwz(:), FEupz(:)
+  real(dp), intent(in) :: Tx, Ty, h0, h(1:n), prof(0:n), krJ0J1(npt), wJ0(npt), wJ1(npt), cx, cy, z
+  complex(dp), intent(in) :: zeta, FEdwz(npt), FEupz(npt)
   complex(dp), dimension(npt,1:n), intent(in) :: u, uh, AdmInt, RTEdw, RTEup
   complex(dp), intent(out) :: Hx_p, Hy_p, Hz_p
 

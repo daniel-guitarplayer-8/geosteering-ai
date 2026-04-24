@@ -6,8 +6,7 @@
 10.0              !altura do primeiro ponto-médio T-R, acima da primeira interface de camadas
 120.0             !tamanho da janela de investigação
 0.2               !passo entre as medidas
-1                 !número de pares T-R
-1.0               !distância T-R 1
+1.0               !distância T-R do arranjo
 Inv0_15Dip1000_t5              !nome dos arquivos de saída
 15                !número de camadas
 233.99    234.02     !resistividades horizontal e vertical

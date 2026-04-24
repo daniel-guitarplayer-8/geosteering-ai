@@ -454,6 +454,33 @@ class SimulationConfig:
     jax_vmap_real: bool = False
 
     # ─────────────────────────────────────────────────────────────────
+    # SPRINT 12 (PR #25 / v1.6.0) — chunking de posições (E4)
+    # ─────────────────────────────────────────────────────────────────
+    # Diagnóstico de regressão (E2): config 600pos×3f com strategy="unified"
+    # materializa tensores intermediários (600, 3, n, npt) complex128 ≈ 1.6 GB,
+    # saturando a L2 (4 MB) do T4 e causando queda de 5.38× → 1.06× speedup.
+    #
+    # Solução: `jax_position_chunk_size=K` ativa `lax.scan` sobre K posições
+    # por passo dentro do JIT unified, reduzindo a materialização intermediária
+    # de (n_pos, nf, n, npt) para (K, nf, n, npt). Com K=64 e oklahoma_28,
+    # a materialização por passo é ≈172 MB (L2-friendly para nf=1); com nf=3,
+    # mantém ~516 MB por chunk — abaixo do limite de HBM T4 (~16 GB).
+    #
+    # Mecanismo: padding com zeros → `ceil(n_pos/K) * K` posições totais →
+    # reshape (n_chunks, K) → `lax.scan` sobre chunks → slice [:n_pos] no fim.
+    # Padding garante forma fixa → sem recompilação XLA na última iteração.
+    #
+    # Opções de chunk_size (oklahoma_28, T4, nf=3):
+    #   K=None  → monolítico (todo n_pos de uma vez) — padrão atual
+    #   K=64    → 10 chunks de 64 posições — recomendado para 600pos×3f
+    #   K=128   → 5 chunks — se nf=1 e n ≤ 28
+    #   K=32    → mais conservador (T4 com muitas camadas)
+    #
+    # Só tem efeito quando `jax_strategy="unified"`. Para "bucketed", ignorado.
+    # Backward-compat: default None (comportamento monolítico v1.5.0/v1.6.0).
+    jax_position_chunk_size: Optional[int] = None
+
+    # ─────────────────────────────────────────────────────────────────
     # VALIDAÇÃO (errata imutável, inspired by PipelineConfig)
     # ─────────────────────────────────────────────────────────────────
     def __post_init__(self) -> None:
@@ -581,6 +608,18 @@ class SimulationConfig:
             f"num_threads={self.num_threads} inválido. Use -1 para "
             f"auto-detectar (usa todos os cores) ou um inteiro >= 1."
         )
+
+        # Sprint 12 (PR #25 / v1.6.0 E4) — chunking de posições.
+        # None = desabilitado (monolítico). Valores válidos: 1–10000.
+        # Valores pequenos (< 8) têm overhead Python dominante; valores
+        # grandes (> n_pos) equivalem ao monolítico (sem ganho de memória).
+        if self.jax_position_chunk_size is not None:
+            assert 1 <= self.jax_position_chunk_size <= 10_000, (
+                f"jax_position_chunk_size={self.jax_position_chunk_size} fora do "
+                f"range válido [1, 10000]. Use None para desabilitar o chunking "
+                f"(comportamento monolítico padrão). Valores típicos para GPU T4: "
+                f"32 (conservador), 64 (recomendado, oklahoma_28), 128 (nf=1)."
+            )
 
         # ──────────────────────────────────────────────────────────────
         # GRUPO 7 — Exportadores Fortran-compatíveis

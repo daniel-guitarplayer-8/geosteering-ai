@@ -182,6 +182,22 @@ class ForwardPureContext:
     :func:`build_static_context`.
     """
 
+    chunk_size: Optional[int] = None
+    """Sprint 12 (PR #25 / v1.6.0 E4) — tamanho do chunk para lax.scan.
+
+    Quando ``None`` (default), usa o caminho monolítico unified (vmap sobre
+    todas as posições de uma vez). Quando inteiro positivo, usa
+    :func:`_forward_pure_jax_unified_chunked_impl` que divide as posições
+    em blocos de ``chunk_size``, processando via ``jax.lax.scan``.
+
+    - ``None``: monolítico — materializa ``(n_pos, nf, n, npt)`` por inteiro.
+    - ``64`` (recomendado para T4, oklahoma_28, 600pos×3f): 10 passos scan
+      de ``(64, nf, n, npt)`` — reduz materialização de 1.6 GB → ~170 MB/passo.
+    - Só tem efeito quando ``strategy="unified"``. Ignorado em ``"bucketed"``.
+
+    Propagado de :attr:`SimulationConfig.jax_position_chunk_size`.
+    """
+
 
 def build_static_context(
     rho_h: np.ndarray,
@@ -193,6 +209,7 @@ def build_static_context(
     dip_deg: float,
     hankel_filter: str = "werthmuller_201pt",
     strategy: str = "bucketed",
+    chunk_size: Optional[int] = None,
 ) -> ForwardPureContext:
     """Pré-computa arrays estáticos para ``forward_pure_jax``.
 
@@ -211,6 +228,10 @@ def build_static_context(
             ``jax.lax.fori_loop``). Propagado de
             :attr:`SimulationConfig.jax_strategy`. Ver
             :attr:`ForwardPureContext.strategy`.
+        chunk_size: Sprint 12 (E4) — se não ``None``, ativa chunking via
+            ``lax.scan`` no caminho unified. Propagado de
+            :attr:`SimulationConfig.jax_position_chunk_size`. Ignorado
+            quando ``strategy="bucketed"``.
 
     Returns:
         :class:`ForwardPureContext` imutável pronto para consumo por
@@ -303,6 +324,7 @@ def build_static_context(
         camad_t_array=camad_t_array,
         camad_r_array=camad_r_array,
         strategy=strategy,
+        chunk_size=chunk_size,
     )
 
 
@@ -626,11 +648,20 @@ Distinto do :data:`_BUCKET_JIT_CACHE` (chaveado por ``(ct, cr, n, npt)``).
 Sob a estratégia ``"unified"``, 1 modelo geológico → 1 entrada neste cache.
 """
 
+_UNIFIED_CHUNKED_JIT_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
+"""Cache LRU para unified com chunking via lax.scan, chaveado por ``(n, npt, chunk_size)``.
+
+Distinto de :data:`_UNIFIED_JIT_CACHE` (monolítico). Uma entrada por
+``(n, npt, chunk_size)``; o XLA interno compila separadamente por shape de
+entrada ``(padded_size,)`` — shape fixo garante zero recompilações.
+"""
+
 
 def clear_unified_jit_cache() -> int:
-    """Limpa o cache unified. Retorna quantas entradas foram removidas."""
-    n = len(_UNIFIED_JIT_CACHE)
+    """Limpa os caches unified (monolítico + chunked). Retorna total removido."""
+    n = len(_UNIFIED_JIT_CACHE) + len(_UNIFIED_CHUNKED_JIT_CACHE)
     _UNIFIED_JIT_CACHE.clear()
+    _UNIFIED_CHUNKED_JIT_CACHE.clear()
     return n
 
 
@@ -748,14 +779,22 @@ def _forward_pure_jax_unified_impl(
     rho_v: "jax.Array",
     ctx: ForwardPureContext,
 ) -> "jax.Array":
-    """Implementação unified — 1 JIT global, tracer ``camad_t``/``camad_r``.
+    """Implementação unified — despacha para monolítico ou chunked por lax.scan.
 
-    Substitui bucketing por ``vmap`` aninhado; mantém ``(n_pos, nf, 9)``
-    na ordem original de ``positions_z``.
+    Quando ``ctx.chunk_size`` é ``None``, usa o caminho monolítico original
+    (Sprint 10 Phase 2) — vmap sobre todas as posições de uma vez.
+    Quando ``ctx.chunk_size`` é inteiro, usa
+    :func:`_forward_pure_jax_unified_chunked_impl` (Sprint 12 E4) — lax.scan
+    sobre blocos de ``chunk_size`` posições, reduzindo materialização
+    de ``(n_pos, nf, n, npt)`` para ``(chunk_size, nf, n, npt)`` por passo.
 
     Paridade com bucketed: <1e-12 em 7 modelos canônicos (validada em
     `tests/test_simulation_jax_sprint10_wired.py`).
     """
+    # Sprint 12 E4: chunking ativo quando chunk_size está definido.
+    if ctx.chunk_size is not None:
+        return _forward_pure_jax_unified_chunked_impl(rho_h, rho_v, ctx)
+
     jitted = _get_unified_jit(ctx.n, ctx.npt)
     return jitted(
         rho_h,
@@ -773,6 +812,220 @@ def _forward_pure_jax_unified_impl(
         ctx.wJ0,
         ctx.wJ1,
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 12 E4 — unified + lax.scan chunking (PR #25 / v1.6.0)
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# MOTIVAÇÃO
+#   Config produção 600pos × 3f com strategy="unified" materializa tensores
+#   intermediários (600, 3, n=28, npt=201) complex128 ≈ 1.6 GB por forward,
+#   saturando a L2 (4 MB) e HBM do T4. Resultado: speedup cai 5.38× → 1.06×.
+#
+# SOLUÇÃO
+#   Dividir as n_pos posições em blocos de `chunk_size` via lax.scan,
+#   materializando apenas (K, nf, n, npt) por passo. Com K=64 e nf=3:
+#   64 × 3 × 28 × 201 × 16 B ≈ 172 MB — dentro do budget da HBM T4.
+#
+# MECANISMO DE PADDING
+#   n_pos não é necessariamente divisível por chunk_size. Para evitar
+#   recompilação XLA na última iteração (shape menor), padded_size é
+#   ceil(n_pos / K) × K. As K - (n_pos % K) posições extras recebem
+#   valores fictícios (zeros) e são descartadas com H_padded[:n_pos].
+#
+# CACHE
+#   `_UNIFIED_CHUNKED_JIT_CACHE[n, npt, chunk_size]` → função jitada.
+#   Chave tripla porque tamanhos distintos de chunk exigem diferentes
+#   vmaps internos. O XLA compila 1× por (padded_size,) distinto.
+
+
+def _get_unified_jit_chunked(n: int, npt: int, chunk_size: int):
+    """Retorna (e memoriza) função jitada unified com chunking via lax.scan.
+
+    Divide posições em blocos de ``chunk_size`` (com padding para forma fixa),
+    processa cada bloco via ``jax.vmap`` aninhado e acumula via
+    ``jax.lax.scan``. Evita materialização de ``(n_pos, nf, n, npt)`` todo
+    de uma vez.
+
+    Chave do cache: ``(n, npt, chunk_size)`` — distinto de
+    :data:`_UNIFIED_JIT_CACHE` (``(n, npt)``). Uma entrada por tripla;
+    o XLA interno tem compilações distintas por ``(padded_size,)``.
+
+    Args:
+        n: Número de camadas (inteiro estático — fecha na função interna).
+        npt: Número de pontos do filtro Hankel (inteiro estático).
+        chunk_size: Tamanho de cada bloco de posições (estático, > 0).
+
+    Returns:
+        Função jitada com assinatura::
+
+            f(rho_h, rho_v, z_padded, freqs,
+              camad_t_padded, camad_r_padded,
+              dz_half, r_half, dip_rad,
+              h_arr, prof_arr, krJ0J1, wJ0, wJ1)
+              → H_padded  # shape (padded_size, nf, 9)
+    """
+    from geosteering_ai.simulation._jax.kernel import _single_position_jax
+
+    key = (int(n), int(npt), int(chunk_size))
+    if key in _UNIFIED_CHUNKED_JIT_CACHE:
+        _UNIFIED_CHUNKED_JIT_CACHE.move_to_end(key)
+        return _UNIFIED_CHUNKED_JIT_CACHE[key]
+
+    def _forward_unified_chunked(
+        rho_h: "jax.Array",
+        rho_v: "jax.Array",
+        z_positions_padded: "jax.Array",
+        freqs: "jax.Array",
+        camad_t_padded: "jax.Array",
+        camad_r_padded: "jax.Array",
+        dz_half: float,
+        r_half: float,
+        dip_rad: float,
+        h_arr: "jax.Array",
+        prof_arr: "jax.Array",
+        krJ0J1: "jax.Array",
+        wJ0: "jax.Array",
+        wJ1: "jax.Array",
+    ) -> "jax.Array":
+        # Eta traceable diferenciável em rho_h/rho_v.
+        eta = jnp.stack([1.0 / rho_h, 1.0 / rho_v], axis=-1)
+
+        def _one_pos_one_freq(z_mid, camad_t, camad_r, freq):
+            # Convenção Fortran T abaixo / R acima (v1.5.0 PR #21).
+            Tz = z_mid + dz_half
+            cz = z_mid - dz_half
+            return _single_position_jax(
+                r_half,
+                0.0,
+                Tz,
+                -r_half,
+                0.0,
+                cz,
+                dip_rad,
+                n,
+                npt,
+                camad_t,
+                camad_r,
+                rho_h,
+                rho_v,
+                h_arr,
+                prof_arr,
+                eta,
+                freq,
+                krJ0J1,
+                wJ0,
+                wJ1,
+                use_native_dipoles=True,
+                use_unified=True,
+            )
+
+        # vmap interno: sobre frequências → (nf, 9) por posição.
+        vmap_freq = jax.vmap(_one_pos_one_freq, in_axes=(None, None, None, 0))
+        # vmap externo: sobre chunk de posições → (chunk_size, nf, 9).
+        vmap_chunk = jax.vmap(vmap_freq, in_axes=(0, 0, 0, None))
+
+        # Reshape: (padded_size,) → (n_chunks, chunk_size) para scan.
+        padded_size = z_positions_padded.shape[0]
+        n_chunks = padded_size // chunk_size
+        z_chunks = z_positions_padded.reshape(n_chunks, chunk_size)
+        ct_chunks = camad_t_padded.reshape(n_chunks, chunk_size)
+        cr_chunks = camad_r_padded.reshape(n_chunks, chunk_size)
+
+        # lax.scan: acumula (chunk_size, nf, 9) × n_chunks passos.
+        # Carry None (sem estado entre passos); ys = stacked outputs.
+        def scan_body(carry, x):
+            z_c, ct_c, cr_c = x
+            return carry, vmap_chunk(z_c, ct_c, cr_c, freqs)
+
+        _, H_chunks = jax.lax.scan(scan_body, None, (z_chunks, ct_chunks, cr_chunks))
+        # H_chunks: (n_chunks, chunk_size, nf, 9) → (padded_size, nf, 9).
+        return H_chunks.reshape(padded_size, H_chunks.shape[2], 9)
+
+    jitted = jax.jit(_forward_unified_chunked, static_argnames=())
+
+    if len(_UNIFIED_CHUNKED_JIT_CACHE) >= _BUCKET_JIT_CACHE_MAXSIZE:
+        _UNIFIED_CHUNKED_JIT_CACHE.popitem(last=False)
+    _UNIFIED_CHUNKED_JIT_CACHE[key] = jitted
+    return jitted
+
+
+def _forward_pure_jax_unified_chunked_impl(
+    rho_h: "jax.Array",
+    rho_v: "jax.Array",
+    ctx: ForwardPureContext,
+) -> "jax.Array":
+    """Implementação unified com chunking via lax.scan (Sprint 12 E4).
+
+    Divide ``ctx.positions_z_jnp`` em blocos de ``ctx.chunk_size`` posições
+    (com padding para shape fixo), processa via ``jax.lax.scan`` e retorna
+    apenas as ``n_pos`` linhas reais (descartando o padding).
+
+    Paridade bit-exata com :func:`_forward_pure_jax_unified_impl` (monolítico)
+    — ambos chamam o mesmo ``_single_position_jax`` com ``use_unified=True``.
+    O padding zero é computado (vmap não pode mascarar), mas seu resultado é
+    descartado no slice final ``[:n_pos]``.
+
+    Args:
+        rho_h, rho_v: tracers JAX diferenciáveis — shape ``(n,)``.
+        ctx: contexto estático com ``ctx.chunk_size`` inteiro positivo e
+            ``ctx.strategy == "unified"``.
+
+    Returns:
+        Tensor ``(n_pos, nf, 9)`` complex128 idêntico ao caminho monolítico.
+    """
+    chunk_size = ctx.chunk_size
+    n_pos = ctx.positions_z_jnp.shape[0]
+
+    # Padding: garante padded_size divisível por chunk_size → forma fixa XLA.
+    remainder = n_pos % chunk_size
+    pad_size = (chunk_size - remainder) if remainder > 0 else 0
+
+    if pad_size > 0:
+        # Posições fictícias (0.0) e camadas da primeira posição (valores
+        # válidos para evitar NaN/Inf em posições descartadas).
+        ct0 = int(np.asarray(ctx.camad_t_array, dtype=np.int32)[0])
+        cr0 = int(np.asarray(ctx.camad_r_array, dtype=np.int32)[0])
+        z_padded = jnp.concatenate(
+            [ctx.positions_z_jnp, jnp.zeros(pad_size, dtype=jnp.float64)]
+        )
+        ct_padded = jnp.concatenate(
+            [
+                jnp.asarray(ctx.camad_t_array, dtype=jnp.int32),
+                jnp.full(pad_size, ct0, dtype=jnp.int32),
+            ]
+        )
+        cr_padded = jnp.concatenate(
+            [
+                jnp.asarray(ctx.camad_r_array, dtype=jnp.int32),
+                jnp.full(pad_size, cr0, dtype=jnp.int32),
+            ]
+        )
+    else:
+        z_padded = ctx.positions_z_jnp
+        ct_padded = jnp.asarray(ctx.camad_t_array, dtype=jnp.int32)
+        cr_padded = jnp.asarray(ctx.camad_r_array, dtype=jnp.int32)
+
+    jitted = _get_unified_jit_chunked(ctx.n, ctx.npt, chunk_size)
+    H_padded = jitted(
+        rho_h,
+        rho_v,
+        z_padded,
+        ctx.freqs_hz_jnp,
+        ct_padded,
+        cr_padded,
+        ctx.dz_half,
+        ctx.r_half,
+        ctx.dip_rad,
+        ctx.h_arr_jnp,
+        ctx.prof_arr_jnp,
+        ctx.krJ0J1,
+        ctx.wJ0,
+        ctx.wJ1,
+    )
+    # Descarta as pad_size linhas extras — mantém apenas n_pos reais.
+    return H_padded[:n_pos]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -904,15 +1157,41 @@ def forward_pure_jax_chunked(
             return _forward_pure_jax_unified_impl(rho_h, rho_v, ctx)
         return _forward_pure_jax_bucketed_impl(rho_h, rho_v, ctx)
 
-    # Divide posições em chunks e aplica o bucketing em cada — buffer
-    # acumula o resultado final na ordem original.
+    if ctx.strategy == "unified":
+        # Sprint 12 E4: usa lax.scan + padding via _forward_pure_jax_unified_chunked_impl.
+        # Evita o loop Python com sub-contextos de shapes variáveis que
+        # causava recompilação XLA no último chunk (forma (remainder,) ≠ (K,)).
+        chunked_ctx = ForwardPureContext(
+            rho_h_jnp=ctx.rho_h_jnp,
+            rho_v_jnp=ctx.rho_v_jnp,
+            esp_np=ctx.esp_np,
+            positions_z_jnp=ctx.positions_z_jnp,
+            freqs_hz_jnp=ctx.freqs_hz_jnp,
+            dz_half=ctx.dz_half,
+            r_half=ctx.r_half,
+            dip_rad=ctx.dip_rad,
+            n=ctx.n,
+            npt=ctx.npt,
+            krJ0J1=ctx.krJ0J1,
+            wJ0=ctx.wJ0,
+            wJ1=ctx.wJ1,
+            h_arr_jnp=ctx.h_arr_jnp,
+            prof_arr_jnp=ctx.prof_arr_jnp,
+            camad_t_array=ctx.camad_t_array,
+            camad_r_array=ctx.camad_r_array,
+            strategy=ctx.strategy,
+            chunk_size=chunk_size,
+        )
+        return _forward_pure_jax_unified_chunked_impl(rho_h, rho_v, chunked_ctx)
+
+    # Bucketed: Python loop sobre chunks — cada sub-contexto tem tamanho
+    # variável (último pode ser menor). Bucketed é menos sensível a
+    # recompilações pois já itera por (ct, cr) buckets de tamanhos distintos.
     H_out = jnp.zeros((n_pos, nf, 9), dtype=jnp.complex128)
     ct_full = np.asarray(ctx.camad_t_array, dtype=np.int32)
     cr_full = np.asarray(ctx.camad_r_array, dtype=np.int32)
     for start in range(0, n_pos, chunk_size):
         end = min(start + chunk_size, n_pos)
-        # Constrói sub-contexto com fatias dos arrays por-posição (os
-        # arrays estáticos do filtro Hankel são compartilhados).
         sub_ctx = ForwardPureContext(
             rho_h_jnp=ctx.rho_h_jnp,
             rho_v_jnp=ctx.rho_v_jnp,
@@ -932,14 +1211,11 @@ def forward_pure_jax_chunked(
             camad_t_array=ct_full[start:end],
             camad_r_array=cr_full[start:end],
             strategy=ctx.strategy,
+            chunk_size=None,
         )
-        # Dispatcher: respeita a strategy do ctx (herdado) — se "unified",
-        # usa o caminho de 1 JIT global; caso contrário, bucketed.
-        if sub_ctx.strategy == "unified":
-            H_chunk = _forward_pure_jax_unified_impl(rho_h, rho_v, sub_ctx)
-        else:
-            H_chunk = _forward_pure_jax_bucketed_impl(rho_h, rho_v, sub_ctx)
-        H_out = H_out.at[start:end].set(H_chunk)
+        H_out = H_out.at[start:end].set(
+            _forward_pure_jax_bucketed_impl(rho_h, rho_v, sub_ctx)
+        )
     return H_out
 
 
@@ -1003,6 +1279,8 @@ __all__ = [
     "ForwardPureContext",
     "build_static_context",
     "clear_jit_cache",
+    "clear_unified_jit_cache",
+    "count_compiled_xla_programs",
     "forward_pure_jax",
     "forward_pure_jax_chunked",
     "forward_pure_jax_pmap",

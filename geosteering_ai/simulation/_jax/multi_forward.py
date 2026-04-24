@@ -394,6 +394,9 @@ def simulate_multi_jax(
     # port para JAX exigiria `lax.cond` + recomputar camada a cada trace.
     # Ganho adicional de vmap aninhado diferido para Sprint 12 (PINN-on-esp).
     _strategy = getattr(cfg, "jax_strategy", "bucketed")
+    # Sprint 12 E4: chunk_size=None → monolítico (v1.5.0/v1.6.0); inteiro →
+    # lax.scan sobre blocos de posições (fix regressão 600pos×3f).
+    _chunk_size = getattr(cfg, "jax_position_chunk_size", None)
     for hordist_key, group in hordist_groups.items():
         for i_tr, i_ang, L, theta in group:
             # Build static context JAX (inclui camad_t_array, camad_r_array)
@@ -407,6 +410,7 @@ def simulate_multi_jax(
                 dip_deg=theta,
                 hankel_filter=hankel_filter,
                 strategy=_strategy,
+                chunk_size=_chunk_size,
             )
 
             # Forward JAX → (n_pos, nf, 9)

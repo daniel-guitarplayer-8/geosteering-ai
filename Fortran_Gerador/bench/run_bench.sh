@@ -120,7 +120,7 @@ done
 STATS=$(python3 - "$TIMES_FILE" <<'PY'
 import sys, statistics, math
 with open(sys.argv[1]) as f:
-    vals = [float(x) for x in f if x.strip()]
+    vals = [float(x.replace(',', '.')) for x in f if x.strip()]
 n = len(vals)
 mean = statistics.fmean(vals)
 stdev = statistics.stdev(vals) if n > 1 else 0.0

@@ -1,647 +1,283 @@
-# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# buildValidamodels.py — Validação do simulador Fortran via modelos geológicos canônicos de referência
-# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# Simula 6 modelos da literatura (Oklahoma, Devine, Hou et al.) com os parâmetros do simulador EM 1D TIV
-# (PerfilaAnisoOmp.f08) e gera figuras comparativas do tensor H completo + perfis de resistividade.
-#
-# Modelos de referência:
-#   1. Oklahoma 3 camadas        — TIV simples (ρ_h ≠ ρ_v em camada central)
-#   2. Oklahoma 5 camadas        — TIV gradual com 5 contrastes
-#   3. Devine 8 camadas          — Isotrópico (ρ_h = ρ_v), complexidade geológica real
-#   4. Oklahoma 15 camadas       — Isotrópico, alta estratificação
-#   5. Oklahoma 28 camadas       — TIV forte (ρ_v = 2×ρ_h), Tech. Report 32_2011 p.58
-#   6. Hou, Mallan & Verdin 2006 — 7 camadas, modelo de referência para validação 3D→1D
-#
-# Formato de saída binário (22-col):
-#   col0  = med (int32)   — índice da medida
-#   col1  = z_obs         — profundidade do ponto médio T-R (m)
-#   col2  = ρ_h           — resistividade horizontal verdadeira (Ω·m)
-#   col3  = ρ_v           — resistividade vertical verdadeira (Ω·m)
-#   col4  = Re(Hxx)  col5  = Im(Hxx)   ...   col20 = Re(Hzz)  col21 = Im(Hzz)
-#
-# Dependências:
-#   - numpy, matplotlib, subprocess, shutil
-#   - Executável Fortran compilado: tatu.x (gerado por 'make' no Makefile do Fortran_Gerador)
-#
-# Uso:
-#   python buildValidamodels.py                       # modo padrão: simula todos os 6 modelos
-#   python buildValidamodels.py --models 0,2,4        # simula e plota apenas modelos 0, 2, 4
-#   python buildValidamodels.py --dat file.dat --out file.out              # plota .dat externo
-#   python buildValidamodels.py --dat file.dat --out file.out --models 1,3 # plota modelos 1 e 3 do .dat
-#
-# Autor: Daniel Leal
-# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 import numpy as np
-import subprocess as sub
-import time
+import pandas as pd         #usado apenas para teste de uso
+import subprocess as sub    #permite executar o programa fortran, criar e acessar arquivos sobre o código de lá
+import time                 #usado para apresentar o tempo de processamento
 import os
-import math
-import shutil
-import argparse
 import sys
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 
 #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-# ── ARGUMENTOS DE LINHA DE COMANDO ─────────────────────────────────────────────────────────────────────────
-# --dat FILE   : caminho para arquivo .dat externo (pula simulação Fortran)
-# --out FILE   : caminho para arquivo .out externo (obrigatório com --dat)
-# --models IDX : índices dos modelos a plotar (ex: "0,2,4" ou "0-5"). Default: todos (0..5)
-#
-# Modos de operação:
-#   1. Sem argumentos:      simula todos os 6 modelos e plota todos
-#   2. --models 0,2:        simula apenas modelos 0 e 2, plota ambos
-#   3. --dat X --out Y:     pula simulação, plota todos os modelos do .dat externo
-#   4. --dat X --out Y --models 1,3: pula simulação, plota modelos 1 e 3 do .dat
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-def _parse_models_arg(models_str, nmax):
-    """Converte string de índices para lista de inteiros.
-
-    Formatos aceitos:
-      "0,2,4"  → [0, 2, 4]
-      "0-5"    → [0, 1, 2, 3, 4, 5]
-      "3"      → [3]
-      "1,3-5"  → [1, 3, 4, 5]
-
-    Args:
-        models_str: String com índices separados por vírgula e/ou ranges.
-        nmax: Valor máximo permitido (exclusive).
-
-    Returns:
-        Lista ordenada de índices válidos (0-based).
-    """
-    indices = set()
-    for part in models_str.split(','):
-        part = part.strip()
-        if '-' in part:
-            lo, hi = part.split('-', 1)
-            lo, hi = int(lo.strip()), int(hi.strip())
-            indices.update(range(lo, hi + 1))
-        else:
-            indices.add(int(part))
-    # Validar range
-    result = sorted(i for i in indices if 0 <= i < nmax)
-    invalidos = sorted(i for i in indices if i < 0 or i >= nmax)
-    if invalidos:
-        print(f'  [AVISO] Índices ignorados (fora de [0, {nmax-1}]): {invalidos}')
-    return result
-
-parser = argparse.ArgumentParser(
-    description='Validação do simulador Fortran via modelos geológicos canônicos de referência.',
-    epilog='Exemplos:\n'
-           '  python buildValidamodels.py                           # simula e plota todos\n'
-           '  python buildValidamodels.py --models 0,2,4            # simula/plota apenas 0,2,4\n'
-           '  python buildValidamodels.py --dat X.dat --out X.out   # plota .dat externo\n',
-    formatter_class=argparse.RawDescriptionHelpFormatter
-)
-parser.add_argument('--dat', type=str, default=None, metavar='FILE',
-                    help='Caminho para arquivo .dat externo (pula simulação Fortran)')
-parser.add_argument('--out', type=str, default=None, metavar='FILE',
-                    help='Caminho para arquivo .out externo (obrigatório com --dat)')
-parser.add_argument('--models', type=str, default=None, metavar='IDX',
-                    help='Índices dos modelos a plotar (ex: "0,2,4" ou "0-5"). Default: todos')
-args = parser.parse_args()
-
-# Validação: --dat requer --out
-if args.dat and not args.out:
-    parser.error('--out é obrigatório quando --dat é fornecido')
-if args.out and not args.dat:
-    parser.error('--dat é obrigatório quando --out é fornecido')
-
-# Modo de operação: externo (--dat) ou simulação (padrão)
-MODO_EXTERNO = args.dat is not None
-
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-# ── CONFIGURAÇÃO DE SIMULAÇÃO ──────────────────────────────────────────────────────────────────────────────
-# Parâmetros compartilhados com fifthBuildTIVModels.py.
-# Para manter consistência entre treinamento e validação, estes valores DEVEM coincidir
-# com os definidos no script de geração de modelos TIV.
-#
-# IMPORTANTE: Ao alterar freqs, angulos ou dTR aqui, altere também em fifthBuildTIVModels.py.
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-freqs   = [20000.]          #[2000., 6000.]   # frequências (Hz) — ex: 2k=δ≈11m, 6k=δ≈6.5m (ρ=10Ω·m)
-angulos = [0.]              #[0., 30.]        # ângulos de inclinação (°) — 0°=vertical, 30°=off-diagonal≠0
-nf      = len(freqs)        # número de frequências
-na      = len(angulos)      # número de ângulos
-pmed    = 0.2               # passo entre medidas (m) — resolução vertical do perfil
-dTR     = [1.0]             #[8.19, 20.43]    # espaçamentos T-R (m) — investigação profunda (ARC/Periscope)
-_nTR    = len(dTR)           # número de pares T-R
-
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-# ── CAMINHOS ───────────────────────────────────────────────────────────────────────────────────────────────
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-mypath       = os.path.dirname(os.path.realpath(__file__)) + '/'
-mymodel      = mypath + 'model.in'
-fortran_exec = mypath + 'tatu.x'
-
-# Verifica se o executável Fortran existe (só necessário no modo simulação)
-if not MODO_EXTERNO and not os.path.isfile(fortran_exec):
-    raise FileNotFoundError(
-        f'Executável Fortran não encontrado: {fortran_exec}\n'
-        f'Execute "make" no diretório {mypath} para compilar tatu.x.'
-    )
-
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-# ── MODELOS CANÔNICOS DE VALIDAÇÃO ─────────────────────────────────────────────────────────────────────────
-# Cada modelo retorna (ncam, esp, resh, resv):
-#   ncam  — número de camadas (incluindo semi-infinitas superior e inferior)
-#   esp   — lista de espessuras das ncam-2 camadas internas (m)
-#   resh  — lista de resistividades horizontais por camada (Ω·m)
-#   resv  — lista de resistividades verticais por camada (Ω·m)
-#
-# Para modelos isotrópicos: resv = resh (λ = ρ_v/ρ_h = 1)
-# Para modelos anisotrópicos: resv ≠ resh (λ > 1 típico em folhelhos)
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-def modelo_valida(imod):
-    """Retorna (ncam, esp, resh, resv) para os 6 modelos canônicos de validação.
-
-    Args:
-        imod: Índice do modelo (0-based). Valores válidos: 0..5.
-
-    Returns:
-        Tupla (ncam, esp, resh, resv) onde:
-        - ncam (int): número total de camadas
-        - esp (list[float]): espessuras das ncam-2 camadas internas (m)
-        - resh (list[float]): resistividades horizontais por camada (Ω·m)
-        - resv (list[float]): resistividades verticais por camada (Ω·m)
-
-    Raises:
-        ValueError: Se imod não está no intervalo [0, 5].
-
-    Note:
-        Ref (modelos 1-5): Tech. Report 32_2011 — Oklahoma/Devine geological models.
-        Ref (modelo 6): Hou, Mallan & Verdin (2006), "Finite-Difference simulation
-        of borehole EM measurements in 3D anisotropic media using coupled
-        scalar-vector potentials", Geophysics 71(5), F101-F114.
-    """
-    pe = 0.3048  # conversão pé → metro (1 ft = 0.3048 m)
-    if (imod + 1) == 1:      # Oklahoma 3 camadas — TIV simples
-        ncam = 3;  esp = [8*pe]
-        resh = [1., 20., 1.];  resv = [1., 40., 1.]
-    elif (imod + 1) == 2:    # Oklahoma 5 camadas — TIV gradual
-        ncam = 5;  esp = [17.*pe, 8.*pe, 4.*pe]
-        resh = [5., 50., 2., 15., 4.5];  resv = [10., 100., 4., 30., 9.]
-    elif (imod + 1) == 3:    # Devine 8 camadas — isotrópico
-        ncam = 8;  esp = [20*pe, 15*pe, 19*pe, 16*pe, 15*pe, 45*pe]
-        resh = [2., 3., 1.8, 4.71, 8.89, 5., 3.2, 8.];  resv = list(resh)
-    elif (imod + 1) == 4:    # Oklahoma 15 camadas — isotrópico
+#-------------------------------------------------------------------------------------------------------------
+# Function que cria modelo de entrada para o código fortran da perfilagem.
+def modelo(imod):
+# Function que cria modelo de entrada para o código fortran da perfilagem.
+    pe = 0.3048
+    if (imod + 1) == 1: #modelo de Oklahoma de 3 camadas
+        ncam = 3
+        esp = [8 * pe]
+        resh = np.ones(ncam)
+        resv = np.ones(ncam)
+        resh[1] = 20.
+        resv[1] = 40.
+    if (imod + 1) == 2:   #modelo de Oklahoma de 5 camadas
+        ncam = 5
+        esp = [17. * pe, 8. * pe, 4. * pe]
+        resh = [5.,  50.,  2., 15., 4.5]
+        resv = [10., 100., 4., 30., 9.]
+    elif (imod + 1) == 3:   #modelo isotrópico Devine de 8 camadas
+        ncam = 8
+        esp = [20 * pe, 15 * pe, 19 * pe, 16 * pe, 15 * pe, 45 * pe]
+        resh = [2., 3., 1.8, 4.71, 8.89, 5., 3.2, 8.]
+        resv = [2., 3., 1.8, 4.71, 8.89, 5., 3.2, 8.]
+    elif (imod + 1) == 4:   #modelo isotrópico Oklahoma de 15 camadas
         ncam = 15
-        esp  = [17*pe, 8*pe, 4*pe, 3*pe, 7*pe, 4*pe, 6*pe, 3*pe, 5*pe, 7*pe, 18*pe, 8*pe, 7*pe]
+        esp = [17 * pe, 8 * pe, 4 * pe, 3 * pe, 7 * pe, 4 * pe, 6 * pe, 3 * pe, 5 * pe, 7 * pe, 18 * pe, 8 * pe, 7 * pe]
         resh = [5., 50., 2., 15., 4.5, 100., 3.5, 450., 30.12, 602.41, 20., 746.27, 200., 7.5, 500.]
-        resv = list(resh)
-    elif (imod + 1) == 5:    # Oklahoma 28 camadas — anisotrópico forte (ρ_v = 2×ρ_h)
-        ncam = 28
-        z    = [46,63,71,75,78,85,89,95,98,103,110,128,136,143,153,157,162,165,169,
-                173,177,182,185,187,189,191,203]
-        esp  = list(np.diff(z) * pe)
-        resh = [10.,100.,4.,30.,9.,200.,7.,909.,60.,1250.,40.,1416.,400.,15.,1000.,
-                179.,1000.,15.,75.,9.,20.,100.,18.,200.,75.,149.,7.,11.]
-        resv = [2*r for r in resh]
-    elif (imod + 1) == 6:    # Hou, Mallan & Verdin (2006) — 7 camadas
-        ncam = 7;  esp = [1.52, 2.35, 2.1, 1.88, 0.92]
-        resh = [1., 80., 1., 10., 1., 0.3, 1.];  resv = [10., 80., 10., 10., 10., 0.3, 10.]
-    else:
-        raise ValueError(f'modelo_valida: imod={imod} fora do intervalo [0, 5]')
-    return ncam, list(esp), list(resh), list(resv)
-
-
-# Nomes legíveis dos modelos (usados em prints e títulos das figuras)
-NOMES_MODELOS = [
-    'Oklahoma 3 cam.', 'Oklahoma 5 cam.', 'Devine 8 cam. (isotrópico)',
-    'Oklahoma 15 cam.', 'Oklahoma 28 cam. (anisotrópico)', 'Hou et al. 7 cam.'
-]
-NMODELS_VALIDA = 6
-
+        resv = [5., 50., 2., 15., 4.5, 100., 3.5, 450., 30.12, 602.41, 20., 746.27, 200., 7.5, 500.]
+    elif (imod + 1) == 5: #modelo de Oklahoma de 28 camadas anisotrópicas (informado em Techical Report 32_2011, pagina 58)
+        ncam = 28       #número de camadas
+        pe = 0.3048     #pé em metros
+        z = [46, 63, 71, 75, 78, 85, 89, 95, 98, 103, 110, 128, 136, 143, 153, 157, 162, 165, 169,
+             173, 177, 182, 185, 187, 189, 191, 203] #profundidades das interfaces das camadas
+        esp = np.diff(z) * pe   #espessuras das camadas internas
+        resh = np.array([10., 100., 4., 30., 9., 200., 7., 909., 60., 1250., 40., 1416., 400., 15., 1000., 179., 1000., 15., 
+                75., 9., 20., 100., 18., 200., 75., 149., 7., 11.])    #resistividades horizontais
+        resv = 2 * resh                                    #resistividades verticais
+    elif (imod + 1) == 6: #modelo de Hou, Mallan & Verdin (2006) "Finite-Difference simulation of borehole EM measurements in 3D anistropic media"
+                          #"using coupled scalar-vector potentials"
+        ncam = 7          #número de camadas
+        esp = [1.52, 2.35, 2.1, 1.88, 0.92]       #espessuras das camadas internas
+        resh = [1., 80., 1., 10., 1., 0.3, 1.]    #resistividades horizontais
+        resv = [10., 80., 10., 10., 10., 0.3, 10.]  #resistividades verticais
+    return ncam, esp, resh, resv
 #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-# ── UTILITÁRIOS ────────────────────────────────────────────────────────────────────────────────────────────
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+#-------------------------------------------------------------------------------------------------------------
+# Function que faz a leitura do arquivo que contém as informações de nº de thetas, nº de frequências e nº de medidas
+# gerado pelo código fortran, e que facilita então o endereçamento das saídas do arquivo binário gerado por lá.
 def ler_arquivo_com_int_float(arquivo):
-    """Lê arquivo texto com colunas mistas (int/float/string) e converte automaticamente.
-
-    Usado para ler o arquivo info*.out gerado pelo Fortran, que contém:
-      Linha 1: nt  nf  nmaxmodel  (inteiros)
-      Linha 2: theta(1..nt)       (floats — ângulos em graus)
-      Linha 3: freq(1..nf)        (floats — frequências em Hz)
-      Linha 4: nmeds(1..nt)       (inteiros — nº de medidas por ângulo)
-
-    Args:
-        arquivo: Caminho do arquivo a ser lido.
-
-    Returns:
-        Lista de listas, cada sublista representando uma linha com valores convertidos.
-    """
     dados = []
-    with open(arquivo, "r") as informa:
+    with open(arquivo,"r") as informa:
         for lin in informa:
+            # Remove espaços em branco no início e no final da linha
             linha = lin.strip()
-            if not linha:
-                continue
+            # Divide a linha em colunas
             colunas = linha.split()
+            # Converte cada coluna para int ou float, conforme possível
             linha_convertida = []
             for coluna in colunas:
                 try:
+                    # Tenta converter para int
                     valor = int(coluna)
                 except ValueError:
                     try:
+                        # Se não for int, tenta converter para float
                         valor = float(coluna)
                     except ValueError:
+                        # Se não for possível converter, mantém como string
                         valor = coluna
                 linha_convertida.append(valor)
             dados.append(linha_convertida)
     return dados
-
-
-# Tipo binário 22-col (formato de saída do PerfilaAnisoOmp.f08):
-#   col0 = med (int32), col1..col21 = z_obs, ρ_h, ρ_v, Re/Im dos 9 componentes tensor H (float64)
-dtyp = np.dtype([('col0', np.int32)] + [('col{}'.format(i), np.float64) for i in range(1, 22)])
-
-
 #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-# ── Parse de --models (precisa de NMODELS_VALIDA já definido) ──────────────────
-selected_models = None  # None = todos
-if args.models is not None:
-    selected_models = _parse_models_arg(args.models, NMODELS_VALIDA)
-    if not selected_models:
-        print('[ERRO] Nenhum modelo válido selecionado. Use índices de 0 a 5.')
-        sys.exit(1)
-
-# ══════════════════════════════════════════════════════════════════════════════════════════════════════════
-# EXECUÇÃO PRINCIPAL
-# ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+#-------------------------------------------------------------------------------------------------------------
+start_time = time.perf_counter()
+mypath = os.path.dirname(os.path.realpath(__file__)) + '/'
+model = 'model.in'
+mymodel = mypath + model
+#-------------------------------------------------------------------------------------------------------------
+somas_esp = []
+nmodels = 6     #Número de modelos que serão criados, e gerarão saídas através do código fortran
+for m in range(nmodels):
+    _, esp_temp, _, _ = modelo(m)
+    somas_esp.append(np.sum(esp_temp))
+maior_espessura = max(somas_esp)
+tj = maior_espessura + 10 #20
 #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-print('═'*89)
-if MODO_EXTERNO:
-    print('VALIDAÇÃO — Modo externo (.dat/.out fornecidos pelo usuário)')
-else:
-    print('VALIDAÇÃO — Modelos geológicos de referência (buildValidamodels.py)')
-print('═'*89)
-if selected_models is not None:
-    print(f'  Modelos selecionados: {selected_models} ({[NOMES_MODELOS[i] for i in selected_models]})')
-else:
-    print(f'  Modelos: todos (0..{NMODELS_VALIDA-1})')
-print(f'  Parâmetros: nf={nf}, freq={freqs} Hz | na={na}, ang={angulos}° | nTR={_nTR}, dTR={dTR} m')
-
-if MODO_EXTERNO:
-    # ── Modo externo: ler .dat e .out fornecidos pelo usuário ─────────────────
-    print(f'  .dat externo: {args.dat}')
-    print(f'  .out externo: {args.out}')
-    if not os.path.isfile(args.dat):
-        print(f'[ERRO] Arquivo .dat não encontrado: {args.dat}')
-        sys.exit(1)
-    if not os.path.isfile(args.out):
-        print(f'[ERRO] Arquivo .out não encontrado: {args.out}')
-        sys.exit(1)
-    # Ler metadados do .out
-    _ext_info = ler_arquivo_com_int_float(args.out)
-    na_ext, nf_ext, nmodels_ext = int(_ext_info[0][0]), int(_ext_info[0][1]), int(_ext_info[0][2])
-    angulos_ext = [float(x) for x in _ext_info[1]]
-    freqs_ext   = [float(x) for x in _ext_info[2]]
-    nmeds_ext   = [int(x) for x in _ext_info[3]]
-    records_per_model_ext = sum(nmeds_ext) * nf_ext
-    # Sobrescrever variáveis locais para plotagem
-    nf, na = nf_ext, na_ext
-    freqs, angulos = freqs_ext, angulos_ext
-    nmeds_v = nmeds_ext
-    NMODELS_VALIDA_EFF = nmodels_ext
-    records_per_model_v = records_per_model_ext
-    # Construir valida_dat_files com o arquivo externo (1 entry)
-    valida_dat_files = [(args.dat, 'Externo', args.out)]
-    # Ajustar selected_models se necessário
-    if selected_models is not None:
-        selected_models = _parse_models_arg(args.models, NMODELS_VALIDA_EFF)
-    else:
-        selected_models = list(range(NMODELS_VALIDA_EFF))
-    print(f'  .out: nt={na}, nf={nf}, nmodels={nmodels_ext}, nmeds={nmeds_v}')
-    print(f'  Registros/modelo: {records_per_model_v} | Total: {nmodels_ext * records_per_model_v}')
-    print('─'*89)
-
-
-if not MODO_EXTERNO:
-    # ── Janela de investigação ──────────────────────────────────────────────────────────────────────────────
-    # tj_v é determinada pelo modelo com a maior espessura total, acrescida de 20 m de margem
-    # para garantir que as camadas semi-infinitas (superior e inferior) sejam bem amostradas.
-    somas_esp_v = [np.sum(modelo_valida(mv)[1]) for mv in range(NMODELS_VALIDA)]
-    tj_v = max(somas_esp_v) + 20.0
-    print(f'  tj_v={tj_v:.2f} m (maior espessura={max(somas_esp_v):.2f} m + 20 m margem), pmed={pmed} m')
-    print('─'*89)
-
-    # ── Display de parâmetros (skin depth e DOI) ────────────────────────────────────────────────────────────
-    print(f'  nf={nf}  Frequências (Hz) : {freqs}')
-    for fi in freqs:
-        delta_10 = 503 * math.sqrt(10 / fi)
-        print(f'    f={int(fi):>6} Hz — skin depth (ρ=10Ω·m): δ≈{delta_10:.1f} m')
-    print(f'  na={na}  Ângulos (°)      : {angulos}')
-    for ai in angulos:
-        if ai == 0.:
-            print(f'    θ=0°  → poço vertical, off-diagonal = 0')
+exec = 'tatu.x' #Gera o executável do fortran. Com o comando make apenas ele é gerado. Com make all, gera ele e roda este script também
+fortran_exec = mypath + exec
+filename = 'validacao'
+for m in range(nmodels):
+    #-------------------------------------------------------------------------------------------------------------
+    ncam, esp, resh, resv = modelo(m)
+    soma_esp_modelo = np.sum(esp)
+    espaco_restante = tj - soma_esp_modelo
+    h1 = espaco_restante / 2.0
+    hn = espaco_restante / 2.0
+    tji = tj - (h1 + hn)      #h1 m serão para acima da 1ª, e outros hn m para abaixo da última.
+    nf = 1                   #número de frequências de investigação
+    freq = np.array([2.e4])
+    na = 1                   #número de ângulos de inclinação
+    ang = np.array([0])
+    pmed = 0.2               #passo entre medidas
+    nAr = 1                  #quantidade de arranjos TR
+    dTRs = np.array([1.,2.,3.], dtype = float)
+    print('Modelo {}'.format(m+1))
+    #-------------------------------------------------------------------------------------------------------------
+    f = open(mymodel,"w")
+    f.write(str(nf) + '                 ' + '!número de frequências' + '\n')
+    for j in range(nf):
+        f.write(str(round(freq[j],4)) + '\n')
+    f.write(str(na) + '                 ' + '!número de ângulos de inclinação' + '\n')
+    for j in range(na):
+        f.write(str(round(ang[j],2)) + '\n')
+    f.write(str(h1) + '              ' + '!altura do primeiro ponto-médio T-R, acima da primeira interface de camadas' + '\n')
+    f.write(str(tj) + '             ' + '!tamanho da janela de investigação' + '\n')
+    f.write(str(pmed) + '               ' + '!passo entre as medidas' + '\n')
+    f.write(str(nAr)+ '              ' + '!número de arranjos T-R, com um T' + '\n')
+    for j in range(nAr):
+        f.write(str(round(dTRs[j],2)) + '\n')
+    f.write(filename + '              ' + '!nome dos arquivos de saída' + '\n')
+    f.write(str(ncam) + '                ' + '!número de camadas' + '\n')
+    for j in range(ncam):
+        myrhoh = np.array(resh)[j]
+        myrhov = np.array(resv)[j]
+        if myrhov < myrhoh: myrhov = myrhoh
+        if j == 0:
+            f.write(str(round(myrhoh,2)) + '    ' + str(round(myrhov,2)) + '     ' + '!resistividades horizontal e vertical' + '\n')
         else:
-            print(f'    θ={int(ai)}°  → poço desviado, off-diagonal ≠ 0, DOI radial = dTR×|sin({int(ai)}°)|')
-    print(f'  nTR={_nTR}  Espaçamentos T-R (m): {dTR}')
-    _ang_max = max(angulos)
-    for dtr_i in dTR:
-        for fi in freqs:
-            delta_i = 503 * math.sqrt(10 / fi)
-            doi_est = dtr_i * abs(math.sin(math.radians(_ang_max))) if _ang_max > 0 else 0.0
-            print(f'    dTR={dtr_i}m, f={int(fi/1000)}kHz → r_k(θ={int(_ang_max)}°)={doi_est:.2f}m, δ≈{delta_i:.1f}m')
-    print('─'*89)
-
-    # ── Configuração OpenMP ─────────────────────────────────────────────────────────────────────────────────
-    _omp_threads = os.environ.get('OMP_NUM_THREADS', None)
-    if _omp_threads:
-        print(f'[OpenMP] OMP_NUM_THREADS = {_omp_threads} thread(s)  (definido pelo usuário)')
-    else:
-        import multiprocessing as _mp
-        print(f'[OpenMP] OMP_NUM_THREADS não definido — OpenMP usará o padrão do sistema '
-              f'({_mp.cpu_count()} núcleos lógicos detectados)')
-    print('─'*89)
-
-    # ── Loop de simulação Fortran ───────────────────────────────────────────────────────────────────────────
-    filename_valida_base = 'validacao'
-    start_time_v = time.perf_counter()
-
-    for mv in range(NMODELS_VALIDA):
-        ncam_v, esp_v, resh_v, resv_v = modelo_valida(mv)
-        soma_esp_v = np.sum(esp_v)
-        h1_v = (tj_v - soma_esp_v) / 2.0
-        print(f'  [{mv+1}/{NMODELS_VALIDA}] {NOMES_MODELOS[mv]} '
-              f'— {ncam_v} cam., soma_esp={soma_esp_v:.2f}m, h1={h1_v:.2f}m')
-
-        # ── Escrita do model.in para este modelo de validação ─────────────────────────────────────────────
-        with open(mymodel, 'w') as f_mod:
-            f_mod.write(str(nf) + '                 !número de frequências\n')
-            for _idx, _fi in enumerate(freqs, 1):
-                f_mod.write(str(_fi) + '           ' + f'!frequência {_idx}\n')
-            f_mod.write(str(na) + '                 !número de ângulos de inclinação\n')
-            for _idx, _ai in enumerate(angulos, 1):
-                f_mod.write(str(_ai) + '               ' + f'!ângulo {_idx}\n')
-            f_mod.write(str(h1_v) + '              !altura do primeiro ponto-médio T-R\n')
-            f_mod.write(str(tj_v) + '             !tamanho da janela de investigação\n')
-            f_mod.write(str(pmed)  + '               !passo entre as medidas\n')
-            f_mod.write(str(_nTR) + '                 !número de pares T-R\n')
-            for dtr_v in dTR:
-                f_mod.write(str(dtr_v) + '               !distância T-R\n')
-            f_mod.write(filename_valida_base + '              !nome dos arquivos de saída\n')
-            f_mod.write(str(ncam_v) + '                !número de camadas\n')
-            for jc in range(ncam_v):
-                myrhoh = float(resh_v[jc]);  myrhov = float(resv_v[jc])
-                if myrhov < myrhoh: myrhov = myrhoh
-                suffix = '     !resistividades horizontal e vertical' if jc == 0 else ''
-                f_mod.write(f'{round(myrhoh, 4)}    {round(myrhov, 4)}{suffix}\n')
-            for jc in range(ncam_v - 3):
-                suffix = '              !espessuras das n-2 camadas' if jc == 0 else ''
-                f_mod.write(f'{round(esp_v[jc], 4)}{suffix}\n')
-            f_mod.write(f'{round(esp_v[-1], 4)}\n')
-            f_mod.write(f'{mv+1} {NMODELS_VALIDA}         !modelo atual e o número máximo de modelos\n')
-            # ── F5/F7/F6/Filtro — Defaults desabilitados (v9.0 backward compatible) ──
-            f_mod.write('0                 !F5: use_arbitrary_freq (0=desabilitado)\n')
-            f_mod.write('0                 !F7: use_tilted_antennas (0=desabilitado)\n')
-            f_mod.write('0                 !F6: use_compensation (0=desabilitado)\n')
-            f_mod.write('0                 !Filtro: 0=Werthmuller (default)')
-
-        # ── Execução do simulador Fortran ─────────────────────────────────────────────────────────────────
-        try:
-            sub.run([fortran_exec], check=True, text=True, capture_output=True)
-        except sub.CalledProcessError as e:
-            print(f'    [ERRO Fortran]: {e.stderr[:300]}')
-
-    end_time_v = time.perf_counter()
-    print('─'*89)
-    print(f'  Tempo de simulação Fortran (validação): {(end_time_v - start_time_v):.2f} s')
-
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    # ── Geração do .out pelo Python (garantia total, independente do Fortran) ──────────────────────────────
-    # O Fortran só grava o .out quando modelm == nmaxmodel. O Python gera sempre,
-    # evitando o bug de int() truncation que impedia a geração para ntmodels não múltiplo de 40.
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    out_src_v = mypath + 'info' + filename_valida_base + '.out'
-    _nmeds_v  = [math.ceil(tj_v / (pmed * math.cos(math.radians(a)))) for a in angulos]
-    with open(out_src_v, 'w') as _f_out_v:
-        _f_out_v.write(f' {na} {nf} {NMODELS_VALIDA}\n')
-        _f_out_v.write(' ' + ' '.join(f'{float(a):.1f}' for a in angulos) + '\n')
-        _f_out_v.write(' ' + ' '.join(f'{float(f):.1f}' for f in freqs) + '\n')
-        _f_out_v.write(' ' + ' '.join(str(n) for n in _nmeds_v) + '\n')
-    print(f'  [.out validação gerado pelo Python] {out_src_v}')
-    print(f'  nt={na}  nf={nf}  nmaxmodel={NMODELS_VALIDA}  nmeds_v={_nmeds_v}')
-
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    # ── Renomeação de arquivos de saída (dTR no nome + .out idêntico ao .dat) ──────────────────────────────
-    # Formato do Fortran:
-    #   nTR=1: {filename}.dat         (sem sufixo _TR)
-    #   nTR>1: {filename}_TR{k}.dat   (com sufixo _TR por par T-R)
-    # Após renomeação: {filename}_TR{k}_d{dTR}m.dat + .out idêntico
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    valida_dat_files = []
-    print('  Renomeação de arquivos de validação:')
-    for itr, dtr in enumerate(dTR):
-        dtr_tag    = str(dtr).replace('.', 'p')
-        _tr_suf_v  = f'_TR{itr+1}' if _nTR > 1 else ''             # nTR=1: Fortran não adiciona sufixo _TR
-        old_dat_v  = mypath + filename_valida_base + f'{_tr_suf_v}.dat'
-        new_name_v = filename_valida_base + f'_TR{itr+1}_d{dtr_tag}m'
-        new_dat_v  = mypath + new_name_v + '.dat'
-        new_out_v  = mypath + new_name_v + '.out'
-        if os.path.exists(old_dat_v):
-            os.rename(old_dat_v, new_dat_v)
-            print(f'    .dat: {os.path.basename(old_dat_v)} → {os.path.basename(new_dat_v)}')
+            f.write(str(round(myrhoh,2)) + '    ' + str(round(myrhov,2)) + '\n')
+    for j in range(ncam-3):
+        if j == 0:
+            f.write(str(round(esp[j],2)) + '              ' + '!espessuras das n-2 camadas' + '\n')
         else:
-            print(f'    [AVISO] .dat não encontrado: {os.path.basename(old_dat_v)}')
-        if os.path.exists(out_src_v):
-            shutil.copy(out_src_v, new_out_v)
-            print(f'    .out: info{filename_valida_base}.out → {os.path.basename(new_out_v)}')
-        valida_dat_files.append((new_dat_v, f'TR{itr+1} (dTR={dtr} m) — Validação', new_out_v))
-
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    # ── Leitura e validação numérica ───────────────────────────────────────────────────────────────────────────
-    # Verifica integridade dos arquivos .dat gerados: contagem de registros, NaN e Inf.
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    nmeds_v = [math.ceil(tj_v / (pmed * math.cos(math.radians(a)))) for a in angulos]
-    records_per_model_v = sum(nmeds_v) * nf
-    _nmeds_v_str = '+'.join(str(n) for n in nmeds_v)
-    print('─'*89)
-    print(f'  Registros esperados/modelo: ({_nmeds_v_str})×{nf}={records_per_model_v} '
-          f'| Total={NMODELS_VALIDA*records_per_model_v}')
-    for dat_path_v, label_v, out_path_v in valida_dat_files:
-        try:
-            mydat_v   = np.fromfile(dat_path_v, dtype=dtyp)
-            myarr_v   = np.array(mydat_v.tolist())
-            nrow_v    = myarr_v.shape[0]
-            expected  = NMODELS_VALIDA * records_per_model_v
-            has_nan_v = np.isnan(myarr_v).any()
-            has_inf_v = np.isinf(myarr_v).any()
-            status_v  = 'OK' if not has_nan_v and not has_inf_v and nrow_v == expected else 'ATENÇÃO'
-            print(f'  [{status_v}] {label_v}')
-            print(f'         .dat  : {dat_path_v}')
-            print(f'         .out  : {out_path_v}')
-            print(f'         Regs  : {nrow_v} (esperado {expected}) | NaN={has_nan_v} | Inf={has_inf_v}')
-        except FileNotFoundError:
-            print(f'  [ERRO] {label_v} — arquivo não encontrado: {dat_path_v}')
-    print('─'*89)
-
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    # ══════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-    # Efetivo para plotagem no modo simulação
-    NMODELS_VALIDA_EFF = NMODELS_VALIDA
-    if selected_models is None:
-        selected_models = list(range(NMODELS_VALIDA))
-
-# PLOTAGEM — Tensor H completo + perfil de resistividade para cada modelo de validação
-# ══════════════════════════════════════════════════════════════════════════════════════════════════════════
-# Para cada combinação (TR × modelo × ângulo × frequência), gera uma figura com:
-#   - Coluna 0 (GridSpec span 3 linhas): perfil de ρ_h e ρ_v em escala log-x
-#   - Colunas 1-6 (grade 3×6): Re/Im das 9 componentes do tensor H
-# Eixo Y compartilhado entre todos os painéis (profundidade invertida, crescendo para baixo).
+            f.write(str(round(esp[j],2)) + '\n')
+    f.write(str(round(esp[-1],2)) + '\n')
+    #Abaixo foi acrescentada uma linha nova para possibilitar a criação do arquivo informa.out com números de elementos da modelagem
+    f.write(str(m+1) + ' ' + str(nmodels) + '         ' + '!modelo atual e o número máximo de modelos')
+    f.close()
+    #-------------------------------------------------------------------------------------------------------------
+    # Executando o programa Fortran
+    try:
+        result = sub.run([fortran_exec] , check = True, text = True, capture_output = True)
+        # print("Saída do Fortran:")
+        # print(result.stdout)
+    except sub.CalledProcessError as e:
+        print("Erro ao executar o programa Fortran:")
+        print(e.stderr)
+    # if (m+1)%100==0:
+    #     print('Ocorreram {0} iterações do total de {1}'.format(m+1,nmodels))
+#-------------------------------------------------------------------------------------------------------------
+end_time = time.perf_counter()
+print('-----------------------------------------------------------------------------------------------------')
+print(f"Tempo de execução: {(end_time - start_time)/3600:.6f} horas")
+print("Por favor, se a execução deste programa não é a primeira vez e você está acrescentando")
+print("mais dados ao seu dataset, você obrigatoriamente tem que mudar o número de modelos do")
+print("do arquivo 'informa.dat' (última coluna da primeira linha)")
 #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-tensor_names_v = [
+# Define o tipo de dados (dtype) que corresponde ao formato do arquivo binário (existem 24 colunas)
+# Neste caso, a primeira coluna é inteira (int32) e as demais são reais de precisão dupla (float64).
+dtyp = np.dtype([('col0', np.int32)] + [('col{}'.format(i), np.float64) for i in range(1, 24)])
+# Em cada linha o conteúdo do arquivo binário é:
+# med, freq, theta, zobs, resh, resv, Re{Hxx}, Im{Hxx}, Re{Hxy}, Im{Hxy}, Re{Hxz}, Im{Hxz},
+#                                     Re{Hyx}, Im{Hyx}, Re{Hyy}, Im{Hyy}, Re{Hyz}, Im{Hyz}
+#                                     Re{Hzx}, Im{Hzx}, Re{Hzy}, Im{Hzy}, Re{Hzz}, Im{Hzz}
+# O arquivo foi construído por 4 loops encaixados. O mais externo compreende à variação dos ângulos de inclinação.
+# O segundo é sobre o número de frequências. O terceiro é sobre as medidas, enquanto o quarto é sobre o número de arranjos.
+#-------------------------------------------------------------------------------------------------------------
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+# Leitura do arquivo binário pelo numpy:
+myout1 = mypath + filename + '.dat'
+mydat = np.fromfile(myout1, dtype=dtyp)
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+#-------------------------------------------------------------------------------------------------------------
+# Exemplo de conversão do arquivo binário para trabalhar com o numpy:
+#-------------------------------------------------------------------------------------------------------------
+# Converta para um array numpy estruturado como lista
+myarr = np.array(mydat.tolist())
+# Exiba o array
+nrow = myarr.shape[0]
+# ncol = myarr.shape[1]
+print('-----------------------------------------------------------------------------------------------------')
+print('Número de linhas do arquivo binário:')
+print(nrow)
+print('-----------------------------------------------------------------------------------------------------')
+# Verifique se há algum NaN no array
+has_nan = np.isnan(myarr).any()
+# Exiba o resultado de haver ou não NaN
+if has_nan:
+   print("O array CONTÉM valores NaN.")
+else:
+   print("O array NÃO contém valores NaN.")
+print(myarr[-1,-2],myarr[-1,-1])    #últimos valores de Hzz
+print('-----------------------------------------------------------------------------------------------------')
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+# PLOTAGEM DE TODAS AS COMPONENTES DO TENSOR COM INTERFACES PARA TODOS OS MODELOS
+#-------------------------------------------------------------------------------------------------------------
+
+# Habilita o suporte a LaTeX
+plt.rcParams.update({
+    "text.usetex": True,
+    "font.family": "serif",
+    "font.serif": ["Computer Modern Roman"],
+    "font.size": 12,
+    "axes.titlesize": 16,
+})
+
+# 1. Separando os dados por modelo:
+z_diff = np.diff(myarr[:, 3])
+split_indices = np.where(z_diff < 0)[0] + 1
+modelos_dados = np.split(myarr, split_indices)
+
+tensor_names = [
     ['H_{xx}', 'H_{xy}', 'H_{xz}'],
     ['H_{yx}', 'H_{yy}', 'H_{yz}'],
     ['H_{zx}', 'H_{zy}', 'H_{zz}']
 ]
-# usetex=False: usa mathtext nativo do matplotlib — suporta Unicode (θ, °, ç, ã)
-# sem depender de instalação LaTeX externa. Evita RuntimeError com caracteres acentuados.
-plt.rcParams.update({
-    "text.usetex": False, "font.family": "serif",
-    "font.size": 12, "axes.titlesize": 13,
-})
 
-# Diretório para salvar as figuras de validação
-plots_dir = mypath + 'validacao_plots/'
-os.makedirs(plots_dir, exist_ok=True)
+# 2. LOOP SOBRE TODOS OS MODELOS
+for idx_modelo in range(len(modelos_dados)):
+    dados_plot = modelos_dados[idx_modelo]
+    zobs = dados_plot[:, 3]
 
-# Layout binário por modelo (ntheta=na, nf):
-#   k=0 (θ=angulos[0]): j=0 (freqs[0]): nmeds_v[0] registros | ... | j=nf-1: nmeds_v[0] registros
-#   k=1 (θ=angulos[1]): j=0 (freqs[0]): nmeds_v[1] registros | ... | j=nf-1: nmeds_v[1] registros
-# offset global do bloco (k,j) dentro do modelo:
-#   sum_{k'<k} nmed(k') * nf  +  j * nmed(k)
-_angulos_plot = angulos
-_freqs_plot   = freqs
-_nmeds_plot   = nmeds_v
-_palette_re   = ['darkblue', 'navy', 'steelblue', 'royalblue', 'cornflowerblue']
-_palette_im   = ['darkred',  'firebrick', 'indianred', 'salmon', 'tomato']
-_colors_re    = (_palette_re * (1 + na // len(_palette_re)))[:na]  # seguro para qualquer na
-_colors_im    = (_palette_im * (1 + na // len(_palette_im)))[:na]
+    # 3. EXTRAINDO AS INTERFACES DA FUNÇÃO modelo()
+    ncam, esp, resh, resv = modelo(idx_modelo)
 
-for dat_path_v, label_v, _ in valida_dat_files:
-    try:
-        mydat_v = np.fromfile(dat_path_v, dtype=dtyp)
-        myarr_v = np.array(mydat_v.tolist())
-    except FileNotFoundError:
-        print(f'  [AVISO] Arquivo de validação não encontrado para plotagem: {dat_path_v}')
-        continue
-    tr_tag = os.path.splitext(os.path.basename(dat_path_v))[0].replace('validacao_', '')
+    interfaces = [0.0]
+    interfaces.extend(np.cumsum(esp))
 
-    # Itera sobre modelos selecionados (default: todos)
-    _models_to_plot = selected_models if selected_models is not None else list(range(NMODELS_VALIDA_EFF))
-    for idx_m in _models_to_plot:
-        start_r = idx_m * records_per_model_v
-        if start_r + records_per_model_v > len(myarr_v):
-            print(f'  [AVISO] Modelo {idx_m} fora do range do .dat ({len(myarr_v)} registros). Pulando.')
-            continue
+    # 4. Configurando a figura
+    fig, axs = plt.subplots(3, 6, figsize=(22, 12), sharey=True)
+    fig.suptitle(f'Componentes do Tensor Magnético - Modelo {idx_modelo + 1} (com {ncam} camadas)', fontsize=22, y=0.96)
 
-        # Em modo externo, modelo_valida pode não ter dados para idx_m >= 6
-        if idx_m < NMODELS_VALIDA:
-            ncam_v2, esp_v2, _, _ = modelo_valida(idx_m)
-            interfaces = [0.0] + list(np.cumsum(esp_v2))
-            nome_safe  = NOMES_MODELOS[idx_m].replace(' ', '_').replace('.', '')
-        else:
-            # Modo externo com mais modelos que os 6 canônicos: sem perfil de resistividade
-            ncam_v2 = 0
-            interfaces = []
-            nome_safe = f'modelo_{idx_m}'
+    col_idx = 6  # Reinicia o índice da coluna para as saídas de cada novo modelo
 
-        # Offset cumulativo por ângulo (em registros dentro do modelo)
-        _k_offsets = []
-        _cum = 0
-        for nmed_k in _nmeds_plot:
-            _k_offsets.append(_cum)
-            _cum += nmed_k * len(_freqs_plot)
+    for i in range(3):
+        for j in range(3):
+            name = tensor_names[i][j]
+            
+            # --- Plot da Parte Real ---
+            ax_re = axs[i, j*2]
+            ax_re.plot(dados_plot[:, col_idx], zobs, color='darkblue', linewidth=2)
+            ax_re.set_title(rf'$Re\{{{name}\}}$')
+            ax_re.grid(True, linestyle=':', alpha=0.5) 
+            
+            for interf in interfaces:
+                ax_re.axhline(y=interf, color='black', linestyle='--', linewidth=1.2, alpha=0.8)
+                
+            if i == 2: ax_re.set_xlabel('Amplitude')
+            col_idx += 1
+            
+            # --- Plot da Parte Imaginária ---
+            ax_im = axs[i, j*2 + 1]
+            ax_im.plot(dados_plot[:, col_idx], zobs, color='darkred', linewidth=2)
+            ax_im.set_title(rf'$Im\{{{name}\}}$')
+            ax_im.grid(True, linestyle=':', alpha=0.5) 
+            
+            for interf in interfaces:
+                ax_im.axhline(y=interf, color='black', linestyle='--', linewidth=1.2, alpha=0.8)
+                
+            if i == 2: ax_im.set_xlabel('Amplitude')
+            col_idx += 1
 
-        # Itera sobre todos os blocos (ângulo × frequência)
-        for ki, (theta_val, nmed_k, k_off) in enumerate(zip(_angulos_plot, _nmeds_plot, _k_offsets)):
-            for ji, freq_val in enumerate(_freqs_plot):
-                blk_start = start_r + k_off + ji * nmed_k
-                blk_end   = blk_start + nmed_k
-                dados_plot = myarr_v[blk_start : blk_end]
-                zobs = dados_plot[:, 1]  # col1 = z_obs (formato 22-col)
+    # Inverte o eixo Y para que a profundidade cresça para baixo
+    axs[0, 0].invert_yaxis()
 
-                # ── Layout: col 0 = perfil de resistividade | cols 1-6 = tensor H ──
-                # GridSpec com 7 colunas: a primeira (width_ratio=1.8) exibe ρ_h e ρ_v
-                # em escala log-x, abrangendo as 3 linhas da figura; as 6 restantes
-                # mantêm a grade 3×6 do tensor EM. O eixo Y é compartilhado entre
-                # todos os painéis para alinhamento direto de profundidade.
-                fig = plt.figure(figsize=(28, 12))
-                _gs = gridspec.GridSpec(3, 7, figure=fig,
-                                        width_ratios=[1.8, 1, 1, 1, 1, 1, 1])
-                _titulo_modelo = NOMES_MODELOS[idx_m] if idx_m < len(NOMES_MODELOS) else f'Modelo {idx_m}'
-                fig.suptitle(
-                    f'Tensor H  —  {_titulo_modelo} ({ncam_v2} cam.)  |  {label_v}  |  '
-                    r'$\theta$' + f'={int(theta_val)}°,  f={int(freq_val/1000)} kHz',
-                    fontsize=15, y=0.98
-                )
+    for i in range(3):
+        axs[i, 0].set_ylabel('Profundidade (m)')
 
-                # ── Painel de resistividade (col 0, span 3 linhas) ──────────────────
-                # col2 = ρ_h, col3 = ρ_v (formato 22-col). O perfil step-function
-                # emerge naturalmente porque o Fortran repete a resistividade da camada
-                # em todos os registros com a mesma profundidade de investigação.
-                rho_h_plot = dados_plot[:, 2]  # Ohm·m — resistividade horizontal
-                rho_v_plot = dados_plot[:, 3]  # Ohm·m — resistividade vertical
-                ax_rho = fig.add_subplot(_gs[:, 0])
-                ax_rho.semilogx(rho_h_plot, zobs,
-                                color='steelblue', linewidth=2.2, label=r'$\rho_h$')
-                ax_rho.semilogx(rho_v_plot, zobs,
-                                color='darkorange', linewidth=2.2, linestyle='--',
-                                label=r'$\rho_v$')
-                for interf in interfaces:
-                    ax_rho.axhline(y=interf, color='black', linestyle='--', lw=1, alpha=0.7)
-                ax_rho.invert_yaxis()
-                ax_rho.set_xlabel(r'Resistividade ($\Omega{\cdot}$m)', fontsize=11)
-                ax_rho.set_ylabel('Profundidade (m)', fontsize=11)
-                ax_rho.set_title(r'$\rho_h$ e $\rho_v$ (modelo verdadeiro)', fontsize=12)
-                ax_rho.legend(fontsize=11, loc='lower right')
-                ax_rho.grid(True, which='both', linestyle=':', alpha=0.5)
-
-                # ── Painéis do tensor 3×6 (cols 1-6) compartilhando eixo Y ─────────
-                _axs = [[fig.add_subplot(_gs[ti, 1 + tj], sharey=ax_rho)
-                          for tj in range(6)] for ti in range(3)]
-                col_idx = 4  # tensor começa na col4 (formato 22-col)
-                for ti in range(3):
-                    for tj2 in range(3):
-                        name  = tensor_names_v[ti][tj2]
-                        ax_re = _axs[ti][tj2*2]
-                        ax_re.plot(dados_plot[:, col_idx], zobs,
-                                   color=_colors_re[ki], linewidth=1.5)
-                        ax_re.set_title(rf'$\mathrm{{Re}}({name})$')
-                        ax_re.grid(True, linestyle=':', alpha=0.5)
-                        for interf in interfaces:
-                            ax_re.axhline(y=interf, color='black', linestyle='--', lw=1, alpha=0.7)
-                        if ti == 2: ax_re.set_xlabel('Amplitude')
-                        ax_re.tick_params(labelleft=False)
-                        col_idx += 1
-                        ax_im = _axs[ti][tj2*2 + 1]
-                        ax_im.plot(dados_plot[:, col_idx], zobs,
-                                   color=_colors_im[ki], linewidth=1.5)
-                        ax_im.set_title(rf'$\mathrm{{Im}}({name})$')
-                        ax_im.grid(True, linestyle=':', alpha=0.5)
-                        for interf in interfaces:
-                            ax_im.axhline(y=interf, color='black', linestyle='--', lw=1, alpha=0.7)
-                        if ti == 2: ax_im.set_xlabel('Amplitude')
-                        ax_im.tick_params(labelleft=False)
-                        col_idx += 1
-                plt.tight_layout(rect=[0, 0.02, 1, 0.96])
-
-                ang_tag  = f'ang{int(theta_val)}'
-                freq_tag = f'f{int(freq_val/1000)}k'
-                fig_base = plots_dir + f'valida_mod{idx_m+1:02d}_{nome_safe}_{tr_tag}_{ang_tag}_{freq_tag}'
-                plt.savefig(fig_base + '.png', dpi=400, bbox_inches='tight')
-                print(f'  [SALVO] mod{idx_m+1} {tr_tag} θ={int(theta_val)}° f={int(freq_val/1000)}kHz: '
-                      f'{os.path.basename(fig_base)}.png')
-                plt.close(fig)  # libera memória — evita acúmulo de figuras em loops longos
-
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-# ── Relatório final ────────────────────────────────────────────────────────────────────────────────────────
-#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-total_time = time.perf_counter() - start_time_v
-print('═'*89)
-print(f'Validação concluída. {NMODELS_VALIDA} modelos de referência processados em {total_time:.2f} s.')
-print(f'  Figuras salvas em: {plots_dir}')
-print('═'*89)
+    plt.tight_layout(rect=[0, 0.02, 1, 0.95])
+    
+    # Exibe a figura na tela
+    plt.show()
 #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»

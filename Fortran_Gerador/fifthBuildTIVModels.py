@@ -7,7 +7,6 @@ import time                 #usado para apresentar o tempo de processamento
 import os
 from scipy.stats import qmc
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 
 #os.environ["OMP_NUM_THREADS"] = "12"
 
@@ -720,7 +719,7 @@ def unfriendly_noisy_2(tji = 100.,
         current_idx += ncam
         lambda_sobol_portion = amostra_unica_sobol[current_idx : current_idx + ncam]
         current_idx += ncam
-        thicknesses_sobol_portion = amostra_unica_sobol[current_idx : current_idx + num_sobol_for_thicknesses]
+        thicknesses_sobol_portion = amostra_unica_sobol[current_idx : current_idx + ncam]
 
         # Resistividades horizontais (geração limpa)
         if rhohdistr == 'unifor':
@@ -956,426 +955,293 @@ def ler_arquivo_com_int_float(arquivo):
 
 #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
 #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-if __name__ == '__main__':
-    start_time = time.perf_counter()
-    mypath = os.path.dirname(os.path.realpath(__file__)) + '/'
-    model = 'model.in'
-    mymodel = mypath + model
-    exec = 'tatu.x' #Gera o executável do fortran. Com o comando make apenas ele é gerado. Com make all, gera ele e roda este script também
-    fortran_exec = mypath + exec
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    # Nem todas as variáveis abaixo são usadas, a não ser que você use na chamada de baseline, unfriendly e unfriendly_noisy
-    tj = 120.                 #Tamanho da janela de investigação.
-    h1 = 10.                  #Altura do primeiro ponto médio de leitura acima da primeira interface.
-    hn = 10.                  #Profundidade do último ponto médio da última interface
-    tji = tj - (h1 + hn)      #h1 m serão para acima da 1ª, e outros hn m para abaixo da última.
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    ntmodels = 3000#10#3000 #30000
-    nmodels1 = int(ntmodels * 0.15)
-    distrho = 'loguni'   #'unifor'  #
-    models1 = baseline_empirical_2(nmodels = nmodels1)
+start_time = time.perf_counter()
+mypath = os.path.dirname(os.path.realpath(__file__)) + '/'
+model = 'model.in'
+mymodel = mypath + model
+exec = 'tatu.x' #Gera o executável do fortran. Com o comando make apenas ele é gerado. Com make all, gera ele e roda este script também
+fortran_exec = mypath + exec
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+# Nem todas as variáveis abaixo são usadas, a não ser que você use na chamada de baseline, unfriendly e unfriendly_noisy
+tj = 120.                 #Tamanho da janela de investigação.
+h1 = 10.                  #Altura do primeiro ponto médio de leitura acima da primeira interface.
+hn = 10.                  #Profundidade do último ponto médio da última interface
+tji = tj - (h1 + hn)      #h1 m serão para acima da 1ª, e outros hn m para abaixo da última.
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+ntmodels = 2000 #30000
+nmodels1 = int(ntmodels * 0.15)
+distrho = 'loguni'   #'unifor'  #
+models1 = baseline_empirical_2(nmodels = nmodels1)
 
-    # nmodels1 = int(ntmodels * 0.19)
-    # models1 = baseline_empirical_2( rho_h_min = 0.5,            #0.5, 
-    #                                 rho_h_max = 1000,           #1000.,
-    #                                 lambda_min = np.sqrt(2),    #1., 
-    #                                 lambda_max = 2,             #np.sqrt(2),
-    #                                 min_thickness = 1.,         #1.,
-    #                                 nmodels = nmodels1)
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    nmodels2 = int(ntmodels * 0.1)
-    models2 = baseline_ncamuniform_2(nmodels = nmodels2)
-    # nmodels2 = int(ntmodels * 0.14)
-    # models2 =baseline_ncamuniform_2(ncamin = 3,                 #3,
-    #                                 ncamax = 81,                #81,
-    #                                 min_thickness = 0.5,        #0.5,
-    #                                 rho_h_min = 0.1,            #0.1,
-    #                                 rho_h_max = 1400,           #1400., 
-    #                                 lambda_min = np.sqrt(2),    #1., 
-    #                                 lambda_max = 2,             #np.sqrt(2),
-    #                                 nmodels = nmodels2)
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    nmodels3 = int(ntmodels * 0.1)
-    models3 = baseline_thick_thicknesses_2(nmodels = nmodels3)
-    # nmodels3 = int(ntmodels * 0.14)
-    # models3 = baseline_thick_thicknesses_2(ncamin = 3,          #3,
-    #                                 ncamax = 15,                #15,
-    #                                 rho_h_min = 0.1,            #0.1,
-    #                                 rho_h_max = 1400,           #1400.,
-    #                                 rhoh_min_b = 0.1,           #0.1,
-    #                                 rhoh_min_a = 100.,          #100., 
-    #                                 rhoh_max_b = 50.,           #50.,
-    #                                 rhoh_max_a = 1800.,         #1800,
-    #                                 lambda_min = np.sqrt(2),    #1.,
-    #                                 lambda_max = 2,             #np.sqrt(2),
-    #                                 nmodels = nmodels3)
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    nmodels4 = int(ntmodels * 0.125)
-    models4 = unfriendly_empirical_2(nmodels = nmodels4)
-    # nmodels4 = int(ntmodels * 0.165)
-    # models4 = unfriendly_empirical_2(rho_h_min = 0.1,           #0.1,
-    #                                 rho_h_max = 1400.,          #1400,
-    #                                 lambda_min = np.sqrt(2),    #1.0,
-    #                                 lambda_max = 2,             #np.sqrt(2),
-    #                                 nmodels = nmodels4,
-    #                                 contraste = 5,              #5,
-    #                                 inf_ratio = 1/150.,         #1/150,
-    #                                 sup_ratio = 150.,           #150,
-    #                                 rho_limite = 100,           #100,
-    #                                 p_contraste = 0.5,          #0.5,
-    #                                 p_camfina = 0.6,            #0.6,
-    #                                 min_thickness = 0.2)
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    nmodels5 = int(ntmodels * 0.175)
-    models5 = unfriendly_noisy_2(nmodels = nmodels5)
-    # nmodels5 = int(ntmodels * 0.215)
-    # models5 = unfriendly_noisy_2(rho_h_min = 0.1,               #0.1,
-    #                                 rho_h_max = 1400,           #1400.,
-    #                                 lambda_min = np.sqrt(2),    #1.,
-    #                                 lambda_max = 2,             #np.sqrt(2),
-    #                                 nmodels = nmodels5,
-    #                                 contraste = 5,              #5,
-    #                                 inf_ratio = 1/150,          #1/150,
-    #                                 sup_ratio = 150,            #150,
-    #                                 rho_limite = 100.,          #100,
-    #                                 p_contraste = 0.5,          #0.5,
-    #                                 p_camfina = 0.6,            #0.6,
-    #                                 min_thickness = 0.1,        #0.1,
-    #                                 noise_std_rho = 0.05,        #0.05,
-    #                                 noise_std_lambda = 0.02,    #0.02,
-    #                                 noise_std_thickness = 0.03) #0.03
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    nmodels6 = int(ntmodels * 0.1)
-    models6 = generate_pathological_models_2(nmodels = nmodels6)
-    # nmodels6 = int(ntmodels * 0.15)
-    # models6 = generate_pathological_models_2(ncamin = 3,           #3,
-    #                                 ncamax = 28,                   #28,
-    #                                 rho_h_min = 0.05,              #0.05,
-    #                                 rho_h_max = 1500.,             #1500.,
-    #                                 lambda_min = np.sqrt(2),       #1.,
-    #                                 lambda_max = np.sqrt(4.5),     #np.sqrt(1.5)
-    #                                 nmodels = nmodels6,
-    #                                 p_total_depth_fill = 0.7,      #0.7,   #Probabilidade de NÃO preencher a janela (resulta em última camada grossa)
-    #                                 min_fill_ratio = 0.4,          #0.4,   #Mínimo da janela preenchida, ex: 40% de tji
-    #                                 min_thickness_internal = 0.1,  #0.1,   #Permitir camadas internas muito finas
-    #                                 contraste = 10,                #10.,
-    #                                 inf_ratio = 1./150,            #1./150,
-    #                                 sup_ratio = 150,               #150.,
-    #                                 rho_limite = 1700,             #1700.,
-    #                                 p_contraste = 0.7,             #0.7,
-    #                                 p_camfina = 0.8,               #0.8,
-    #                                 noise_std_rho = 0.07,          #0.07,
-    #                                 noise_std_lambda = 0.03,       #0.03,
-    #                                 noise_std_thickness = 0.04,    #0.04,
-    #                                 p_extreme_semispace_rho = 0.5, #0.5,
-    #                                 extreme_semispace_rho_range_low = (0.05, 0.5),     #(0.05, 0.5),
-    #                                 extreme_semispace_rho_range_high = (1000, 3000),   #(1000, 3000),
-    #                                 p_semispace_anisotropy = 0.4,                      #0.4,
-    #                                 semispace_anisotropy_range = (1.5, 2.5)            #(1.5, 2.5)
-    #                                 )
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    nmodels7 = int(ntmodels * 0.125)
-    models7 = generate_pathological_models_2(nmodels = nmodels7, rho_h_min = 0.1, rho_h_max = 1500, lambda_min = 1,
-                                            lambda_max = 1.001, min_thickness_internal = 10, p_camfina = 0.3)
-    #models7 = generate_pathological_models_2(ncamin = 3,            #3,
-    #                                ncamax = 28,                   #28,
-    #                                rho_h_min = 0.1,               #0.05,
-    #                                rho_h_max = 1500.,             #1500.,
-    #                                lambda_min = 1.,               #1.,
-    #                                lambda_max = 1.01,             #np.sqrt(1.5)
-    #                                nmodels = nmodels7,
-    #                                p_total_depth_fill = 0.7,      #0.7,   #Probabilidade de NÃO preencher a janela (resulta em última camada grossa)
-    #                                min_fill_ratio = 0.4,          #0.4,   #Mínimo da janela preenchida, ex: 40% de tji
-    #                                min_thickness_internal = 10.,  #0.1,   #Permitir camadas internas muito finas
-    #                                contraste = 10,                #10.,
-    #                                inf_ratio = 1./150,            #1./150,
-    #                                sup_ratio = 150,               #150.,
-    #                                rho_limite = 1700,             #1700.,
-    #                                p_contraste = 0.7,             #0.7,
-    #                                p_camfina = 0.3,               #0.8,
-    #                                noise_std_rho = 0.07,          #0.07,
-    #                                noise_std_lambda = 0.03,       #0.03,
-    #                                noise_std_thickness = 0.04,    #0.04,
-    #                                p_extreme_semispace_rho = 0.5, #0.5,
-    #                                extreme_semispace_rho_range_low = (0.1, 1.),      #(0.05, 0.5),
-    #                                extreme_semispace_rho_range_high = (200, 1500),   #(1000, 3000),
-    #                                p_semispace_anisotropy = 0.4,                     #0.4,
-    #                                semispace_anisotropy_range = (3., 5.)             #(1.5, 2.5)
-    #                                )
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••• •••••••••»
-    nmodels8 = int(ntmodels * 0.125) #int(ntmodels * 0.075)  #
-    models8 = baseline_empirical_2(nmodels = nmodels8, rho_h_min = 0.1, rho_h_max = 1500, rhohdistr = 'loguni',
-                                  lambda_min = 1, lambda_max = 1.0001, min_thickness = 0.5)
-    #models8 = baseline_empirical_2( rho_h_min = 0.1,            #0.5, 
-    #                                rho_h_max = 1500,           #1000.,
-    #                                lambda_min = 1.,            #1., 
-    #                                lambda_max = 1.01,          #np.sqrt(2),
-    #                                min_thickness = 0.5,        #1.,
-    #                                rhohdistr = 'loguni',
-    #                                nmodels = nmodels8)
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    models = models1 + models2 + models3 + models4 + models5 + models6 + models7 + models8  #
-    nmodels_actual = len(models)   # contagem real após truncamento por int()
-    # Aviso quando int() causa discrepância (ntmodels não é múltiplo de 40)
-    if nmodels_actual != ntmodels:
-        print(f'[AVISO] ntmodels={ntmodels} → int(fração×ntmodels) → {nmodels_actual} modelos reais '
-              f'(diferença={ntmodels - nmodels_actual}). '
-              f'nmaxmodel={nmodels_actual} será usado no model.in para garantir que o .out seja gerado.')
-    print('Modelos criados!')
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    # ── Parâmetros físicos da simulação (GeradorComMultiplosReceptores-equivalente) ─────────────────────────────
-    # Frequências baixas (2/6 kHz) + espaçamentos longos (8.19/20.43 m) = investigação profunda (DOI ~4–15 m)
-    # Dois ângulos (0° e 30°) ativam componentes off-diagonal do tensor H (Hxy, Hxz, Hzx, etc.)
-    # Saída: arquivos separados por par T-R (_TR1.dat / _TR2.dat), formato 22-col (sem freq/theta no binário)
-    freqs   = [20000.]         #[2000., 6000.]  # frequências (Hz) — ex: 2k=δ≈11m, 6k=δ≈6.5m (ρ=10Ω·m)
-    angulos = [0.]        #[0., 30.]        # ângulos de inclinação (°) — 0°=vertical, 30°=off-diagonal≠0
-    nf      = len(freqs)       # número de frequências
-    na      = len(angulos)     # número de ângulos
-    pmed    = 0.2              # passo entre medidas (m)
-    dTR     = [1.0]    #[8.19, 20.43]    # espaçamentos T-R (m) — investigação profunda (tipo ARC/Periscope)
-
-    # ── F5/F7/F6/Filtro — Flags de features opcionais (v9.0) ─────────────────────
-    # F5: Frequências arbitrárias — quando 1, permite nf > 2 sem aviso no Fortran.
-    #     Quando 0 (default), o Fortran emite aviso se nf > 2.
-    # F7: Antenas inclinadas — quando 1, calcula H_tilted(β,φ) para cada configuração.
-    #     H_tilted(β,φ) = cos(β)·Hzz + sin(β)·[cos(φ)·Hxz + sin(φ)·Hyz]
-    #     Saída estendida: 22 + 2×n_tilted colunas por registro binário.
-    # F6: Compensação midpoint — quando 1, calcula medições compensadas entre pares T-R.
-    #     Requer nTR ≥ 2. Gera arquivos _COMP{i}.dat e _COMP{i}_ATT.dat adicionais.
-    #     Cancelamento de efeitos ambientais (rugosidade, excentricidade, invasão).
-    # Filtro: Seleção do filtro de Hankel.
-    #     0=Werthmuller 201pt (default), 1=Kong 61pt (rápido), 2=Anderson 801pt (preciso).
-    use_arbitrary_freq  = 0      # F5: 0=desabilitado (default), 1=habilitado
-    use_tilted_antennas = 0      # F7: 0=desabilitado (default), 1=habilitado
-    tilted_configs      = []     # F7: lista de (beta, phi) em graus — ex: [(45., 0.), (30., 90.)]
-    use_compensation    = 0      # F6: 0=desabilitado (default), 1=habilitado
-    comp_pairs          = []     # F6: lista de (near_itr, far_itr) — ex: [(1, 3)] para nTR≥3
-    filter_type         = 0      # Filtro: 0=Werthmuller, 1=Kong, 2=Anderson
-    # F10 — Sensibilidades ∂H/∂ρ (Jacobiano) via diferenças finitas centradas
-    use_jacobian        = 0      # F10: 0=desabilitado (default), 1=habilitado
-    jacobian_method     = 1      # F10: 0=Python Workers (B), 1=Fortran OpenMP interno (C)
-    jacobian_fd_step    = 1e-4   # F10: ε relativo para FD centrada (default 1e-4 = 0,01%)
-
-    # Nome base dos arquivos: encoda frequências e ângulos para rastreabilidade total
-    _freq_tag = '-'.join(f'{int(fi/1000)}k'  for fi in freqs)   # ex: "2k-6k"
-    _ang_tag  = '-'.join(f'{int(ai)}'        for ai in angulos)  # ex: "0-30"
-    filename  = f"Inv_f{_freq_tag}_a{_ang_tag}_{ntmodels}"        # ex: "Inv_f2k-6k_a0-30_3000"
-
-    # ── Display de parâmetros de entrada (espelho do model.in a ser gerado) ──────────────────────────────────────
-    import math as _math
-    print('═'*89)
-    print('PARÂMETROS DE ENTRADA — fifthBuildTIVModels.py')
-    print('═'*89)
-    print(f'  Executável Fortran : {fortran_exec}')
-    print(f'  Arquivo model.in   : {mymodel}')
-    print(f'  Arquivo de saída   : {filename}_TR{{i}}_d{{dTR}}m.dat  (i=1..{len(dTR)})')
-    print('─'*89)
-    print(f'  nf={nf}  Frequências (Hz) : {freqs}')
-    for fi in freqs:
-        delta_10 = 503 * _math.sqrt(10 / fi)
-        print(f'    f={int(fi):>6} Hz — skin depth (ρ=10Ω·m): δ≈{delta_10:.1f} m')
-    print(f'  na={na}  Ângulos (°)      : {angulos}')
-    for ai in angulos:
-        if ai == 0.:
-            print(f'    θ=0°  → poço vertical, off-diagonal = 0')
+# nmodels1 = int(ntmodels * 0.19)
+# models1 = baseline_empirical_2( rho_h_min = 0.5,            #0.5, 
+#                                 rho_h_max = 1000,           #1000.,
+#                                 lambda_min = np.sqrt(2),    #1., 
+#                                 lambda_max = 2,             #np.sqrt(2),
+#                                 min_thickness = 1.,         #1.,
+#                                 nmodels = nmodels1)
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+nmodels2 = int(ntmodels * 0.1)
+models2 = baseline_ncamuniform_2(nmodels = nmodels2)
+# nmodels2 = int(ntmodels * 0.14)
+# models2 =baseline_ncamuniform_2(ncamin = 3,                 #3,
+#                                 ncamax = 81,                #81,
+#                                 min_thickness = 0.5,        #0.5,
+#                                 rho_h_min = 0.1,            #0.1,
+#                                 rho_h_max = 1400,           #1400., 
+#                                 lambda_min = np.sqrt(2),    #1., 
+#                                 lambda_max = 2,             #np.sqrt(2),
+#                                 nmodels = nmodels2)
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+nmodels3 = int(ntmodels * 0.1)
+models3 = baseline_thick_thicknesses_2(nmodels = nmodels3)
+# nmodels3 = int(ntmodels * 0.14)
+# models3 = baseline_thick_thicknesses_2(ncamin = 3,          #3,
+#                                 ncamax = 15,                #15,
+#                                 rho_h_min = 0.1,            #0.1,
+#                                 rho_h_max = 1400,           #1400.,
+#                                 rhoh_min_b = 0.1,           #0.1,
+#                                 rhoh_min_a = 100.,          #100., 
+#                                 rhoh_max_b = 50.,           #50.,
+#                                 rhoh_max_a = 1800.,         #1800,
+#                                 lambda_min = np.sqrt(2),    #1.,
+#                                 lambda_max = 2,             #np.sqrt(2),
+#                                 nmodels = nmodels3)
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+nmodels4 = int(ntmodels * 0.125)
+models4 = unfriendly_empirical_2(nmodels = nmodels4)
+# nmodels4 = int(ntmodels * 0.165)
+# models4 = unfriendly_empirical_2(rho_h_min = 0.1,           #0.1,
+#                                 rho_h_max = 1400.,          #1400,
+#                                 lambda_min = np.sqrt(2),    #1.0,
+#                                 lambda_max = 2,             #np.sqrt(2),
+#                                 nmodels = nmodels4,
+#                                 contraste = 5,              #5,
+#                                 inf_ratio = 1/150.,         #1/150,
+#                                 sup_ratio = 150.,           #150,
+#                                 rho_limite = 100,           #100,
+#                                 p_contraste = 0.5,          #0.5,
+#                                 p_camfina = 0.6,            #0.6,
+#                                 min_thickness = 0.2)
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+nmodels5 = int(ntmodels * 0.175)
+models5 = unfriendly_noisy_2(nmodels = nmodels5)
+# nmodels5 = int(ntmodels * 0.215)
+# models5 = unfriendly_noisy_2(rho_h_min = 0.1,               #0.1,
+#                                 rho_h_max = 1400,           #1400.,
+#                                 lambda_min = np.sqrt(2),    #1.,
+#                                 lambda_max = 2,             #np.sqrt(2),
+#                                 nmodels = nmodels5,
+#                                 contraste = 5,              #5,
+#                                 inf_ratio = 1/150,          #1/150,
+#                                 sup_ratio = 150,            #150,
+#                                 rho_limite = 100.,          #100,
+#                                 p_contraste = 0.5,          #0.5,
+#                                 p_camfina = 0.6,            #0.6,
+#                                 min_thickness = 0.1,        #0.1,
+#                                 noise_std_rho = 0.05,        #0.05,
+#                                 noise_std_lambda = 0.02,    #0.02,
+#                                 noise_std_thickness = 0.03) #0.03
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+nmodels6 = int(ntmodels * 0.1)
+models6 = generate_pathological_models_2(nmodels = nmodels6)
+# nmodels6 = int(ntmodels * 0.15)
+# models6 = generate_pathological_models_2(ncamin = 3,           #3,
+#                                 ncamax = 28,                   #28,
+#                                 rho_h_min = 0.05,              #0.05,
+#                                 rho_h_max = 1500.,             #1500.,
+#                                 lambda_min = np.sqrt(2),       #1.,
+#                                 lambda_max = np.sqrt(4.5),     #np.sqrt(1.5)
+#                                 nmodels = nmodels6,
+#                                 p_total_depth_fill = 0.7,      #0.7,   #Probabilidade de NÃO preencher a janela (resulta em última camada grossa)
+#                                 min_fill_ratio = 0.4,          #0.4,   #Mínimo da janela preenchida, ex: 40% de tji
+#                                 min_thickness_internal = 0.1,  #0.1,   #Permitir camadas internas muito finas
+#                                 contraste = 10,                #10.,
+#                                 inf_ratio = 1./150,            #1./150,
+#                                 sup_ratio = 150,               #150.,
+#                                 rho_limite = 1700,             #1700.,
+#                                 p_contraste = 0.7,             #0.7,
+#                                 p_camfina = 0.8,               #0.8,
+#                                 noise_std_rho = 0.07,          #0.07,
+#                                 noise_std_lambda = 0.03,       #0.03,
+#                                 noise_std_thickness = 0.04,    #0.04,
+#                                 p_extreme_semispace_rho = 0.5, #0.5,
+#                                 extreme_semispace_rho_range_low = (0.05, 0.5),     #(0.05, 0.5),
+#                                 extreme_semispace_rho_range_high = (1000, 3000),   #(1000, 3000),
+#                                 p_semispace_anisotropy = 0.4,                      #0.4,
+#                                 semispace_anisotropy_range = (1.5, 2.5)            #(1.5, 2.5)
+#                                 )
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+nmodels7 = int(ntmodels * 0.125)
+models7 = generate_pathological_models_2(nmodels = nmodels7, rho_h_min = 0.1, rho_h_max = 1500, lambda_min = 1,
+                                        lambda_max = 1.001, min_thickness_internal = 10, p_camfina = 0.3)
+#models7 = generate_pathological_models_2(ncamin = 3,            #3,
+#                                ncamax = 28,                   #28,
+#                                rho_h_min = 0.1,               #0.05,
+#                                rho_h_max = 1500.,             #1500.,
+#                                lambda_min = 1.,               #1.,
+#                                lambda_max = 1.01,             #np.sqrt(1.5)
+#                                nmodels = nmodels7,
+#                                p_total_depth_fill = 0.7,      #0.7,   #Probabilidade de NÃO preencher a janela (resulta em última camada grossa)
+#                                min_fill_ratio = 0.4,          #0.4,   #Mínimo da janela preenchida, ex: 40% de tji
+#                                min_thickness_internal = 10.,  #0.1,   #Permitir camadas internas muito finas
+#                                contraste = 10,                #10.,
+#                                inf_ratio = 1./150,            #1./150,
+#                                sup_ratio = 150,               #150.,
+#                                rho_limite = 1700,             #1700.,
+#                                p_contraste = 0.7,             #0.7,
+#                                p_camfina = 0.3,               #0.8,
+#                                noise_std_rho = 0.07,          #0.07,
+#                                noise_std_lambda = 0.03,       #0.03,
+#                                noise_std_thickness = 0.04,    #0.04,
+#                                p_extreme_semispace_rho = 0.5, #0.5,
+#                                extreme_semispace_rho_range_low = (0.1, 1.),      #(0.05, 0.5),
+#                                extreme_semispace_rho_range_high = (200, 1500),   #(1000, 3000),
+#                                p_semispace_anisotropy = 0.4,                     #0.4,
+#                                semispace_anisotropy_range = (3., 5.)             #(1.5, 2.5)
+#                                )
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••• •••••••••»
+nmodels8 = int(ntmodels * 0.125) #int(ntmodels * 0.075)  #
+models8 = baseline_empirical_2(nmodels = nmodels8, rho_h_min = 0.1, rho_h_max = 1500, rhohdistr = 'loguni',
+                              lambda_min = 1, lambda_max = 1.0001, min_thickness = 0.5)
+#models8 = baseline_empirical_2( rho_h_min = 0.1,            #0.5, 
+#                                rho_h_max = 1500,           #1000.,
+#                                lambda_min = 1.,            #1., 
+#                                lambda_max = 1.01,          #np.sqrt(2),
+#                                min_thickness = 0.5,        #1.,
+#                                rhohdistr = 'loguni',
+#                                nmodels = nmodels8)
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+models = models1 + models2 + models3 + models4 + models5 + models6 + models7 + models8  #
+print('Modelos criados!')
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+filename = 'Inv0_Dip2000_teste'
+print(f"Nome do Arquivo: {filename}")
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+# # nf = 6                  #número de frequências de investigação
+# # f1, f2, f3, f4, f5, f6 = 2.e3, 6.e3, 12.e3, 24.e3, 48.e3, 96.e3 #frequências
+nf = 1                    #número de frequências de investigação 2
+f1 = 20000.               #frequência
+#f2 = 40000.               #frequência
+# na = 6                  #número de ângulos de inclinação
+# a1, a2, a3, a4, a5 = 0, 15., 30., 45., 60., 75.    #ângulos de inclinação
+na = 1                    #número de ângulos de inclinação
+a1 = 0.                   #ângulos de inclinação
+#a2 = 15.                   #ângulos de inclinação
+pmed = 0.2                #passo entre medidas
+dTR = 1.                  #distâncias dos arranjos TR1, TR2, TR3
+# dTR1, dTR2, dTR3 = 8.19, 20.43, 33.18   #distâncias dos arranjos TR1, TR2, TR3
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+# ── Configuração OpenMP ───────────────────────────────────────────────────────
+_omp_threads = os.environ.get('OMP_NUM_THREADS', None)
+if _omp_threads:
+    print(f'[OpenMP] OMP_NUM_THREADS = {_omp_threads} thread(s)  (definido pelo usuário)')
+else:
+    import multiprocessing as _mp
+    print(f'[OpenMP] OMP_NUM_THREADS não definido — OpenMP usará o padrão do sistema '
+          f'({_mp.cpu_count()} núcleos lógicos detectados)')
+print('[OpenMP] A distribuição interna threads_k × threads_j será exibida pelo Fortran abaixo.')
+print('─' * 89)
+_block_start = time.perf_counter()
+for i, m in enumerate(models):
+    ncam = m['n_layers']
+    f = open(mymodel,"w")
+    f.write(str(nf) + '                 ' + '!número de frequências' + '\n')
+    f.write(str(f1) + '           ' + '!frequência 1' + '\n')
+    #f.write(str(f2) + '            ' + '!frequência 2' + '\n')
+    # f.write(str(f3) + '           ' + '!frequência 3' + '\n')
+    # f.write(str(f4) + '           ' + '!frequência 4' + '\n')
+    # f.write(str(f5) + '           ' + '!frequência 5' + '\n')
+    # f.write(str(f6) + '           ' + '!frequência 6' + '\n')
+    f.write(str(na) + '                 ' + '!número de ângulos de inclinação' + '\n')
+    f.write(str(a1) + '               ' + '!ângulo 1' + '\n')
+    # f.write(str(a2) + '              ' + '!ângulo 2' + '\n')
+    # f.write(str(a3) + '              '  + '!ângulo 3' + '\n')
+    # f.write(str(a4) + '              ' + '!ângulo 4' + '\n')
+    # f.write(str(a5) + '              ' + '!ângulo 5' + '\n')
+    f.write(str(h1) + '              ' + '!altura do primeiro ponto-médio T-R, acima da primeira interface de camadas' + '\n')
+    f.write(str(tj) + '             ' + '!tamanho da janela de investigação' + '\n')
+    f.write(str(pmed) + '               ' + '!passo entre as medidas' + '\n')
+    f.write(str(dTR) + '               ' + '!distância T-R do arranjo' + '\n')
+    f.write(filename + '              ' + '!nome dos arquivos de saída' + '\n')
+    f.write(str(ncam) + '                ' + '!número de camadas' + '\n')
+    for j in range(ncam):
+        myrhoh = np.array(m['rho_h'])[j]
+        myrhov = np.array(m['rho_v'])[j]
+        if myrhov < myrhoh: myrhov = myrhoh
+        if j == 0:
+            f.write(str(round(myrhoh,2)) + '    ' + str(round(myrhov,2)) + '     ' + '!resistividades horizontal e vertical' + '\n')
         else:
-            print(f'    θ={int(ai)}°  → poço desviado, off-diagonal ≠ 0, DOI radial = dTR×|sin({int(ai)}°)|')
-    print(f'  nTR={len(dTR)}  Espaçamentos T-R (m): {dTR}')
-    _ang_max = max(angulos)
-    for dtr_i in dTR:
-        for fi in freqs:
-            delta_i = 503 * _math.sqrt(10 / fi)
-            doi_est = dtr_i * abs(_math.sin(_math.radians(_ang_max))) if _ang_max > 0 else 0.0
-            print(f'    dTR={dtr_i}m, f={int(fi/1000)}kHz → r_k(θ={int(_ang_max)}°)={doi_est:.2f}m, δ≈{delta_i:.1f}m')
-    print(f'  pmed={pmed} m   h1={h1} m   tj={tj} m   tji={tji:.1f} m')
-    print(f'  ntmodels={ntmodels} → nmodels_actual={nmodels_actual} '
-          f'({nmodels1}+{nmodels2}+{nmodels3}+{nmodels4}+{nmodels5}+{nmodels6}+{nmodels7}+{nmodels8})'
-          + (f'  [AVISO: diferença={ntmodels-nmodels_actual}]' if nmodels_actual != ntmodels else ''))
-    nmeds = [_math.ceil(tj / (pmed * _math.cos(_math.radians(a)))) for a in angulos]
-    regs_per_model = sum(nmeds) * nf
-    _nmed_str = ' + '.join(f'nmed({int(a)}°)={n}' for a, n in zip(angulos, nmeds))
-    print(f'  Registros/modelo/TR: {_nmed_str} × nf={nf} = {regs_per_model}')
-    print(f'  Total registros/TR : {regs_per_model * nmodels_actual:,}  (~{regs_per_model * nmodels_actual * 172 / 1e9:.2f} GB)')
-    print('═'*89)
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    # ── Configuração OpenMP ───────────────────────────────────────────────────────
-    _omp_threads = os.environ.get('OMP_NUM_THREADS', None)
-    if _omp_threads:
-        print(f'[OpenMP] OMP_NUM_THREADS = {_omp_threads} thread(s)  (definido pelo usuário)')
-    else:
-        import multiprocessing as _mp
-        print(f'[OpenMP] OMP_NUM_THREADS não definido — OpenMP usará o padrão do sistema '
-              f'({_mp.cpu_count()} núcleos lógicos detectados)')
-    print('[OpenMP] A distribuição interna threads_k × threads_j será exibida pelo Fortran abaixo.')
-    print('─' * 89)
-    _block_start = time.perf_counter()
-    for i, m in enumerate(models):
-        ncam = m['n_layers']
-        with open(mymodel, "w") as f:
-            f.write(str(nf) + '                 ' + '!número de frequências' + '\n')
-            for _idx, _fi in enumerate(freqs, 1):
-                f.write(str(_fi) + '           ' + f'!frequência {_idx}' + '\n')
-            f.write(str(na) + '                 ' + '!número de ângulos de inclinação' + '\n')
-            for _idx, _ai in enumerate(angulos, 1):
-                f.write(str(_ai) + '               ' + f'!ângulo {_idx}' + '\n')
-            f.write(str(h1) + '              ' + '!altura do primeiro ponto-médio T-R, acima da primeira interface de camadas' + '\n')
-            f.write(str(tj) + '             ' + '!tamanho da janela de investigação' + '\n')
-            f.write(str(pmed) + '               ' + '!passo entre as medidas' + '\n')
-            # Feature 1 (Multi-TR): escreve nTR + nTR valores de dTR
-            # Para nTR=1, backward-compatible com formato anterior
-            if isinstance(dTR, (list, tuple, np.ndarray)):
-                nTR_val = len(dTR)
-                f.write(str(nTR_val) + '                 ' + '!número de pares T-R' + '\n')
-                for itr_idx, dtr_val in enumerate(dTR):
-                    f.write(str(dtr_val) + '               ' + '!distância T-R ' + str(itr_idx+1) + '\n')
-            else:
-                f.write('1                 ' + '!número de pares T-R' + '\n')
-                f.write(str(dTR) + '               ' + '!distância T-R 1' + '\n')
-            f.write(filename + '              ' + '!nome dos arquivos de saída' + '\n')
-            f.write(str(ncam) + '                ' + '!número de camadas' + '\n')
-            for j in range(ncam):
-                myrhoh = np.array(m['rho_h'])[j]
-                myrhov = np.array(m['rho_v'])[j]
-                if myrhov < myrhoh: myrhov = myrhoh
-                if j == 0:
-                    f.write(str(round(myrhoh,2)) + '    ' + str(round(myrhov,2)) + '     ' + '!resistividades horizontal e vertical' + '\n')
-                else:
-                    f.write(str(round(myrhoh,2)) + '    ' + str(round(myrhov,2)) + '\n')
-            for j in range(ncam-3):
-                if j == 0:
-                    f.write(str(round(np.array(m['thicknesses'])[j],2)) + '              ' + '!espessuras das n-2 camadas' + '\n')
-                else:
-                    f.write(str(round(np.array(m['thicknesses'])[j],2)) + '\n')
-            f.write(str(round(np.array(m['thicknesses'])[-1],2)) + '\n')
-            f.write(str(i+1) + ' ' + str(nmodels_actual) + '         ' + '!modelo atual e o número máximo de modelos' + '\n')
-            # ── F5/F7/F6/Filtro — Flags opcionais v9.0 (backward compatible) ──
-            f.write(str(use_arbitrary_freq)  + '                 ' + '!F5: use_arbitrary_freq (0=desabilitado, 1=habilitado)' + '\n')
-            f.write(str(use_tilted_antennas) + '                 ' + '!F7: use_tilted_antennas (0=desabilitado, 1=habilitado)\n')
-            if use_tilted_antennas == 1 and len(tilted_configs) > 0:
-                f.write(str(len(tilted_configs)) + '                 ' + '!F7: n_tilted (número de configurações tilted)\n')
-                for it_idx, (beta_t, phi_t) in enumerate(tilted_configs):
-                    f.write(f'{beta_t}  {phi_t}' + '            ' + f'!F7: beta({it_idx+1}) phi({it_idx+1}) em graus\n')
-            # F6 — Compensação midpoint
-            f.write(str(use_compensation) + '                 ' + '!F6: use_compensation (0=desabilitado, 1=habilitado)\n')
-            if use_compensation == 1 and len(comp_pairs) > 0:
-                f.write(str(len(comp_pairs)) + '                 ' + '!F6: n_comp_pairs\n')
-                for cp_idx, (near_i, far_i) in enumerate(comp_pairs):
-                    f.write(f'{near_i}  {far_i}' + '              ' + f'!F6: near({cp_idx+1}) far({cp_idx+1})\n')
-            # Filtro Adaptativo
-            f.write(str(filter_type) + '                 ' + '!Filtro: 0=Werthmuller, 1=Kong, 2=Anderson\n')
-            # F10 — Sensibilidades ∂H/∂ρ (Jacobiano)
-            if use_jacobian == 1:
-                f.write(str(use_jacobian) + '                 ' + '!F10: use_jacobian\n')
-                f.write(str(jacobian_method) + '                 ' + '!F10: jacobian_method (0=B Python, 1=C Fortran)\n')
-                f.write(str(jacobian_fd_step) + '          ' + '!F10: jacobian_fd_step (ε relativo)\n')
-        #-------------------------------------------------------------------------------------------------------------
-        # Executando o programa Fortran
-        try:
-            result = sub.run([fortran_exec] , check = True, text = True, capture_output = True)
-            if i == 0 and result.stdout.strip():   # exibe info de threads só no 1º modelo
-                print(result.stdout.strip())
-        except sub.CalledProcessError as e:
-            print("Erro ao executar o programa Fortran:")
-            print(e.stderr)
-        if (i+1)%100==0:
-            _block_end = time.perf_counter()
-            _block_s   = _block_end - _block_start
-            _mean_s    = _block_s / 100
-            _eta_s     = _mean_s * (nmodels_actual - (i+1))
-            print(f'  Iterações {i-98:>4d}–{i+1:<4d} de {ntmodels} | '
-                  f'bloco={_block_s:6.1f}s | '
-                  f'média={_mean_s:.3f}s/modelo | '
-                  f'ETA={_eta_s/60:.1f}min')
-            _block_start = _block_end
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    end_time = time.perf_counter()
-    print('─'*89)
-    print(f"Tempo de execução (treinamento): {(end_time - start_time)/3600:.4f} horas  "
-          f"({(end_time - start_time):.1f} s)")
-    print("AVISO: ao acrescentar dados a um dataset existente, atualize nmaxmodel no .out.")
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    # ── Geração garantida do .out pelo Python ─────────────────────────────────────────────────────────────────────
-    # O Fortran só escreve o .out na última iteração (modelm == nmaxmodel). Se o Fortran falhar no
-    # último modelo, o .out nunca é criado. Para garantia total, o Python regenera o .out aqui,
-    # com os mesmos campos e formato que o Fortran produziria:
-    #   Linha 1: nt  nf  nmaxmodel
-    #   Linha 2: theta(1..nt)       — ângulos em graus (real64)
-    #   Linha 3: freq(1..nf)        — frequências em Hz (real64)
-    #   Linha 4: nmeds(1..nt)       — nº de medidas por ângulo (inteiro)
-    # Nota: nmeds(k) = ceil(tj / (pmed × cos(θ_k))) — mesmo cálculo do Fortran
-    out_src = mypath + 'info' + filename + '.out'
-    _nmeds_list = [_math.ceil(tj / (pmed * _math.cos(_math.radians(a)))) for a in angulos]
-    with open(out_src, 'w') as _f_out:
-        _f_out.write(f' {na} {nf} {nmodels_actual}\n')
-        _f_out.write(' ' + ' '.join(f'{float(a):.1f}' for a in angulos) + '\n')
-        _f_out.write(' ' + ' '.join(f'{float(f):.1f}' for f in freqs) + '\n')
-        _f_out.write(' ' + ' '.join(str(n) for n in _nmeds_list) + '\n')
-    print(f'[.out gerado pelo Python] {out_src}')
-    print(f'  nt={na}  nf={nf}  nmaxmodel={nmodels_actual}')
-    print(f'  theta={angulos}°  freq={freqs} Hz  nmeds={_nmeds_list}')
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    # ── Pós-processamento: renomear arquivos com dTR e gerar .out idênticos ao .dat ──────────────────────────────
-    # O Python gera: info{filename}.out  (acima, garantido).
-    # Após renomear : {filename}_TR{i}_d{dTR}m.dat  e  {filename}_TR{i}_d{dTR}m.out  (cópia por TR).
-    import shutil
-    final_dat_files = []  # lista de (dat_path, label, out_path)
-    print('─'*89)
-    print('Renomeação de arquivos de saída (freq + ângulo + dTR nos nomes):')
-    _nTR = len(dTR)
-    for itr, dtr in enumerate(dTR):
-        dtr_tag  = str(dtr).replace('.', 'p')                        # "8p19"
-        _tr_suf  = f'_TR{itr+1}' if _nTR > 1 else ''               # nTR=1: Fortran não adiciona sufixo _TR
-        old_dat  = mypath + filename + f'{_tr_suf}.dat'
-        new_name = filename + f'_TR{itr+1}_d{dtr_tag}m'             # ex: "Inv_f2k-6k_a0-30_3000_TR1_d8p19m"
-        new_dat  = mypath + new_name + '.dat'
-        new_out  = mypath + new_name + '.out'
-        if os.path.exists(old_dat):
-            os.rename(old_dat, new_dat)
-            print(f'  .dat : {os.path.basename(old_dat)}\n'
-                  f'       → {os.path.basename(new_dat)}')
+            f.write(str(round(myrhoh,2)) + '    ' + str(round(myrhov,2)) + '\n')
+    for j in range(ncam-3):
+        if j == 0:
+            f.write(str(round(np.array(m['thicknesses'])[j],2)) + '              ' + '!espessuras das n-2 camadas' + '\n')
         else:
-            print(f'  [AVISO] .dat não encontrado: {old_dat}')
-        if os.path.exists(out_src):
-            shutil.copy(out_src, new_out)
-            print(f'  .out : info{filename}.out\n'
-                  f'       → {os.path.basename(new_out)}')
-        else:
-            print(f'  [AVISO] .out fonte não encontrado: {out_src}')
-        final_dat_files.append((new_dat, f'TR{itr+1} (dTR={dtr} m)', new_out))
-    print('─'*89)
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    # ── Validação numérica dos arquivos .dat de treinamento ──────────────────────────────────────────────────────
-    # Formato binário (Fortran_Gerador): 1 int32 + 21 float64 = 22 colunas / 172 bytes por registro.
-    # Layout: col0=med | col1=z_obs | col2=rho_h | col3=rho_v | col4..21 = Re/Im dos 9 componentes do tensor H.
-    # Ordem no arquivo: k(ângulo) → j(freq) → i(medida).
-    # Para ntheta=2, nf=2: blocos θ=angulos[0]/freqs[0], θ=angulos[0]/freqs[1], θ=angulos[1]/freqs[0], θ=angulos[1]/freqs[1].
-    dtyp = np.dtype([('col0', np.int32)] + [('col{}'.format(i), np.float64) for i in range(1, 22)])
-    print(f'Validação dos arquivos .dat de treinamento ({len(final_dat_files)} par(es) T-R):')
-    for dat_path, label, out_path in final_dat_files:
-        try:
-            mydat  = np.fromfile(dat_path, dtype=dtyp)
-            myarr  = np.array(mydat.tolist())
-            nrow   = myarr.shape[0]
-            has_nan = np.isnan(myarr).any()
-            has_inf = np.isinf(myarr).any()
-            status  = 'OK' if not has_nan and not has_inf else 'ATENÇÃO'
-            print(f'  [{status}] {label}')
-            print(f'         .dat  : {dat_path}')
-            print(f'         .out  : {out_path}')
-            print(f'         Regs  : {nrow:,} | NaN={has_nan} | Inf={has_inf}')
-            print(f'         H33   : Re={myarr[-1,-2]:.4e}  Im={myarr[-1,-1]:.4e}')
-        except FileNotFoundError:
-            print(f'  [ERRO] {label} — arquivo não encontrado: {dat_path}')
-    print('─'*89)
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
-    # ── Tempo total de execução ────────────────────────────────────────────────────────────────────────────────
-    total_elapsed = time.perf_counter() - start_time
-    print('═'*89)
-    print(f'fifthBuildTIVModels.py concluído. {nmodels_actual} modelos gerados em {total_elapsed:.2f} s.')
-    print(f'Para validação com modelos canônicos (Oklahoma, Devine, Hou et al.), execute:')
-    print(f'  python buildValidamodels.py')
-    print('═'*89)
-
-    #«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+            f.write(str(round(np.array(m['thicknesses'])[j],2)) + '\n')
+    f.write(str(round(np.array(m['thicknesses'])[-1],2)) + '\n')
+    #Abaixo foi acrescentada uma linha nova para possibilitar a criação do arquivo informa.out com números de elementos da modelagem
+    f.write(str(i+1) + ' ' + str(ntmodels) + '         ' + '!modelo atual e o número máximo de modelos')
+    f.close()
+    #-------------------------------------------------------------------------------------------------------------
+    # Executando o programa Fortran
+    try:
+        result = sub.run([fortran_exec] , check = True, text = True, capture_output = True)
+        if i == 0 and result.stdout.strip():   # exibe info de threads só no 1º modelo
+            print(result.stdout.strip())
+    except sub.CalledProcessError as e:
+        print("Erro ao executar o programa Fortran:")
+        print(e.stderr)
+    if (i+1)%100==0:
+        _block_end = time.perf_counter()
+        _block_s   = _block_end - _block_start
+        _mean_s    = _block_s / 100
+        _eta_s     = _mean_s * (ntmodels - (i+1))
+        print(f'  Iterações {i-98:>4d}–{i+1:<4d} de {ntmodels} | '
+              f'bloco={_block_s:6.1f}s | '
+              f'média={_mean_s:.3f}s/modelo | '
+              f'ETA={_eta_s/60:.1f}min')
+        _block_start = _block_end
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+end_time = time.perf_counter()
+print('-----------------------------------------------------------------------------------------------------')
+print(f"Tempo de execução: {(end_time - start_time)/3600:.6f} horas")
+print("Por favor, se a execução deste programa não é a primeira vez e você está acrescentando")
+print("mais dados ao seu dataset, você obrigatoriamente tem que mudar o número de modelos do")
+print("do arquivo 'informa.dat' (última coluna da primeira linha)")
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+#-------------------------------------------------------------------------------------------------------------
+## Define o tipo de dados (dtype) que corresponde ao formato do arquivo binário (existem 12 colunas)
+## Neste caso, a primeira coluna é inteira (int32) e as demais são reais de precisão dupla (float64).
+#dtyp = np.dtype([('col0', np.int32)] + [('col{}'.format(i), np.float64) for i in range(1, 22)])
+## Em cada linha o conteúdo do arquivo binário é:
+## med, freq, theta, zobs, resh, resv, Re{Hxx}, Im{Hxx}, Re{Hyy}, Im{Hyy}, Re{Hzz}, Im{Hzz}
+## O arquivo foi construído por 3 loops encaixados. O mais externo compreende à variação dos ângulos de inclinação.
+## O segundo é sobre o número de frequências, enquanto o mais interno é sobre as medidas.
+##-------------------------------------------------------------------------------------------------------------
+## Leitura do arquivo binário pelo numpy:
+#myout1 = mypath + filename + '.dat'
+#mydat = np.fromfile(myout1, dtype=dtyp)
+##«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
+##-------------------------------------------------------------------------------------------------------------
+## Exemplo de conversão do arquivo binário para trabalhar com o numpy:
+##-------------------------------------------------------------------------------------------------------------
+## Converta para um array numpy estruturado como lista
+#myarr = np.array(mydat.tolist())
+## Exiba o array
+#nrow = myarr.shape[0]
+## ncol = myarr.shape[1]
+#print('-----------------------------------------------------------------------------------------------------')
+#print('Número de linhas do arquivo binário:')
+#print(nrow)
+#print('-----------------------------------------------------------------------------------------------------')
+## Verifique se há algum NaN no array
+#has_nan = np.isnan(myarr).any()
+## Exiba o resultado de haver ou não NaN
+#if has_nan:
+#    print("O array CONTÉM valores NaN.")
+#else:
+#    print("O array NÃO contém valores NaN.")
+#print(myarr[-1,-2],myarr[-1,-1])    #últimos valores de Hzz
+#print('-----------------------------------------------------------------------------------------------------')
+#«•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••»
