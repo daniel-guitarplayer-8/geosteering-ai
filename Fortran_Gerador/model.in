@@ -5,47 +5,56 @@
 10.0              !altura do primeiro ponto-médio T-R, acima da primeira interface de camadas
 120.0             !tamanho da janela de investigação
 0.2               !passo entre as medidas
-1.0               !distância T-R do arranjo
+1                 !nTR — número de pares T-R (formato v10.0)
+1.0               !distância T-R 1 (metros)
 Inv0_Dip2000_teste              !nome dos arquivos de saída
-21                !número de camadas
-1370.86    1403.96     !resistividades horizontal e vertical
-4.5    4.5
-59.34    64.81
-4.91    4.91
-0.79    0.81
-31.78    34.06
-463.62    480.96
-290.64    343.03
-1.34    1.42
-0.9    0.97
-161.73    161.73
-93.47    101.59
-0.2    0.22
-9.89    9.89
-135.64    150.6
-5.43    6.09
-2.66    3.14
-30.39    30.39
-1.03    1.09
-0.12    0.14
-8.54    20.35
-0.99              !espessuras das n-2 camadas
-0.96
-0.86
-0.95
-1.01
-0.93
-0.99
-0.88
-0.95
-0.94
-42.54
-0.89
-0.94
-0.88
-0.91
-40.75
-1.06
-0.94
-0.99
-1340 2000         !modelo atual e o número máximo de modelos
+25                !número de camadas
+40.57    40.58     !resistividades horizontal e vertical
+9.78    9.78
+232.05    232.07
+0.28    0.28
+395.93    395.94
+6.67    6.67
+850.83    850.98
+0.12    0.12
+0.43    0.43
+4.19    4.19
+844.33    844.35
+15.7    15.71
+21.98    21.99
+172.02    172.04
+37.3    37.3
+187.37    187.4
+480.25    480.32
+0.2    0.2
+92.17    92.18
+35.13    35.14
+277.39    277.43
+45.62    45.62
+1.17    1.18
+134.63    134.65
+777.97    778.01
+1.91              !espessuras das n-2 camadas
+2.22
+5.21
+6.91
+2.43
+4.15
+3.74
+6.22
+0.78
+0.56
+0.5
+1.31
+2.8
+6.68
+5.82
+20.64
+5.89
+8.62
+0.69
+1.16
+2.36
+6.75
+2.65
+2000 2000         !modelo atual e o número máximo de modelos

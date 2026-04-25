@@ -459,6 +459,7 @@ def plot_resistivity_profile(
     title: str = "Perfil de Resistividade",
     style: Optional[PlotStyle] = None,
     z_obs: Optional[np.ndarray] = None,
+    scale_mode: str = "rho_log10",
 ) -> None:
     """Desenha ρₕ/ρᵥ vs profundidade replicando a convenção de ``buildValidamodels.py``.
 
@@ -509,14 +510,16 @@ def plot_resistivity_profile(
         # Ordena por z para evitar cruzamentos visuais se z_obs n\u00e3o monot\u00f4nico
         order = np.argsort(z_flat)
         z_sorted = z_flat[order]
-        ax.semilogx(
+        # v2.4c: escala linear vs log10 conforme scale_mode (default rho_log10)
+        plot_fn = ax.plot if scale_mode == "rho_linear" else ax.semilogx
+        plot_fn(
             rho_h_z[order],
             z_sorted,
             color=style.color_rho_h,
             linewidth=style.line_width + 0.6,
             label=r"$\rho_h$",
         )
-        ax.semilogx(
+        plot_fn(
             rho_v_z[order],
             z_sorted,
             color=style.color_rho_v,
@@ -577,7 +580,9 @@ def plot_resistivity_profile(
             lw=style.line_width + 0.3,
             ls="--",
         )
-        ax.set_xscale("log")
+        # v2.4c: respeita scale_mode no fallback legado
+        if scale_mode != "rho_linear":
+            ax.set_xscale("log")
 
     ax.set_xlabel(r"Resistividade ($\Omega\cdot m$)")
     ax.set_ylabel("Profundidade (m)")
@@ -628,6 +633,8 @@ def plot_tensor_full(
     tr_mask: Optional[Sequence[bool]] = None,
     ang_mask: Optional[Sequence[bool]] = None,
     freq_mask: Optional[Sequence[bool]] = None,
+    combos: Optional[Sequence[Tuple[int, int, int]]] = None,
+    scale_mode: str = "re_im",
 ) -> None:
     """Plota o tensor H em grid 3×6 com Re/Im pareados por componente.
 
@@ -673,6 +680,19 @@ def plot_tensor_full(
     nTR, nAng, n_pos, nf, _ = H.shape
     # v2.4/E12: resolve m\u00e1scaras TR/ang/freq. Cada combina\u00e7\u00e3o selecionada
     # vira uma curva sobreposta (cor distinta) nos 18 subplots Re/Im do tensor.
+    # v2.4c: combos (lista de tuplas) tem prioridade; fallback p/ masks legadas.
+    if combos is not None:
+        _combo_list_v24c: List[Tuple[int, int, int]] = [
+            (int(itr), int(iang), int(ifq))
+            for (itr, iang, ifq) in combos
+            if 0 <= int(itr) < nTR and 0 <= int(iang) < nAng and 0 <= int(ifq) < nf
+        ]
+        _used_trs = {c[0] for c in _combo_list_v24c}
+        _used_angs = {c[1] for c in _combo_list_v24c}
+        _used_freqs = {c[2] for c in _combo_list_v24c}
+        tr_mask = [i in _used_trs for i in range(nTR)]
+        ang_mask = [i in _used_angs for i in range(nAng)]
+        freq_mask = [i in _used_freqs for i in range(nf)]
     tr_sel = [
         i for i in range(nTR) if tr_mask is None or (i < len(tr_mask) and tr_mask[i])
     ]
@@ -938,6 +958,11 @@ def plot_tensor_full(
         )
     except Exception:
         lbl = title
+    # v2.4c: scale_mode no tensor 3x6 é fixo em Re/Im (propósito: panorama);
+    # se o usuário escolheu outra escala, sugere em parênteses usar a aba
+    # "Componentes EM" para obter magnitude/fase/dB individual.
+    if scale_mode and scale_mode != "re_im":
+        lbl = lbl + f"   (dica: use 'Componentes EM' para visualizar em {scale_mode})"
     canvas.figure.suptitle(lbl, fontsize=style.font_size + 2)
     canvas.draw()
 
@@ -959,6 +984,11 @@ def plot_em_profile(
     kind: str = "Magnitude + Fase",
     style: Optional[PlotStyle] = None,
     thicknesses: Optional[Sequence[float]] = None,
+    tr_mask: Optional[Sequence[bool]] = None,
+    ang_mask: Optional[Sequence[bool]] = None,
+    freq_mask: Optional[Sequence[bool]] = None,
+    combos: Optional[Sequence[Tuple[int, int, int]]] = None,
+    scale_mode: str = "re_im",
 ) -> None:
     """Plota componentes EM em função da profundidade em múltiplos modos.
 
@@ -986,14 +1016,53 @@ def plot_em_profile(
         return
 
     nTR, nAng, n_pos, nf, _ = H.shape
+    # v2.4c: resolve combinações (lista de tuplas tem prioridade; senão masks).
+    if combos is not None:
+        combo_iter_em: List[Tuple[int, int, int]] = [
+            (int(itr), int(iang), int(ifq))
+            for (itr, iang, ifq) in combos
+            if 0 <= int(itr) < nTR and 0 <= int(iang) < nAng and 0 <= int(ifq) < nf
+        ]
+    else:
+        _tr_sel = [
+            i for i in range(nTR) if tr_mask is None or (i < len(tr_mask) and tr_mask[i])
+        ]
+        _ang_sel = [
+            i
+            for i in range(nAng)
+            if ang_mask is None or (i < len(ang_mask) and ang_mask[i])
+        ]
+        _freq_sel = [
+            i
+            for i in range(nf)
+            if freq_mask is None or (i < len(freq_mask) and freq_mask[i])
+        ]
+        combo_iter_em = [
+            (itr, iang, ifq) for itr in _tr_sel for iang in _ang_sel for ifq in _freq_sel
+        ]
+    # v2.4d: scale_mode só sobrescreve `kind` para modos 1-col. Para modos
+    # 2-col ("Magnitude + Fase" e "Re + Im") o `kind` vem do combo_kind_mode
+    # e determina o LAYOUT; scale_mode apenas modula COMO cada coluna é
+    # calculada (log10/dB/rad) — preserva o comportamento v2.4/v2.4b no qual
+    # "Magnitude + Fase" plota ambos lado-a-lado na mesma imagem.
+    if kind not in ("Magnitude + Fase", "Re + Im"):
+        _scale_to_kind = {
+            "re_im": "Re + Im",
+            "mag_lin": "Só Magnitude",
+            "mag_log10": "Só Magnitude",
+            "mag_db": "Magnitude (dB)",
+            "phase_deg": "Só Fase",
+            "phase_rad": "Só Fase",
+        }
+        if scale_mode in _scale_to_kind:
+            kind = _scale_to_kind[scale_mode]
     n_comp = max(1, len(components))
-    # layout de colunas
     two_cols = kind in ("Magnitude + Fase", "Re + Im")
     ncols = 2 if two_cols else 1
     axes = canvas.figure.subplots(n_comp, ncols, squeeze=False)
 
     comp_idx = {name: i for i, name in enumerate(COMPONENT_NAMES)}
-    n_curves = nTR * nAng * nf
+    n_curves = max(1, len(combo_iter_em))
     colors = _palette_colors(n_curves, style.palette)
     thick_arr = (
         np.asarray(thicknesses, dtype=np.float64)
@@ -1010,55 +1079,69 @@ def plot_em_profile(
             if ax_b is not None:
                 _draw_layer_boundaries(ax_b, thick_arr, style)
         curve = 0
-        for itr in range(nTR):
-            for iang in range(nAng):
-                for ifq in range(nf):
-                    label = (
-                        f"TR={trs[itr]:.2f} m · θ={dips[iang]:g}° · "
-                        f"f={freqs[ifq] / 1e3:.1f} kHz"
-                    )
-                    if z_obs is not None and np.asarray(z_obs).ndim == 2:
-                        z = np.asarray(z_obs)[iang]
-                    elif z_obs is not None and np.asarray(z_obs).ndim == 1:
-                        z = np.asarray(z_obs)
-                    else:
-                        z = np.arange(n_pos, dtype=np.float64)
-                    H_sel = H[itr, iang, :, ifq, idx]
-                    mag = np.abs(H_sel)
-                    phase = np.degrees(np.angle(H_sel))
-                    color = colors[curve % len(colors)]
-                    curve += 1
-                    if kind == "Magnitude + Fase":
-                        ax_a.plot(mag, z, label=label, lw=style.line_width, color=color)
-                        ax_b.plot(phase, z, label=label, lw=style.line_width, color=color)
-                    elif kind == "Re + Im":
-                        ax_a.plot(
-                            H_sel.real, z, label=label, lw=style.line_width, color=color
-                        )
-                        ax_b.plot(
-                            H_sel.imag, z, label=label, lw=style.line_width, color=color
-                        )
-                    elif kind == "Magnitude (dB)":
-                        db = 20.0 * _safe_log10(mag)
-                        ax_a.plot(db, z, label=label, lw=style.line_width, color=color)
-                    elif kind == "Só Re":
-                        ax_a.plot(
-                            H_sel.real, z, label=label, lw=style.line_width, color=color
-                        )
-                    elif kind == "Só Im":
-                        ax_a.plot(
-                            H_sel.imag, z, label=label, lw=style.line_width, color=color
-                        )
-                    elif kind == "Só Magnitude":
-                        ax_a.plot(mag, z, label=label, lw=style.line_width, color=color)
-                    elif kind == "Só Fase":
-                        ax_a.plot(phase, z, label=label, lw=style.line_width, color=color)
+        # v2.4c: itera apenas sobre combinações selecionadas (combos unificado)
+        for itr, iang, ifq in combo_iter_em:
+            label = (
+                f"TR={trs[itr]:.2f} m · θ={dips[iang]:g}° · "
+                f"f={freqs[ifq] / 1e3:.1f} kHz"
+            )
+            if z_obs is not None and np.asarray(z_obs).ndim == 2:
+                z = np.asarray(z_obs)[iang]
+            elif z_obs is not None and np.asarray(z_obs).ndim == 1:
+                z = np.asarray(z_obs)
+            else:
+                z = np.arange(n_pos, dtype=np.float64)
+            H_sel = H[itr, iang, :, ifq, idx]
+            mag = np.abs(H_sel)
+            phase = np.degrees(np.angle(H_sel))
+            color = colors[curve % len(colors)]
+            curve += 1
+            if kind == "Magnitude + Fase":
+                # v2.4d: scale_mode modula escala da magnitude (eixo A)
+                # e da fase (eixo B) — mantém ambos visíveis lado a lado.
+                if scale_mode == "mag_log10":
+                    mag_plot = _safe_log10(mag)
+                elif scale_mode == "mag_db":
+                    mag_plot = 20.0 * _safe_log10(mag)
+                else:
+                    mag_plot = mag  # "mag_lin" ou default
+                phase_plot = np.radians(phase) if scale_mode == "phase_rad" else phase
+                ax_a.plot(mag_plot, z, label=label, lw=style.line_width, color=color)
+                ax_b.plot(phase_plot, z, label=label, lw=style.line_width, color=color)
+            elif kind == "Re + Im":
+                ax_a.plot(H_sel.real, z, label=label, lw=style.line_width, color=color)
+                ax_b.plot(H_sel.imag, z, label=label, lw=style.line_width, color=color)
+            elif kind == "Magnitude (dB)":
+                db = 20.0 * _safe_log10(mag)
+                ax_a.plot(db, z, label=label, lw=style.line_width, color=color)
+            elif kind == "Só Re":
+                ax_a.plot(H_sel.real, z, label=label, lw=style.line_width, color=color)
+            elif kind == "Só Im":
+                ax_a.plot(H_sel.imag, z, label=label, lw=style.line_width, color=color)
+            elif kind == "Só Magnitude":
+                # v2.4c: scale_mode="mag_log10" troca magnitude por log10(|H|)
+                mag_plot = _safe_log10(mag) if scale_mode == "mag_log10" else mag
+                ax_a.plot(mag_plot, z, label=label, lw=style.line_width, color=color)
+            elif kind == "Só Fase":
+                ax_a.plot(phase, z, label=label, lw=style.line_width, color=color)
 
         # Labels e formatação
         if kind == "Magnitude + Fase":
-            ax_a.set_xlabel(f"|{cname}| (A/m)")
-            ax_a.set_xscale("log")
-            ax_b.set_xlabel(f"Fase {cname} (°)")
+            # v2.4d: reflete scale_mode nos xlabels e no xscale
+            if scale_mode == "mag_log10":
+                ax_a.set_xlabel(f"log10 |{cname}|")
+            elif scale_mode == "mag_db":
+                ax_a.set_xlabel(f"|{cname}| (dB)")
+            elif scale_mode == "mag_lin":
+                ax_a.set_xlabel(f"|{cname}| (A/m)")
+            else:
+                ax_a.set_xlabel(f"|{cname}| (A/m)")
+                ax_a.set_xscale("log")
+            ax_b.set_xlabel(
+                f"Fase {cname} (rad)"
+                if scale_mode == "phase_rad"
+                else f"Fase {cname} (°)"
+            )
         elif kind == "Re + Im":
             ax_a.set_xlabel(f"Re({cname})")
             ax_b.set_xlabel(f"Im({cname})")
@@ -1069,8 +1152,11 @@ def plot_em_profile(
         elif kind == "Só Im":
             ax_a.set_xlabel(f"Im({cname})")
         elif kind == "Só Magnitude":
-            ax_a.set_xlabel(f"|{cname}| (A/m)")
-            ax_a.set_xscale("log")
+            if scale_mode == "mag_log10":
+                ax_a.set_xlabel(f"log10 |{cname}|")
+            else:
+                ax_a.set_xlabel(f"|{cname}| (A/m)")
+                ax_a.set_xscale("log")
         elif kind == "Só Fase":
             ax_a.set_xlabel(f"Fase {cname} (°)")
         for ax in (ax_a, ax_b):
@@ -1261,6 +1347,8 @@ def plot_geosignals(
     tr_mask: Optional[Sequence[bool]] = None,
     ang_mask: Optional[Sequence[bool]] = None,
     freq_mask: Optional[Sequence[bool]] = None,
+    combos: Optional[Sequence[Tuple[int, int, int]]] = None,
+    scale_mode: str = "geo_log10_deg",
 ) -> None:
     """Plota até 5 geosinais derivados do tensor H em grade (N×2) amp/fase.
 
@@ -1324,6 +1412,19 @@ def plot_geosignals(
         canvas.draw()
         return
 
+    # v2.4c: combos (lista de tuplas) tem prioridade; fallback p/ masks legadas.
+    if combos is not None:
+        _combo_list_v24c: List[Tuple[int, int, int]] = [
+            (int(itr), int(iang), int(ifq))
+            for (itr, iang, ifq) in combos
+            if 0 <= int(itr) < nTR and 0 <= int(iang) < nAng and 0 <= int(ifq) < nf
+        ]
+        _used_trs = {c[0] for c in _combo_list_v24c}
+        _used_angs = {c[1] for c in _combo_list_v24c}
+        _used_freqs = {c[2] for c in _combo_list_v24c}
+        tr_mask = [i in _used_trs for i in range(nTR)]
+        ang_mask = [i in _used_angs for i in range(nAng)]
+        freq_mask = [i in _used_freqs for i in range(nf)]
     tr_sel = [
         i for i in range(nTR) if tr_mask is None or (i < len(tr_mask) and tr_mask[i])
     ]
@@ -1367,8 +1468,17 @@ def plot_geosignals(
                         z = np.arange(n_pos, dtype=np.float64)
                     H_slice = H[itr, iang, :, ifq, :]
                     signal = _compute_geosignal(gname, H_slice)
-                    amp = _safe_log10(np.abs(signal) + 1e-30)
-                    phase = np.degrees(np.angle(signal))
+                    # v2.4c: amplitude/fase dependem de scale_mode
+                    raw_amp = np.abs(signal) + 1e-30
+                    if scale_mode == "geo_lin_deg":
+                        amp = raw_amp
+                        phase = np.degrees(np.angle(signal))
+                    elif scale_mode == "geo_db_rad":
+                        amp = 20.0 * _safe_log10(raw_amp)
+                        phase = np.angle(signal)  # radianos
+                    else:  # geo_log10_deg (default)
+                        amp = _safe_log10(raw_amp)
+                        phase = np.degrees(np.angle(signal))
                     lbl = (
                         f"TR={trs[itr]:.2f} θ={dips[iang]:g}° "
                         f"f={freqs[ifq] / 1e3:.1f} kHz"
@@ -1378,8 +1488,16 @@ def plot_geosignals(
                     ax_amp.plot(amp, z, label=lbl, lw=style.line_width, color=color)
                     ax_pha.plot(phase, z, label=lbl, lw=style.line_width, color=color)
 
-        ax_amp.set_xlabel(f"{gname} — amplitude log₁₀|·|")
-        ax_pha.set_xlabel(f"{gname} — fase ∠· (°)")
+        # v2.4c: rótulos refletem a escala selecionada
+        if scale_mode == "geo_lin_deg":
+            ax_amp.set_xlabel(f"{gname} — amplitude |·|")
+            ax_pha.set_xlabel(f"{gname} — fase ∠· (°)")
+        elif scale_mode == "geo_db_rad":
+            ax_amp.set_xlabel(f"{gname} — amplitude (dB)")
+            ax_pha.set_xlabel(f"{gname} — fase ∠· (rad)")
+        else:
+            ax_amp.set_xlabel(f"{gname} — amplitude log₁₀|·|")
+            ax_pha.set_xlabel(f"{gname} — fase ∠· (°)")
         for ax in (ax_amp, ax_pha):
             ax.set_ylabel("Profundidade (m)")
             ax.invert_yaxis()

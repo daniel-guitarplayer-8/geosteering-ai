@@ -89,6 +89,7 @@ if QT_AVAILABLE:
     )
     from .sm_io import compute_nmeds_per_angle
     from .sm_model_gen import GENERATORS_AVAILABLE, GenConfig, generate_models
+    from .sm_plot_cache import LRUPlotCache
     from .sm_plots import (
         COMPONENT_NAMES,
         PLOT_KINDS,
@@ -2419,6 +2420,36 @@ class SimulatorPage(QtWidgets.QWidget):
         )
         self.sim_history_list.addItem(item)
 
+    def mark_history_out_of_cache(self, snapshot_id: str) -> None:
+        """Marca um item do histórico como fora-do-cache (ícone cinza).
+
+        Chamado pelo MainWindow quando o LRUPlotCache evicta um snapshot
+        antigo por ter ultrapassado o limite (maxlen=3 ou 500 MB). O item
+        permanece na lista — só muda visualmente para sinalizar ao usuário
+        que o tensor H não está mais em RAM e que duplo-clique exigirá
+        reexecução para plotar.
+        """
+        role = (
+            QtCore.Qt.ItemDataRole.UserRole
+            if hasattr(QtCore.Qt, "ItemDataRole")
+            else QtCore.Qt.UserRole
+        )
+        for i in range(self.sim_history_list.count()):
+            item = self.sim_history_list.item(i)
+            if item is None:
+                continue
+            if str(item.data(role)) == str(snapshot_id):
+                text = item.text()
+                # Troca ícone ● (em cache) por ○ (fora de cache)
+                if text.startswith("● "):
+                    item.setText("○ " + text[2:])
+                item.setToolTip(
+                    f"snapshot_id: {snapshot_id}\n"
+                    "Tensor fora do cache (evictado por limite de memória).\n"
+                    "Reexecute com estes parâmetros para plotar."
+                )
+                return
+
     def clear_history_list(self) -> None:
         """Limpa a lista do histórico na UI (sem tocar no ExperimentState)."""
         self.sim_history_list.clear()
@@ -3171,12 +3202,259 @@ class BenchmarkPage(QtWidgets.QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# v2.4d: SaveFigureDialog — customização antes de exportar
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class SaveFigureDialog(QtWidgets.QDialog):
+    """Diálogo de salvamento de figura com 2 modos: rápido ou customizado.
+
+    v2.4d — permite ao usuário escolher entre:
+      • **Salvar figura atual (padrão)** — exporta o canvas exibido AS-IS
+        (equivalente ao comportamento v2.4c: arquivo direto PNG/PDF/SVG).
+      • **Customizar antes de salvar** — permite escolher quais componentes
+        EM (Hxx, Hxy, …, Hzz) e quais combinações (TR, θ, f) aparecem na
+        imagem final. A figura é re-renderizada em um canvas temporário
+        com essas escolhas e depois exportada.
+
+    Invariantes:
+      • Não toca no canvas principal da ResultsPage (preserva a visualização
+        ao vivo; o usuário não perde seu contexto ao salvar).
+      • Não inicia qualquer simulação (plotagem 100% CPU NumPy/Matplotlib).
+      • Backends JAX/Numba/Fortran NÃO são chamados aqui.
+
+    Attributes:
+        mode: "quick" (salvar atual) ou "custom" (customizar).
+        selected_components: lista de nomes de componentes EM escolhidos.
+        selected_combos: lista de tuplas (itr, iang, ifq) escolhidas.
+        output_path: caminho de arquivo escolhido pelo usuário (pode ser
+            ``None`` se cancelou).
+    """
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget,
+        all_components: Sequence[str],
+        current_components: Sequence[str],
+        combos_labels: Sequence[str],
+        current_selected_combo_indices: Sequence[int],
+        current_plot_kind: str,
+        current_scale_mode: str,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Salvar Figura — Opções de Exportação")
+        self.setModal(True)
+        self.resize(560, 620)
+
+        # Compatibilidade Qt5/Qt6: enum paths diferentes
+        self._checkable_flag = (
+            QtCore.Qt.ItemFlag.ItemIsUserCheckable
+            if hasattr(QtCore.Qt, "ItemFlag")
+            else QtCore.Qt.ItemIsUserCheckable
+        )
+        self._checked = (
+            QtCore.Qt.CheckState.Checked
+            if hasattr(QtCore.Qt, "CheckState")
+            else QtCore.Qt.Checked
+        )
+        self._unchecked = (
+            QtCore.Qt.CheckState.Unchecked
+            if hasattr(QtCore.Qt, "CheckState")
+            else QtCore.Qt.Unchecked
+        )
+        self._user_role = (
+            QtCore.Qt.ItemDataRole.UserRole
+            if hasattr(QtCore.Qt, "ItemDataRole")
+            else QtCore.Qt.UserRole
+        )
+
+        self.mode: str = "quick"
+        self.selected_components: List[str] = list(current_components)
+        self.selected_combos: List[int] = list(current_selected_combo_indices)
+        self.output_path: Optional[str] = None
+        self._all_components = list(all_components)
+        self._combos_labels = list(combos_labels)
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+
+        # ── Cabeçalho explicativo ────────────────────────────────────────
+        header = QtWidgets.QLabel(
+            "<b>Como você gostaria de salvar a figura?</b><br/>"
+            "<span style='color:#888;'>Escolha entre exportar a figura "
+            "atual como está na tela ou customizar antes de salvar.</span>"
+        )
+        header.setWordWrap(True)
+        root.addWidget(header)
+
+        # ── Modo (rádio) ─────────────────────────────────────────────────
+        self.rb_quick = QtWidgets.QRadioButton(
+            "Salvar figura atual (padrão) — exporta como está na tela"
+        )
+        self.rb_quick.setChecked(True)
+        self.rb_custom = QtWidgets.QRadioButton(
+            "Customizar antes de salvar — escolher componentes e combinações"
+        )
+        root.addWidget(self.rb_quick)
+        root.addWidget(self.rb_custom)
+
+        # ── Painel de customização (visível só em modo custom) ───────────
+        self.grp_custom = QtWidgets.QGroupBox("Customização da figura exportada")
+        grp_layout = QtWidgets.QVBoxLayout(self.grp_custom)
+
+        # Info do contexto atual
+        info = QtWidgets.QLabel(
+            f"<i>Tipo de plot:</i> <b>{current_plot_kind}</b> · "
+            f"<i>Escala:</i> <b>{current_scale_mode}</b>"
+        )
+        info.setWordWrap(True)
+        grp_layout.addWidget(info)
+
+        # Componentes EM (checkbox list)
+        grp_layout.addWidget(QtWidgets.QLabel("<b>Componentes EM:</b>"))
+        self.list_components = QtWidgets.QListWidget()
+        self.list_components.setMaximumHeight(180)
+        for name in self._all_components:
+            it = QtWidgets.QListWidgetItem(name)
+            it.setFlags(it.flags() | self._checkable_flag)
+            it.setCheckState(
+                self._checked if name in self.selected_components else self._unchecked
+            )
+            self.list_components.addItem(it)
+        grp_layout.addWidget(self.list_components)
+
+        btns_comp = QtWidgets.QHBoxLayout()
+        b_comp_all = QtWidgets.QPushButton("Marcar todos")
+        b_comp_none = QtWidgets.QPushButton("Desmarcar todos")
+        b_comp_all.clicked.connect(lambda: self._set_all(self.list_components, True))
+        b_comp_none.clicked.connect(lambda: self._set_all(self.list_components, False))
+        btns_comp.addWidget(b_comp_all)
+        btns_comp.addWidget(b_comp_none)
+        btns_comp.addStretch(1)
+        grp_layout.addLayout(btns_comp)
+
+        # Combinações (TR, θ, f)
+        grp_layout.addWidget(QtWidgets.QLabel("<b>Combinações (TR, θ, f):</b>"))
+        self.list_combos = QtWidgets.QListWidget()
+        self.list_combos.setMaximumHeight(200)
+        current_set = set(self.selected_combos)
+        for i, lbl in enumerate(self._combos_labels):
+            it = QtWidgets.QListWidgetItem(lbl)
+            it.setFlags(it.flags() | self._checkable_flag)
+            it.setCheckState(self._checked if i in current_set else self._unchecked)
+            it.setData(self._user_role, i)
+            self.list_combos.addItem(it)
+        grp_layout.addWidget(self.list_combos)
+
+        btns_combo = QtWidgets.QHBoxLayout()
+        b_combo_all = QtWidgets.QPushButton("Marcar todas")
+        b_combo_none = QtWidgets.QPushButton("Desmarcar todas")
+        b_combo_first = QtWidgets.QPushButton("Apenas primeira")
+        b_combo_all.clicked.connect(lambda: self._set_all(self.list_combos, True))
+        b_combo_none.clicked.connect(lambda: self._set_all(self.list_combos, False))
+        b_combo_first.clicked.connect(self._select_first_combo)
+        btns_combo.addWidget(b_combo_all)
+        btns_combo.addWidget(b_combo_none)
+        btns_combo.addWidget(b_combo_first)
+        btns_combo.addStretch(1)
+        grp_layout.addLayout(btns_combo)
+
+        root.addWidget(self.grp_custom)
+        self.grp_custom.setEnabled(False)
+
+        # Rádio → habilita/desabilita painel custom
+        self.rb_custom.toggled.connect(self.grp_custom.setEnabled)
+
+        # ── Botões OK / Cancelar ─────────────────────────────────────────
+        btns_box = QtWidgets.QDialogButtonBox()
+        btns_box.addButton(
+            "Escolher destino e salvar…",
+            QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole,
+        )
+        btns_box.addButton(
+            "Cancelar",
+            QtWidgets.QDialogButtonBox.ButtonRole.RejectRole,
+        )
+        btns_box.accepted.connect(self._on_accept)
+        btns_box.rejected.connect(self.reject)
+        root.addWidget(btns_box)
+
+    # ── Helpers ──────────────────────────────────────────────────────────
+
+    def _set_all(self, lst: QtWidgets.QListWidget, checked: bool) -> None:
+        state = self._checked if checked else self._unchecked
+        for i in range(lst.count()):
+            lst.item(i).setCheckState(state)
+
+    def _select_first_combo(self) -> None:
+        self._set_all(self.list_combos, False)
+        if self.list_combos.count() > 0:
+            self.list_combos.item(0).setCheckState(self._checked)
+
+    def _on_accept(self) -> None:
+        """Coleta escolhas e solicita caminho de arquivo."""
+        if self.rb_custom.isChecked():
+            self.mode = "custom"
+            self.selected_components = [
+                self.list_components.item(i).text()
+                for i in range(self.list_components.count())
+                if self.list_components.item(i).checkState() == self._checked
+            ]
+            self.selected_combos = [
+                int(self.list_combos.item(i).data(self._user_role))
+                for i in range(self.list_combos.count())
+                if self.list_combos.item(i).checkState() == self._checked
+            ]
+            if not self.selected_components:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Nada selecionado",
+                    "Selecione ao menos 1 componente EM para customizar a figura.",
+                )
+                return
+            if not self.selected_combos:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Nada selecionado",
+                    "Selecione ao menos 1 combinação (TR, θ, f) para customizar.",
+                )
+                return
+        else:
+            self.mode = "quick"
+
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Salvar figura",
+            "plot.png",
+            "PNG (*.png);;PDF (*.pdf);;SVG (*.svg)",
+        )
+        if not path:
+            return  # usuário cancelou o diálogo de arquivo
+        self.output_path = path
+        self.accept()
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Aba 4 — Resultados (+ model selector)
 # ══════════════════════════════════════════════════════════════════════════
 
 
 class ResultsPage(QtWidgets.QWidget):
-    """Página de plotagem interativa — simulação + benchmark + seletor de modelo."""
+    """Página de plotagem interativa — simulação + benchmark + seletor de modelo.
+
+    v2.4c: Refatoração completa da seção Resultados com (1) combobox de
+    experimento (lista snapshots do histórico), (2) lista unificada de
+    combinações TR×θ×f (substitui 3 filtros separados), (3) combos de
+    escala contextuais por tipo de plot, (4) botão "Liberar memória"
+    (cache LRU), (5) QSpinBox para índice de modelo (O(1) vs O(N)),
+    (6) aviso pré-plot quando > 50 curvas seriam renderizadas.
+    """
+
+    # v2.4c: sinal emitido quando usuário seleciona um experimento no combo
+    # (permite ao MainWindow trocar para esta aba quando duplo-clique do
+    # histórico da aba Simulador é disparado).
+    request_free_memory = Signal()
 
     def __init__(
         self,
@@ -3188,6 +3466,10 @@ class ResultsPage(QtWidgets.QWidget):
         self._current_sim: Optional[Dict[str, Any]] = None
         self._benchmark_plot_data: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._sim_models: List[Dict[str, Any]] = []  # cache dos modelos gerados
+        # v2.4c: lista ordenada de (label, snapshot_id, in_cache) para combo_experiment
+        self._experiment_entries: List[Tuple[str, Optional[str], bool]] = []
+        # v2.4c: bundle ativo escolhido via combo_experiment (None = usa _current_sim)
+        self._active_bundle: Optional[Dict[str, Any]] = None
 
         # Painel esquerdo — controles
         controls = QtWidgets.QGroupBox("Controles de Plot")
@@ -3195,18 +3477,62 @@ class ResultsPage(QtWidgets.QWidget):
         ctrl_layout.setLabelAlignment(ALIGN_RIGHT)
         ctrl_layout.setHorizontalSpacing(12)
 
-        self.combo_source = QtWidgets.QComboBox()
-        self.combo_source.addItems(["Simulação atual", "Benchmark (Numba vs Fortran)"])
-        _tooltip(self.combo_source, "Fonte dos dados a plotar.")
-
-        self.combo_model_key = QtWidgets.QComboBox()
+        # ── v2.4c: Combo de seleção de experimento ──────────────────────
+        # Lista todos os snapshots históricos + "Simulação atual" +
+        # "Benchmark atual". Substitui funcionalmente combo_source (que
+        # fica oculto por backward-compat).
+        self.combo_experiment = QtWidgets.QComboBox()
+        self.combo_experiment.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
+            if hasattr(QtWidgets.QComboBox, "SizeAdjustPolicy")
+            else 0
+        )
         _tooltip(
-            self.combo_model_key,
+            self.combo_experiment,
             (
-                "Célula específica (modelo × config) a plotar. Em 'Simulação atual', "
-                "se múltiplos modelos foram gerados, lista os índices 0..N−1."
+                "<b>Experimento a plotar</b><br/>"
+                "• <b>Simulação atual</b>: último run em memória.<br/>"
+                "• <b>Benchmark atual</b>: Numba vs Fortran (se ativo).<br/>"
+                "• <b>#N — …</b>: snapshot do histórico (em cache LRU).<br/>"
+                "Ícone ○ = tensor fora do cache (reexecute para plotar)."
             ),
         )
+        # Popula entries default (serão atualizadas em refresh_experiment_list)
+        self._experiment_entries = [("Simulação atual", None, True)]
+        self.combo_experiment.addItem("Simulação atual")
+
+        # v2.4c: combo_source mantido oculto (backward-compat com código existente
+        # que ainda lê combo_source.currentIndex() internamente).
+        self.combo_source = QtWidgets.QComboBox()
+        self.combo_source.addItems(["Simulação atual", "Benchmark (Numba vs Fortran)"])
+        self.combo_source.setVisible(False)
+        _tooltip(self.combo_source, "(oculto v2.4c — substituído por combo_experiment)")
+
+        # ── v2.4c: QSpinBox para índice de modelo (O(1) vs O(N)) ────────
+        # Substitui combo_model_key populado com loop de 1000 entries.
+        # Label ao lado mostra título do modelo atual.
+        self.spin_model_idx = QtWidgets.QSpinBox()
+        self.spin_model_idx.setMinimum(0)
+        self.spin_model_idx.setMaximum(0)
+        self.spin_model_idx.setPrefix("#")
+        self.spin_model_idx.setToolTip(
+            "Índice do modelo geológico (0-based). Lento O(N) na GUI "
+            "antiga foi substituído por spinner O(1)."
+        )
+        self.lbl_model_title = QtWidgets.QLabel("(modelo único)")
+        self.lbl_model_title.setStyleSheet("color: #9cdcfe;")
+        self.lbl_model_title.setWordWrap(True)
+        model_idx_wrap = QtWidgets.QWidget()
+        model_idx_h = QtWidgets.QHBoxLayout(model_idx_wrap)
+        model_idx_h.setContentsMargins(0, 0, 0, 0)
+        model_idx_h.addWidget(self.spin_model_idx, 0)
+        model_idx_h.addWidget(self.lbl_model_title, 1)
+
+        # v2.4c: combo_model_key mantido oculto (backward-compat com _resolve_current_sim_H
+        # e fluxo de benchmark que usa texto "Modelo / Config").
+        self.combo_model_key = QtWidgets.QComboBox()
+        self.combo_model_key.setVisible(False)
+        _tooltip(self.combo_model_key, "(oculto v2.4c — substituído por spin_model_idx)")
 
         self.list_components = QtWidgets.QListWidget()
         self.list_components.setSelectionMode(
@@ -3270,12 +3596,77 @@ class ResultsPage(QtWidgets.QWidget):
             ),
         )
 
-        # ── v2.4: Filtros TR / Ângulo / Frequência (QListWidget checkável) ──
-        # Permitem ao usuário escolher quais combinações plotar em vez de
-        # sempre a primeira (comportamento antigo: itr=0, iang=0, ifq=0).
+        # ── v2.4c: Lista UNIFICADA de combinações (TR × θ × f) ──────────
+        # Substitui os 3 filtros separados (que geravam produto cartesiano
+        # explosivo até 105 curvas). Agora cada item é uma combinação
+        # específica que o usuário marca individualmente.
+        # Os widgets list_tr_filter / list_ang_filter / list_freq_filter
+        # continuam existindo (ocultos) para backward-compat com testes
+        # externos que esperem as máscaras individuais.
+        self.list_combos = QtWidgets.QListWidget()
+        self.list_combos.setMaximumHeight(180)
+        self.list_combos.setAlternatingRowColors(True)
+        self.list_combos.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.NoSelection
+            if hasattr(QtWidgets.QAbstractItemView, "SelectionMode")
+            else QtWidgets.QAbstractItemView.NoSelection
+        )
+        _tooltip(
+            self.list_combos,
+            (
+                "<b>Combinações (TR, θ, f) a plotar</b><br/>"
+                "Cada linha é uma combinação única. Marque apenas as que quer "
+                "visualizar. Default: 1 combinação marcada para evitar explosão "
+                "visual.<br/><br/>"
+                "⚠ Mais de 20 combinações pode tornar o plot ilegível."
+            ),
+        )
+
+        # Botões auxiliares da lista de combinações
+        self.btn_combos_all = QtWidgets.QPushButton("Marcar todas")
+        self.btn_combos_none = QtWidgets.QPushButton("Desmarcar")
+        self.btn_combos_first = QtWidgets.QPushButton("Apenas 1ª")
+        for _b in (self.btn_combos_all, self.btn_combos_none, self.btn_combos_first):
+            _b.setMaximumWidth(110)
+        self.edit_combos_search = QtWidgets.QLineEdit()
+        self.edit_combos_search.setPlaceholderText(
+            "Filtrar (ex: 'TR=1.0', 'θ=0°', 'f=20')"
+        )
+        self.edit_combos_search.setClearButtonEnabled(True)
+        self.btn_combos_apply_filter = QtWidgets.QPushButton("Marcar filtro")
+        self.btn_combos_apply_filter.setMaximumWidth(110)
+        self.lbl_combos_count = QtWidgets.QLabel("Selecionadas: 0 / 0")
+        self.lbl_combos_count.setStyleSheet("color: #9cdcfe;")
+
+        combos_wrap = QtWidgets.QWidget()
+        combos_v = QtWidgets.QVBoxLayout(combos_wrap)
+        combos_v.setContentsMargins(0, 0, 0, 0)
+        combos_v.setSpacing(4)
+        combos_v.addWidget(self.list_combos)
+        # Primeira linha de botões: marcar/desmarcar/primeira
+        btn_row1 = QtWidgets.QHBoxLayout()
+        btn_row1.setContentsMargins(0, 0, 0, 0)
+        btn_row1.addWidget(self.btn_combos_all)
+        btn_row1.addWidget(self.btn_combos_none)
+        btn_row1.addWidget(self.btn_combos_first)
+        btn_row1.addStretch(1)
+        combos_v.addLayout(btn_row1)
+        # Segunda linha: busca + aplicar
+        btn_row2 = QtWidgets.QHBoxLayout()
+        btn_row2.setContentsMargins(0, 0, 0, 0)
+        btn_row2.addWidget(self.edit_combos_search, 1)
+        btn_row2.addWidget(self.btn_combos_apply_filter)
+        combos_v.addLayout(btn_row2)
+        combos_v.addWidget(self.lbl_combos_count)
+
+        # Filtros legados (ocultos) — mantidos p/ backward-compat
         self.list_tr_filter = self._make_check_list("Espaçamentos T-R")
         self.list_ang_filter = self._make_check_list("Ângulos de dip")
         self.list_freq_filter = self._make_check_list("Frequências")
+        self.list_tr_filter.setVisible(False)
+        self.list_ang_filter.setVisible(False)
+        self.list_freq_filter.setVisible(False)
+
         # ── v2.4: Filtro de geosinais (5 derivados) ─────────────────────────
         self.list_geo_filter = self._make_check_list("Geosinais")
         for name in ("USD", "UAD", "UHR", "UHA", "U3DF"):
@@ -3308,23 +3699,82 @@ class ResultsPage(QtWidgets.QWidget):
             ),
         )
 
+        # ── v2.4c: Combos de escala contextuais por tipo de plot ────────
+        self.combo_scale_tensor = QtWidgets.QComboBox()
+        self.combo_scale_tensor.addItems(
+            [
+                "Re / Im (linear)",
+                "Magnitude (linear)",
+                "Magnitude (log10)",
+                "Magnitude (dB)",
+                "Fase (°)",
+                "Fase (rad)",
+            ]
+        )
+        _tooltip(
+            self.combo_scale_tensor,
+            "Escala de renderização do tensor H / Componentes EM.",
+        )
+
+        self.combo_scale_geosignals = QtWidgets.QComboBox()
+        self.combo_scale_geosignals.addItems(
+            [
+                "Amplitude (log10) + Fase (°)",
+                "Amplitude (linear) + Fase (°)",
+                "Amplitude (dB) + Fase (rad)",
+            ]
+        )
+        _tooltip(self.combo_scale_geosignals, "Escala para os 5 geosinais.")
+
+        self.combo_scale_resistivity = QtWidgets.QComboBox()
+        self.combo_scale_resistivity.addItems(["log10 (padrão)", "linear"])
+        _tooltip(
+            self.combo_scale_resistivity,
+            "Escala do perfil de resistividade (log10 = idêntico a buildValidamodels.py).",
+        )
+
         self.btn_plot = QtWidgets.QPushButton("Plotar")
         self.btn_plot.setProperty("role", "primary")
         _tooltip(self.btn_plot, "Renderiza o plot com os dados e configurações atuais.")
         self.btn_save = QtWidgets.QPushButton("Salvar figura…")
         _tooltip(self.btn_save, "Exporta a figura atual como PNG, PDF ou SVG no disco.")
+        # ── v2.4c: Botão "Liberar memória de plotagem" ──────────────────
+        self.btn_free_memory = QtWidgets.QPushButton("🧹 Liberar memória")
+        self.btn_free_memory.setProperty("role", "warning")
+        _tooltip(
+            self.btn_free_memory,
+            (
+                "Esvazia o cache LRU de tensores H (snapshots do histórico). "
+                "A 'Simulação atual' é preservada. Use se a GUI ficar lenta "
+                "após múltiplas simulações grandes."
+            ),
+        )
 
-        ctrl_layout.addRow("Fonte:", self.combo_source)
-        ctrl_layout.addRow("Modelo / célula:", self.combo_model_key)
+        # ── v2.4d: Combos de escala empilhados (QStackedWidget) ──────────
+        # Os 3 combos (Tensor/EM, Geosinais, Resistividade) ocupam a MESMA
+        # linha (mesmo X/Y). O label troca dinamicamente conforme o tipo de
+        # plot selecionado, evitando reflow do layout ao trocar Tipo de plot.
+        self._scale_stack = QtWidgets.QStackedWidget()
+        self._scale_stack.addWidget(self.combo_scale_tensor)  # índice 0
+        self._scale_stack.addWidget(self.combo_scale_geosignals)  # índice 1
+        self._scale_stack.addWidget(self.combo_scale_resistivity)  # índice 2
+        self._scale_label = QtWidgets.QLabel("Escala Tensor/EM:")
+
+        # ── v2.4c: Layout refatorado — ordem intuitiva ────────────────
+        ctrl_layout.addRow("Experimento:", self.combo_experiment)
+        ctrl_layout.addRow("Modelo:", model_idx_wrap)
         ctrl_layout.addRow("Componentes EM:", self.list_components)
         ctrl_layout.addRow("Tipo de plot:", self.combo_plot_kind)
         ctrl_layout.addRow("Modo (Componentes EM):", self.combo_kind_mode)
-        ctrl_layout.addRow("Filtro — TR:", self.list_tr_filter)
-        ctrl_layout.addRow("Filtro — Ângulo:", self.list_ang_filter)
-        ctrl_layout.addRow("Filtro — Frequência:", self.list_freq_filter)
+        # v2.4d: único row para os 3 combos de escala (posição X/Y fixa)
+        ctrl_layout.addRow(self._scale_label, self._scale_stack)
+        ctrl_layout.addRow("Combinações (TR, θ, f):", combos_wrap)
         ctrl_layout.addRow("Filtro — Geosinais:", self.list_geo_filter)
+        # Widgets ocultos mantidos no form p/ backward-compat (não aparecem na UI)
+        # combo_source e combo_model_key foram criados com setVisible(False)
         ctrl_layout.addRow(self.btn_plot)
         ctrl_layout.addRow(self.btn_save)
+        ctrl_layout.addRow(self.btn_free_memory)
 
         # Painel direito — canvas
         self.canvas = EMCanvas(self, figsize=(14, 9), style=self._style)
@@ -3356,6 +3806,21 @@ class ResultsPage(QtWidgets.QWidget):
         self.btn_plot.clicked.connect(self._on_plot)
         self.btn_save.clicked.connect(self._on_save)
         self.combo_source.currentIndexChanged.connect(self._refresh_keys)
+
+        # v2.4c: wiring dos novos controles
+        self.combo_experiment.currentIndexChanged.connect(self._on_experiment_changed)
+        self.spin_model_idx.valueChanged.connect(self._on_model_idx_changed)
+        self.btn_free_memory.clicked.connect(self.request_free_memory.emit)
+        self.btn_combos_all.clicked.connect(lambda: self._set_all_combos(True))
+        self.btn_combos_none.clicked.connect(lambda: self._set_all_combos(False))
+        self.btn_combos_first.clicked.connect(self._select_first_combo_only)
+        self.btn_combos_apply_filter.clicked.connect(self._apply_combos_search)
+        self.list_combos.itemChanged.connect(self._update_combos_count)
+        # Combo de tipo de plot → atualizar visibilidade dos combos de escala
+        self.combo_plot_kind.currentIndexChanged.connect(
+            self._update_scale_combos_visibility
+        )
+        self._update_scale_combos_visibility()
 
     # ── v2.4: helpers de filtro ───────────────────────────────────────────
     def _make_check_list(self, label: str) -> QtWidgets.QListWidget:
@@ -3397,6 +3862,341 @@ class ResultsPage(QtWidgets.QWidget):
         """Máscara dos 5 geosinais na ordem [USD, UAD, UHR, UHA, U3DF]."""
         return self._filter_mask(self.list_geo_filter)
 
+    # ══════════════════════════════════════════════════════════════════
+    # v2.4c — Helpers da lista unificada de combinações (TR × θ × f)
+    # ══════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _fmt_hz(fq: float) -> str:
+        """Formata frequência com unidade legível (Hz / kHz / MHz)."""
+        try:
+            f = float(fq)
+        except Exception:
+            return str(fq)
+        if f >= 1e6:
+            return f"{f / 1e6:g} MHz"
+        if f >= 1e3:
+            return f"{f / 1e3:g} kHz"
+        return f"{f:g} Hz"
+
+    def _populate_combos(
+        self,
+        trs: Sequence[float],
+        dips: Sequence[float],
+        freqs: Sequence[float],
+    ) -> None:
+        """Popula list_combos com todas as combinações (iTR, iAng, iFq).
+
+        Default: apenas a primeira combinação é marcada (evita explosão
+        visual quando nTR×nAng×nFreq > 20).
+        """
+        self.list_combos.blockSignals(True)
+        try:
+            self.list_combos.clear()
+            role = (
+                QtCore.Qt.ItemDataRole.UserRole
+                if hasattr(QtCore.Qt, "ItemDataRole")
+                else QtCore.Qt.UserRole
+            )
+            for itr, tr in enumerate(trs or []):
+                for iang, ang in enumerate(dips or []):
+                    for ifq, fq in enumerate(freqs or []):
+                        label = (
+                            f"TR={float(tr):.1f} m | "
+                            f"θ={float(ang):g}° | "
+                            f"f={self._fmt_hz(fq)}"
+                        )
+                        item = QtWidgets.QListWidgetItem(label)
+                        item.setFlags(
+                            item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable
+                        )
+                        item.setData(role, (itr, iang, ifq))
+                        default_checked = itr == 0 and iang == 0 and ifq == 0
+                        item.setCheckState(
+                            QtCore.Qt.CheckState.Checked
+                            if default_checked
+                            else QtCore.Qt.CheckState.Unchecked
+                        )
+                        self.list_combos.addItem(item)
+        finally:
+            self.list_combos.blockSignals(False)
+        self._update_combos_count()
+
+    def _selected_combos(self) -> List[Tuple[int, int, int]]:
+        """Retorna lista de tuples (iTR, iAng, iFq) das combinações marcadas."""
+        role = (
+            QtCore.Qt.ItemDataRole.UserRole
+            if hasattr(QtCore.Qt, "ItemDataRole")
+            else QtCore.Qt.UserRole
+        )
+        out: List[Tuple[int, int, int]] = []
+        for i in range(self.list_combos.count()):
+            item = self.list_combos.item(i)
+            if item is None:
+                continue
+            if item.checkState() == QtCore.Qt.CheckState.Checked:
+                data = item.data(role)
+                if isinstance(data, tuple) and len(data) == 3:
+                    out.append((int(data[0]), int(data[1]), int(data[2])))
+        return out
+
+    def _set_all_combos(self, checked: bool) -> None:
+        """Marca/desmarca todos os combos da lista."""
+        state = (
+            QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked
+        )
+        self.list_combos.blockSignals(True)
+        try:
+            for i in range(self.list_combos.count()):
+                item = self.list_combos.item(i)
+                if item is not None:
+                    item.setCheckState(state)
+        finally:
+            self.list_combos.blockSignals(False)
+        self._update_combos_count()
+
+    def _select_first_combo_only(self) -> None:
+        """Marca apenas a primeira combinação, desmarca o resto."""
+        self.list_combos.blockSignals(True)
+        try:
+            for i in range(self.list_combos.count()):
+                item = self.list_combos.item(i)
+                if item is not None:
+                    item.setCheckState(
+                        QtCore.Qt.CheckState.Checked
+                        if i == 0
+                        else QtCore.Qt.CheckState.Unchecked
+                    )
+        finally:
+            self.list_combos.blockSignals(False)
+        self._update_combos_count()
+
+    def _apply_combos_search(self) -> None:
+        """Marca combos cujo label contém o texto de busca (case-insensitive)."""
+        q = self.edit_combos_search.text().strip().lower()
+        if not q:
+            return
+        self.list_combos.blockSignals(True)
+        try:
+            for i in range(self.list_combos.count()):
+                item = self.list_combos.item(i)
+                if item is None:
+                    continue
+                if q in item.text().lower():
+                    item.setCheckState(QtCore.Qt.CheckState.Checked)
+        finally:
+            self.list_combos.blockSignals(False)
+        self._update_combos_count()
+
+    def _update_combos_count(self, *_args) -> None:
+        """Atualiza label de contagem + aviso se muitas combinações marcadas."""
+        total = self.list_combos.count()
+        sel = sum(
+            1
+            for i in range(total)
+            if self.list_combos.item(i) is not None
+            and self.list_combos.item(i).checkState() == QtCore.Qt.CheckState.Checked
+        )
+        warn = "  ⚠ >20 curvas pode travar" if sel > 20 else ""
+        self.lbl_combos_count.setText(f"Selecionadas: {sel} / {total}{warn}")
+        # Cor vermelha quando >20 (aviso), cinza/azul caso contrário
+        self.lbl_combos_count.setStyleSheet(
+            "color: #f48771; font-weight: bold;" if sel > 20 else "color: #9cdcfe;"
+        )
+
+    # ══════════════════════════════════════════════════════════════════
+    # v2.4c — Helpers de combo_experiment (seletor de snapshot)
+    # ══════════════════════════════════════════════════════════════════
+
+    def refresh_experiment_list(
+        self,
+        snapshots: Optional[Sequence[Any]] = None,
+        cache_keys: Optional[set] = None,
+        has_benchmark: bool = False,
+    ) -> None:
+        """Reconstrói ``combo_experiment`` com snapshots do histórico.
+
+        Args:
+            snapshots: lista de SimulationSnapshot (do ExperimentState).
+            cache_keys: conjunto de snapshot_id atualmente em cache LRU
+                (snapshots fora do cache ficam com ícone ○).
+            has_benchmark: ``True`` se há dados de benchmark disponíveis.
+        """
+        cache_keys = cache_keys or set()
+        snapshots = list(snapshots or [])
+        # Preserva seleção atual por snapshot_id quando possível
+        prev_snap_id: Optional[str] = None
+        prev_idx = self.combo_experiment.currentIndex()
+        if 0 <= prev_idx < len(self._experiment_entries):
+            prev_snap_id = self._experiment_entries[prev_idx][1]
+
+        self.combo_experiment.blockSignals(True)
+        try:
+            self.combo_experiment.clear()
+            self._experiment_entries = []
+            # 1) Simulação atual
+            self._experiment_entries.append(("Simulação atual", None, True))
+            self.combo_experiment.addItem("Simulação atual")
+            # 2) Benchmark (se ativo)
+            if has_benchmark:
+                self._experiment_entries.append(
+                    ("Benchmark atual", "__benchmark__", True)
+                )
+                self.combo_experiment.addItem("Benchmark atual")
+            # 3) Snapshots do histórico (mais recentes primeiro)
+            for snap in reversed(snapshots):
+                snap_id = getattr(snap, "snapshot_id", None)
+                label = getattr(snap, "label", "") or str(snap_id or "")
+                in_cache = snap_id in cache_keys
+                prefix = "● " if in_cache else "○ "
+                self._experiment_entries.append((label, snap_id, in_cache))
+                self.combo_experiment.addItem(prefix + label)
+            # Restaura seleção anterior se ainda presente
+            if prev_snap_id is not None:
+                for i, (_lbl, sid, _inc) in enumerate(self._experiment_entries):
+                    if sid == prev_snap_id:
+                        self.combo_experiment.setCurrentIndex(i)
+                        break
+        finally:
+            self.combo_experiment.blockSignals(False)
+
+    def select_experiment_by_snapshot_id(self, snapshot_id: str) -> bool:
+        """Seleciona o combo entry correspondente ao snapshot_id (duplo-clique hist.)."""
+        for i, (_lbl, sid, _inc) in enumerate(self._experiment_entries):
+            if sid == snapshot_id:
+                self.combo_experiment.setCurrentIndex(i)
+                return True
+        return False
+
+    def _on_experiment_changed(self, idx: int) -> None:
+        """Handler de mudança no combo_experiment — não dispara plot automático."""
+        # Só atualiza _active_bundle; plot real só roda quando btn_plot é clicado
+        if not (0 <= idx < len(self._experiment_entries)):
+            return
+        _label, snap_id, in_cache = self._experiment_entries[idx]
+        if snap_id is None:
+            # "Simulação atual" → _active_bundle = None (usa _current_sim)
+            self._active_bundle = None
+            self.combo_source.setCurrentIndex(0)
+        elif snap_id == "__benchmark__":
+            self._active_bundle = None
+            self.combo_source.setCurrentIndex(1)
+        else:
+            # Snapshot histórico — resolvido em _on_plot via callback do MainWindow
+            # (emitido via sinal não necessário; MainWindow preenche self._active_bundle
+            #  através de set_active_bundle quando o usuário pede plot).
+            if not in_cache:
+                self.btn_plot.setEnabled(False)
+                self.btn_plot.setToolTip(
+                    "Tensor fora do cache. Reexecute com estes parâmetros."
+                )
+            else:
+                self.btn_plot.setEnabled(True)
+                self.btn_plot.setToolTip(
+                    "Renderiza o plot com os dados e configurações atuais."
+                )
+            self.combo_source.setCurrentIndex(0)
+
+    def current_experiment_snap_id(self) -> Optional[str]:
+        """Retorna o snapshot_id selecionado no combo (ou None para 'Simulação atual')."""
+        idx = self.combo_experiment.currentIndex()
+        if 0 <= idx < len(self._experiment_entries):
+            _lbl, sid, _inc = self._experiment_entries[idx]
+            if sid is None or sid == "__benchmark__":
+                return None
+            return sid
+        return None
+
+    def set_active_bundle_from_history(self, bundle: Optional[Dict[str, Any]]) -> None:
+        """Define o bundle ativo vindo do cache LRU (chamado pelo MainWindow)."""
+        self._active_bundle = bundle
+        if bundle is not None:
+            self._current_sim = bundle
+            models = bundle.get("model")
+            if isinstance(models, dict):
+                self._sim_models = [models]
+            self._refresh_keys()
+            trs = bundle.get("trs", [])
+            dips = bundle.get("dips", [])
+            freqs = bundle.get("freqs", [])
+            self._populate_combos(trs, dips, freqs)
+            self._populate_filter(self.list_tr_filter, trs, "{} m")
+            self._populate_filter(self.list_ang_filter, dips, "{}°")
+            self._populate_filter(self.list_freq_filter, freqs, "{:g} Hz")
+
+    # ══════════════════════════════════════════════════════════════════
+    # v2.4c — Helpers de spin_model_idx + visibilidade de escalas
+    # ══════════════════════════════════════════════════════════════════
+
+    def _on_model_idx_changed(self, idx: int) -> None:
+        """Atualiza label de título quando spin_model_idx muda."""
+        title = "(modelo único)"
+        if 0 <= idx < len(self._sim_models):
+            md = self._sim_models[idx]
+            t = md.get("title", "") if isinstance(md, dict) else ""
+            if not t and isinstance(md, dict):
+                t = f"{md.get('n_layers', '?')} camadas"
+            title = t or "(sem título)"
+        self.lbl_model_title.setText(title)
+        # Mantém combo_model_key sincronizado (backward-compat interna)
+        if self.combo_model_key.count() > idx:
+            self.combo_model_key.setCurrentIndex(idx)
+
+    def _update_scale_combos_visibility(self, *_args) -> None:
+        """Alterna o combo de escala ativo (página do QStackedWidget).
+
+        v2.4d: os 3 combos (Tensor/EM, Geosinais, Resistividade) compartilham
+        a mesma linha via ``self._scale_stack`` + ``self._scale_label``. Aqui
+        apenas trocamos o índice da stack e o texto do label — sem mexer em
+        visibilidade individual (o que causaria reflow do QFormLayout).
+        """
+        kind = self.combo_plot_kind.currentText()
+        if kind in (
+            "Tensor H completo (Re/Im 3×6)",
+            "Componentes EM",
+            "Benchmark compare (Numba vs Fortran)",
+        ):
+            self._scale_stack.setCurrentIndex(0)
+            self._scale_label.setText("Escala Tensor/EM:")
+        elif kind == "Geosinais (USD/UAD/UHR/UHA)":
+            self._scale_stack.setCurrentIndex(1)
+            self._scale_label.setText("Escala Geosinais:")
+        elif kind in (
+            "Perfil de Resistividade",
+            "Anisotropia λ = √(ρᵥ/ρₕ)",
+        ):
+            self._scale_stack.setCurrentIndex(2)
+            self._scale_label.setText("Escala Resistividade:")
+        else:
+            # Tipo de plot desconhecido — mantém Tensor/EM como default
+            self._scale_stack.setCurrentIndex(0)
+            self._scale_label.setText("Escala Tensor/EM:")
+
+    def current_scale_mode(self) -> str:
+        """Retorna o modo de escala do tipo de plot ativo (string curta para sm_plots)."""
+        kind = self.combo_plot_kind.currentText()
+        if kind == "Geosinais (USD/UAD/UHR/UHA)":
+            txt = self.combo_scale_geosignals.currentText()
+            if txt.startswith("Amplitude (linear)"):
+                return "geo_lin_deg"
+            if txt.startswith("Amplitude (dB)"):
+                return "geo_db_rad"
+            return "geo_log10_deg"
+        if kind in ("Perfil de Resistividade", "Anisotropia λ = √(ρᵥ/ρₕ)"):
+            txt = self.combo_scale_resistivity.currentText()
+            return "rho_linear" if txt.startswith("linear") else "rho_log10"
+        # Tensor/EM/Benchmark
+        txt = self.combo_scale_tensor.currentText()
+        mapping = {
+            "Re / Im (linear)": "re_im",
+            "Magnitude (linear)": "mag_lin",
+            "Magnitude (log10)": "mag_log10",
+            "Magnitude (dB)": "mag_db",
+            "Fase (°)": "phase_deg",
+            "Fase (rad)": "phase_rad",
+        }
+        return mapping.get(txt, "re_im")
+
     def set_style(self, style: PlotStyle) -> None:
         self._style = style
         if self.canvas is not None:
@@ -3408,10 +4208,14 @@ class ResultsPage(QtWidgets.QWidget):
         self._current_sim = result
         self._sim_models = list(models or [])
         self._refresh_keys()
-        # v2.4: popula filtros TR / ang / freq com os valores deste sim
-        self._populate_filter(self.list_tr_filter, result.get("trs", []), "{} m")
-        self._populate_filter(self.list_ang_filter, result.get("dips", []), "{}°")
-        self._populate_filter(self.list_freq_filter, result.get("freqs", []), "{:g} Hz")
+        # v2.4c: popula list_combos unificado + filtros legados (ocultos) para back-compat
+        trs = list(result.get("trs", []))
+        dips = list(result.get("dips", []))
+        freqs = list(result.get("freqs", []))
+        self._populate_combos(trs, dips, freqs)
+        self._populate_filter(self.list_tr_filter, trs, "{} m")
+        self._populate_filter(self.list_ang_filter, dips, "{}°")
+        self._populate_filter(self.list_freq_filter, freqs, "{:g} Hz")
 
     def set_benchmark_plot_data(
         self, data: Dict[Tuple[str, str], Dict[str, Any]]
@@ -3422,48 +4226,79 @@ class ResultsPage(QtWidgets.QWidget):
         # o mesmo conjunto de freqs/TRs/dips dentro de um benchmark).
         if data:
             first = next(iter(data.values()))
-            self._populate_filter(self.list_tr_filter, first.get("trs", []), "{} m")
-            self._populate_filter(self.list_ang_filter, first.get("dips", []), "{}°")
-            self._populate_filter(
-                self.list_freq_filter, first.get("freqs", []), "{:g} Hz"
-            )
+            trs = list(first.get("trs", []))
+            dips = list(first.get("dips", []))
+            freqs = list(first.get("freqs", []))
+            # v2.4c: popula list_combos também para benchmark
+            self._populate_combos(trs, dips, freqs)
+            self._populate_filter(self.list_tr_filter, trs, "{} m")
+            self._populate_filter(self.list_ang_filter, dips, "{}°")
+            self._populate_filter(self.list_freq_filter, freqs, "{:g} Hz")
 
     def _refresh_keys(self) -> None:
+        """v2.4c: popula combo_model_key (oculto, backward-compat) + spin_model_idx."""
         self.combo_model_key.clear()
-        if self.combo_source.currentIndex() == 0:
-            if self._current_sim is not None:
-                H = self._current_sim.get("H_stack")
-                n_models = int(H.shape[0]) if (H is not None and H.ndim == 6) else 1
-                if n_models <= 1:
-                    self.combo_model_key.addItem("(simulação atual — modelo único)")
-                else:
-                    for i in range(n_models):
-                        title = ""
-                        if i < len(self._sim_models):
-                            md = self._sim_models[i]
-                            title = (
-                                md.get("title", "")
-                                or f'{md.get("n_layers", "?")} camadas'
-                            )
-                        self.combo_model_key.addItem(
-                            f"Modelo #{i + 1}/{n_models} — {title}".strip(" —")
-                        )
-        else:
-            for m, c in self._benchmark_plot_data.keys():
+        n_models = 1
+        benchmark_mode = self.combo_source.currentIndex() == 1
+        if benchmark_mode:
+            keys = list(self._benchmark_plot_data.keys())
+            for m, c in keys:
                 self.combo_model_key.addItem(f"{m} / Config {c}")
+            n_models = max(1, len(keys))
+            # No modo benchmark o spinner controla a célula (m/config) e o
+            # label mostra o nome composto.
+            self.spin_model_idx.setMaximum(max(0, n_models - 1))
+            self.spin_model_idx.setValue(0)
+            lbl = keys[0] if keys else ""
+            self.lbl_model_title.setText(
+                f"{lbl[0]} / Config {lbl[1]}" if lbl else "(sem benchmark)"
+            )
+            return
+        # Simulação atual
+        if self._current_sim is not None:
+            H = self._current_sim.get("H_stack")
+            if H is not None and hasattr(H, "ndim") and H.ndim == 6:
+                n_models = int(H.shape[0])
+        # v2.4c: combo_model_key mantido oculto — O(N) mas só no background
+        # (widget oculto não renderiza cada item). spin_model_idx é O(1).
+        if n_models <= 1:
+            self.combo_model_key.addItem("(simulação atual — modelo único)")
+            self.spin_model_idx.setMaximum(0)
+            self.spin_model_idx.setValue(0)
+            self.lbl_model_title.setText("(modelo único)")
+        else:
+            # Popula combo_model_key com lista curta (primeiros 100 entries)
+            # para evitar loop gigante na UI oculta.
+            upper = min(100, n_models)
+            for i in range(upper):
+                title = ""
+                if i < len(self._sim_models):
+                    md = self._sim_models[i]
+                    title = md.get("title", "") or f'{md.get("n_layers", "?")} camadas'
+                self.combo_model_key.addItem(
+                    f"Modelo #{i + 1}/{n_models} — {title}".strip(" —")
+                )
+            self.spin_model_idx.setMaximum(n_models - 1)
+            self.spin_model_idx.setValue(0)
+            # Atualiza label via handler
+            self._on_model_idx_changed(0)
 
     def _selected_components(self) -> List[str]:
         items = self.list_components.selectedItems()
         return [it.text() for it in items] if items else ["Hxx", "Hzz"]
 
     def _resolve_current_sim_H(self) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
-        """Retorna (H0 — tensor do modelo selecionado, model_dict) para sim atual."""
+        """Retorna (H0 — tensor do modelo selecionado, model_dict) para sim atual.
+
+        v2.4c: usa ``spin_model_idx.value()`` (O(1)) em vez de
+        ``combo_model_key.currentIndex()`` (populado com loop O(N)).
+        """
         sim = self._current_sim or {}
         H = sim.get("H_stack")
         if H is None or not hasattr(H, "size") or H.size == 0:
             return None, {}
-        idx = max(0, self.combo_model_key.currentIndex())
-        # Quando só há 1 modelo, combo_model_key.currentIndex() pode ser 0
+        idx = max(0, int(self.spin_model_idx.value()))
+        # v2.4c: trata H.ndim 4 (single-model legacy), 5 e 6.
         if H.ndim == 6:
             idx = min(idx, H.shape[0] - 1)
             H0 = H[idx]
@@ -3471,6 +4306,8 @@ class ResultsPage(QtWidgets.QWidget):
         else:
             H0 = H
             md = sim.get("model", {}) or {}
+            if H.ndim not in (4, 5) and self._sim_models:
+                md = self._sim_models[0]
         return H0, md
 
     def _on_plot(self) -> None:
@@ -3482,6 +4319,26 @@ class ResultsPage(QtWidgets.QWidget):
         ang_mask = self._filter_mask(self.list_ang_filter)
         freq_mask = self._filter_mask(self.list_freq_filter)
         geo_mask = self._geosignal_mask()
+        # v2.4c: lista unificada de combinações + escala contextual
+        combos = self._selected_combos()
+        scale_mode = self.current_scale_mode()
+
+        # v2.4c: valida quantidade de curvas (E10) — avisa antes de plotar
+        if combos and len(combos) > 50:
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Muitas curvas selecionadas",
+                (
+                    f"Você selecionou <b>{len(combos)}</b> combinações. "
+                    "Plotar isso pode demorar e consumir muita RAM.<br/><br/>"
+                    "Deseja prosseguir?"
+                ),
+                QtWidgets.QMessageBox.StandardButton.Yes
+                | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
 
         if self.combo_source.currentIndex() == 0:
             sim = self._current_sim
@@ -3497,7 +4354,11 @@ class ResultsPage(QtWidgets.QWidget):
             rho_h = md.get("rho_h", [])
             rho_v = md.get("rho_v", rho_h)
             thicknesses = md.get("thicknesses", [])
-            title = md.get("title", "") or f"Modelo {self.combo_model_key.currentText()}"
+            # v2.4c: usa spin_model_idx + lbl_model_title (não depende mais do combo oculto)
+            title = md.get("title", "") or (
+                f"Modelo #{self.spin_model_idx.value() + 1} — "
+                f"{self.lbl_model_title.text()}"
+            )
 
             if kind == "Tensor H completo (Re/Im 3×6)":
                 plot_tensor_full(
@@ -3515,6 +4376,8 @@ class ResultsPage(QtWidgets.QWidget):
                     tr_mask=tr_mask or None,
                     ang_mask=ang_mask or None,
                     freq_mask=freq_mask or None,
+                    combos=combos or None,
+                    scale_mode=scale_mode,
                 )
             elif kind == "Componentes EM":
                 plot_em_profile(
@@ -3529,6 +4392,8 @@ class ResultsPage(QtWidgets.QWidget):
                     kind=kind_mode,
                     style=self._style,
                     thicknesses=thicknesses,
+                    combos=combos or None,
+                    scale_mode=scale_mode,
                 )
             elif kind == "Geosinais (USD/UAD/UHR/UHA)":
                 plot_geosignals(
@@ -3545,6 +4410,8 @@ class ResultsPage(QtWidgets.QWidget):
                     tr_mask=tr_mask or None,
                     ang_mask=ang_mask or None,
                     freq_mask=freq_mask or None,
+                    combos=combos or None,
+                    scale_mode=scale_mode,
                 )
             elif kind == "Perfil de Resistividade":
                 plot_resistivity_profile(
@@ -3555,6 +4422,7 @@ class ResultsPage(QtWidgets.QWidget):
                     title=title,
                     style=self._style,
                     z_obs=z_obs,
+                    scale_mode=scale_mode,
                 )
             elif kind == "Anisotropia λ = √(ρᵥ/ρₕ)":
                 plot_anisotropy(
@@ -3642,6 +4510,7 @@ class ResultsPage(QtWidgets.QWidget):
                     title=f"{md.get('title', model_name)} — Config {config}",
                     style=self._style,
                     z_obs=z_obs_2d,
+                    scale_mode=scale_mode,
                 )
             elif kind == "Anisotropia λ = √(ρᵥ/ρₕ)":
                 plot_anisotropy(
@@ -3673,6 +4542,8 @@ class ResultsPage(QtWidgets.QWidget):
                     kind=kind_mode,
                     style=self._style,
                     thicknesses=thicknesses,
+                    combos=combos or None,
+                    scale_mode=scale_mode,
                 )
             elif kind == "Geosinais (USD/UAD/UHR/UHA)":
                 H_plot = H_n if H_n is not None else H_f
@@ -3692,6 +4563,8 @@ class ResultsPage(QtWidgets.QWidget):
                     tr_mask=tr_mask or None,
                     ang_mask=ang_mask or None,
                     freq_mask=freq_mask or None,
+                    combos=combos or None,
+                    scale_mode=scale_mode,
                 )
             else:
                 plot_benchmark_compare(
@@ -3709,14 +4582,99 @@ class ResultsPage(QtWidgets.QWidget):
                 )
 
     def _on_save(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Salvar figura",
-            "plot.png",
-            "PNG (*.png);;PDF (*.pdf);;SVG (*.svg)",
+        """v2.4d: abre SaveFigureDialog para escolher modo de exportação.
+
+        Dois modos:
+          • ``quick``: salva o canvas atual diretamente (comportamento v2.4c).
+          • ``custom``: o usuário redefine componentes e combinações; o canvas
+            principal é re-renderizado com essas escolhas, salvo em disco,
+            e depois RESTAURADO ao estado original (visualização preservada).
+        """
+        # Constrói lista de labels das combinações atuais para o diálogo
+        combos_labels: List[str] = []
+        current_selected_idx: List[int] = []
+        for i in range(self.list_combos.count()):
+            item = self.list_combos.item(i)
+            if item is None:
+                continue
+            combos_labels.append(item.text())
+            if item.checkState() == QtCore.Qt.CheckState.Checked:
+                current_selected_idx.append(i)
+
+        dlg = SaveFigureDialog(
+            parent=self,
+            all_components=list(COMPONENT_NAMES),
+            current_components=self._selected_components(),
+            combos_labels=combos_labels,
+            current_selected_combo_indices=current_selected_idx,
+            current_plot_kind=self.combo_plot_kind.currentText(),
+            current_scale_mode=self.current_scale_mode(),
         )
-        if path:
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+
+        path = dlg.output_path
+        if not path:
+            return
+
+        if dlg.mode == "quick":
+            # Salva o canvas como está (comportamento legado v2.4c)
             self.canvas.save(path)
+            return
+
+        # Modo custom: snapshot do estado, re-render, salva, restaura
+        # Snapshot: componentes selecionados + estado dos combos
+        saved_components = [
+            self.list_components.item(i).text()
+            for i in range(self.list_components.count())
+            if self.list_components.item(i).isSelected()
+        ]
+        saved_combo_states = [
+            self.list_combos.item(i).checkState() for i in range(self.list_combos.count())
+        ]
+
+        # Aplica seleção customizada
+        try:
+            # Componentes EM: setSelected
+            chosen_comps = set(dlg.selected_components)
+            for i in range(self.list_components.count()):
+                it = self.list_components.item(i)
+                it.setSelected(it.text() in chosen_comps)
+
+            # Combinações: setCheckState
+            chosen_combos = set(dlg.selected_combos)
+            self.list_combos.blockSignals(True)
+            try:
+                for i in range(self.list_combos.count()):
+                    it = self.list_combos.item(i)
+                    if it is None:
+                        continue
+                    it.setCheckState(
+                        QtCore.Qt.CheckState.Checked
+                        if i in chosen_combos
+                        else QtCore.Qt.CheckState.Unchecked
+                    )
+            finally:
+                self.list_combos.blockSignals(False)
+
+            # Re-plota no canvas (síncrono, NumPy/Matplotlib apenas)
+            self._on_plot()
+            # Salva a figura re-renderizada
+            self.canvas.save(path)
+        finally:
+            # Restaura seleção original
+            for i in range(self.list_components.count()):
+                it = self.list_components.item(i)
+                it.setSelected(it.text() in saved_components)
+            self.list_combos.blockSignals(True)
+            try:
+                for i, state in enumerate(saved_combo_states):
+                    if i < self.list_combos.count():
+                        self.list_combos.item(i).setCheckState(state)
+            finally:
+                self.list_combos.blockSignals(False)
+            # Re-plota para restaurar visualização ao estado original
+            self._on_plot()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -4476,7 +5434,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # duplo-clique no hist\u00f3rico → recarregar plot em Resultados sem
         # re-executar. Perdido ao fechar o programa (apenas metadados v\u00e3o
         # para o .exp.json via ExperimentState.simulations).
-        self._sim_history_cache: Dict[str, Dict[str, Any]] = {}
+        # v2.4c: cache LRU limita a 3 snapshots ou 500 MB — previne
+        # travamento GUI quando user executa múltiplas simulações de
+        # 1000+ modelos (H_stack pode atingir ~860 MB cada).
+        self._sim_history_cache: LRUPlotCache = LRUPlotCache(maxlen=3, max_bytes=500e6)
 
         self.page_sim.request_start.connect(self._start_simulation)
         self.page_sim.request_stop.connect(self._stop_simulation)
@@ -4489,6 +5450,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.page_bench.request_stop.connect(self._stop_benchmark)
         self.page_prefs.paths_changed.connect(self._apply_paths)
         self.page_prefs.style_changed.connect(self._apply_style)
+        # v2.4c: sinais da ResultsPage
+        self.page_results.request_free_memory.connect(self._on_free_plot_memory)
+        self.page_results.combo_experiment.currentIndexChanged.connect(
+            self._on_results_experiment_changed
+        )
 
     def _build_toolbar(self) -> None:
         toolbar = QtWidgets.QToolBar("main")
@@ -4553,6 +5519,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.page_sim.clear_history_list()
         for snap in exp.simulations:
             self.page_sim.add_history_entry(snap.snapshot_id, snap.label, in_cache=False)
+        # v2.4c: sincroniza combo_experiment da ResultsPage
+        self._refresh_results_experiment_combo()
 
     def _on_new_experiment(self) -> None:
         dlg = NewExperimentDialog(self)
@@ -4636,6 +5604,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # v2.4: limpa cache de tens\u00f5es e UI do hist\u00f3rico ao fechar experimento
         self._sim_history_cache.clear()
         self.page_sim.clear_history_list()
+        self._refresh_results_experiment_combo()  # v2.4c
         self.stack.setCurrentIndex(0)
         self.act_save.setEnabled(False)
         self.act_save_as.setEnabled(False)
@@ -4996,8 +5965,33 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._experiment.append_simulation(snap)
         # Cache do tensor H (sobrevive at\u00e9 o fim da sess\u00e3o)
-        self._sim_history_cache[snap_id] = dict(plot_bundle)
+        # v2.4c: cache LRU — put() pode evictar snapshots antigos para
+        # respeitar maxlen=3 e max_bytes=500 MB. Chaves evictadas voltam
+        # como lista; atualizamos a lista do histórico para refletir perda.
+        evicted_ids = self._sim_history_cache.put(snap_id, dict(plot_bundle))
+        for old_id in evicted_ids:
+            try:
+                self.page_sim.mark_history_out_of_cache(old_id)
+            except Exception:
+                pass
+        if evicted_ids:
+            try:
+                total_mb = self._sim_history_cache.total_bytes() / 1e6
+                self.page_sim.append_log(
+                    f"  [cache] evictados {len(evicted_ids)} snapshot(s) "
+                    f"antigos (cache atual: {total_mb:.1f} MB)"
+                )
+            except Exception:
+                pass
         self.page_sim.add_history_entry(snap_id, snap.label, in_cache=True)
+        # v2.4c: notifica ResultsPage para atualizar combo_experiment
+        try:
+            self.page_results.refresh_experiment_list(
+                snapshots=list(self._experiment.simulations),
+                cache_keys=set(self._sim_history_cache.keys()),
+            )
+        except Exception:
+            pass
 
     # ── v2.4: Handlers de hist\u00f3rico ────────────────────────────────────
     def _on_clear_simulations_requested(self) -> None:
@@ -5026,6 +6020,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._experiment.clear_simulations()
             self._sim_history_cache.clear()
             self.page_sim.clear_history_list()
+            self._refresh_results_experiment_combo()  # v2.4c
             self.status.showMessage(
                 f"Hist\u00f3rico de simula\u00e7\u00f5es limpo ({n} entrada(s) removida(s)).",
                 5000,
@@ -5052,8 +6047,69 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Para visualiz\u00e1-la, re-execute com os mesmos par\u00e2metros.",
             )
             return
-        self.page_results.set_current_simulation(bundle, models=[bundle.get("model", {})])
+        # v2.4c: aplica bundle + sincroniza combo_experiment na ResultsPage
+        self.page_results.set_active_bundle_from_history(bundle)
+        self.page_results.select_experiment_by_snapshot_id(snapshot_id)
         self.tabs.setCurrentWidget(self.page_results)
+
+    # ── v2.4c: Handlers novos ───────────────────────────────────────────
+    def _on_free_plot_memory(self) -> None:
+        """Handler do botão 'Liberar memória de plotagem' (ResultsPage)."""
+        try:
+            mb_before = self._sim_history_cache.total_bytes() / 1e6
+        except Exception:
+            mb_before = 0.0
+        n_cleared = self._sim_history_cache.clear()
+        # Marca todos os itens do histórico como fora-do-cache (ícone cinza)
+        try:
+            if self._experiment is not None:
+                for snap in self._experiment.simulations:
+                    self.page_sim.mark_history_out_of_cache(snap.snapshot_id)
+        except Exception:
+            pass
+        # gc.collect agendado no event loop (não bloqueia UI)
+        QtCore.QTimer.singleShot(0, self._run_gc_collect)
+        QtWidgets.QMessageBox.information(
+            self,
+            "Memória de plotagem liberada",
+            (
+                f"Cache LRU limpo: <b>{n_cleared}</b> snapshot(s) removidos, "
+                f"<b>{mb_before:.1f} MB</b> liberados.<br/><br/>"
+                "A 'Simulação atual' foi preservada. Para replotar snapshots "
+                "do histórico, re-execute com os mesmos parâmetros."
+            ),
+        )
+        self._refresh_results_experiment_combo()
+
+    def _run_gc_collect(self) -> None:
+        """Executa gc.collect assíncrono (chamado via QTimer.singleShot)."""
+        import gc
+
+        gc.collect()
+
+    def _on_results_experiment_changed(self, _idx: int) -> None:
+        """Handler do combo_experiment — carrega bundle do cache LRU se snapshot."""
+        snap_id = self.page_results.current_experiment_snap_id()
+        if snap_id is None:
+            return
+        bundle = self._sim_history_cache.get(snap_id)
+        if bundle is not None:
+            self.page_results.set_active_bundle_from_history(bundle)
+
+    def _refresh_results_experiment_combo(self) -> None:
+        """Reconstrói combo_experiment da ResultsPage com estado atual."""
+        try:
+            snapshots = (
+                list(self._experiment.simulations) if self._experiment is not None else []
+            )
+            cache_keys = set(self._sim_history_cache.keys())
+            self.page_results.refresh_experiment_list(
+                snapshots=snapshots,
+                cache_keys=cache_keys,
+                has_benchmark=bool(self.page_results._benchmark_plot_data),
+            )
+        except Exception:
+            pass
 
     def _on_sim_error(self, msg: str) -> None:
         self.page_sim.set_running(False)
@@ -5475,6 +6531,221 @@ def _run_smoke_test() -> int:
         )
     except Exception as exc:
         check(False, f"Layout 3-colunas ({exc})")
+
+    # ════════════════════════════════════════════════════════════════════
+    # v2.4c — Novos checks: combo_experiment, list_combos, escalas, memória
+    # ════════════════════════════════════════════════════════════════════
+    try:
+        results = window.page_results
+        # combo_experiment presente
+        check(
+            hasattr(results, "combo_experiment")
+            and isinstance(results.combo_experiment, QtWidgets.QComboBox),
+            "ResultsPage tem combo_experiment (v2.4c)",
+        )
+        # list_combos presente e vazia inicialmente
+        check(
+            hasattr(results, "list_combos")
+            and isinstance(results.list_combos, QtWidgets.QListWidget),
+            "ResultsPage tem list_combos unificado (v2.4c)",
+        )
+        # Helpers de combos
+        check(
+            hasattr(results, "_populate_combos") and callable(results._populate_combos),
+            "ResultsPage._populate_combos existe (v2.4c)",
+        )
+        check(
+            hasattr(results, "_selected_combos") and callable(results._selected_combos),
+            "ResultsPage._selected_combos existe (v2.4c)",
+        )
+        # Popula combos com TR×Ang×Freq = 2×2×2 = 8 combinações
+        results._populate_combos([1.0, 2.0], [0.0, 30.0], [20000.0, 40000.0])
+        n_items = results.list_combos.count()
+        check(
+            n_items == 8,
+            f"list_combos populou 2×2×2 = 8 itens (got {n_items}) (v2.4c)",
+        )
+        # Default: apenas 1 marcada
+        selected = results._selected_combos()
+        check(
+            len(selected) == 1 and selected[0] == (0, 0, 0),
+            f"Default marca só (0,0,0) (got {selected}) (v2.4c)",
+        )
+        # Botão "Marcar todas" funciona
+        results._set_all_combos(True)
+        selected_all = results._selected_combos()
+        check(
+            len(selected_all) == 8,
+            f"_set_all_combos(True) marca 8 (got {len(selected_all)}) (v2.4c)",
+        )
+        # Combos de escala contextuais
+        check(
+            hasattr(results, "combo_scale_tensor")
+            and hasattr(results, "combo_scale_geosignals")
+            and hasattr(results, "combo_scale_resistivity"),
+            "ResultsPage tem 3 combos de escala contextuais (v2.4c)",
+        )
+        # spin_model_idx substitui combo_model_key
+        check(
+            hasattr(results, "spin_model_idx")
+            and isinstance(results.spin_model_idx, QtWidgets.QSpinBox),
+            "spin_model_idx (QSpinBox) presente (v2.4c)",
+        )
+        # btn_free_memory
+        check(
+            hasattr(results, "btn_free_memory")
+            and isinstance(results.btn_free_memory, QtWidgets.QPushButton),
+            "btn_free_memory (QPushButton) presente (v2.4c)",
+        )
+        # current_scale_mode() retorna string válida
+        sm = results.current_scale_mode()
+        check(
+            isinstance(sm, str) and len(sm) > 0,
+            f"current_scale_mode() retorna string (got '{sm}') (v2.4c)",
+        )
+        # refresh_experiment_list funciona sem snapshots
+        results.refresh_experiment_list(snapshots=[], cache_keys=set())
+        check(
+            results.combo_experiment.count() >= 1
+            and results.combo_experiment.itemText(0) == "Simulação atual",
+            "combo_experiment default = 'Simulação atual' (v2.4c)",
+        )
+    except Exception as exc:
+        check(False, f"v2.4c ResultsPage widgets ({exc})")
+
+    # LRUPlotCache integrado em MainWindow._sim_history_cache
+    try:
+        cache = window._sim_history_cache
+        check(
+            cache.__class__.__name__ == "LRUPlotCache",
+            f"MainWindow._sim_history_cache é LRUPlotCache (got {type(cache).__name__}) (v2.4c)",
+        )
+        # Testa eviction: maxlen=3 → inserir 4 deve evictar 1
+        cache.clear()
+        for i in range(4):
+            cache.put(f"snap_{i}", {"H_stack": np.zeros((5, 5), dtype=complex)})
+        check(
+            len(cache) == 3 and "snap_0" not in cache,
+            f"LRU evicta oldest quando supera maxlen=3 (len={len(cache)}, keys={cache.keys()}) (v2.4c)",
+        )
+        # clear() retorna count
+        n_cleared = cache.clear()
+        check(
+            n_cleared == 3 and len(cache) == 0,
+            f"LRUPlotCache.clear() retorna 3 (got {n_cleared}) (v2.4c)",
+        )
+    except Exception as exc:
+        check(False, f"v2.4c LRUPlotCache em MainWindow ({exc})")
+
+    # ════════════════════════════════════════════════════════════════════
+    # v2.4d — Novos checks: stacked scale combos, SaveFigureDialog,
+    #                        Magnitude + Fase preservado
+    # ════════════════════════════════════════════════════════════════════
+    try:
+        results = window.page_results
+        # QStackedWidget para combos de escala (posição X/Y fixa)
+        check(
+            hasattr(results, "_scale_stack")
+            and isinstance(results._scale_stack, QtWidgets.QStackedWidget),
+            "ResultsPage tem _scale_stack (QStackedWidget) — combos overlaid (v2.4d)",
+        )
+        check(
+            hasattr(results, "_scale_label")
+            and isinstance(results._scale_label, QtWidgets.QLabel),
+            "ResultsPage tem _scale_label (dinâmico) (v2.4d)",
+        )
+        # Stack tem exatamente 3 páginas (tensor, geo, rho)
+        check(
+            results._scale_stack.count() == 3,
+            f"_scale_stack tem 3 páginas (got {results._scale_stack.count()}) (v2.4d)",
+        )
+        # Troca de tipo de plot atualiza o índice da stack + label
+        results.combo_plot_kind.setCurrentText("Geosinais (USD/UAD/UHR/UHA)")
+        results._update_scale_combos_visibility()
+        check(
+            results._scale_stack.currentIndex() == 1
+            and "Geosinais" in results._scale_label.text(),
+            f"Stack→1 + label='Geosinais' para Geosinais (got idx={results._scale_stack.currentIndex()}, "
+            f"label='{results._scale_label.text()}') (v2.4d)",
+        )
+        results.combo_plot_kind.setCurrentText("Perfil de Resistividade")
+        results._update_scale_combos_visibility()
+        check(
+            results._scale_stack.currentIndex() == 2
+            and "Resistividade" in results._scale_label.text(),
+            f"Stack→2 + label='Resistividade' para ρ-profile (got idx={results._scale_stack.currentIndex()}, "
+            f"label='{results._scale_label.text()}') (v2.4d)",
+        )
+        results.combo_plot_kind.setCurrentText("Componentes EM")
+        results._update_scale_combos_visibility()
+        check(
+            results._scale_stack.currentIndex() == 0
+            and "Tensor/EM" in results._scale_label.text(),
+            f"Stack→0 + label='Tensor/EM' para EM (got idx={results._scale_stack.currentIndex()}, "
+            f"label='{results._scale_label.text()}') (v2.4d)",
+        )
+    except Exception as exc:
+        check(False, f"v2.4d stacked scale combos ({exc})")
+
+    # SaveFigureDialog
+    try:
+        dlg = SaveFigureDialog(
+            parent=window.page_results,
+            all_components=["Hxx", "Hzz"],
+            current_components=["Hxx"],
+            combos_labels=["TR=1.0 | θ=0° | f=20 kHz"],
+            current_selected_combo_indices=[0],
+            current_plot_kind="Componentes EM",
+            current_scale_mode="re_im",
+        )
+        check(
+            dlg.mode == "quick",
+            f"SaveFigureDialog default mode='quick' (got '{dlg.mode}') (v2.4d)",
+        )
+        check(
+            hasattr(dlg, "rb_quick")
+            and hasattr(dlg, "rb_custom")
+            and dlg.rb_quick.isChecked()
+            and not dlg.rb_custom.isChecked(),
+            "SaveFigureDialog: rb_quick checked, rb_custom not (v2.4d)",
+        )
+        check(
+            dlg.list_components.count() == 2 and dlg.list_combos.count() == 1,
+            f"SaveFigureDialog populou 2 comps + 1 combo (v2.4d)",
+        )
+        dlg.close()
+    except Exception as exc:
+        check(False, f"v2.4d SaveFigureDialog ({exc})")
+
+    # Magnitude + Fase preservado — plot_em_profile com kind=Magnitude+Fase
+    # deve criar 2 colunas independente de scale_mode
+    try:
+        import numpy as _np
+
+        from .sm_plots import plot_em_profile as _pep
+
+        # Canvas dummy (headless)
+        results = window.page_results
+        _H = _np.ones((1, 1, 5, 1, 9), dtype=_np.complex128) * (1 + 1j)
+        _pep(
+            results.canvas,
+            _H,
+            z_obs=_np.linspace(0, 4, 5),
+            freqs=[20000.0],
+            trs=[1.0],
+            dips=[0.0],
+            components=["Hxx"],
+            kind="Magnitude + Fase",
+            scale_mode="mag_log10",  # v2.4d: não deve sobrescrever kind
+            combos=[(0, 0, 0)],
+        )
+        n_axes = len(results.canvas.figure.get_axes())
+        check(
+            n_axes == 2,
+            f"'Magnitude + Fase' + scale='mag_log10' → 2 subplots (got {n_axes}) (v2.4d)",
+        )
+    except Exception as exc:
+        check(False, f"v2.4d Magnitude + Fase preservado ({exc})")
 
     print(f"\n=== Resultado: {len(failures)} falha(s) ===")
     window.close()
