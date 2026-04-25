@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /Library/Developer/CommandLineTools/usr/bin/ld-classic "$@"

@@ -1,0 +1,60 @@
+1                 !número de frequências
+20000.0           !frequência 1
+1                 !número de ângulos de inclinação
+0.0               !ângulo 1
+10.0              !altura do primeiro ponto-médio T-R, acima da primeira interface de camadas
+120.0             !tamanho da janela de investigação
+0.2               !passo entre as medidas
+1                 !nTR — número de pares T-R (formato v10.0)
+1.0               !distância T-R 1 (metros)
+Inv0_Dip2000_teste              !nome dos arquivos de saída
+25                !número de camadas
+40.57    40.58     !resistividades horizontal e vertical
+9.78    9.78
+232.05    232.07
+0.28    0.28
+395.93    395.94
+6.67    6.67
+850.83    850.98
+0.12    0.12
+0.43    0.43
+4.19    4.19
+844.33    844.35
+15.7    15.71
+21.98    21.99
+172.02    172.04
+37.3    37.3
+187.37    187.4
+480.25    480.32
+0.2    0.2
+92.17    92.18
+35.13    35.14
+277.39    277.43
+45.62    45.62
+1.17    1.18
+134.63    134.65
+777.97    778.01
+1.91              !espessuras das n-2 camadas
+2.22
+5.21
+6.91
+2.43
+4.15
+3.74
+6.22
+0.78
+0.56
+0.5
+1.31
+2.8
+6.68
+5.82
+20.64
+5.89
+8.62
+0.69
+1.16
+2.36
+6.75
+2.65
+2000 2000         !modelo atual e o número máximo de modelos

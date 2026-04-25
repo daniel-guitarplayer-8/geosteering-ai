@@ -6,120 +6,19 @@ use magneticdipoles
 use omp_lib
 contains
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta, h1, tj, &
-                             nTR, dTR, p_med, n, resist, esp, filename, &
-                             use_arb_freq, use_tilted, n_tilted, beta_tilt, phi_tilt, &
-                             use_compensation, n_comp_pairs, comp_pairs, &
-                             filter_type, &
-                             use_jacobian, jacobian_method, jacobian_fd_step)
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Sub-rotina principal do simulador EM 1D TIV com múltiplos pares T-R.
-  !
-  ! Versão 10.0: F5 + F6 + F7 + Filtro Adaptativo + F10 (Jacobiano ∂H/∂ρ).
-  !   - nTR = 1: backward-compatible (saída idêntica ao formato anterior)
-  !   - nTR > 1: loop externo sobre pares T-R, cada um com r_k = dTR(itr)*|sin(θ)|
-  !              Saída: arquivos separados por par T-R (sufixo _TR{itr})
-  !
-  ! F5 — Frequências arbitrárias (use_arb_freq):
-  !   Quando use_arb_freq == 0 (default): emite aviso se nf > 2 (guard)
-  !   Quando use_arb_freq == 1: nf arbitrário (1-16), sem restrição
-  !   O código já suporta nf arbitrário via caches Phase 4: (npt, n, nf, ntheta)
-  !
-  ! F6 — Compensação midpoint (use_compensation):
-  !   Quando use_compensation == 0 (default): sem compensação, saída padrão
-  !   Quando use_compensation == 1: calcula medições compensadas para pares T-R:
-  !     - Diferença de fase: Δφ = arg(H_near) − arg(H_far)
-  !     - Atenuação: Δα = 20·log₁₀(|H_near|/|H_far|)
-  !     - Tensor compensado: H_comp = (H_near + H_far) / 2
-  !   n_comp_pairs: número de pares de compensação
-  !   comp_pairs(n_comp_pairs, 2): índices (near_itr, far_itr) dos pares T-R
-  !   Requer nTR ≥ 2. Cada par gera arquivo _COMP{ipair}.dat adicional.
-  !   Ref: docs/reference/analise_novos_recursos_simulador_fortran.md §5
-  !
-  ! F7 — Antenas inclinadas (use_tilted):
-  !   Quando use_tilted == 0 (default): sem cálculo extra, saída inalterada (22 col)
-  !   Quando use_tilted == 1: calcula H_tilted para cada configuração (β, φ):
-  !     H_tilted(β, φ) = cos(β)·Hzz + sin(β)·[cos(φ)·Hxz + sin(φ)·Hyz]
-  !   onde β = ângulo de inclinação (0°-90°), φ = azimute (0°-360°).
-  !   Saída estendida: 22 + 2×n_tilted colunas por registro.
-  !   Ref: docs/reference/analise_novos_recursos_simulador_fortran.md §F7
-  !
-  ! Filtro Adaptativo (filter_type):
-  !   filter_type == 0 (default): Werthmuller 201 pontos (precisão 10⁻⁶)
-  !   filter_type == 1: Kong 61 pontos (rápido, 3.3×, precisão 10⁻⁴)
-  !   filter_type == 2: Anderson 801 pontos (máxima precisão 10⁻⁸, 4× lento)
-  !   Seleção no model.in controla trade-off velocidade × precisão.
-  !   Kong recomendado para geração de datasets de treinamento (ruído será
-  !   adicionado); Anderson para validação cruzada com empymod.
-  !   Ref: docs/reference/analise_novos_recursos_simulador_fortran.md §7.2.4
-  !
-  ! F10 — Sensibilidades ∂H/∂ρ (Jacobiano) via diferenças finitas centradas:
-  !   Quando use_jacobian == 0 (default): sem cálculo extra, comportamento inalterado.
-  !   Quando use_jacobian == 1 .and. jacobian_method == 1: calcula Jacobiano
-  !   internamente em Fortran via compute_jacobian_fd (Estratégia C, OpenMP).
-  !   Quando use_jacobian == 1 .and. jacobian_method == 0: no-op aqui
-  !   (Estratégia B é puramente orquestração Python via batch_runner.py).
-  !   Fórmula: J_ik = (H_i(ρ_k + δ) − H_i(ρ_k − δ)) / (2δ)
-  !     δ = max(jacobian_fd_step × |ρ_k|, 1e-6)
-  !   Saída: dois arquivos .jac (um por componente h/v) com shape
-  !          (ntheta, nmmax, nf, 9, n) complex(dp).
-  !   Ref: docs/reference/relatorio_vantagens_jacobiano.md §9.3 (Estratégia C)
-  !
-  ! Fluxo de execução (multi-TR):
-  !   do itr = 1, nTR
-  !     do k = 1, ntheta  (outer parallel if ntheta > 1)
-  !       r_k = dTR(itr) * |sin(θ_k)|
-  !       commonarraysMD → cache(npt, n, nf)  [1× por (itr, k)]
-  !       do j = 1, nmed(k)  (inner parallel, schedule(guided, 16))
-  !         fieldsinfreqs_cached_ws(ws_pool(tid), cache, ...)
-  !       end do
-  !     end do
-  !     [F7: compute tilted responses from cH1 tensor]
-  !     writes_files(...)
-  !   end do
-  !   [F6: compute compensation from stored multi-TR data]
-  !   borehole_compensation(cH_all_tr, comp_pairs, ...)
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta, h1, tj, dTR, p_med, &
+                             n, resist, esp, filename)
   implicit none
   character(*), intent(in) :: mypath
-  integer, intent(in) ::  modelm, nmaxmodel, nf, ntheta, n, nTR
-  real(dp), intent(in) :: freq(nf), theta(ntheta), h1, tj, dTR(nTR), p_med, resist(n,2), esp(n)
+  integer, intent(in) ::  modelm, nmaxmodel, nf, ntheta, n
+  real(dp), intent(in) :: freq(nf), theta(ntheta), h1, tj, dTR, p_med, resist(n,2), esp(n) !, hn
   character(*), intent(in) :: filename
-  ! F5/F7 — Feature flags (desabilitados por padrão = 0, backward compatible)
-  integer, intent(in) :: use_arb_freq   ! F5: 0=padrão (guard nf>2), 1=nf arbitrário
-  integer, intent(in) :: use_tilted     ! F7: 0=desabilitado, 1=calcula antenas inclinadas
-  integer, intent(in) :: n_tilted       ! F7: número de configurações tilted (0 se desabilitado)
-  real(dp), intent(in) :: beta_tilt(:)  ! F7: ângulos de inclinação em graus (size n_tilted)
-  real(dp), intent(in) :: phi_tilt(:)   ! F7: ângulos azimutais em graus (size n_tilted)
-  ! F6 — Compensação midpoint (borehole compensation)
-  integer, intent(in) :: use_compensation  ! F6: 0=desabilitado (default), 1=habilitado
-  integer, intent(in) :: n_comp_pairs      ! F6: número de pares de compensação (0 se desab.)
-  integer, intent(in) :: comp_pairs(:,:)   ! F6: pares (near_itr, far_itr), shape (n_comp_pairs, 2)
-  ! Filtro Adaptativo — seleção do filtro de Hankel
-  integer, intent(in) :: filter_type  ! 0=Werthmuller 201pt (default), 1=Kong 61pt, 2=Anderson 801pt
-  ! F10 — Sensibilidades ∂H/∂ρ (Jacobiano) via diferenças finitas centradas
-  integer,  intent(in) :: use_jacobian      ! F10: 0=desabilitado (default), 1=habilitado
-  integer,  intent(in) :: jacobian_method   ! F10: 0=Python B (no-op aqui), 1=Fortran OpenMP C
-  real(dp), intent(in) :: jacobian_fd_step  ! F10: ε relativo para FD centrada (default 1e-4)
 
   integer :: i, j, k, nmmax
   real(dp) :: thetamin, thetaplu, thetarad
   ! real(dp) :: tj
   character(5) :: dipolo
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Filtro Adaptativo — npt_active determinado por filter_type em runtime.
-  !   filter_type == 0: Werthmuller 201pt (default, precisão 10⁻⁶)
-  !   filter_type == 1: Kong 61pt (rápido, precisão 10⁻⁴, 3.3× speedup)
-  !   filter_type == 2: Anderson 801pt (máxima precisão 10⁻⁸, 4× mais lento)
-  !
-  ! PERFORMANCE: npt_active é variável runtime (não parameter) porque o filtro
-  ! é selecionável pelo usuário. Todas as alocações de workspace, caches e
-  ! arrays de filtro usam npt_active. As sub-rotinas fieldsinfreqs/fieldsinfreqs_ws
-  ! (legado, NÃO chamadas no hot path Phase 4) recebem npt como dummy argument
-  ! com intent(in) — inalteradas.
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  integer :: npt_active
+  integer, parameter :: npt = 201
   real(dp), dimension(:), allocatable :: krJ0J1, wJ0, wJ1
   real(dp), dimension(:,:), allocatable :: krwJ0J1
   !=============================================================================
@@ -143,7 +42,7 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! Ref: docs/reference/analise_paralelismo_cpu_fortran.md §7 Fase 3
   !=============================================================================
   type(thread_workspace), allocatable :: ws_pool(:)
-  integer :: t, tid, itr
+  integer :: t, tid
 
   !=============================================================================
   ! Fase 4 — Cache de commonarraysMD por (r, freq)
@@ -160,77 +59,16 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! Tamanho: 9 × (npt × n × nf) × 16 bytes ≈ 1,68 MB para n=29, nf=2, npt=201.
   ! Ref: docs/reference/analise_paralelismo_cpu_fortran.md §7 Fase 4
   !=============================================================================
-  ! Fase 4 — cache com dimensão ntheta: u_cache(npt, n, nf, ntheta).
-  ! Necessário porque o outer !$omp parallel do if(ntheta>1) executa k=1 e k=2
-  ! em threads distintos. Sem a dimensão ntheta, thread k=1 e thread k=2
-  ! escreviam no mesmo u_cache(:,:,ii) simultaneamente → race condition que
-  ! corromperia silenciosamente os resultados de θ=30°.
-  ! Com a 4ª dimensão cada thread k escreve em u_cache(:,:,ii,k) independente.
-  complex(dp), allocatable :: u_cache(:,:,:,:), s_cache(:,:,:,:)
-  complex(dp), allocatable :: uh_cache(:,:,:,:), sh_cache(:,:,:,:)
-  complex(dp), allocatable :: RTEdw_cache(:,:,:,:), RTEup_cache(:,:,:,:)
-  complex(dp), allocatable :: RTMdw_cache(:,:,:,:), RTMup_cache(:,:,:,:)
-  complex(dp), allocatable :: AdmInt_cache(:,:,:,:)
+  complex(dp), allocatable :: u_cache(:,:,:), s_cache(:,:,:)
+  complex(dp), allocatable :: uh_cache(:,:,:), sh_cache(:,:,:)
+  complex(dp), allocatable :: RTEdw_cache(:,:,:), RTEup_cache(:,:,:)
+  complex(dp), allocatable :: RTMdw_cache(:,:,:), RTMup_cache(:,:,:)
+  complex(dp), allocatable :: AdmInt_cache(:,:,:)
   real(dp)    :: r_k, omega_i
   complex(dp) :: zeta_i
   real(dp), allocatable :: eta_shared(:,:)  ! (n, 2) — hoisted de fieldsinfreqs (B2)
   integer     :: ii
   ! real(dp) :: wtime
-
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! F7 — Variáveis para antenas inclinadas (tilted coils)
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! A resposta de uma antena inclinada com eixo n̂ = (sinβ·cosφ, sinβ·sinφ, cosβ)
-  ! medindo o campo de um transmissor axial (ẑ) é:
-  !   H_tilted(β, φ) = cos(β)·Hzz + sin(β)·[cos(φ)·Hxz + sin(φ)·Hyz]
-  ! onde Hxz = cH(:,3), Hyz = cH(:,6), Hzz = cH(:,9) do tensor 3×3.
-  ! Custo: 5 multiplicações + 2 adições por ponto — negligível vs forward model.
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  complex(dp), allocatable :: cH_tilted(:,:,:,:)  ! (ntheta, nmmax, nf, n_tilted)
-  real(dp) :: beta_rad, phi_rad
-  integer  :: it
-
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! F6 — Variáveis para compensação midpoint (borehole compensation)
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Armazena o tensor completo por par T-R para pós-processamento de compensação.
-  ! cH_all_tr(nTR, ntheta, nmmax, nf, 9): tensor H para todos os pares T-R.
-  !   Preenchido durante o loop do itr = 1, nTR.
-  !   Usado após o loop para calcular medições compensadas (phase_diff, atten).
-  ! zrho_all_tr(nTR, ntheta, nmmax, nf, 3): zobs, rho_h, rho_v por par T-R.
-  ! cH_comp(n_comp_pairs, ntheta, nmmax, nf, 9): tensor compensado por par.
-  ! phase_diff(n_comp_pairs, ntheta, nmmax, nf, 9): diferença de fase (graus).
-  ! atten_db(n_comp_pairs, ntheta, nmmax, nf, 9): atenuação (dB).
-  !
-  ! Memória: para nTR=3, ntheta=1, nmmax=600, nf=2:
-  !   cH_all_tr: 3 × 1 × 600 × 2 × 9 × 16 bytes = ~518 KB — negligível.
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  complex(dp), allocatable :: cH_all_tr(:,:,:,:,:)    ! (nTR, ntheta, nmmax, nf, 9)
-  real(dp), allocatable    :: zrho_all_tr(:,:,:,:,:)   ! (nTR, ntheta, nmmax, nf, 3)
-  complex(dp), allocatable :: cH_comp(:,:,:,:,:)       ! (n_comp_pairs, ntheta, nmmax, nf, 9)
-  real(dp), allocatable    :: phase_diff(:,:,:,:,:)    ! (n_comp_pairs, ntheta, nmmax, nf, 9)
-  real(dp), allocatable    :: atten_db(:,:,:,:,:)      ! (n_comp_pairs, ntheta, nmmax, nf, 9)
-  integer :: ipair, i_near, i_far, ic
-  real(dp) :: abs_near, abs_far
-
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! F10 — Variáveis para Sensibilidades ∂H/∂ρ (Jacobiano)
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Arrays globais de saída do Jacobiano (Estratégia C — Fortran OpenMP).
-  ! Shape: (nTR, ntheta, nmmax, nf, 9, n) — uma derivada por camada.
-  !   dH_dRho_h_all: ∂H/∂ρ_h (componente horizontal)
-  !   dH_dRho_v_all: ∂H/∂ρ_v (componente vertical)
-  !
-  ! Memória para nTR=1, ntheta=1, nmmax=600, nf=2, n=10:
-  !   2 arrays × 1 × 1 × 600 × 2 × 9 × 10 × 16 bytes ≈ 3.5 MB — negligível.
-  ! Para nTR=3, n=30: ~63 MB (ainda aceitável em workstation típica).
-  !
-  ! Array auxiliar posTR_array_k (6 × nmed(k)) reconstrói posições T-R por k.
-  ! Ref: docs/reference/relatorio_vantagens_jacobiano.md §9.3
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  complex(dp), allocatable :: dH_dRho_h_all(:,:,:,:,:,:)  ! (nTR, ntheta, nmmax, nf, 9, n)
-  complex(dp), allocatable :: dH_dRho_v_all(:,:,:,:,:,:)  ! (nTR, ntheta, nmmax, nf, 9, n)
-  real(dp), allocatable    :: posTR_array_k(:,:)          ! (6, nmed(k)) — posições para jacobian
 
   ! wtime = omp_get_wtime( )
 
@@ -257,43 +95,9 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   end do
   nmmax = maxval(nmed)
 
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Filtro Adaptativo — Seleção do filtro de Hankel por filter_type
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! O filtro de Hankel discretiza a integral EM:
-  !   H(r,z,ω) = ∫₀^∞ K(kr,z,ω) · J_ν(kr·r) · kr dkr
-  ! usando npt pesos pré-computados (quadratura digital).
-  !
-  ! Seleção por cenário:
-  !   ┌────────────────────┬───────────────────┬──────┬────────────┐
-  !   │ filter_type        │ Filtro            │ npt  │ Precisão   │
-  !   ├────────────────────┼───────────────────┼──────┼────────────┤
-  !   │ 0 (default)        │ Werthmuller       │ 201  │ 10⁻⁶       │
-  !   │ 1 (rápido)         │ Kong              │  61  │ 10⁻⁴       │
-  !   │ 2 (máxima prec.)   │ Anderson          │ 801  │ 10⁻⁸       │
-  !   └────────────────────┴───────────────────┴──────┴────────────┘
-  !
-  ! Custo computacional: escala linearmente com npt.
-  !   Kong (61): ~3.3× mais rápido que Werthmuller (201)
-  !   Anderson (801): ~4× mais lento que Werthmuller (201)
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  select case (filter_type)
-  case (1)
-    ! Kong 61 pontos — geração rápida de datasets de treinamento
-    npt_active = 61
-    call J0J1Kong(npt_active, krJ0J1, wJ0, wJ1)
-  case (2)
-    ! Anderson 801 pontos — validação e referência (máxima precisão)
-    npt_active = 801
-    call J0J1And(krJ0J1, wJ0, wJ1)
-  case default
-    ! Werthmuller 201 pontos — simulação padrão (backward compatible)
-    npt_active = 201
-    call J0J1Wer(npt_active, krJ0J1, wJ0, wJ1)
-  end select
-
-  allocate(krwJ0J1(npt_active,3))
-  do i = 1, npt_active
+  call J0J1Wer(npt, krJ0J1, wJ0, wJ1)
+  allocate(krwJ0J1(npt,3))
+  do i = 1, npt
     krwJ0J1(i,:) = (/ krJ0J1(i), wJ0(i), wJ1(i) /)
   end do
 
@@ -364,36 +168,26 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   allocate(ws_pool(0:maxthreads-1))
   do t = 0, maxthreads-1
-    ! Fase 3 — arrays de transmissão/potencial (npt_active × n)
-    allocate(ws_pool(t)%Tudw (npt_active, n))
-    allocate(ws_pool(t)%Txdw (npt_active, n))
-    allocate(ws_pool(t)%Tuup (npt_active, n))
-    allocate(ws_pool(t)%Txup (npt_active, n))
-    allocate(ws_pool(t)%TEdwz(npt_active, n))
-    allocate(ws_pool(t)%TEupz(npt_active, n))
-    ! Fase 3b — fatores de onda de commonfactorsMD (npt_active)
-    allocate(ws_pool(t)%Mxdw (npt_active))
-    allocate(ws_pool(t)%Mxup (npt_active))
-    allocate(ws_pool(t)%Eudw (npt_active))
-    allocate(ws_pool(t)%Euup (npt_active))
-    allocate(ws_pool(t)%FEdwz(npt_active))
-    allocate(ws_pool(t)%FEupz(npt_active))
+    allocate(ws_pool(t)%Tudw (npt, n))
+    allocate(ws_pool(t)%Txdw (npt, n))
+    allocate(ws_pool(t)%Tuup (npt, n))
+    allocate(ws_pool(t)%Txup (npt, n))
+    allocate(ws_pool(t)%TEdwz(npt, n))
+    allocate(ws_pool(t)%TEupz(npt, n))
   end do
 
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! Fase 4 — Alocação dos caches de commonarraysMD (shared entre threads)
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Fase 4 — alocação com dimensão ntheta: elimina race condition no outer parallel do k.
-  ! Custo de memória: ×ntheta (para ntheta=2: ~3,36 MB, era ~1,68 MB — irrelevante).
-  allocate(u_cache     (npt_active, n, nf, ntheta))
-  allocate(s_cache     (npt_active, n, nf, ntheta))
-  allocate(uh_cache    (npt_active, n, nf, ntheta))
-  allocate(sh_cache    (npt_active, n, nf, ntheta))
-  allocate(RTEdw_cache (npt_active, n, nf, ntheta))
-  allocate(RTEup_cache (npt_active, n, nf, ntheta))
-  allocate(RTMdw_cache (npt_active, n, nf, ntheta))
-  allocate(RTMup_cache (npt_active, n, nf, ntheta))
-  allocate(AdmInt_cache(npt_active, n, nf, ntheta))
+  allocate(u_cache     (npt, n, nf))
+  allocate(s_cache     (npt, n, nf))
+  allocate(uh_cache    (npt, n, nf))
+  allocate(sh_cache    (npt, n, nf))
+  allocate(RTEdw_cache (npt, n, nf))
+  allocate(RTEup_cache (npt, n, nf))
+  allocate(RTMdw_cache (npt, n, nf))
+  allocate(RTMup_cache (npt, n, nf))
+  allocate(AdmInt_cache(npt, n, nf))
 
   ! Fase 4 — eta hoisted para escopo de perfila1DanisoOMP (era recomputado em
   ! cada chamada de fieldsinfreqs antes). Invariante durante todo o modelo.
@@ -410,81 +204,6 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
       '  threads_angulos(k)=', num_threads_k, &
       '  threads_medidas(j)=', num_threads_j, &
       '  produto=', num_threads_k * num_threads_j
-
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    ! F5 — Validação de frequências arbitrárias
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    ! Quando use_arb_freq == 0 (padrão), o código aceita qualquer nf mas emite
-    ! aviso para nf > 2 como proteção contra uso acidental. Quando habilitado,
-    ! valida nf ∈ [1, 16] e exibe as frequências configuradas.
-    ! O core já suporta nf arbitrário — caches Phase 4 têm dimensão (npt, n, nf).
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    if (use_arb_freq == 0 .and. nf > 2) then
-      write(*,'(A,I0,A)') '[F5 AVISO] nf = ', nf, ' > 2 com use_arbitrary_freq desabilitado.'
-      write(*,'(A)')      '           Para nf > 2 sem aviso, defina use_arbitrary_freq = 1 no model.in.'
-    end if
-    if (use_arb_freq == 1) then
-      if (nf < 1 .or. nf > 16) then
-        write(*,'(A,I0,A)') '[F5 ERRO] nf = ', nf, ' fora do intervalo válido [1, 16].'
-        stop '[F5] nf deve estar entre 1 e 16 com use_arbitrary_freq habilitado'
-      end if
-      write(*,'(A,I0,A)') '[F5] Frequências arbitrárias habilitadas: nf = ', nf, ' frequência(s)'
-      do ii = 1, nf
-        write(*,'(A,I0,A,F12.1,A)') '     freq(', ii, ') = ', freq(ii), ' Hz'
-      end do
-    end if
-
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    ! F7 — Informações sobre antenas inclinadas
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    if (use_tilted == 1 .and. n_tilted > 0) then
-      write(*,'(A,I0,A)') '[F7] Antenas inclinadas habilitadas: ', n_tilted, ' configuração(ões)'
-      do ii = 1, n_tilted
-        write(*,'(A,I0,A,F6.1,A,F6.1,A)') &
-          '     tilted(', ii, '): beta=', beta_tilt(ii), '° phi=', phi_tilt(ii), '°'
-      end do
-      write(*,'(A,I0,A)') '[F7] Saída estendida: 22 + ', 2*n_tilted, ' colunas por registro'
-    end if
-
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    ! F6 — Informações sobre compensação midpoint
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    if (use_compensation == 1 .and. n_comp_pairs > 0) then
-      write(*,'(A,I0,A)') '[F6] Compensação midpoint habilitada: ', n_comp_pairs, ' par(es)'
-      do ii = 1, n_comp_pairs
-        write(*,'(A,I0,A,I0,A,I0,A)') &
-          '     comp(', ii, '): near=TR', comp_pairs(ii,1), ' far=TR', comp_pairs(ii,2), ''
-      end do
-      if (nTR < 2) then
-        write(*,'(A)') '[F6 AVISO] use_compensation=1 mas nTR < 2. Compensação desabilitada.'
-      end if
-    end if
-
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    ! Filtro Adaptativo — Informações sobre o filtro selecionado
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    if (filter_type == 1) then
-      write(*,'(A,I0,A)') '[FILTRO] Kong (', npt_active, ' pts) — modo rápido para geração de treinamento'
-    else if (filter_type == 2) then
-      write(*,'(A,I0,A)') '[FILTRO] Anderson (', npt_active, ' pts) — máxima precisão para validação'
-    else
-      write(*,'(A,I0,A)') '[FILTRO] Werthmuller (', npt_active, ' pts) — padrão (precisão 10⁻⁶)'
-    end if
-
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    ! F10 — Informações sobre Jacobiano
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    if (use_jacobian == 1) then
-      if (jacobian_method == 1) then
-        write(*,'(A,ES10.3,A)') &
-          '[F10] Jacobiano habilitado — Estratégia C (Fortran OpenMP interno), fd_step=', &
-          jacobian_fd_step, ' (relativo)'
-        write(*,'(A,I0,A)') '[F10] Saída: 2 arquivos .jac com shape (ntheta, nmmax, nf, 9, ', &
-                            n, ') — h e v'
-      else
-        write(*,'(A)') '[F10] Jacobiano habilitado — Estratégia B (Python Workers, no-op no Fortran)'
-      end if
-    end if
   end if
 
   allocate(zrho1(ntheta,nmmax,nf,3), cH1(ntheta,nmmax,nf,9))
@@ -494,70 +213,6 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   allocate(z_rho1(nmmax,nf,3), c_H1(nmmax,nf,9))
   z_rho1 = 0.d0
   c_H1 = 0.d0
-  ! F7 — Alocação do array de respostas tilted
-  ! Quando habilitado: tamanho completo (ntheta, nmmax, nf, n_tilted) + zerado.
-  ! Quando desabilitado: tamanho mínimo (1,1,1,1) SEM zeroing — passado como
-  ! assumed-shape a writes_files mas nunca acessado (guard use_tilted==1 interno).
-  if (use_tilted == 1 .and. n_tilted > 0) then
-    allocate(cH_tilted(ntheta, nmmax, nf, n_tilted))
-    cH_tilted = (0.d0, 0.d0)
-  else
-    allocate(cH_tilted(1, 1, 1, 1))
-  end if
-
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! F6 — Alocação dos arrays de compensação midpoint
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! cH_all_tr armazena o tensor completo de TODOS os pares T-R para permitir
-  ! o cálculo de compensação após o loop principal. Necessário porque a
-  ! compensação requer H_near e H_far simultaneamente — não disponíveis
-  ! durante o loop itr que processa um par de cada vez.
-  ! F6 — Alocação condicional dos arrays de compensação midpoint.
-  ! Quando habilitado: tamanho completo + inicializado.
-  ! Quando desabilitado: allocate(0,...) cria descritor alocado com zero bytes
-  ! de dados — overhead negligível (~5 descritores sem dados) e silencia
-  ! -Wmaybe-uninitialized do gfortran sem impacto na performance.
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  if (use_compensation == 1 .and. n_comp_pairs > 0 .and. nTR >= 2) then
-    allocate(cH_all_tr(nTR, ntheta, nmmax, nf, 9))
-    allocate(zrho_all_tr(nTR, ntheta, nmmax, nf, 3))
-    allocate(cH_comp(n_comp_pairs, ntheta, nmmax, nf, 9))
-    allocate(phase_diff(n_comp_pairs, ntheta, nmmax, nf, 9))
-    allocate(atten_db(n_comp_pairs, ntheta, nmmax, nf, 9))
-    cH_all_tr = (0.d0, 0.d0)
-    zrho_all_tr = 0.d0
-    cH_comp = (0.d0, 0.d0)
-    phase_diff = 0.d0
-    atten_db = 0.d0
-  else
-    allocate(cH_all_tr(0, 0, 0, 0, 0))
-    allocate(zrho_all_tr(0, 0, 0, 0, 0))
-    allocate(cH_comp(0, 0, 0, 0, 0))
-    allocate(phase_diff(0, 0, 0, 0, 0))
-    allocate(atten_db(0, 0, 0, 0, 0))
-  end if
-
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! F10 — Alocação dos arrays globais do Jacobiano (Estratégia C)
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Quando jacobian_method == 1 (Estratégia C — Fortran OpenMP interno):
-  !   aloca arrays completos (nTR, ntheta, nmmax, nf, 9, n) para armazenar
-  !   ∂H/∂ρ_h e ∂H/∂ρ_v de todos os pares T-R, ângulos e medidas.
-  ! Quando jacobian_method == 0 (Estratégia B — Python Workers externos):
-  !   Fortran não calcula o Jacobiano; a expansão de perturbações é feita
-  !   pelo batch_runner.py que chama múltiplas vezes o simulador normal.
-  !   Aloca zero-size para silenciar warnings e manter shape consistente.
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  if (use_jacobian == 1 .and. jacobian_method == 1) then
-    allocate(dH_dRho_h_all(nTR, ntheta, nmmax, nf, 9, n))
-    allocate(dH_dRho_v_all(nTR, ntheta, nmmax, nf, 9, n))
-    dH_dRho_h_all = (0.d0, 0.d0)
-    dH_dRho_v_all = (0.d0, 0.d0)
-  else
-    allocate(dH_dRho_h_all(0, 0, 0, 0, 0, 0))
-    allocate(dH_dRho_v_all(0, 0, 0, 0, 0, 0))
-  end if
-
   ! Fase 2 — Hybrid Scheduler: escolha do schedule baseada na característica do loop
   !   • Loop externo `k` (ângulos): carga desigual porque nmed(k) varia com theta(k)
   !     (janela vertical constante mas passo vertical pz = p_med*cos(theta) muda),
@@ -572,40 +227,8 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   ! os valores do master (inicializados em 0.d0 nas linhas ~158 acima),
   ! garantindo semântica portável. Custo: ~32 KB copiados por thread uma vez
   ! por região paralela — irrelevante para throughput.
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Fase 5/5b — Paralelismo adaptativo: single-level (ntheta=1) ou nested (ntheta>1)
-  !
-  ! Estratégia de particionamento de threads:
-  !
-  !   ┌────────────────────────────────────────────────────────────────────────┐
-  !   │  ntheta = 1 (produção: perfilagem a 0°)                              │
-  !   │    → Loop k serial (1 iteração), inner parallel j com maxthreads     │
-  !   │    → tid = omp_get_thread_num() direto                               │
-  !   │    → Sem overhead de nested fork/join                                │
-  !   │                                                                      │
-  !   │  ntheta > 1 (multi-ângulo: geosteering)                              │
-  !   │    → Outer parallel k com num_threads_k threads (schedule dynamic)   │
-  !   │    → Inner parallel j com num_threads_j threads (schedule static)    │
-  !   │    → tid = omp_get_ancestor_thread_num(1) * num_threads_j            │
-  !   │           + omp_get_thread_num()                                     │
-  !   │    → Pré-cômputo commonarraysMD serial dentro de cada k              │
-  !   │    → firstprivate(z_rho1, c_H1) para cópias por ângulo              │
-  !   └────────────────────────────────────────────────────────────────────────┘
-  !
-  ! A Fase 3b garante que ws_pool tem 12 campos (6 transmissão + 6 fatores de
-  ! onda), eliminando toda pressão de stack mesmo com ntheta > 1 × maxthreads.
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Feature 1 — Loop externo sobre pares T-R.
-  ! Cada par itr tem seu próprio r_k = dTR(itr) * |sin(θ_k)| e portanto
-  ! requer recomputo do cache Fase 4 (commonarraysMD depende de r).
-  ! Para nTR=1, este loop executa uma única vez → backward compatible.
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  do itr = 1, nTR
-  ! Fase 5b: outer parallel com cláusula if(ntheta > 1).
   !$omp parallel do schedule(dynamic) num_threads(num_threads_k) &
-  !$omp&        if(ntheta > 1) &
-  !$omp&        private(k,ang,seno,coss,px,pz,Lsen,Lcos,r_k,omega_i,zeta_i,ii) &
+  !$omp&        private(k,ang,seno,coss,px,pz,Lsen,Lcos) &
   !$omp&        firstprivate(z_rho1,c_H1)
   do k = 1, ntheta
     ang = theta(k) * pi / 18.d1
@@ -613,8 +236,8 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     coss = cos(ang)
     px = p_med * seno
     pz = p_med * coss
-    Lsen = dTR(itr) * seno
-    Lcos = dTR(itr) * coss
+    Lsen = dTR * seno
+    Lcos = dTR * coss
 
     !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
     ! Fase 4 — Pré-cômputo de commonarraysMD (serial, uma vez por ângulo k)
@@ -629,18 +252,17 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     !
     ! Redução: nf × nmed = 1.200 chamadas/modelo → nf = 2 chamadas/modelo.
     ! Os caches são lidos (read-only) pelos threads no inner parallel abaixo.
-    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§��§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-    r_k = dTR(itr) * dabs(seno)
+    !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+    r_k = dTR * dabs(seno)
     do ii = 1, nf
       omega_i = 2.d0 * pi * freq(ii)
       zeta_i  = cmplx(0.d0, 1.d0, kind=dp) * omega_i * mu
-      ! Slice (:,:,ii,k): cada ângulo k escreve em posição independente → thread-safe.
-      call commonarraysMD(n, npt_active, r_k, krwJ0J1(:,1), zeta_i, h, eta_shared,   &
-                          u_cache(:,:,ii,k),  s_cache(:,:,ii,k),               &
-                          uh_cache(:,:,ii,k), sh_cache(:,:,ii,k),              &
-                          RTEdw_cache(:,:,ii,k), RTEup_cache(:,:,ii,k),        &
-                          RTMdw_cache(:,:,ii,k), RTMup_cache(:,:,ii,k),        &
-                          AdmInt_cache(:,:,ii,k))
+      call commonarraysMD(n, npt, r_k, krwJ0J1(:,1), zeta_i, h, eta_shared,   &
+                          u_cache(:,:,ii),  s_cache(:,:,ii),                   &
+                          uh_cache(:,:,ii), sh_cache(:,:,ii),                  &
+                          RTEdw_cache(:,:,ii), RTEup_cache(:,:,ii),            &
+                          RTMdw_cache(:,:,ii), RTMup_cache(:,:,ii),            &
+                          AdmInt_cache(:,:,ii))
     end do
 
     ! Schedule static: iterações têm custo uniforme (mesmos n, npt, nf, nlayers)
@@ -648,24 +270,9 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     !         hot path (ver magneticdipoles.f08 type :: thread_workspace).
     ! Fase 4: caches compartilhados u_cache,...,AdmInt_cache são lidos por todas
     !         as threads (read-only ⇒ sem race, sem locks).
-    ! Débito B3/D7 corrigido: zrho e cH são allocatable com private — OpenMP spec
-    ! define status de alocação indefinido para cópias private de allocatables.
-    ! Migração para firstprivate garante herança de alocação + valores do master.
-    ! Mesmo padrão aplicado a z_rho1/c_H1 em D4 (outer parallel, linha 232).
-    ! Fase 5/5b: inner parallel com threads adaptativas.
-    ! ntheta=1: maxthreads (single-level), ntheta>1: num_threads_j (nested).
-    ! B3/D7: firstprivate(zrho, cH) — allocatable portável.
-    ! Fase 2b: schedule(guided, 16) — chunks iniciais grandes (~nmed/threads)
-    ! decrescentes até chunk mínimo de 16. Melhora balanceamento em:
-    !   - Regimes degradados (poucos threads, nmed grande)
-    !   - Multi-ângulo (ntheta>1) com nmed(k) variável entre ângulos
-    !   - Custo não-uniforme por iteração (commonfactorsMD varia com camadT)
-    ! Chunk=16 preserva localidade de cache L1 (~16 × 19 KB ≈ 300 KB/chunk).
-    !$omp parallel do schedule(guided, 16) &
-    !$omp&        num_threads(merge(maxthreads, num_threads_j, ntheta == 1)) &
+    !$omp parallel do schedule(static) num_threads(num_threads_j) &
     !$omp&        default(shared) &
-    !$omp&        private(j, x, y, z, Tx, Ty, Tz, posTR, tid) &
-    !$omp&        firstprivate(zrho, cH)
+    !$omp&        private(j, x, y, z, Tx, Ty, Tz, posTR, zrho, cH, tid)
     do j = 1, nmed(k)
       !----------------------------------------------------
       ! Arranjo TR1:
@@ -678,23 +285,17 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
       Ty = 0.d0
       Tz = z1 + (j-1) * pz + Lcos / 2
       posTR = (/Tx, Ty, Tz, x, y, z/)
-      ! Fase 5/5b: tid adaptativo.
-      ! ntheta=1: tid direto (single-level). ntheta>1: tid global (nested, D6).
-      if (ntheta == 1) then
-        tid = omp_get_thread_num()
-      else
-        tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()
-      end if
-      ! Fase 4: passa slice (:,:,:,k) — shape (npt_active,n,nf) — compatível com a
-      ! interface de fieldsinfreqs_cached_ws (intent(in) dimension(npt,n,nf)).
-      ! Thread-safe: cada k lê sua própria fatia do cache, sem conflito.
-      call fieldsinfreqs_cached_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt_active, &
+      ! Fase 3 + D6 corrigido (PR1-Hygiene): tid GLOBAL do workspace pool.
+      ! Com num_threads_k==1 (ntheta=1 produção), ancestor(1)==0 ⇒ tid == inner_tid.
+      ! Com num_threads_k>1 (multi-ângulo futuro), tid percorre [0, maxthreads-1].
+      tid = omp_get_ancestor_thread_num(1) * num_threads_j + omp_get_thread_num()
+      ! Fase 4: chamada usa os caches pré-computados (shared) em vez de
+      ! recalcular commonarraysMD a cada iteração j.
+      call fieldsinfreqs_cached_ws(ws_pool(tid), ang, nf, freq, posTR, dipolo, npt, &
                                     krwJ0J1, n, h, prof, resist, eta_shared,        &
-                                    u_cache(:,:,:,k),  s_cache(:,:,:,k),            &
-                                    uh_cache(:,:,:,k), sh_cache(:,:,:,k),           &
-                                    RTEdw_cache(:,:,:,k), RTEup_cache(:,:,:,k),     &
-                                    RTMdw_cache(:,:,:,k), RTMup_cache(:,:,:,k),     &
-                                    AdmInt_cache(:,:,:,k),                          &
+                                    u_cache, s_cache, uh_cache, sh_cache,           &
+                                    RTEdw_cache, RTEup_cache,                        &
+                                    RTMdw_cache, RTMup_cache, AdmInt_cache,          &
                                     zrho, cH)
       z_rho1(j,:,:) = zrho
       c_H1(j,:,:) = cH
@@ -704,205 +305,22 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
     cH1(k,1:nmed(k),:,:) = c_H1
   end do
   !$omp end parallel do
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! F7 — Cálculo das respostas de antenas inclinadas (pós-processamento)
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! F7 — Cálculo das respostas de antenas inclinadas.
-  ! Guard completo: zeroing + cálculo SOMENTE quando F7 habilitado.
-  ! Quando desabilitado: zero overhead (sem memset, sem loops).
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  if (use_tilted == 1 .and. n_tilted > 0) then
-    ! Zero cH_tilted a cada iteração itr para evitar dados residuais de itr-1.
-    cH_tilted = (0.d0, 0.d0)
-    do it = 1, n_tilted
-      beta_rad = beta_tilt(it) * pi / 18.d1
-      phi_rad  = phi_tilt(it) * pi / 18.d1
-      do k = 1, ntheta
-        do j = 1, nmed(k)
-          do i = 1, nf
-            cH_tilted(k, j, i, it) = &
-              cos(beta_rad) * cH1(k, j, i, 9) + &
-              sin(beta_rad) * (cos(phi_rad) * cH1(k, j, i, 3) + &
-                               sin(phi_rad) * cH1(k, j, i, 6))
-          end do
-        end do
-      end do
-    end do
-  end if
-
-  ! Feature 1: escrita de saída por par T-R (dentro do loop itr)
-  ! F7: passa cH_tilted para writes_files (condicionalmente alocado)
-  call writes_files(modelm, nmaxmodel, mypath, zrho1, cH1, ntheta, theta, nf, freq, nmed, filename, &
-                    itr, nTR, use_tilted, n_tilted, beta_tilt, phi_tilt, cH_tilted)
-
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! F6 — Armazenamento do tensor por par T-R para compensação posterior
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Salva cH1 e zrho1 indexados por itr. Após o loop completo, os arrays
-  ! cH_all_tr e zrho_all_tr contêm dados de TODOS os pares T-R, necessários
-  ! para calcular phase_diff e attenuation entre pares (near, far).
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  if (use_compensation == 1 .and. n_comp_pairs > 0 .and. nTR >= 2) then
-    cH_all_tr(itr, :, :, :, :) = cH1
-    zrho_all_tr(itr, :, :, :, :) = zrho1
-  end if
-
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! F10 — Cálculo do Jacobiano ∂H/∂ρ (Estratégia C, serial no itr, paralelo internamente)
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Para cada ângulo k dentro deste par T-R (itr), reconstrói posTR_array_k
-  ! (6 × nmed(k)) e chama compute_jacobian_fd — que paraleliza internamente
-  ! sobre 2*n perturbações (n camadas × 2 componentes h/v).
-  !
-  ! Performance: o loop externo k é serial (poucas iterações tipicamente),
-  ! o loop 2*n dentro de compute_jacobian_fd é onde está o paralelismo OpenMP.
-  ! Ver compute_jacobian_fd abaixo para detalhes do schedule(dynamic, 1).
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  if (use_jacobian == 1 .and. jacobian_method == 1) then
-    do k = 1, ntheta
-      ang  = theta(k) * pi / 18.d1
-      seno = sin(ang)
-      coss = cos(ang)
-      px   = p_med * seno
-      pz   = p_med * coss
-      Lsen = dTR(itr) * seno
-      Lcos = dTR(itr) * coss
-      r_k  = dTR(itr) * dabs(seno)
-
-      ! Reconstrói posTR_array_k (6 × nmed(k)) — posições de medidas para este k.
-      ! Mesma lógica do loop j principal (linhas ~670 abaixo).
-      if (allocated(posTR_array_k)) deallocate(posTR_array_k)
-      allocate(posTR_array_k(6, nmed(k)))
-      do j = 1, nmed(k)
-        x  = 0.d0 + (j-1) * px - Lsen / 2
-        y  = 0.d0
-        z  = z1 + (j-1) * pz - Lcos / 2
-        Tx = 0.d0 + (j-1) * px + Lsen / 2
-        Ty = 0.d0
-        Tz = z1 + (j-1) * pz + Lcos / 2
-        posTR_array_k(:, j) = (/ Tx, Ty, Tz, x, y, z /)
-      end do
-
-      call compute_jacobian_fd(ws_pool, maxthreads, ang, nf, freq,              &
-                                posTR_array_k, nmed(k), dipolo, npt_active,     &
-                                krwJ0J1, n, h, prof, resist, eta_shared, r_k,   &
-                                jacobian_fd_step,                               &
-                                dH_dRho_h_all(itr, k, 1:nmed(k), :, :, :),      &
-                                dH_dRho_v_all(itr, k, 1:nmed(k), :, :, :))
-    end do
-
-    ! Escreve os arquivos .jac (Re e Im de dH_dRho_h e dH_dRho_v)
-    call write_jacobian_file(modelm, nmaxmodel, mypath, filename, itr, nTR,     &
-                              ntheta, nmmax, nf, n, nmed,                       &
-                              dH_dRho_h_all(itr, :, :, :, :, :),                &
-                              dH_dRho_v_all(itr, :, :, :, :, :))
-  end if
-
-  end do  ! end do itr = 1, nTR
-
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! F6 — Cálculo da compensação midpoint (pós-processamento)
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Para cada par de compensação (near_itr, far_itr), calcula:
-  !   1. Tensor compensado: H_comp = (H_near + H_far) / 2
-  !   2. Diferença de fase:  Δφ = arg(H_near) − arg(H_far)  [graus]
-  !   3. Atenuação:          Δα = 20·log₁₀(|H_near|/|H_far|)  [dB]
-  !
-  ! Custo computacional: O(n_comp_pairs × ntheta × nmmax × nf × 9) operações.
-  ! Para configuração típica (n_comp_pairs=1, ntheta=1, nmmax=600, nf=2):
-  !   ~10.800 operações × ~15 ns ≈ ~162 μs — negligível vs forward model.
-  !
-  ! Princípio físico (CDR — Compensated Dual Resistivity):
-  !   Efeitos ambientais (rugosidade, excentricidade, invasão de lama)
-  !   são simétricos em relação ao midpoint T1-T2 e se cancelam na média,
-  !   enquanto a resposta da formação (assimétrica) se preserva.
-  !   Ref: Schlumberger ARC tool, Baker Hughes OnTrak.
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  if (use_compensation == 1 .and. n_comp_pairs > 0 .and. nTR >= 2) then
-    do ipair = 1, n_comp_pairs
-      i_near = comp_pairs(ipair, 1)
-      i_far  = comp_pairs(ipair, 2)
-      ! Validação dos índices de pares T-R
-      if (i_near < 1 .or. i_near > nTR .or. i_far < 1 .or. i_far > nTR) then
-        write(*,'(A,I0,A,I0,A,I0)') &
-          '[F6 ERRO] Par de compensação ', ipair, ' com índices inválidos: near=', i_near, ' far=', i_far
-        cycle
-      end if
-      do k = 1, ntheta
-        do j = 1, nmed(k)
-          do i = 1, nf
-            do ic = 1, 9
-              ! ── Tensor compensado: média aritmética (CDR clássico) ──
-              ! Cancela efeitos de 1ª ordem simétricos ao midpoint.
-              cH_comp(ipair, k, j, i, ic) = 0.5d0 * &
-                (cH_all_tr(i_near, k, j, i, ic) + cH_all_tr(i_far, k, j, i, ic))
-
-              ! ── Diferença de fase (graus) ──
-              ! Δφ = arg(H_near) − arg(H_far), convertido para graus.
-              ! atan2 retorna [-π, π]; a diferença é a phase shift entre pares T-R.
-              phase_diff(ipair, k, j, i, ic) = &
-                (atan2(aimag(cH_all_tr(i_near, k, j, i, ic)), &
-                       real(cH_all_tr(i_near, k, j, i, ic))) - &
-                 atan2(aimag(cH_all_tr(i_far, k, j, i, ic)), &
-                       real(cH_all_tr(i_far, k, j, i, ic)))) * 18.d1 / pi
-
-              ! ── Atenuação (dB) ──
-              ! Δα = 20·log₁₀(|H_near|/|H_far|). Protegido contra divisão por zero
-              ! com max(|H_far|, 1e-20). Guard 1e-20 é fisicamente motivado:
-              ! campos EM em meios condutivos típicos variam entre 1e-6 e 1e-9 A/m²;
-              ! valores < 1e-20 são numericamente indistinguíveis de zero no contexto
-              ! da simulação. Guard 1e-30 produziria atenuações > 400 dB — não físico.
-              abs_near = abs(cH_all_tr(i_near, k, j, i, ic))
-              abs_far  = abs(cH_all_tr(i_far, k, j, i, ic))
-              atten_db(ipair, k, j, i, ic) = 20.d0 * &
-                log10(max(abs_near, 1.d-20) / max(abs_far, 1.d-20))
-            end do
-          end do
-        end do
-      end do
-    end do
-
-    ! Escrita dos resultados compensados — um arquivo _COMP{ipair}.dat por par
-    call writes_compensation_files(modelm, mypath, &
-      n_comp_pairs, comp_pairs, ntheta, nf, nmed, filename, &
-      cH_comp, phase_diff, atten_db, zrho_all_tr)
-  end if
-
+  ! Fase 3/PR1-Hygiene: removido !$omp barrier órfão que estava fora de região
+  ! paralela (débito D5 da Fase 3). O !$omp end parallel do acima já contém
+  ! uma barreira implícita — a diretiva explícita era redundante e semanticamente
+  ! inválida fora de uma região parallel ativa.
   deallocate(zrho,cH,z_rho1,c_H1)
-  if (allocated(cH_tilted)) deallocate(cH_tilted)
-  ! F6 — Liberação dos arrays de compensação
-  if (allocated(cH_all_tr))    deallocate(cH_all_tr)
-  if (allocated(zrho_all_tr))  deallocate(zrho_all_tr)
-  if (allocated(cH_comp))      deallocate(cH_comp)
-  if (allocated(phase_diff))   deallocate(phase_diff)
-  if (allocated(atten_db))     deallocate(atten_db)
-  ! F10 — Liberação dos arrays do Jacobiano
-  if (allocated(dH_dRho_h_all)) deallocate(dH_dRho_h_all)
-  if (allocated(dH_dRho_v_all)) deallocate(dH_dRho_v_all)
-  if (allocated(posTR_array_k)) deallocate(posTR_array_k)
-
-  ! Débito B5 corrigido: krwJ0J1 alocado na linha ~99 e nunca desalocado.
-  ! Leak de ~9,6 KB/modelo (npt × 3 × 8 bytes = 201 × 3 × 8 ≈ 4,8 KB).
-  if (allocated(krwJ0J1)) deallocate(krwJ0J1)
 
   ! Fase 3 — Liberação do ws_pool após o loop paralelo
   ! Desalocação explícita dos 6 campos por slot + array mestre, mais defensiva
   ! que confiar no deallocate recursivo automático do Fortran 2003.
   do t = 0, maxthreads-1
-    ! Fase 3 — campos (npt × n)
     if (allocated(ws_pool(t)%Tudw))  deallocate(ws_pool(t)%Tudw)
     if (allocated(ws_pool(t)%Txdw))  deallocate(ws_pool(t)%Txdw)
     if (allocated(ws_pool(t)%Tuup))  deallocate(ws_pool(t)%Tuup)
     if (allocated(ws_pool(t)%Txup))  deallocate(ws_pool(t)%Txup)
     if (allocated(ws_pool(t)%TEdwz)) deallocate(ws_pool(t)%TEdwz)
     if (allocated(ws_pool(t)%TEupz)) deallocate(ws_pool(t)%TEupz)
-    ! Fase 3b — campos (npt)
-    if (allocated(ws_pool(t)%Mxdw))  deallocate(ws_pool(t)%Mxdw)
-    if (allocated(ws_pool(t)%Mxup))  deallocate(ws_pool(t)%Mxup)
-    if (allocated(ws_pool(t)%Eudw))  deallocate(ws_pool(t)%Eudw)
-    if (allocated(ws_pool(t)%Euup))  deallocate(ws_pool(t)%Euup)
-    if (allocated(ws_pool(t)%FEdwz)) deallocate(ws_pool(t)%FEdwz)
-    if (allocated(ws_pool(t)%FEupz)) deallocate(ws_pool(t)%FEupz)
   end do
   deallocate(ws_pool)
 
@@ -918,6 +336,8 @@ subroutine perfila1DanisoOMP(modelm, nmaxmodel, mypath, nf, freq, ntheta, theta,
   if (allocated(AdmInt_cache)) deallocate(AdmInt_cache)
   if (allocated(eta_shared))   deallocate(eta_shared)
   !-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+  ! write(*,*)'Passando para a escrita dos arquivos'
+  call writes_files(modelm, nmaxmodel, mypath, zrho1, cH1, ntheta, theta, nf, freq, nmed, filename)
   deallocate(zrho1, cH1)
 
   ! wtime = omp_get_wtime() - wtime
@@ -1134,18 +554,11 @@ subroutine fieldsinfreqs_cached_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0
   complex(dp), dimension(nf,9), intent(out) :: cH
 
   integer :: i, layerObs, camadT, camadR
-  ! Débito B1 corrigido: eliminada cópia redundante krJ0J1/wJ0/wJ1 = krwJ0J1(:,1..3).
-  ! As slices krwJ0J1(:,1), krwJ0J1(:,2), krwJ0J1(:,3) são passadas diretamente
-  ! para hmd_TIV_optimized_ws e vmd_optimized_ws abaixo. Em column-major, a
-  ! primeira dimensão (npt) é contígua — cada slice (:,k) é contígua em memória,
-  ! sem necessidade de cópia temporária pelo compilador.
-  real(dp) :: freq
+  real(dp) :: freq, krJ0J1(npt), wJ0(npt), wJ1(npt)
   real(dp) :: x, y, z, Tx, Ty, Tz, zobs, omega
   complex(dp) :: HxHMD(1,2), HyHMD(1,2), HzHMD(1,2) !só se dipolo = 'hmdxy'
   complex(dp) :: zeta, HxVMD, HyVMD, HzVMD, matH(3,3), tH(3,3)
-  ! Fase 3b: Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz movidos de automatic (stack)
-  ! para ws%Mxdw etc. (heap, via thread_workspace). Eliminação de ~19 KB/thread
-  ! de pressão de stack. Robustez para n ≥ 30 camadas + muitos threads.
+  complex(dp), dimension(npt) :: Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz
 
   Tx = posTR(1)
   Ty = posTR(2)
@@ -1158,6 +571,13 @@ subroutine fieldsinfreqs_cached_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0
   ! Armazenamento da profundidade do ponto-médio do arranjo T-R1 e suas resistividades verdadeiras
   zobs = (Tz + z) / 2.d0
   layerObs = layer2z_inwell(n, zobs, prof(1:n-1))
+
+  ! r local nem é usado aqui — estaria redundante, pois commonarraysMD já foi
+  ! chamada pelo caller (perfila1DanisoOMP) com o r correto.
+
+  krJ0J1 = krwJ0J1(:,1)
+  wJ0    = krwJ0J1(:,2)
+  wJ1    = krwJ0J1(:,3)
 
   do i = 1, nf
     freq  = freqs(i)
@@ -1173,20 +593,18 @@ subroutine fieldsinfreqs_cached_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0
                          u_c(:,:,i), s_c(:,:,i), uh_c(:,:,i), sh_c(:,:,i), &
                          RTEdw_c(:,:,i), RTEup_c(:,:,i),                    &
                          RTMdw_c(:,:,i), RTMup_c(:,:,i),                    &
-                         ws%Mxdw, ws%Mxup, ws%Eudw, ws%Euup, ws%FEdwz, ws%FEupz)
-    call hmd_TIV_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt,       &
-                      krwJ0J1(:,1), krwJ0J1(:,2), krwJ0J1(:,3), h,        &
-                      prof, zeta, eta_in, x, y, z,                         &
-                      u_c(:,:,i), s_c(:,:,i), uh_c(:,:,i), sh_c(:,:,i),   &
-                      RTEdw_c(:,:,i), RTEup_c(:,:,i),                      &
-                      RTMdw_c(:,:,i), RTMup_c(:,:,i),                      &
-                      ws%Mxdw, ws%Mxup, ws%Eudw, ws%Euup, HxHMD, HyHMD, HzHMD, dipolo)
-    call vmd_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt,         &
-                      krwJ0J1(:,1), krwJ0J1(:,2), krwJ0J1(:,3), h,        &
-                      prof, zeta, x, y, z,                                 &
-                      u_c(:,:,i), uh_c(:,:,i), AdmInt_c(:,:,i),            &
-                      RTEdw_c(:,:,i), RTEup_c(:,:,i),                      &
-                      ws%FEdwz, ws%FEupz, HxVMD, HyVMD, HzVMD)
+                         Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz)
+    call hmd_TIV_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt, krJ0J1, wJ0, wJ1, h, &
+                      prof, zeta, eta_in, x, y, z,                                  &
+                      u_c(:,:,i), s_c(:,:,i), uh_c(:,:,i), sh_c(:,:,i),             &
+                      RTEdw_c(:,:,i), RTEup_c(:,:,i),                                &
+                      RTMdw_c(:,:,i), RTMup_c(:,:,i),                                &
+                      Mxdw, Mxup, Eudw, Euup, HxHMD, HyHMD, HzHMD, dipolo)
+    call vmd_optimized_ws(ws, Tx, Ty, Tz, n, camadR, camadT, npt, krJ0J1, wJ0, wJ1, h, &
+                      prof, zeta, x, y, z,                                          &
+                      u_c(:,:,i), uh_c(:,:,i), AdmInt_c(:,:,i),                     &
+                      RTEdw_c(:,:,i), RTEup_c(:,:,i),                                &
+                      FEdwz, FEupz, HxVMD, HyVMD, HzVMD)
     !===========================================================================
     matH(1,:) = (/HxHMD(1,1), HyHMD(1,1), HzHMD(1,1)/)
     matH(2,:) = (/HxHMD(1,2), HyHMD(1,2), HzHMD(1,2)/)
@@ -1197,56 +615,31 @@ subroutine fieldsinfreqs_cached_ws(ws, ang, nf, freqs, posTR, dipolo, npt, krwJ0
   end do
 end subroutine fieldsinfreqs_cached_ws
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq, nmeds, filename, &
-                        itr, nTR, use_tilted, n_tilted_in, beta_tilt_in, phi_tilt_in, cH_tilted_in)
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Versão 8.0: escrita de saída com suporte a Feature 1 (Multi-TR) e F7 (Tilted).
-  !   - Feature 1: sufixo _TR{itr} para nTR > 1, sem sufixo para nTR == 1
-  !   - F7: quando use_tilted == 1, anexa Re/Im de H_tilted para cada configuração
-  !         ao registro binário, resultando em 22 + 2×n_tilted colunas.
-  !         O arquivo .out inclui metadados das antenas inclinadas.
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq, nmeds, filename)
   implicit none
   character(*), intent(in) :: mypath
-  integer, intent(in) :: modelm, nmaxmodel, nt, nf, itr, nTR
+  integer, intent(in) :: modelm, nmaxmodel, nt, nf
   integer, intent(in) :: nmeds(nt)
   real(dp), intent(in) :: theta(nt), freq(nf)
   real(dp), dimension(:,:,:,:), intent(in) :: zrho
   complex(dp), dimension(:,:,:,:), intent(in) :: cH
   character(*), intent(in) :: filename
-  ! F7 — Parâmetros de antenas inclinadas
-  integer, intent(in) :: use_tilted, n_tilted_in
-  real(dp), intent(in) :: beta_tilt_in(:), phi_tilt_in(:)
-  complex(dp), dimension(:,:,:,:), intent(in) :: cH_tilted_in  ! (nt, nmmax, nf, n_tilted)
-
-  integer :: k, j, i, exec, it
+ 
+  integer :: k, j, i, exec
   character(len=:), allocatable :: infomodels, fileTR
-  character(len=10) :: tr_suffix
   logical :: file_exists
 
   if (modelm == nmaxmodel) then
     infomodels = mypath//trim('info')//trim(adjustl(filename))//'.out'
     open(unit = 10, file = infomodels, status = 'replace', action = 'write')
-    write(10,*) nt, nf, nmaxmodel
-    write(10,*) (/(theta(i),i=1,nt)/)
-    write(10,*) (/(freq(i),i=1,nf)/)
-    write(10,*) (/(nmeds(i),i=1,nt)/)
-    ! F7 — Metadados de antenas inclinadas no arquivo .out
-    ! Linha 5: use_tilted, n_tilted (0 0 quando desabilitado)
-    write(10,*) use_tilted, n_tilted_in
-    if (use_tilted == 1 .and. n_tilted_in > 0) then
-      write(10,*) (/(beta_tilt_in(it), it=1,n_tilted_in)/)
-      write(10,*) (/(phi_tilt_in(it), it=1,n_tilted_in)/)
-    end if
+    write(10,*)nt,nf,nmaxmodel
+    write(10,*)(/(theta(i),i=1,nt)/)
+    write(10,*)(/(freq(i),i=1,nf)/)
+    write(10,*)(/(nmeds(i),i=1,nt)/)
     close(10)
   end if
-  ! Arquivos: sufixo _TR{itr} para nTR > 1, sem sufixo para nTR == 1
-  if (nTR > 1) then
-    write(tr_suffix, '(A,I0)') '_TR', itr
-    fileTR = mypath//trim(adjustl(filename))//trim(tr_suffix)//'.dat'
-  else
-    fileTR = mypath//trim(adjustl(filename))//'.dat'
-  end if
+  ! Arquivos:
+  fileTR = mypath//trim(adjustl(filename))//'.dat'
 
   !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
   ! Correção Débito 1 — Abertura Condicional do Arquivo de Saída
@@ -1290,22 +683,18 @@ subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq
   do k = 1, nt
     do j = 1, nf
       do i = 1, nmeds(k)
-        ! Registro padrão: 1 int32 + 21 float64 = 172 bytes (22 colunas)
-        write(1000) i, zrho(k,i,j,1), zrho(k,i,j,2), zrho(k,i,j,3), &
+        write(1000)i, zrho(k,i,j,1), zrho(k,i,j,2), zrho(k,i,j,3), &
                    real(cH(k,i,j,1)), aimag(cH(k,i,j,1)), real(cH(k,i,j,2)), aimag(cH(k,i,j,2)), &
                    real(cH(k,i,j,3)), aimag(cH(k,i,j,3)), real(cH(k,i,j,4)), aimag(cH(k,i,j,4)), &
                    real(cH(k,i,j,5)), aimag(cH(k,i,j,5)), real(cH(k,i,j,6)), aimag(cH(k,i,j,6)), &
                    real(cH(k,i,j,7)), aimag(cH(k,i,j,7)), real(cH(k,i,j,8)), aimag(cH(k,i,j,8)), &
                    real(cH(k,i,j,9)), aimag(cH(k,i,j,9))
-        ! F7 — Extensão tilted: 2×n_tilted float64 adicionais por registro
-        ! Formato binário stream: dados contíguos, sem delimitadores de registro.
-        ! Cada configuração tilted adiciona Re(H_tilted) + Im(H_tilted) = 16 bytes.
-        ! Total por registro: 172 + n_tilted × 16 bytes.
-        if (use_tilted == 1 .and. n_tilted_in > 0) then
-          do it = 1, n_tilted_in
-            write(1000) real(cH_tilted_in(k,i,j,it)), aimag(cH_tilted_in(k,i,j,it))
-          end do
-        end if
+        ! write(1000)i, freq(j), theta(k), zrho(k,i,j,1), zrho(k,i,j,2), zrho(k,i,j,3), &
+        !            real(cH(k,i,j,1)), aimag(cH(k,i,j,1)), real(cH(k,i,j,2)), aimag(cH(k,i,j,2)), &
+        !            real(cH(k,i,j,3)), aimag(cH(k,i,j,3)), real(cH(k,i,j,4)), aimag(cH(k,i,j,4)), &
+        !            real(cH(k,i,j,5)), aimag(cH(k,i,j,5)), real(cH(k,i,j,6)), aimag(cH(k,i,j,6)), &
+        !            real(cH(k,i,j,7)), aimag(cH(k,i,j,7)), real(cH(k,i,j,8)), aimag(cH(k,i,j,8)), &
+        !            real(cH(k,i,j,9)), aimag(cH(k,i,j,9))
       end do
     end do
   end do
@@ -1313,112 +702,6 @@ subroutine writes_files(modelm, nmaxmodel, mypath, zrho, cH, nt, theta, nf, freq
   
 end subroutine writes_files
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-! F6 — Sub-rotina de escrita dos resultados de compensação midpoint
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-subroutine writes_compensation_files(modelm, mypath, &
-    n_comp_pairs, comp_pairs, nt, nf, nmeds, filename, &
-    cH_comp, phase_diff, atten_db, zrho_all_tr)
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Escreve os resultados da compensação midpoint (F6) em arquivos binários.
-  !
-  ! Para cada par de compensação (near_itr, far_itr), gera:
-  !   {filename}_COMP{ipair}.dat — arquivo binário stream
-  !
-  ! Formato do registro (29 colunas):
-  !   col 0:  i (int32) — índice da medida
-  !   col 1:  z_obs (float64) — profundidade do ponto médio
-  !   col 2:  rho_h_near (float64) — resistividade horizontal (par near)
-  !   col 3:  rho_v_near (float64) — resistividade vertical (par near)
-  !   col 4-21:  Re/Im(H_comp(1:9)) — 9 componentes do tensor compensado
-  !   col 22-30: phase_diff(1:9) — diferença de fase por componente (graus)
-  !   (total: 1 int32 + 28 float64 = 228 bytes/registro)
-  !
-  ! Nota: attenuation (dB) é armazenada num arquivo separado _COMP{ipair}_ATT.dat
-  ! para manter compatibilidade de formato com leitores existentes.
-  !
-  ! Abertura condicional: mesma lógica de writes_files (Débito 1).
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  implicit none
-  character(*), intent(in) :: mypath
-  integer, intent(in) :: modelm, nt, nf, n_comp_pairs
-  integer, intent(in) :: nmeds(nt), comp_pairs(:,:)
-  character(*), intent(in) :: filename
-  complex(dp), dimension(:,:,:,:,:), intent(in) :: cH_comp      ! (n_comp_pairs, nt, nmmax, nf, 9)
-  real(dp), dimension(:,:,:,:,:), intent(in)    :: phase_diff    ! (n_comp_pairs, nt, nmmax, nf, 9)
-  real(dp), dimension(:,:,:,:,:), intent(in)    :: atten_db      ! (n_comp_pairs, nt, nmmax, nf, 9)
-  real(dp), dimension(:,:,:,:,:), intent(in)    :: zrho_all_tr   ! (nTR, nt, nmmax, nf, 3)
-
-  integer :: ipair, k, j, i, ic, exec, i_near
-  character(len=:), allocatable :: fileComp, fileAtt
-  character(len=20) :: comp_suffix
-  logical :: file_exists
-
-  do ipair = 1, n_comp_pairs
-    i_near = comp_pairs(ipair, 1)
-
-    ! ── Arquivo do tensor compensado + phase_diff ──
-    write(comp_suffix, '(A,I0)') '_COMP', ipair
-    fileComp = mypath//trim(adjustl(filename))//trim(comp_suffix)//'.dat'
-
-    inquire(file = fileComp, exist = file_exists)
-    if (modelm == 1 .or. .not. file_exists) then
-      open(unit = 1100 + ipair, iostat = exec, file = fileComp, form = 'unformatted', &
-           access = 'stream', status = 'replace', action = 'write')
-    else
-      open(unit = 1100 + ipair, iostat = exec, file = fileComp, form = 'unformatted', &
-           access = 'stream', status = 'old', position = 'append', action = 'write')
-    end if
-
-    do k = 1, nt
-      do j = 1, nf
-        do i = 1, nmeds(k)
-          ! Registro: 1 int32 + 3 float64 (zobs, rho_h, rho_v) +
-          !           18 float64 (Re/Im H_comp 9 comp) +
-          !           9 float64 (phase_diff 9 comp)
-          write(1100 + ipair) i, &
-            zrho_all_tr(i_near, k, i, j, 1), &
-            zrho_all_tr(i_near, k, i, j, 2), &
-            zrho_all_tr(i_near, k, i, j, 3), &
-            (real(cH_comp(ipair, k, i, j, ic)), aimag(cH_comp(ipair, k, i, j, ic)), ic=1,9), &
-            (phase_diff(ipair, k, i, j, ic), ic=1,9)
-        end do
-      end do
-    end do
-    close(unit = 1100 + ipair)
-
-    ! ── Arquivo de atenuação (dB) ──
-    fileAtt = mypath//trim(adjustl(filename))//trim(comp_suffix)//'_ATT.dat'
-
-    inquire(file = fileAtt, exist = file_exists)
-    if (modelm == 1 .or. .not. file_exists) then
-      open(unit = 1200 + ipair, iostat = exec, file = fileAtt, form = 'unformatted', &
-           access = 'stream', status = 'replace', action = 'write')
-    else
-      open(unit = 1200 + ipair, iostat = exec, file = fileAtt, form = 'unformatted', &
-           access = 'stream', status = 'old', position = 'append', action = 'write')
-    end if
-
-    do k = 1, nt
-      do j = 1, nf
-        do i = 1, nmeds(k)
-          ! Registro: 1 int32 + 3 float64 (zobs, rho_h, rho_v) +
-          !           9 float64 (atten_db por componente)
-          write(1200 + ipair) i, &
-            zrho_all_tr(i_near, k, i, j, 1), &
-            zrho_all_tr(i_near, k, i, j, 2), &
-            zrho_all_tr(i_near, k, i, j, 3), &
-            (atten_db(ipair, k, i, j, ic), ic=1,9)
-        end do
-      end do
-    end do
-    close(unit = 1200 + ipair)
-  end do
-
-end subroutine writes_compensation_files
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-
 subroutine write_results(results, nk, nj, ni, arq, filename)
   implicit none
   integer, dimension(:,:,:), intent(in) :: results
@@ -1441,333 +724,5 @@ subroutine write_results(results, nk, nj, ni, arq, filename)
 
   close(arq)
 end subroutine write_results
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-! F10 — compute_jacobian_fd: Cálculo do Jacobiano ∂H/∂ρ via diferenças finitas centradas
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-!
-! ESTRATÉGIA C — Paralelização OpenMP interna (Máxima Performance)
-!
-! Calcula a matriz Jacobiana ∂H/∂ρ para todas as medidas j de um único
-! ângulo k e par T-R itr, usando diferenças finitas centradas (erro O(δ²)):
-!
-!   J_{jfc,layer,h} = (H_{jfc}(ρ_h + δ) − H_{jfc}(ρ_h − δ)) / (2 δ)
-!   J_{jfc,layer,v} = (H_{jfc}(ρ_v + δ) − H_{jfc}(ρ_v − δ)) / (2 δ)
-!
-! onde o passo δ segue a política de robustez numérica:
-!   1. δ = fd_step × |ρ_ref|             (perturbação puramente relativa)
-!   2. δ = max(δ, 1e-6)                   (piso absoluto)
-!   3. δ = min(δ, 0.1 × |ρ_ref|)          (teto relativo — protege ρ_m > 0)
-! Esta política garante que resist − δ > 0 sempre (evitando divisão por zero
-! em eta = 1/resist), mesmo para valores não-físicos de ρ_ref.
-!
-! PARALELISMO: o loop `do kk = 1, 2*n` é paralelizado via !$omp parallel do.
-! Cada iteração kk corresponde a UMA perturbação (layer, componente h ou v),
-! com 2 chamadas sequenciais a fieldsinfreqs_cached_ws (±δ). As 2*n iterações
-! são completamente independentes (perturbam apenas uma entrada de resist a
-! cada vez), permitindo escalonamento ideal com OpenMP.
-!
-! Distribuição: schedule(dynamic, 1) — cada thread pega 1 perturbação por vez,
-! o que minimiza desbalanceamento quando algumas camadas são mais baratas que
-! outras (e.g., camadas externas sem contraste nas vizinhas).
-!
-! THREAD-SAFETY:
-!   - ws_pool_in(tid) — cada thread usa seu próprio slot (tid único por thread)
-!   - Caches perturbados (u_p, s_p, ..., AdmInt_p) — alocados UMA VEZ POR THREAD
-!     em região !$omp parallel separada (via diretriz private + allocate),
-!     evitando contenção de heap nos 2*n allocate/deallocate do loop kk.
-!   - resist_p, resist_m, eta_p, eta_m — arrays privados por thread
-!
-! ASSUMED-SHAPE (otimização de passagem):
-!   dH_dRho_*_out são declarados com `dimension(:,:,:,:)` (assumed-shape),
-!   permitindo que o CALLER passe slices não-contíguas (e.g., `h_all(itr,k,
-!   1:nmed(k), :, :, :)` que é descontíguo em column-major) SEM copy-in/
-!   copy-out. Isso requer interface explícita — garantido por estarmos no
-!   mesmo módulo DManisoTIV. Ganho: elimina cópia temporária de ~500 KB/k
-!   para o caso típico (ntheta=1, nmmax=600, nf=2, 9 comp, n=10 camadas).
-!
-! REUTILIZAÇÃO DO ws_pool:
-! compute_jacobian_fd é chamada FORA do loop paralelo externo de perfila1DanisoOMP
-! (após !$omp end parallel do). Portanto, ws_pool já está livre e cada thread
-! do loop kk pode usar ws_pool(tid) sem conflito com o forward nominal.
-!
-! Ref: docs/reference/relatorio_vantagens_jacobiano.md §9.3 Estratégia C
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-subroutine compute_jacobian_fd(ws_pool_in, n_threads_pool, ang, nf, freq,      &
-                                posTR_array, n_pos, dipolo, npt_active,         &
-                                krwJ0J1, n, h, prof, resist, eta_shared, r_k,   &
-                                fd_step, dH_dRho_h_out, dH_dRho_v_out)
-  implicit none
-  ! ── Entradas ──
-  ! NOTA: n_threads_pool DEVE ser declarado antes de ws_pool_in,
-  ! pois Fortran 2008 estrito (-std=f2008) exige que variáveis usadas
-  ! no dimensionamento de arrays já estejam tipadas nesse ponto.
-  integer,      intent(in) :: n_threads_pool
-  type(thread_workspace), intent(inout) :: ws_pool_in(0:n_threads_pool-1)
-  integer,      intent(in) :: nf, n_pos, npt_active, n
-  real(dp),     intent(in) :: ang, freq(nf)
-  real(dp),     intent(in) :: posTR_array(6, n_pos)
-  character(*), intent(in) :: dipolo
-  real(dp),     intent(in) :: krwJ0J1(npt_active, 3)
-  real(dp),     intent(in) :: h(n), prof(0:n), resist(n, 2), eta_shared(n, 2)
-  real(dp),     intent(in) :: r_k         ! distância horizontal T-R (já computada no caller)
-  real(dp),     intent(in) :: fd_step     ! ε relativo para FD centrada
-
-  ! ── Saídas (assumed-shape para aceitar slices não-contíguas do caller) ──
-  ! Shape esperado: (n_pos, nf, 9, n). A declaração assumed-shape permite que
-  ! o Fortran passe descritor (dope vector) em vez de copiar o array — crítico
-  ! para performance quando o caller passa h_all(itr, k, 1:nmed(k), :, :, :).
-  complex(dp), intent(out) :: dH_dRho_h_out(:, :, :, :)
-  complex(dp), intent(out) :: dH_dRho_v_out(:, :, :, :)
-
-  ! Variáveis locais
-  integer     :: kk, layer, comp, jj, ii
-  integer     :: tid                 !tid removido da cláusula private — atribuído dentro do loop
-  real(dp)    :: delta, rho_ref, omega_loc
-  complex(dp) :: zeta_loc
-  real(dp)    :: resist_p(n, 2), resist_m(n, 2)
-  real(dp)    :: eta_p(n, 2), eta_m(n, 2)
-  real(dp)    :: zrho_p(nf, 3), zrho_m(nf, 3)
-  complex(dp) :: cH_p(nf, 9), cH_m(nf, 9)
-  ! Caches perturbados — alocados UMA vez por thread em região parallel externa
-  complex(dp), allocatable :: u_p(:,:,:), s_p(:,:,:), uh_p(:,:,:), sh_p(:,:,:)
-  complex(dp), allocatable :: RTEdw_p(:,:,:), RTEup_p(:,:,:)
-  complex(dp), allocatable :: RTMdw_p(:,:,:), RTMup_p(:,:,:)
-  complex(dp), allocatable :: AdmInt_p(:,:,:)
-  complex(dp), allocatable :: u_m(:,:,:), s_m(:,:,:), uh_m(:,:,:), sh_m(:,:,:)
-  complex(dp), allocatable :: RTEdw_m(:,:,:), RTEup_m(:,:,:)
-  complex(dp), allocatable :: RTMdw_m(:,:,:), RTMup_m(:,:,:)
-  complex(dp), allocatable :: AdmInt_m(:,:,:)
-
-  ! ── Sanidade de shape (defensiva, custo O(1)) ──
-  ! O caller DEVE passar arrays com shape (n_pos, nf, 9, n). Erros de shape
-  ! são detectados imediatamente, impedindo corrupção silenciosa.
-  if (size(dH_dRho_h_out, 1) /= n_pos .or. size(dH_dRho_h_out, 2) /= nf .or. &
-      size(dH_dRho_h_out, 3) /= 9     .or. size(dH_dRho_h_out, 4) /= n) then
-    write(*,'(A)') '[F10 ERRO] shape de dH_dRho_h_out inconsistente — abortando.'
-    write(*,'(A,4I6)') '  esperado: ', n_pos, nf, 9, n
-    write(*,'(A,4I6)') '  recebido: ', size(dH_dRho_h_out, 1), size(dH_dRho_h_out, 2), &
-                                          size(dH_dRho_h_out, 3), size(dH_dRho_h_out, 4)
-    return
-  end if
-
-  ! Zeroing dos outputs (defensivo — sempre preenchidos no loop abaixo)
-  dH_dRho_h_out = (0.d0, 0.d0)
-  dH_dRho_v_out = (0.d0, 0.d0)
-
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  ! Região paralela: cada thread aloca seus caches UMA VEZ, executa loop
-  ! dynamic sobre 2*n perturbações, depois desaloca.
-  !
-  ! Antes: allocate/deallocate DENTRO do `do kk` → 2*n × 18 allocs por thread.
-  ! Agora: allocate UMA VEZ por thread ANTES do do → 18 allocs por thread.
-  ! Ganho: ~95% redução de contenção no heap (lock do glibc malloc_arena).
-  !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-  !$omp parallel default(shared)                                                &
-  !$omp&        private(kk, layer, comp, jj, tid, delta, rho_ref,               &
-  !$omp&                resist_p, resist_m, eta_p, eta_m,                       &
-  !$omp&                zrho_p, zrho_m, cH_p, cH_m, ii, omega_loc, zeta_loc,    &
-  !$omp&                u_p, s_p, uh_p, sh_p, RTEdw_p, RTEup_p,                 &
-  !$omp&                RTMdw_p, RTMup_p, AdmInt_p,                             &
-  !$omp&                u_m, s_m, uh_m, sh_m, RTEdw_m, RTEup_m,                 &
-  !$omp&                RTMdw_m, RTMup_m, AdmInt_m)
-
-  ! ── Alocar caches Phase 4 privados (UMA vez por thread) ──
-  allocate(u_p(npt_active, n, nf), s_p(npt_active, n, nf))
-  allocate(uh_p(npt_active, n, nf), sh_p(npt_active, n, nf))
-  allocate(RTEdw_p(npt_active, n, nf), RTEup_p(npt_active, n, nf))
-  allocate(RTMdw_p(npt_active, n, nf), RTMup_p(npt_active, n, nf))
-  allocate(AdmInt_p(npt_active, n, nf))
-  allocate(u_m(npt_active, n, nf), s_m(npt_active, n, nf))
-  allocate(uh_m(npt_active, n, nf), sh_m(npt_active, n, nf))
-  allocate(RTEdw_m(npt_active, n, nf), RTEup_m(npt_active, n, nf))
-  allocate(RTMdw_m(npt_active, n, nf), RTMup_m(npt_active, n, nf))
-  allocate(AdmInt_m(npt_active, n, nf))
-
-  !$omp do schedule(dynamic, 1)
-  do kk = 1, 2*n
-    layer = (kk - 1) / 2 + 1         ! 1..n
-    comp  = mod(kk - 1, 2) + 1       ! 1 = ρ_h, 2 = ρ_v
-    tid   = omp_get_thread_num()
-
-    ! ── Preparar resistividades perturbadas ──
-    ! Política de passo δ (robustez numérica):
-    !   1. Relativo: δ = fd_step × |ρ_ref|
-    !   2. Piso absoluto: δ ≥ 1e-6 (evita FD divergir para ρ ≈ 0)
-    !   3. Teto relativo: δ ≤ 0.1 × |ρ_ref| (garante ρ_ref − δ > 0 sempre)
-    ! Exemplo: ρ_ref=1e-7, fd_step=1e-4
-    !   δ_rel = 1e-11 → piso sobe para 1e-6 → teto reduz para 1e-8
-    !   resist_m = 1e-7 − 1e-8 = 9e-8 > 0 ✓
-    resist_p = resist
-    resist_m = resist
-    rho_ref  = resist(layer, comp)
-    delta    = fd_step * abs(rho_ref)
-    if (delta < 1.d-6)                 delta = 1.d-6
-    if (delta > 0.1d0 * abs(rho_ref))  delta = 0.1d0 * abs(rho_ref)
-    resist_p(layer, comp) = rho_ref + delta
-    resist_m(layer, comp) = rho_ref - delta
-
-    ! ── eta = 1/resist (recomputado apenas para a camada perturbada) ──
-    eta_p = eta_shared
-    eta_m = eta_shared
-    eta_p(layer, comp) = 1.d0 / resist_p(layer, comp)
-    eta_m(layer, comp) = 1.d0 / resist_m(layer, comp)
-
-    ! ── Recomputar caches Phase 4 para cada frequência (perturbações +δ e −δ) ──
-    do ii = 1, nf
-      omega_loc = 2.d0 * pi * freq(ii)
-      zeta_loc  = cmplx(0.d0, 1.d0, kind=dp) * omega_loc * mu
-      call commonarraysMD(n, npt_active, r_k, krwJ0J1(:,1), zeta_loc, h, eta_p, &
-                          u_p(:,:,ii), s_p(:,:,ii), uh_p(:,:,ii), sh_p(:,:,ii), &
-                          RTEdw_p(:,:,ii), RTEup_p(:,:,ii),                      &
-                          RTMdw_p(:,:,ii), RTMup_p(:,:,ii), AdmInt_p(:,:,ii))
-      call commonarraysMD(n, npt_active, r_k, krwJ0J1(:,1), zeta_loc, h, eta_m, &
-                          u_m(:,:,ii), s_m(:,:,ii), uh_m(:,:,ii), sh_m(:,:,ii), &
-                          RTEdw_m(:,:,ii), RTEup_m(:,:,ii),                      &
-                          RTMdw_m(:,:,ii), RTMup_m(:,:,ii), AdmInt_m(:,:,ii))
-    end do
-
-    ! ── Loop serial sobre posições j (dentro da região paralela de kk) ──
-    do jj = 1, n_pos
-      call fieldsinfreqs_cached_ws(ws_pool_in(tid), ang, nf, freq,              &
-                                    posTR_array(:, jj), dipolo, npt_active,     &
-                                    krwJ0J1, n, h, prof, resist_p, eta_p,       &
-                                    u_p, s_p, uh_p, sh_p,                       &
-                                    RTEdw_p, RTEup_p, RTMdw_p, RTMup_p,         &
-                                    AdmInt_p, zrho_p, cH_p)
-      call fieldsinfreqs_cached_ws(ws_pool_in(tid), ang, nf, freq,              &
-                                    posTR_array(:, jj), dipolo, npt_active,     &
-                                    krwJ0J1, n, h, prof, resist_m, eta_m,       &
-                                    u_m, s_m, uh_m, sh_m,                       &
-                                    RTEdw_m, RTEup_m, RTMdw_m, RTMup_m,         &
-                                    AdmInt_m, zrho_m, cH_m)
-
-      ! ── Diferença finita centrada: J = (H+ − H−) / (2δ) ──
-      if (comp == 1) then
-        dH_dRho_h_out(jj, :, :, layer) = (cH_p - cH_m) / (2.d0 * delta)
-      else
-        dH_dRho_v_out(jj, :, :, layer) = (cH_p - cH_m) / (2.d0 * delta)
-      end if
-    end do
-  end do
-  !$omp end do
-
-  ! ── Liberar caches privados (UMA vez por thread) ──
-  deallocate(u_p, s_p, uh_p, sh_p, RTEdw_p, RTEup_p, RTMdw_p, RTMup_p, AdmInt_p)
-  deallocate(u_m, s_m, uh_m, sh_m, RTEdw_m, RTEup_m, RTMdw_m, RTMup_m, AdmInt_m)
-
-  !$omp end parallel
-
-end subroutine compute_jacobian_fd
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-! F10 — write_jacobian_file: Escreve o Jacobiano em arquivo binário .jac
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-!
-! Formato do arquivo .jac v3 (stream unformatted):
-!   Header (int32), escrito UMA vez por arquivo (modelm=1 ou arquivo novo):
-!     magic (4 bytes ASCII 'JAC3'), version (int32 = 3)
-!     nt, nmmax, nf, n_components (=9), itr, nTR, nmaxmodel  ← 7 inteiros
-!     nmeds(1..nt)  ← nmeds por ângulo (evita ambiguidade de leitura)
-!   NOTA v3: n_layers MIGRADO para payload por-modelo (cada modelo pode ter
-!   número diferente de camadas — o gerador Sobol produz modelos com n_layers
-!   variáveis). nmaxmodel no header é apenas informativo: leitores robustos
-!   devem contar modelos até EOF em vez de confiar nesse valor.
-!
-!   Payload (repetido por modelo):
-!     model_id (int32)
-!     n_layers (int32)  ← NOVO v3: número de camadas DESTE modelo
-!     Re/Im alternados de dH_dRho_h(k, j, i, ic, layer) — ordem (k, j, i, ic, layer)
-!     Re/Im alternados de dH_dRho_v(k, j, i, ic, layer)
-!
-! Apenas os nmeds(k) primeiros elementos da dimensão j são gravados (não nmmax),
-! o que permite arquivos compactos quando ntheta > 1 e nmed varia por ângulo.
-!
-! Tamanho header v3: 8 bytes (magic+version) + 7×4 bytes (counts) + nt×4 bytes (nmeds)
-! Tamanho payload/modelo: 4 (id) + 4 (n_layers) + 2 × (sum(nmeds) × nf × 9 × n) × 16 bytes
-! Nome: {filename}[_TR{itr}].jac (sufixo _TR{itr} se nTR > 1)
-!§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
-subroutine write_jacobian_file(modelm, nmaxmodel, mypath, filename, itr, nTR, &
-                                nt, nmmax, nf, n_layers, nmeds,                &
-                                dH_dRho_h_in, dH_dRho_v_in)
-  implicit none
-  integer,      intent(in) :: modelm, nmaxmodel, itr, nTR, nt, nmmax, nf, n_layers
-  integer,      intent(in) :: nmeds(nt)
-  character(*), intent(in) :: mypath, filename
-  complex(dp),  intent(in) :: dH_dRho_h_in(nt, nmmax, nf, 9, n_layers)
-  complex(dp),  intent(in) :: dH_dRho_v_in(nt, nmmax, nf, 9, n_layers)
-
-  integer :: k, j, i, ic, layer, exec
-  integer, parameter :: VERSION_JAC = 3
-  character(len=4)   :: magic
-  character(len=:), allocatable :: fileJAC
-  character(len=10) :: tr_suffix
-  logical :: file_exists
-
-  magic = 'JAC3'
-
-  ! ── Construção do nome do arquivo ──
-  if (nTR > 1) then
-    write(tr_suffix, '(A,I0)') '_TR', itr
-    fileJAC = mypath//trim(adjustl(filename))//trim(tr_suffix)//'.jac'
-  else
-    fileJAC = mypath//trim(adjustl(filename))//'.jac'
-  end if
-
-  ! ── Abertura condicional: append se modelm > 1 e arquivo existe ──
-  inquire(file = fileJAC, exist = file_exists)
-  if (modelm == 1 .or. .not. file_exists) then
-    open(unit = 2000, iostat = exec, file = fileJAC, form = 'unformatted',  &
-         access = 'stream', status = 'replace', action = 'write')
-    ! Header v3 — escrito apenas quando o arquivo é criado.
-    ! NOTA: n_layers removido do header (migrado para payload por-modelo), pois
-    ! o gerador Sobol produz modelos com n_layers variáveis. nmaxmodel aqui é
-    ! informativo (leitores robustos devem contar via EOF).
-    write(2000) magic, VERSION_JAC
-    write(2000) nt, nmmax, nf, 9, itr, nTR, nmaxmodel
-    write(2000) (nmeds(k), k = 1, nt)
-  else
-    open(unit = 2000, iostat = exec, file = fileJAC, form = 'unformatted',  &
-         access = 'stream', status = 'old', position = 'append', action = 'write')
-  end if
-
-  ! ── Payload: identificador do modelo + n_layers + Re/Im de dH_dRho_h e dH_dRho_v ──
-  ! Ordem de loops: (k, j, i, ic, layer) — matching column-major de Fortran.
-  ! v3: cada payload inclui (modelm, n_layers) permitindo que modelos com
-  ! diferentes n_layers coexistam no mesmo arquivo (crítico para modo batch
-  ! com gerador estocástico).
-  write(2000) modelm
-  write(2000) n_layers
-
-  do k = 1, nt
-    do j = 1, nmeds(k)
-      do i = 1, nf
-        do ic = 1, 9
-          do layer = 1, n_layers
-            write(2000) real(dH_dRho_h_in(k, j, i, ic, layer), kind=dp), &
-                       aimag(dH_dRho_h_in(k, j, i, ic, layer))
-          end do
-        end do
-      end do
-    end do
-  end do
-
-  do k = 1, nt
-    do j = 1, nmeds(k)
-      do i = 1, nf
-        do ic = 1, 9
-          do layer = 1, n_layers
-            write(2000) real(dH_dRho_v_in(k, j, i, ic, layer), kind=dp), &
-                       aimag(dH_dRho_v_in(k, j, i, ic, layer))
-          end do
-        end do
-      end do
-    end do
-  end do
-
-  close(unit = 2000)
-end subroutine write_jacobian_file
 !§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 end module DManisoTIV

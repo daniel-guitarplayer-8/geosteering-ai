@@ -1,0 +1,109 @@
+# Relatório de Benchmark — meu_teste
+
+**Gerado em**: 2026-04-05T19:36:34Z
+**Script**: `bench/run_bench.sh`
+
+## Ambiente
+
+| Campo                | Valor                                   |
+|:---------------------|:----------------------------------------|
+| Sistema operacional  | Darwin                                |
+| CPU                  | Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz                              |
+| Núcleos físicos      | 8                             |
+| Núcleos lógicos      | 16                              |
+| Compilador           | GNU Fortran (Homebrew GCC 15.2.0_1) 15.2.0                           |
+| `OMP_NUM_THREADS`  | 12                                |
+| Flags extras         | (nenhuma)             |
+
+## Configuração do Modelo (`model.in`)
+
+- Frequências: 2 (20 kHz, 40 kHz)
+- Ângulo: 1 (0°)
+- Camadas: 10
+- Filtro Hankel: 201 pontos (Werthmüller J0/J1)
+- Medidas por modelo: ~600 (janela 120 m, passo 0,2 m)
+
+## Resultados
+
+| Métrica                        | Valor                   |
+|:-------------------------------|:------------------------|
+| Iterações                      | 60                      |
+| Wall-time médio (s/modelo)     | 0.0520                   |
+| Desvio-padrão (s)              | 0.0063                  |
+| Mínimo (s)                     | 0.0500                   |
+| Máximo (s)                     | 0.0900                   |
+| Mediana (s)                    | 0.0500                 |
+| **Throughput (modelos/hora)**  | **69230.8**         |
+
+## Saída Binária
+
+| Campo        | Valor                              |
+|:-------------|:-----------------------------------|
+| Arquivo      | `Inv0_15Dip1000_t5.dat`                     |
+| Tamanho      | 206400 bytes                    |
+| MD5          | `1e4f36fa8f0bcd21f3700dc445c2894d`                           |
+
+## Série Bruta (segundos)
+
+```
+0,05
+0,05
+0,05
+0,05
+0,06
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,09
+0,05
+0,05
+0,05
+0,06
+0,05
+0,06
+0,05
+0,05
+0,05
+0,05
+0,06
+0,05
+0,06
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,06
+0,05
+0,05
+0,05
+0,07
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+0,05
+```

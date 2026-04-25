@@ -574,3 +574,175 @@ def test_vmap_real_bucketed_strategy_also_works():
     )
     assert res.H_tensor.shape == (1, 2, 20, 1, 9)
     assert np.all(np.isfinite(res.H_tensor))
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Sprint 12 E4 — position chunking via lax.scan (jax_position_chunk_size)
+# ═════════════════════════════════════════════════════════════════════════
+
+
+def test_chunk_size_config_validation():
+    """SimulationConfig rejeita jax_position_chunk_size fora de [1, 10000]."""
+    from geosteering_ai.simulation.config import SimulationConfig
+
+    SimulationConfig(jax_position_chunk_size=None)  # default — sem chunking
+    SimulationConfig(jax_position_chunk_size=1)  # mínimo válido
+    SimulationConfig(jax_position_chunk_size=64)  # valor típico
+    SimulationConfig(jax_position_chunk_size=10_000)  # máximo válido
+    with pytest.raises(AssertionError):
+        SimulationConfig(jax_position_chunk_size=0)
+    with pytest.raises(AssertionError):
+        SimulationConfig(jax_position_chunk_size=10_001)
+
+
+@jax_required
+def test_chunked_unified_parity_100pos():
+    """Chunked unified (K=32) é bit-exato vs monolítico em 100 posições × 3f."""
+    from geosteering_ai.simulation._jax.forward_pure import (
+        build_static_context,
+        forward_pure_jax,
+    )
+    from geosteering_ai.simulation.validation.canonical_models import (
+        get_canonical_model,
+    )
+
+    m = get_canonical_model("oklahoma_28")
+    z = np.linspace(m.min_depth - 2, m.max_depth + 2, 100)
+    freqs = np.array([2e4, 4e4, 1e5])
+    rh = jnp.asarray(m.rho_h)
+    rv = jnp.asarray(m.rho_v)
+
+    ctx_mono = build_static_context(
+        m.rho_h, m.rho_v, m.esp, z, freqs, 1.0, 0.0, strategy="unified"
+    )
+    ctx_chunk = build_static_context(
+        m.rho_h,
+        m.rho_v,
+        m.esp,
+        z,
+        freqs,
+        1.0,
+        0.0,
+        strategy="unified",
+        chunk_size=32,
+    )
+    diff = float(
+        jnp.max(
+            jnp.abs(
+                forward_pure_jax(rh, rv, ctx_mono) - forward_pure_jax(rh, rv, ctx_chunk)
+            )
+        )
+    )
+    assert diff == 0.0, f"chunked diverge do monolítico (100pos): {diff:.3e}"
+
+
+@jax_required
+def test_chunked_unified_parity_600pos_3freqs():
+    """Chunked unified (K=64) é bit-exato vs monolítico em 600 posições × 3f.
+
+    Este é o caso de regressão identificado em E2: config produção que
+    saturava a L2 do T4 no caminho monolítico.
+    """
+    from geosteering_ai.simulation._jax.forward_pure import (
+        build_static_context,
+        forward_pure_jax,
+    )
+    from geosteering_ai.simulation.validation.canonical_models import (
+        get_canonical_model,
+    )
+
+    m = get_canonical_model("oklahoma_28")
+    z = np.linspace(m.min_depth - 2, m.max_depth + 2, 600)
+    freqs = np.array([2e4, 4e4, 1e5])
+    rh = jnp.asarray(m.rho_h)
+    rv = jnp.asarray(m.rho_v)
+
+    ctx_mono = build_static_context(
+        m.rho_h, m.rho_v, m.esp, z, freqs, 1.0, 0.0, strategy="unified"
+    )
+    ctx_chunk = build_static_context(
+        m.rho_h,
+        m.rho_v,
+        m.esp,
+        z,
+        freqs,
+        1.0,
+        0.0,
+        strategy="unified",
+        chunk_size=64,
+    )
+    diff = float(
+        jnp.max(
+            jnp.abs(
+                forward_pure_jax(rh, rv, ctx_mono) - forward_pure_jax(rh, rv, ctx_chunk)
+            )
+        )
+    )
+    assert diff == 0.0, f"chunked diverge do monolítico (600pos×3f): {diff:.3e}"
+
+
+@jax_required
+def test_chunked_non_divisible_padding():
+    """Padding correto quando n_pos não é divisível por chunk_size."""
+    from geosteering_ai.simulation._jax.forward_pure import (
+        build_static_context,
+        forward_pure_jax,
+    )
+
+    rho_h = np.array([10.0, 100.0, 10.0])
+    rho_v = np.array([10.0, 200.0, 10.0])
+    esp = np.array([5.0])
+    # 70 posições, chunk_size=32 → padded_size=96 (3 chunks de 32)
+    z = np.linspace(-2.0, 8.0, 70)
+    freqs = np.array([2e4, 1e5])
+    rh = jnp.asarray(rho_h)
+    rv = jnp.asarray(rho_v)
+
+    ctx_mono = build_static_context(
+        rho_h, rho_v, esp, z, freqs, 1.0, 0.0, strategy="unified"
+    )
+    ctx_chunk = build_static_context(
+        rho_h,
+        rho_v,
+        esp,
+        z,
+        freqs,
+        1.0,
+        0.0,
+        strategy="unified",
+        chunk_size=32,
+    )
+    H_mono = forward_pure_jax(rh, rv, ctx_mono)
+    H_chunk = forward_pure_jax(rh, rv, ctx_chunk)
+    assert H_chunk.shape == (70, 2, 9), f"shape errado: {H_chunk.shape}"
+    diff = float(jnp.max(jnp.abs(H_mono - H_chunk)))
+    assert diff == 0.0, f"padding produziu resultado incorreto: {diff:.3e}"
+
+
+@jax_required
+def test_chunked_via_simulate_multi_jax():
+    """simulate_multi_jax com jax_position_chunk_size propagado via SimulationConfig."""
+    from geosteering_ai.simulation._jax.multi_forward import simulate_multi_jax
+    from geosteering_ai.simulation.config import SimulationConfig
+    from geosteering_ai.simulation.validation.canonical_models import (
+        get_canonical_model,
+    )
+
+    m = get_canonical_model("oklahoma_5")
+    z = np.linspace(m.min_depth - 2, m.max_depth + 2, 80)
+    kwargs = dict(
+        rho_h=m.rho_h,
+        rho_v=m.rho_v,
+        esp=m.esp,
+        positions_z=z,
+        frequencies_hz=[2e4, 1e5],
+        tr_spacings_m=[1.0],
+        dip_degs=[0.0],
+    )
+    res_mono = simulate_multi_jax(**kwargs, cfg=SimulationConfig(jax_strategy="unified"))
+    res_chunk = simulate_multi_jax(
+        **kwargs,
+        cfg=SimulationConfig(jax_strategy="unified", jax_position_chunk_size=32),
+    )
+    diff = float(np.abs(res_mono.H_tensor - res_chunk.H_tensor).max())
+    assert diff == 0.0, f"simulate_multi_jax chunked diverge: {diff:.3e}"
