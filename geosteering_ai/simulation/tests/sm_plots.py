@@ -635,6 +635,7 @@ def plot_tensor_full(
     freq_mask: Optional[Sequence[bool]] = None,
     combos: Optional[Sequence[Tuple[int, int, int]]] = None,
     scale_mode: str = "re_im",
+    layout: str = "default",
 ) -> None:
     """Plota o tensor H em grid 3×6 com Re/Im pareados por componente.
 
@@ -715,6 +716,14 @@ def plot_tensor_full(
         )
         canvas.draw()
         return
+    # v2.5: layout pode forçar inclusão/exclusão do perfil ρ
+    #   "tensor_3x6"      → grade 3×6 sem ρ (clássico v2.4)
+    #   "tensor_3x7_rho"  → grade 3×7 com ρ_h/ρ_v à esquerda
+    #   "default"         → respeita include_resistivity explícito
+    if layout == "tensor_3x6":
+        include_resistivity = False
+    elif layout == "tensor_3x7_rho":
+        include_resistivity = True
     have_rho = include_resistivity and rho_h is not None and len(rho_h) > 0
 
     # Grid: 3 linhas × (1 col. ρ + 6 pares Re/Im = 6 cols × 2 componentes)
@@ -989,15 +998,25 @@ def plot_em_profile(
     freq_mask: Optional[Sequence[bool]] = None,
     combos: Optional[Sequence[Tuple[int, int, int]]] = None,
     scale_mode: str = "re_im",
+    layout: str = "default",
 ) -> None:
     """Plota componentes EM em função da profundidade em múltiplos modos.
 
     Args:
         kind: Um dos valores em :data:`PLOT_KINDS`. Determina o layout
             (2-col: Magnitude + Fase, ou Re + Im, ou 1-col: só Magnitude / Fase / Re / Im / dB).
+        layout: v2.5 — preset de layout escolhido no PlotComposerDialog.
+            Quando ``"em_vertical_2col"`` força ``kind="Magnitude + Fase"``;
+            ``"em_vertical_1col"`` força ``kind="Magnitude (linear)"``.
+            ``"default"`` respeita o ``kind`` explícito.
     """
     if canvas.figure is None:
         return
+    # v2.5: layout sobrescreve `kind` para garantir N×2 (Mag+Fase) ou N×1 (Mag).
+    if layout == "em_vertical_2col":
+        kind = "Magnitude + Fase"
+    elif layout == "em_vertical_1col":
+        kind = "Magnitude (linear)"
     style = style or canvas.style
     apply_style(style)
     canvas.figure.clear()
@@ -1349,6 +1368,10 @@ def plot_geosignals(
     freq_mask: Optional[Sequence[bool]] = None,
     combos: Optional[Sequence[Tuple[int, int, int]]] = None,
     scale_mode: str = "geo_log10_deg",
+    layout: str = "default",
+    include_resistivity: bool = False,
+    rho_h: Optional[Sequence[float]] = None,
+    rho_v: Optional[Sequence[float]] = None,
 ) -> None:
     """Plota até 5 geosinais derivados do tensor H em grade (N×2) amp/fase.
 
@@ -1449,7 +1472,95 @@ def plot_geosignals(
         return
 
     n_rows = len(selected_geo)
-    axes = canvas.figure.subplots(n_rows, 2, squeeze=False)
+    # v2.5: layout `geo_nx2_rho` ou flag `include_resistivity=True` adiciona
+    # coluna ρ_h/ρ_v à esquerda (similar ao layout 3×7 do tensor). Reutiliza
+    # `_rho_per_z()` para amostragem em z_obs (bit-exato a buildValidamodels.py).
+    rho_arr_h = (
+        np.asarray(rho_h, dtype=np.float64)
+        if rho_h is not None and len(rho_h) > 0
+        else None
+    )
+    rho_arr_v = (
+        np.asarray(rho_v, dtype=np.float64)
+        if rho_v is not None and len(rho_v) > 0
+        else (rho_arr_h.copy() if rho_arr_h is not None else None)
+    )
+    use_rho_column = (
+        layout == "geo_nx2_rho" or include_resistivity
+    ) and rho_arr_h is not None
+    if use_rho_column:
+        from matplotlib.gridspec import GridSpec
+
+        gs = GridSpec(
+            n_rows,
+            3,
+            figure=canvas.figure,
+            width_ratios=[1.4, 1.0, 1.0],
+            wspace=0.32,
+            hspace=0.38,
+        )
+        ax_rho = canvas.figure.add_subplot(gs[:, 0])
+        axes = np.empty((n_rows, 2), dtype=object)
+        for r in range(n_rows):
+            axes[r][0] = canvas.figure.add_subplot(gs[r, 1])
+            axes[r][1] = canvas.figure.add_subplot(gs[r, 2])
+        # Desenha o perfil ρ (log10 com axhlines nas interfaces).
+        # Reaproveita o mesmo helper canônico v2.4b usado por plot_tensor_full.
+        z_flat_rho = (
+            np.asarray(z_obs, dtype=np.float64).ravel() if z_obs is not None else None
+        )
+        if z_flat_rho is not None and z_flat_rho.size > 0:
+            order = np.argsort(z_flat_rho)
+            z_sorted = z_flat_rho[order]
+            rho_h_z = _rho_per_z(z_flat_rho, rho_arr_h, thick_arr)[order]
+            rho_v_z = _rho_per_z(z_flat_rho, rho_arr_v, thick_arr)[order]
+            ax_rho.semilogx(
+                rho_h_z,
+                z_sorted,
+                color=style.color_rho_h,
+                linewidth=style.line_width + 0.6,
+                label=r"$\rho_h$",
+            )
+            ax_rho.semilogx(
+                rho_v_z,
+                z_sorted,
+                color=style.color_rho_v,
+                linewidth=style.line_width + 0.6,
+                linestyle="--",
+                label=r"$\rho_v$",
+            )
+            # Interfaces internas — normaliza thick_arr da mesma forma que
+            # plot_tensor_full (L810-817 do mesmo arquivo). Sem normalização,
+            # se `thicknesses` incluir valores sentinela das semi-camadas
+            # (size == n ou n−1 em vez de n−2), as axhlines aparecem em
+            # profundidades erradas. Garante paridade com a coluna ρ do
+            # plot_tensor_full e com a referência buildValidamodels.py.
+            if thick_arr.size and rho_arr_h.size >= 2:
+                if thick_arr.size == rho_arr_h.size - 2:
+                    internals = thick_arr
+                elif thick_arr.size == rho_arr_h.size:
+                    internals = thick_arr[1:-1]
+                elif thick_arr.size == rho_arr_h.size - 1:
+                    internals = thick_arr[1:]
+                else:
+                    internals = thick_arr[: max(rho_arr_h.size - 2, 0)]
+                boundaries = np.concatenate(([0.0], np.cumsum(internals)))
+                for interf in boundaries:
+                    ax_rho.axhline(
+                        y=float(interf),
+                        color="#000000",
+                        linestyle="--",
+                        lw=1.0,
+                        alpha=0.6,
+                    )
+        ax_rho.invert_yaxis()
+        ax_rho.set_xlabel(r"Resistividade ($\Omega \cdot$m)")
+        ax_rho.set_ylabel("Profundidade TVD (m)")
+        ax_rho.set_title(r"$\rho_h$ e $\rho_v$ (modelo verdadeiro)")
+        ax_rho.grid(True, ls=":", alpha=style.grid_alpha)
+        ax_rho.legend(loc="best", fontsize=max(6, style.font_size - 2))
+    else:
+        axes = canvas.figure.subplots(n_rows, 2, squeeze=False)
     n_curves = len(tr_sel) * len(ang_sel) * len(freq_sel)
     colors = _palette_colors(n_curves, style.palette)
 

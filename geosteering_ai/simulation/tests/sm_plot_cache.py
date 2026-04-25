@@ -79,6 +79,12 @@ class LRUPlotCache:
         self.max_bytes: float = float(max_bytes)
         self._store: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._sizes: Dict[str, int] = {}
+        # ── v2.5 ─ Tracker de auto-evictions ──────────────────────────────
+        # Conjunto de chaves que foram inseridas mas evictadas pelo próprio
+        # `put()` por excederem isoladamente `max_bytes`. Permite que a UI
+        # mostre uma mensagem específica (em vez de "tensor não está em
+        # memória" genérica). Ver: simulation_manager.py:_on_history_open.
+        self._too_big_ever: set[str] = set()
 
     # ── API pública ─────────────────────────────────────────────────────
 
@@ -117,6 +123,22 @@ class LRUPlotCache:
             # paramos aqui — o item atual fica mesmo acima do limite.
             if not self._store:
                 break
+
+        # ── v2.5 ─ Detecta auto-eviction ──────────────────────────────────
+        # Se após todo o `put()` a chave inserida não está mais no store,
+        # é porque foi removida pela própria política LRU para respeitar
+        # `max_bytes` (caso típico: multi-freq × multi-angle × 1000 modelos
+        # com H_stack >> 500 MB).
+        #
+        # Implementação: checa o estado FINAL do store em vez de iterar a
+        # lista de evictadas. Isso cobre corretamente todos os caminhos
+        # de eviction (incluindo o caso onde múltiplos itens antigos foram
+        # removidos antes do novo, levando à sua própria remoção subsequente).
+        # Marca permanentemente para que `was_too_big(key)` retorne True
+        # mesmo após o cache ser totalmente limpo, preservando a semântica
+        # "este tensor é grande demais para o cache atual".
+        if key not in self._store:
+            self._too_big_ever.add(key)
         return evicted
 
     def get(self, key: str) -> Optional[Dict[str, Any]]:
@@ -139,11 +161,35 @@ class LRUPlotCache:
 
         Returns:
             Número de snapshots removidos.
+
+        Note:
+            Não limpa o registro `_too_big_ever` — chaves que excederam
+            `max_bytes` permanecem marcadas para que a UI continue mostrando
+            mensagem específica mesmo após `clear()` manual do usuário.
         """
         n = len(self._store)
         self._store.clear()
         self._sizes.clear()
         return n
+
+    def was_too_big(self, key: str) -> bool:
+        """Indica se a chave foi auto-evictada por exceder ``max_bytes``.
+
+        Adicionado em v2.5. Útil para a UI distinguir entre:
+
+        - **Cache miss comum**: snapshot foi evictado por LRU normal (mais
+          recentes empurraram este para fora) — usuário pode re-executar.
+        - **Tensor grande demais**: o snapshot por si só excede ``max_bytes``
+          (típico em simulações multi-freq × multi-angle com 1000+ modelos)
+          — usuário precisa aumentar limite de cache OU re-executar.
+
+        Args:
+            key: Identificador do snapshot.
+
+        Returns:
+            ``True`` se a chave já foi auto-evictada em algum ``put()``.
+        """
+        return key in self._too_big_ever
 
     def total_bytes(self) -> int:
         """Soma bytes estimados de todos os bundles atualmente em cache."""

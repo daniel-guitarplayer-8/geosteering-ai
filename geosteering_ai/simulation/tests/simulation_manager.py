@@ -3436,6 +3436,441 @@ class SaveFigureDialog(QtWidgets.QDialog):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# v2.5 — PlotComposerDialog (compositor único de plotagem)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class PlotComposerDialog(QtWidgets.QDialog):
+    """Compositor único de plotagem — substitui o fluxo legado de Plotar inline.
+
+    v2.5 — chamado quando o usuário clica em **Plotar** na ResultsPage.
+    Permite escolher Tipo, Modo, Escala, Combinações, Componentes/Geosinais,
+    Layout (4 presets) e inclusão opcional do perfil de resistividade na
+    mesma figura. Ao confirmar, o usuário escolhe entre:
+
+      • **Plotar no Canvas** — renderiza inline na ResultsPage (modo padrão)
+      • **Exportar Figura...** — renderiza + salva PNG/PDF/SVG diretamente
+
+    Invariantes:
+      • Não toca em backends JAX/Numba/Fortran (plotagem 100% NumPy/Matplotlib).
+      • Não inicia simulações (depende de ``current_sim`` já carregado).
+      • Backward-compat: SaveFigureDialog v2.4d preservado e ainda acessível
+        via botão **Salvar Figura** (fallback para fluxo antigo).
+
+    Attributes:
+        action: ``"plot"`` (renderizar canvas), ``"export"`` (renderizar+salvar)
+            ou ``"cancel"`` (usuário cancelou). Default ``"cancel"``.
+        export_path: caminho de arquivo escolhido em modo export (None se
+            action != "export").
+        layout_key: chave do layout selecionado (``"tensor_3x6"``,
+            ``"tensor_3x7_rho"``, ``"em_vertical_2col"``, ``"em_vertical_1col"``,
+            ``"geo_nx2"``, ``"geo_nx2_rho"``, ...).
+        include_resistivity: True se o usuário marcou "Incluir Perfil ρ".
+    """
+
+    # Mapeamento Layout × Plot Kind (apresentação visual no combo)
+    LAYOUTS_BY_KIND: Dict[str, List[Tuple[str, str]]] = {
+        "Tensor H completo (Re/Im 3×6)": [
+            ("3×6 — sem ρ (clássico v2.4)", "tensor_3x6"),
+            ("3×7 — ρ_h/ρ_v à esquerda (★)", "tensor_3x7_rho"),
+        ],
+        "Componentes EM": [
+            ("1×N — Mag + Fase (clássico)", "em_vertical_2col"),
+            ("N×1 — Mag apenas (compacto)", "em_vertical_1col"),
+        ],
+        "Geosinais (USD/UAD/UHR/UHA)": [
+            ("N×2 — Amp + Fase (clássico)", "geo_nx2"),
+            ("N×2 + ρ — perfil à esquerda", "geo_nx2_rho"),
+        ],
+        "Perfil de Resistividade": [("1 axis — ρ_h e ρ_v", "rho_single")],
+        "Anisotropia λ = √(ρᵥ/ρₕ)": [("1 axis — λ vs profundidade", "aniso_single")],
+        "Benchmark compare (Numba vs Fortran)": [("Padrão", "bench_default")],
+    }
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget,
+        ctx: Dict[str, Any],
+    ) -> None:
+        """Constrói o dialog pré-populado com o estado atual da ResultsPage.
+
+        Args:
+            parent: widget pai (tipicamente a MainWindow ou ResultsPage).
+            ctx: dict com snapshot do estado atual da ResultsPage. Chaves:
+
+              - ``kinds`` (List[str]): tipos de plot disponíveis no combo
+              - ``modes_by_kind`` (Dict[str, List[str]]): modos por tipo
+              - ``scales_by_kind`` (Dict[str, List[str]]): escalas por tipo
+              - ``current_kind`` (str): tipo atualmente selecionado
+              - ``current_mode`` (str): modo atualmente selecionado
+              - ``current_scale`` (str): escala atualmente selecionada
+              - ``all_components`` (List[str]): nomes de todas as 9 componentes
+              - ``current_components`` (List[str]): componentes marcadas
+              - ``all_geosignals`` (List[str]): nomes (USD, UAD, UHR, UHA, U3DF)
+              - ``current_geosignals`` (List[str]): geosinais marcados
+              - ``combos_labels`` (List[str]): labels das combinações TR×θ×f
+              - ``combos_indices_data`` (List[Tuple[int,int,int]]): tuples
+                (itr, iang, ifq) por índice
+              - ``current_combo_indices`` (List[int]): índices marcados hoje
+              - ``include_rho_default`` (bool): default da checkbox ρ
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Compor Plotagem — v2.5")
+        self.setModal(True)
+        self.resize(720, 720)
+
+        # ── Compatibilidade Qt5/Qt6 ──────────────────────────────────────
+        self._checkable_flag = (
+            QtCore.Qt.ItemFlag.ItemIsUserCheckable
+            if hasattr(QtCore.Qt, "ItemFlag")
+            else QtCore.Qt.ItemIsUserCheckable
+        )
+        self._checked = (
+            QtCore.Qt.CheckState.Checked
+            if hasattr(QtCore.Qt, "CheckState")
+            else QtCore.Qt.Checked
+        )
+        self._unchecked = (
+            QtCore.Qt.CheckState.Unchecked
+            if hasattr(QtCore.Qt, "CheckState")
+            else QtCore.Qt.Unchecked
+        )
+        self._user_role = (
+            QtCore.Qt.ItemDataRole.UserRole
+            if hasattr(QtCore.Qt, "ItemDataRole")
+            else QtCore.Qt.UserRole
+        )
+
+        # ── Estado de saída (resultado do dialog) ────────────────────────
+        self.action: str = "cancel"
+        self.export_path: Optional[str] = None
+        self.layout_key: str = "tensor_3x6"  # default; recomputado em get_spec
+        self.include_resistivity: bool = bool(ctx.get("include_rho_default", True))
+
+        # ── Contexto ─────────────────────────────────────────────────────
+        self._ctx = ctx
+        self._modes_by_kind: Dict[str, List[str]] = ctx.get("modes_by_kind", {})
+        self._scales_by_kind: Dict[str, List[str]] = ctx.get("scales_by_kind", {})
+
+        # ── Layout principal (QVBoxLayout + 4 grupos QFormLayout) ────────
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+
+        header = QtWidgets.QLabel(
+            "<b>Compor plotagem para o canvas ou exportação</b><br/>"
+            "<span style='color:#888;'>Escolha tipo, layout e combinações. "
+            "Use <i>Plotar no Canvas</i> para visualizar; <i>Exportar Figura</i> "
+            "para salvar como PNG/PDF/SVG.</span>"
+        )
+        header.setWordWrap(True)
+        root.addWidget(header)
+
+        # ── Grupo 1: Tipo, Modo, Escala ──────────────────────────────────
+        grp_kind = QtWidgets.QGroupBox("1) Tipo de plotagem")
+        f1 = QtWidgets.QFormLayout(grp_kind)
+        self.combo_kind = QtWidgets.QComboBox()
+        self.combo_kind.addItems(ctx.get("kinds", []))
+        if ctx.get("current_kind"):
+            idx = self.combo_kind.findText(ctx["current_kind"])
+            if idx >= 0:
+                self.combo_kind.setCurrentIndex(idx)
+        self.combo_mode = QtWidgets.QComboBox()
+        self.combo_scale = QtWidgets.QComboBox()
+        f1.addRow("Tipo:", self.combo_kind)
+        f1.addRow("Modo:", self.combo_mode)
+        f1.addRow("Escala:", self.combo_scale)
+        root.addWidget(grp_kind)
+
+        # ── Grupo 2: Layout & ρ opcional ─────────────────────────────────
+        grp_layout = QtWidgets.QGroupBox("2) Layout e perfil de resistividade")
+        f2 = QtWidgets.QFormLayout(grp_layout)
+        self.combo_layout = QtWidgets.QComboBox()
+        self.check_include_rho = QtWidgets.QCheckBox(
+            "Incluir perfil ρ_h/ρ_v na mesma figura (quando aplicável)"
+        )
+        self.check_include_rho.setChecked(self.include_resistivity)
+        f2.addRow("Layout:", self.combo_layout)
+        f2.addRow("Extras:", self.check_include_rho)
+        root.addWidget(grp_layout)
+
+        # ── Grupo 3: Componentes ↔ Geosinais (stacked) ───────────────────
+        grp_picker = QtWidgets.QGroupBox("3) Componentes ou geosinais")
+        v3 = QtWidgets.QVBoxLayout(grp_picker)
+        self.stack_picker = QtWidgets.QStackedWidget()
+
+        # 3a — Componentes EM (Hxx..Hzz)
+        comp_widget = QtWidgets.QWidget()
+        comp_layout = QtWidgets.QVBoxLayout(comp_widget)
+        comp_layout.setContentsMargins(0, 0, 0, 0)
+        self.list_components = QtWidgets.QListWidget()
+        self.list_components.setMaximumHeight(140)
+        cur_comps = set(ctx.get("current_components", []))
+        for name in ctx.get("all_components", []):
+            it = QtWidgets.QListWidgetItem(name)
+            it.setFlags(it.flags() | self._checkable_flag)
+            it.setCheckState(self._checked if name in cur_comps else self._unchecked)
+            self.list_components.addItem(it)
+        comp_layout.addWidget(self.list_components)
+        comp_btns = QtWidgets.QHBoxLayout()
+        b_c_all = QtWidgets.QPushButton("Marcar todos")
+        b_c_none = QtWidgets.QPushButton("Desmarcar")
+        b_c_all.clicked.connect(lambda: self._set_all(self.list_components, True))
+        b_c_none.clicked.connect(lambda: self._set_all(self.list_components, False))
+        comp_btns.addWidget(b_c_all)
+        comp_btns.addWidget(b_c_none)
+        comp_btns.addStretch(1)
+        comp_layout.addLayout(comp_btns)
+        self.stack_picker.addWidget(comp_widget)  # idx 0
+
+        # 3b — Filtro de Geosinais (USD/UAD/UHR/UHA/U3DF)
+        geo_widget = QtWidgets.QWidget()
+        geo_layout = QtWidgets.QVBoxLayout(geo_widget)
+        geo_layout.setContentsMargins(0, 0, 0, 0)
+        self.list_geosignals = QtWidgets.QListWidget()
+        self.list_geosignals.setMaximumHeight(140)
+        cur_geos = set(ctx.get("current_geosignals", []))
+        for name in ctx.get("all_geosignals", []):
+            it = QtWidgets.QListWidgetItem(name)
+            it.setFlags(it.flags() | self._checkable_flag)
+            it.setCheckState(self._checked if name in cur_geos else self._unchecked)
+            self.list_geosignals.addItem(it)
+        geo_layout.addWidget(self.list_geosignals)
+        geo_btns = QtWidgets.QHBoxLayout()
+        b_g_all = QtWidgets.QPushButton("Marcar todos")
+        b_g_none = QtWidgets.QPushButton("Desmarcar")
+        b_g_all.clicked.connect(lambda: self._set_all(self.list_geosignals, True))
+        b_g_none.clicked.connect(lambda: self._set_all(self.list_geosignals, False))
+        geo_btns.addWidget(b_g_all)
+        geo_btns.addWidget(b_g_none)
+        geo_btns.addStretch(1)
+        geo_layout.addLayout(geo_btns)
+        self.stack_picker.addWidget(geo_widget)  # idx 1
+
+        # 3c — Vazio (para tipos sem componentes/geosinais: ρ, anisotropia, bench)
+        empty_widget = QtWidgets.QLabel(
+            "<i>Este tipo de plot não usa componentes individuais.</i>"
+        )
+        empty_widget.setStyleSheet("color:#888;")
+        self.stack_picker.addWidget(empty_widget)  # idx 2
+
+        v3.addWidget(self.stack_picker)
+        root.addWidget(grp_picker)
+
+        # ── Grupo 4: Combinações (TR × θ × f) ────────────────────────────
+        grp_combos = QtWidgets.QGroupBox("4) Combinações (TR × θ × f)")
+        v4 = QtWidgets.QVBoxLayout(grp_combos)
+        self.list_combos = QtWidgets.QListWidget()
+        self.list_combos.setMaximumHeight(180)
+        combos_labels = list(ctx.get("combos_labels", []))
+        combos_data = list(ctx.get("combos_indices_data", []))
+        cur_combo_idx = set(ctx.get("current_combo_indices", []))
+        for i, lbl in enumerate(combos_labels):
+            it = QtWidgets.QListWidgetItem(lbl)
+            it.setFlags(it.flags() | self._checkable_flag)
+            it.setCheckState(self._checked if i in cur_combo_idx else self._unchecked)
+            data_tuple = combos_data[i] if i < len(combos_data) else (0, 0, 0)
+            it.setData(self._user_role, data_tuple)
+            self.list_combos.addItem(it)
+        v4.addWidget(self.list_combos)
+        cb_btns = QtWidgets.QHBoxLayout()
+        b_all = QtWidgets.QPushButton("Marcar todas")
+        b_none = QtWidgets.QPushButton("Desmarcar")
+        b_first = QtWidgets.QPushButton("Apenas primeira")
+        b_all.clicked.connect(lambda: self._set_all(self.list_combos, True))
+        b_none.clicked.connect(lambda: self._set_all(self.list_combos, False))
+        b_first.clicked.connect(self._select_first_combo)
+        cb_btns.addWidget(b_all)
+        cb_btns.addWidget(b_none)
+        cb_btns.addWidget(b_first)
+        cb_btns.addStretch(1)
+        v4.addLayout(cb_btns)
+        root.addWidget(grp_combos)
+
+        # ── Bottom buttons ───────────────────────────────────────────────
+        bottom = QtWidgets.QDialogButtonBox()
+        self._btn_plot = bottom.addButton(
+            "Plotar no Canvas",
+            QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole,
+        )
+        self._btn_export = bottom.addButton(
+            "Exportar Figura...",
+            QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole,
+        )
+        self._btn_cancel = bottom.addButton(
+            "Cancelar",
+            QtWidgets.QDialogButtonBox.ButtonRole.RejectRole,
+        )
+        self._btn_plot.clicked.connect(self._on_plot_canvas)
+        self._btn_export.clicked.connect(self._on_export)
+        self._btn_cancel.clicked.connect(self.reject)
+        root.addWidget(bottom)
+
+        # ── Reage a mudança de Tipo (recarrega Modo, Escala, Layout, stack)
+        self.combo_kind.currentTextChanged.connect(self._refresh_kind_dependent)
+        # Estado inicial
+        self._refresh_kind_dependent(self.combo_kind.currentText())
+        # Restaura modo/escala atuais (após refresh)
+        if ctx.get("current_mode"):
+            idx = self.combo_mode.findText(ctx["current_mode"])
+            if idx >= 0:
+                self.combo_mode.setCurrentIndex(idx)
+        if ctx.get("current_scale"):
+            idx = self.combo_scale.findText(ctx["current_scale"])
+            if idx >= 0:
+                self.combo_scale.setCurrentIndex(idx)
+
+    # ── Helpers internos ─────────────────────────────────────────────────
+
+    def _refresh_kind_dependent(self, kind: str) -> None:
+        """Repopula combos Modo/Escala/Layout e troca o stack de picker conforme tipo."""
+        # Modos
+        self.combo_mode.blockSignals(True)
+        self.combo_mode.clear()
+        self.combo_mode.addItems(self._modes_by_kind.get(kind, []))
+        self.combo_mode.blockSignals(False)
+        # Escalas
+        self.combo_scale.blockSignals(True)
+        self.combo_scale.clear()
+        self.combo_scale.addItems(self._scales_by_kind.get(kind, []))
+        self.combo_scale.blockSignals(False)
+        # Layouts
+        self.combo_layout.blockSignals(True)
+        self.combo_layout.clear()
+        for label, key in self.LAYOUTS_BY_KIND.get(kind, [("Padrão", "default")]):
+            self.combo_layout.addItem(label, userData=key)
+        self.combo_layout.blockSignals(False)
+        # Stack picker (componentes vs geosinais vs vazio)
+        if kind in ("Tensor H completo (Re/Im 3×6)", "Componentes EM"):
+            self.stack_picker.setCurrentIndex(0)  # Componentes
+        elif kind == "Geosinais (USD/UAD/UHR/UHA)":
+            self.stack_picker.setCurrentIndex(1)  # Geosinais
+        else:
+            self.stack_picker.setCurrentIndex(2)  # Vazio
+        # ρ checkbox: só faz sentido para Tensor e Geosinais
+        rho_applicable = kind in (
+            "Tensor H completo (Re/Im 3×6)",
+            "Geosinais (USD/UAD/UHR/UHA)",
+        )
+        self.check_include_rho.setEnabled(rho_applicable)
+
+    def _set_all(self, lst: QtWidgets.QListWidget, checked: bool) -> None:
+        state = self._checked if checked else self._unchecked
+        for i in range(lst.count()):
+            lst.item(i).setCheckState(state)
+
+    def _select_first_combo(self) -> None:
+        self._set_all(self.list_combos, False)
+        if self.list_combos.count() > 0:
+            self.list_combos.item(0).setCheckState(self._checked)
+
+    def _collect_checked_items(
+        self, lst: QtWidgets.QListWidget
+    ) -> List[QtWidgets.QListWidgetItem]:
+        return [
+            lst.item(i)
+            for i in range(lst.count())
+            if lst.item(i).checkState() == self._checked
+        ]
+
+    # ── Acceptors ────────────────────────────────────────────────────────
+
+    def _validate(self) -> bool:
+        """Valida combinações selecionadas; mostra warning se nada marcado."""
+        n_combos = sum(
+            1
+            for i in range(self.list_combos.count())
+            if self.list_combos.item(i).checkState() == self._checked
+        )
+        if n_combos == 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Nenhuma combinação",
+                "Marque ao menos uma combinação (TR × θ × f) para plotar.",
+            )
+            return False
+        # v2.5 — limite de 100 curvas (vale para Plotar E Exportar — ambos
+        # disparam render síncrono que pode consumir muita RAM e demorar).
+        if n_combos > 100:
+            ctx_msg = (
+                "Plotar tantas curvas pode demorar e consumir muita RAM."
+                if self.action == "plot"
+                else "Renderizar tantas curvas para exportação pode demorar "
+                "e gerar arquivo PDF/SVG muito grande."
+            )
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Muitas combinações",
+                f"Você selecionou {n_combos} combinações. {ctx_msg}<br/>"
+                "Deseja prosseguir mesmo assim?",
+                QtWidgets.QMessageBox.StandardButton.Yes
+                | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return False
+        return True
+
+    def _on_plot_canvas(self) -> None:
+        self.action = "plot"
+        if not self._validate():
+            return
+        self._capture_layout()
+        self.accept()
+
+    def _on_export(self) -> None:
+        self.action = "export"
+        if not self._validate():
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Exportar figura",
+            "plot.png",
+            "PNG (*.png);;PDF (*.pdf);;SVG (*.svg)",
+        )
+        if not path:
+            return  # usuário cancelou export
+        self.export_path = path
+        self._capture_layout()
+        self.accept()
+
+    def _capture_layout(self) -> None:
+        """Lê o layout selecionado do combo (userData)."""
+        data = self.combo_layout.currentData()
+        if data:
+            self.layout_key = str(data)
+        self.include_resistivity = bool(self.check_include_rho.isChecked())
+
+    # ── API pública ──────────────────────────────────────────────────────
+
+    def get_spec(self) -> Dict[str, Any]:
+        """Coleta a especificação completa da plotagem composta.
+
+        Retorna dict com TODAS as escolhas do usuário, pronto para ser
+        consumido por `ResultsPage._render_from_spec()` e
+        `_export_canvas_to_path()`.
+        """
+        comps = [it.text() for it in self._collect_checked_items(self.list_components)]
+        geos = [it.text() for it in self._collect_checked_items(self.list_geosignals)]
+        combos = [
+            tuple(it.data(self._user_role) or (0, 0, 0))
+            for it in self._collect_checked_items(self.list_combos)
+        ]
+        return {
+            "action": self.action,
+            "kind": self.combo_kind.currentText(),
+            "mode": self.combo_mode.currentText(),
+            "scale": self.combo_scale.currentText(),
+            "components": comps,
+            "geosignals": geos,
+            "combos": combos,
+            "layout": self.layout_key,
+            "include_rho": self.include_resistivity,
+            "export_path": self.export_path,
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Aba 4 — Resultados (+ model selector)
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -3470,6 +3905,9 @@ class ResultsPage(QtWidgets.QWidget):
         self._experiment_entries: List[Tuple[str, Optional[str], bool]] = []
         # v2.4c: bundle ativo escolhido via combo_experiment (None = usa _current_sim)
         self._active_bundle: Optional[Dict[str, Any]] = None
+        # v2.5: estado escolhido pelo PlotComposerDialog (default-safe)
+        self._layout_key: str = "default"
+        self._include_rho_in_plot: bool = True
 
         # Painel esquerdo — controles
         controls = QtWidgets.QGroupBox("Controles de Plot")
@@ -3803,7 +4241,10 @@ class ResultsPage(QtWidgets.QWidget):
         )
         root.addWidget(splitter, 1)
 
-        self.btn_plot.clicked.connect(self._on_plot)
+        # v2.5: Plotar agora abre PlotComposerDialog. O método _on_plot()
+        # foi preservado e é chamado internamente após o dialog confirmar.
+        # btn_save_figure continua chamando SaveFigureDialog v2.4d (fallback).
+        self.btn_plot.clicked.connect(self._open_plot_composer)
         self.btn_save.clicked.connect(self._on_save)
         self.combo_source.currentIndexChanged.connect(self._refresh_keys)
 
@@ -4172,6 +4613,27 @@ class ResultsPage(QtWidgets.QWidget):
             self._scale_stack.setCurrentIndex(0)
             self._scale_label.setText("Escala Tensor/EM:")
 
+    def set_scale_mode(self, label: str) -> None:
+        """v2.5 — setter inverso de :meth:`current_scale_mode`.
+
+        Recebe o LABEL textual (ex: "Re / Im (linear)") escolhido no
+        PlotComposerDialog e ajusta o combo de escala apropriado conforme
+        o tipo de plot atual. Silencioso se o label não pertencer ao
+        contexto (ex: "log10 (padrão)" enviado mas tipo é Tensor).
+        """
+        if not label:
+            return
+        kind = self.combo_plot_kind.currentText()
+        if kind == "Geosinais (USD/UAD/UHR/UHA)":
+            target = self.combo_scale_geosignals
+        elif kind in ("Perfil de Resistividade", "Anisotropia λ = √(ρᵥ/ρₕ)"):
+            target = self.combo_scale_resistivity
+        else:
+            target = self.combo_scale_tensor
+        idx = target.findText(label)
+        if idx >= 0:
+            target.setCurrentIndex(idx)
+
     def current_scale_mode(self) -> str:
         """Retorna o modo de escala do tipo de plot ativo (string curta para sm_plots)."""
         kind = self.combo_plot_kind.currentText()
@@ -4287,6 +4749,234 @@ class ResultsPage(QtWidgets.QWidget):
         items = self.list_components.selectedItems()
         return [it.text() for it in items] if items else ["Hxx", "Hzz"]
 
+    # ══════════════════════════════════════════════════════════════════════
+    # v2.5 — PlotComposerDialog: integration helpers
+    # ══════════════════════════════════════════════════════════════════════
+
+    # Modos contextuais por tipo de plot (espelha lógica visual do
+    # combo_kind_mode legado). Mantém retro-compatibilidade: quando o
+    # usuário escolhe um modo que não existe no espaço contextual,
+    # _apply_spec_to_widgets() faz fallback silencioso ao default.
+    _MODES_BY_KIND: Dict[str, List[str]] = {
+        "Tensor H completo (Re/Im 3×6)": ["Re + Im"],
+        "Componentes EM": [
+            "Magnitude + Fase",
+            "Re + Im",
+            "Magnitude (linear)",
+            "Magnitude (log10)",
+            "Magnitude (dB)",
+            "Fase (graus)",
+        ],
+        "Geosinais (USD/UAD/UHR/UHA)": ["—"],
+        "Perfil de Resistividade": ["—"],
+        "Anisotropia λ = √(ρᵥ/ρₕ)": ["—"],
+        "Benchmark compare (Numba vs Fortran)": ["—"],
+    }
+
+    # Escalas contextuais por tipo. Default é a primeira da lista.
+    _SCALES_BY_KIND: Dict[str, List[str]] = {
+        "Tensor H completo (Re/Im 3×6)": [
+            "Re / Im (linear)",
+            "Magnitude (linear)",
+            "Magnitude (log10)",
+            "Magnitude (dB)",
+            "Fase (°)",
+            "Fase (rad)",
+        ],
+        "Componentes EM": [
+            "Re / Im (linear)",
+            "Magnitude (linear)",
+            "Magnitude (log10)",
+            "Magnitude (dB)",
+            "Fase (°)",
+            "Fase (rad)",
+        ],
+        "Geosinais (USD/UAD/UHR/UHA)": [
+            "Amplitude (log10) + Fase (°)",
+            "Amplitude (linear) + Fase (°)",
+            "Amplitude (dB) + Fase (rad)",
+        ],
+        "Perfil de Resistividade": ["log10 (padrão)", "linear"],
+        "Anisotropia λ = √(ρᵥ/ρₕ)": ["log10 (padrão)", "linear"],
+        "Benchmark compare (Numba vs Fortran)": ["Re / Im (linear)"],
+    }
+
+    def _collect_plot_context(self) -> Dict[str, Any]:
+        """Snapshot do estado atual da ResultsPage para o PlotComposerDialog.
+
+        Constrói o dict ``ctx`` que o ``PlotComposerDialog.__init__`` espera,
+        contendo listas de opções disponíveis e os valores correntes de cada
+        controle. Facilita testes isolados (ctx é serializável).
+        """
+        # Tipos disponíveis (do combo_plot_kind real)
+        kinds = [
+            self.combo_plot_kind.itemText(i) for i in range(self.combo_plot_kind.count())
+        ]
+        # Componentes EM (lista completa do widget legado)
+        all_components = [
+            self.list_components.item(i).text()
+            for i in range(self.list_components.count())
+        ]
+        current_components = self._selected_components()
+
+        # Geosinais (5 derivados — labels do widget legado)
+        all_geosignals: List[str] = []
+        current_geosignals: List[str] = []
+        try:
+            for i in range(self.list_geo_filter.count()):
+                it = self.list_geo_filter.item(i)
+                if it is None:
+                    continue
+                all_geosignals.append(it.text())
+                if it.checkState() == QtCore.Qt.CheckState.Checked:
+                    current_geosignals.append(it.text())
+        except Exception:
+            all_geosignals = ["USD", "UAD", "UHR", "UHA", "U3DF"]
+            current_geosignals = list(all_geosignals)
+
+        # Combinações (labels + tuples + índices marcados)
+        role = (
+            QtCore.Qt.ItemDataRole.UserRole
+            if hasattr(QtCore.Qt, "ItemDataRole")
+            else QtCore.Qt.UserRole
+        )
+        combos_labels: List[str] = []
+        combos_data: List[Tuple[int, int, int]] = []
+        current_combo_idx: List[int] = []
+        for i in range(self.list_combos.count()):
+            it = self.list_combos.item(i)
+            if it is None:
+                continue
+            combos_labels.append(it.text())
+            combos_data.append(tuple(it.data(role) or (0, 0, 0)))
+            if it.checkState() == QtCore.Qt.CheckState.Checked:
+                current_combo_idx.append(i)
+
+        return {
+            "kinds": kinds,
+            "modes_by_kind": self._MODES_BY_KIND,
+            "scales_by_kind": self._SCALES_BY_KIND,
+            "current_kind": self.combo_plot_kind.currentText(),
+            "current_mode": self.combo_kind_mode.currentText(),
+            "current_scale": self.current_scale_mode(),
+            "all_components": all_components,
+            "current_components": current_components,
+            "all_geosignals": all_geosignals,
+            "current_geosignals": current_geosignals,
+            "combos_labels": combos_labels,
+            "combos_indices_data": combos_data,
+            "current_combo_indices": current_combo_idx,
+            "include_rho_default": getattr(self, "_include_rho_in_plot", True),
+        }
+
+    def _apply_spec_to_widgets(self, spec: Dict[str, Any]) -> None:
+        """Reflete escolhas do dialog nos widgets da ResultsPage.
+
+        Após aplicar, ``_on_plot()`` pode rodar normalmente — os widgets
+        carregam o estado do dialog. Mudanças permanecem visíveis ao usuário
+        (transparência: ele vê para onde a configuração foi).
+
+        Args:
+            spec: dict produzido por ``PlotComposerDialog.get_spec()``.
+        """
+        # Tipo
+        idx = self.combo_plot_kind.findText(spec.get("kind", ""))
+        if idx >= 0:
+            self.combo_plot_kind.setCurrentIndex(idx)
+        # Modo (apenas se o tipo escolhido suporta o modo)
+        idx = self.combo_kind_mode.findText(spec.get("mode", ""))
+        if idx >= 0:
+            self.combo_kind_mode.setCurrentIndex(idx)
+        # Escala — usa o setter contextual da ResultsPage v2.4c
+        try:
+            self.set_scale_mode(spec.get("scale", ""))
+        except Exception:
+            pass
+        # Componentes EM (multi-select)
+        wanted = set(spec.get("components", []))
+        for i in range(self.list_components.count()):
+            it = self.list_components.item(i)
+            it.setSelected(it.text() in wanted)
+        # Geosinais (checkable)
+        wanted_geos = set(spec.get("geosignals", []))
+        try:
+            for i in range(self.list_geo_filter.count()):
+                it = self.list_geo_filter.item(i)
+                it.setCheckState(
+                    QtCore.Qt.CheckState.Checked
+                    if it.text() in wanted_geos
+                    else QtCore.Qt.CheckState.Unchecked
+                )
+        except Exception:
+            pass
+        # Combinações (tuples → marcar quem está em spec["combos"])
+        wanted_combos = set(tuple(c) for c in spec.get("combos", []))
+        role = (
+            QtCore.Qt.ItemDataRole.UserRole
+            if hasattr(QtCore.Qt, "ItemDataRole")
+            else QtCore.Qt.UserRole
+        )
+        for i in range(self.list_combos.count()):
+            it = self.list_combos.item(i)
+            if it is None:
+                continue
+            data = tuple(it.data(role) or (0, 0, 0))
+            it.setCheckState(
+                QtCore.Qt.CheckState.Checked
+                if data in wanted_combos
+                else QtCore.Qt.CheckState.Unchecked
+            )
+        # v2.5 — atributos novos lidos por _on_plot()
+        self._layout_key = str(spec.get("layout", "default"))
+        self._include_rho_in_plot = bool(spec.get("include_rho", True))
+
+    def _open_plot_composer(self) -> None:
+        """Slot do botão **Plotar** — abre PlotComposerDialog (v2.5).
+
+        Se nenhuma simulação estiver carregada, exibe aviso e retorna.
+        Após confirmar, aplica o spec aos widgets e chama ``_on_plot()``
+        para renderizar inline. Em modo export, salva o canvas direto.
+        """
+        if not self._current_sim:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Nenhuma simulação",
+                "Execute uma simulação ou benchmark antes de compor a plotagem.",
+            )
+            return
+        ctx = self._collect_plot_context()
+        dlg = PlotComposerDialog(self, ctx)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return  # usuário cancelou
+        spec = dlg.get_spec()
+        self._apply_spec_to_widgets(spec)
+        # Renderiza no canvas (caminho legado v2.4)
+        self._on_plot()
+        if spec.get("action") == "export":
+            path = spec.get("export_path") or ""
+            if path:
+                self._save_canvas_to_path(path)
+
+    def _save_canvas_to_path(self, path: str) -> None:
+        """Salva o canvas atual da ResultsPage em arquivo PNG/PDF/SVG.
+
+        Reaproveita o mesmo código usado por ``_on_save()`` (modo quick),
+        mas pula o SaveFigureDialog. Fluxo direto pós-PlotComposerDialog.
+        """
+        try:
+            self.canvas.figure.savefig(path, dpi=self._style.dpi, bbox_inches="tight")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Figura exportada",
+                f"Figura salva em:<br/><code>{path}</code>",
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Erro ao salvar",
+                f"Não foi possível salvar a figura:<br/><code>{exc}</code>",
+            )
+
     def _resolve_current_sim_H(self) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
         """Retorna (H0 — tensor do modelo selecionado, model_dict) para sim atual.
 
@@ -4361,6 +5051,9 @@ class ResultsPage(QtWidgets.QWidget):
             )
 
             if kind == "Tensor H completo (Re/Im 3×6)":
+                # v2.5: layout pode forçar 3×6 (sem ρ) ou 3×7 (com ρ).
+                # `include_resistivity` escolhido pelo usuário no dialog
+                # tem precedência sobre o default (True) da função.
                 plot_tensor_full(
                     self.canvas,
                     H0,
@@ -4378,6 +5071,8 @@ class ResultsPage(QtWidgets.QWidget):
                     freq_mask=freq_mask or None,
                     combos=combos or None,
                     scale_mode=scale_mode,
+                    layout=getattr(self, "_layout_key", "default"),
+                    include_resistivity=getattr(self, "_include_rho_in_plot", True),
                 )
             elif kind == "Componentes EM":
                 plot_em_profile(
@@ -4394,6 +5089,7 @@ class ResultsPage(QtWidgets.QWidget):
                     thicknesses=thicknesses,
                     combos=combos or None,
                     scale_mode=scale_mode,
+                    layout=getattr(self, "_layout_key", "default"),
                 )
             elif kind == "Geosinais (USD/UAD/UHR/UHA)":
                 plot_geosignals(
@@ -4412,6 +5108,10 @@ class ResultsPage(QtWidgets.QWidget):
                     freq_mask=freq_mask or None,
                     combos=combos or None,
                     scale_mode=scale_mode,
+                    layout=getattr(self, "_layout_key", "default"),
+                    include_resistivity=getattr(self, "_include_rho_in_plot", False),
+                    rho_h=rho_h,
+                    rho_v=rho_v,
                 )
             elif kind == "Perfil de Resistividade":
                 plot_resistivity_profile(
@@ -5968,22 +6668,41 @@ class MainWindow(QtWidgets.QMainWindow):
         # v2.4c: cache LRU — put() pode evictar snapshots antigos para
         # respeitar maxlen=3 e max_bytes=500 MB. Chaves evictadas voltam
         # como lista; atualizamos a lista do histórico para refletir perda.
+        # v2.5: bug fix — `in_cache` agora reflete o ESTADO REAL do cache
+        # após put(). Em simulações multi-freq×multi-angle com 1000+ modelos,
+        # o H_stack pode exceder 500 MB e ser auto-evictado imediatamente:
+        # antes a UI marcava `in_cache=True` levando à mensagem confusa
+        # "tensor não está em memória — cache perdido ao fechar o programa".
+        # Agora `snap_id in self._sim_history_cache` é a fonte de verdade.
         evicted_ids = self._sim_history_cache.put(snap_id, dict(plot_bundle))
         for old_id in evicted_ids:
+            if old_id == snap_id:
+                continue  # próprio snapshot — tratado abaixo via in_cache
             try:
                 self.page_sim.mark_history_out_of_cache(old_id)
             except Exception:
                 pass
+        in_cache = snap_id in self._sim_history_cache
         if evicted_ids:
             try:
                 total_mb = self._sim_history_cache.total_bytes() / 1e6
-                self.page_sim.append_log(
-                    f"  [cache] evictados {len(evicted_ids)} snapshot(s) "
-                    f"antigos (cache atual: {total_mb:.1f} MB)"
-                )
+                if not in_cache:
+                    # v2.5: auto-eviction — tensor maior que max_bytes
+                    bundle_mb = self._sim_history_cache.estimate_bytes(plot_bundle) / 1e6
+                    self.page_sim.append_log(
+                        f"  [cache] tensor desta simulação ({bundle_mb:.1f} MB) "
+                        f"excede o limite do LRU (500 MB) — não cacheado"
+                    )
+                else:
+                    n_old = sum(1 for k in evicted_ids if k != snap_id)
+                    if n_old > 0:
+                        self.page_sim.append_log(
+                            f"  [cache] evictados {n_old} snapshot(s) antigos "
+                            f"(cache atual: {total_mb:.1f} MB)"
+                        )
             except Exception:
                 pass
-        self.page_sim.add_history_entry(snap_id, snap.label, in_cache=True)
+        self.page_sim.add_history_entry(snap_id, snap.label, in_cache=in_cache)
         # v2.4c: notifica ResultsPage para atualizar combo_experiment
         try:
             self.page_results.refresh_experiment_list(
@@ -6039,13 +6758,28 @@ class MainWindow(QtWidgets.QMainWindow):
         """Duplo-clique \u2014 reabre tensor H em Resultados se em cache."""
         bundle = self._sim_history_cache.get(snapshot_id)
         if bundle is None:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Tensor n\u00e3o dispon\u00edvel",
-                "Esta simula\u00e7\u00e3o foi carregada do .exp.json, mas o tensor H "
-                "n\u00e3o est\u00e1 em mem\u00f3ria (cache perdido ao fechar o programa).<br/>"
-                "Para visualiz\u00e1-la, re-execute com os mesmos par\u00e2metros.",
-            )
+            # v2.5: mensagem espec\u00edfica para auto-eviction (tensor maior
+            # que max_bytes do cache) vs. cache miss comum (LRU/sess\u00e3o).
+            if self._sim_history_cache.was_too_big(snapshot_id):
+                title = "Tensor grande demais para cache"
+                msg = (
+                    "Esta simula\u00e7\u00e3o multi-freq\u00d7multi-angle gerou um tensor "
+                    "que excedeu o limite do cache LRU (500 MB).<br/><br/>"
+                    "Para visualiz\u00e1-la, op\u00e7\u00f5es:<br/>"
+                    "&nbsp;\u2022 Re-execute (ela voltar\u00e1 a ser a 'Simula\u00e7\u00e3o atual')<br/>"
+                    "&nbsp;\u2022 Reduza n_models, nTR, n\u03b8 ou nf<br/>"
+                    "&nbsp;\u2022 Aumente o limite de cache em Prefer\u00eancias (futuro)"
+                )
+            else:
+                title = "Tensor n\u00e3o dispon\u00edvel"
+                msg = (
+                    "Esta simula\u00e7\u00e3o foi carregada do .exp.json, mas o tensor H "
+                    "n\u00e3o est\u00e1 em mem\u00f3ria (cache LRU perdido ao fechar o "
+                    "programa, ou empurrado fora pelas simula\u00e7\u00f5es mais recentes)."
+                    "<br/><br/>Para visualiz\u00e1-la, re-execute com os mesmos "
+                    "par\u00e2metros."
+                )
+            QtWidgets.QMessageBox.information(self, title, msg)
             return
         # v2.4c: aplica bundle + sincroniza combo_experiment na ResultsPage
         self.page_results.set_active_bundle_from_history(bundle)
@@ -6746,6 +7480,135 @@ def _run_smoke_test() -> int:
         )
     except Exception as exc:
         check(False, f"v2.4d Magnitude + Fase preservado ({exc})")
+
+    # ══════════════════════════════════════════════════════════════════
+    # v2.5 — PlotComposerDialog + bug fix LRU multi-freq×angle (+12 testes)
+    # ══════════════════════════════════════════════════════════════════
+    try:
+        # 1. Cache LRU expõe API was_too_big()
+        cache_v25 = LRUPlotCache(maxlen=3, max_bytes=1000)
+        check(
+            hasattr(cache_v25, "was_too_big") and callable(cache_v25.was_too_big),
+            "v2.5: LRUPlotCache.was_too_big() existe",
+        )
+
+        # 2. Auto-eviction marca was_too_big=True
+        import numpy as _np_v25
+
+        big = {"H_stack": _np_v25.zeros(2000, dtype=_np_v25.complex128)}  # ~32 KB
+        cache_v25.put("snap_big", big)
+        check(
+            cache_v25.was_too_big("snap_big"),
+            f"v2.5: tensor > max_bytes marca was_too_big=True (in_cache={'snap_big' in cache_v25})",
+        )
+
+        # 3. Cache miss normal não marca was_too_big
+        cache_v25.put(
+            "snap_normal", {"H_stack": _np_v25.zeros(10, dtype=_np_v25.complex128)}
+        )
+        check(
+            not cache_v25.was_too_big("nonexistent_key"),
+            "v2.5: chave inexistente retorna was_too_big=False",
+        )
+    except Exception as exc:
+        check(False, f"v2.5 LRUPlotCache.was_too_big ({exc})")
+
+    # PlotComposerDialog instanciação + integração com ResultsPage
+    try:
+        results = window.page_results
+        # 4. ResultsPage tem botão Plotar conectado a _open_plot_composer
+        check(
+            hasattr(results, "_open_plot_composer")
+            and callable(results._open_plot_composer),
+            "v2.5: ResultsPage._open_plot_composer existe",
+        )
+        # 5. ResultsPage tem _collect_plot_context (snapshot de estado)
+        check(
+            hasattr(results, "_collect_plot_context")
+            and callable(results._collect_plot_context),
+            "v2.5: ResultsPage._collect_plot_context existe",
+        )
+        # 6. ctx do dialog é serializável e contém chaves esperadas
+        ctx = results._collect_plot_context()
+        required_keys = {
+            "kinds",
+            "modes_by_kind",
+            "scales_by_kind",
+            "current_kind",
+            "all_components",
+            "combos_labels",
+            "all_geosignals",
+            "include_rho_default",
+        }
+        missing = required_keys - set(ctx.keys())
+        check(
+            not missing,
+            f"v2.5: ctx tem todas chaves esperadas (missing={missing})",
+        )
+        # 7. PlotComposerDialog instancia sem erro
+        dlg_v25 = PlotComposerDialog(parent=results, ctx=ctx)
+        check(
+            dlg_v25.action == "cancel",
+            f"v2.5: PlotComposerDialog default action='cancel' (got '{dlg_v25.action}')",
+        )
+        # 8. Layout combo populado por kind
+        check(
+            dlg_v25.combo_layout.count() >= 1,
+            f"v2.5: combo_layout populado (got {dlg_v25.combo_layout.count()} layouts)",
+        )
+        # 9. include_rho checkbox presente
+        check(
+            hasattr(dlg_v25, "check_include_rho"),
+            "v2.5: check_include_rho presente no dialog",
+        )
+        # 10. get_spec retorna dict completo
+        spec = dlg_v25.get_spec()
+        check(
+            "kind" in spec and "layout" in spec and "include_rho" in spec,
+            f"v2.5: get_spec() retorna dict com kind/layout/include_rho",
+        )
+        # 11. Trocar kind atualiza layouts
+        dlg_v25.combo_kind.setCurrentText("Geosinais (USD/UAD/UHR/UHA)")
+        layouts_geo = [
+            dlg_v25.combo_layout.itemData(i) for i in range(dlg_v25.combo_layout.count())
+        ]
+        check(
+            "geo_nx2_rho" in layouts_geo,
+            f"v2.5: trocar para Geosinais expõe layout 'geo_nx2_rho' (got {layouts_geo})",
+        )
+        dlg_v25.close()
+    except Exception as exc:
+        check(False, f"v2.5 PlotComposerDialog ({exc})")
+
+    # 12. plot_tensor_full com layout='tensor_3x6' força include_resistivity=False
+    try:
+        import numpy as _np_t
+
+        from .sm_plots import plot_tensor_full as _ptf
+
+        results = window.page_results
+        _H6 = _np_t.ones((1, 1, 4, 1, 9), dtype=_np_t.complex128)
+        _ptf(
+            results.canvas,
+            _H6,
+            z_obs=_np_t.linspace(0, 3, 4),
+            freqs=[20000.0],
+            trs=[1.0],
+            dips=[0.0],
+            rho_h=[10.0, 100.0, 10.0],  # 3 camadas
+            rho_v=[10.0, 100.0, 10.0],
+            thicknesses=[1.0],
+            combos=[(0, 0, 0)],
+            layout="tensor_3x6",
+        )
+        # Em layout 3×6 sem ρ, a figure deve ter exatamente 18 axes (3×6)
+        n_axes_t = len(results.canvas.figure.get_axes())
+        check(
+            n_axes_t == 18,
+            f"v2.5: layout='tensor_3x6' → 18 axes sem ρ (got {n_axes_t})",
+        )
+    except Exception as exc:
+        check(False, f"v2.5 plot_tensor_full layout='tensor_3x6' ({exc})")
 
     print(f"\n=== Resultado: {len(failures)} falha(s) ===")
     window.close()
