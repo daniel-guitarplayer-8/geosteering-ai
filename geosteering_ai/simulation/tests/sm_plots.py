@@ -191,6 +191,14 @@ class PlotStyle:
     marker_size: float = 4.0
     marker_style: str = "o"
 
+    # ── v2.6: tema dark/light/auto para integração com UI VSCode-style ────
+    # theme="dark" sobrescreve background e cores de eixos para integrar
+    # visualmente com o tema dark da app. Cores de curva também são
+    # adaptadas via _theme_color_overrides() abaixo.
+    # theme="auto" segue a app (default) — equivalente a "dark" quando a
+    # MainWindow usa o stylesheet escuro.
+    theme: str = "auto"  # "light" | "dark" | "auto"
+
 
 def apply_style(style: PlotStyle) -> None:
     """Aplica um ``PlotStyle`` globalmente aos rcParams do matplotlib.
@@ -204,6 +212,17 @@ def apply_style(style: PlotStyle) -> None:
     """
     if not _HAS_MPL:
         return
+    # v2.6 U1+P1: tema dark/light. "auto" segue app (default = dark hoje).
+    theme = getattr(style, "theme", "auto")
+    is_dark = theme == "dark" or theme == "auto"
+    if is_dark:
+        bg = "#1e1e1e"
+        fg = "#d4d4d4"
+        grid_color = "#3c3c3c"
+    else:
+        bg = style.background
+        fg = "#000000"
+        grid_color = "#cccccc"
     rc = {
         "figure.dpi": style.dpi,
         "savefig.dpi": max(style.dpi, 150),
@@ -219,8 +238,8 @@ def apply_style(style: PlotStyle) -> None:
         "lines.markersize": style.marker_size,
         "axes.grid": style.grid,
         "grid.alpha": style.grid_alpha,
-        "axes.facecolor": style.background,
-        "figure.facecolor": style.background,
+        "axes.facecolor": bg,
+        "figure.facecolor": bg,
         "axes.linewidth": style.spine_width,
         "axes.titlelocation": style.title_location,
         "legend.loc": style.legend_location,
@@ -228,6 +247,16 @@ def apply_style(style: PlotStyle) -> None:
         "axes.unicode_minus": True,
         "xtick.minor.visible": style.minor_ticks,
         "ytick.minor.visible": style.minor_ticks,
+        # v2.6: cores de eixos/texto/grid adaptadas ao tema
+        "axes.edgecolor": fg,
+        "axes.labelcolor": fg,
+        "axes.titlecolor": fg,
+        "xtick.color": fg,
+        "ytick.color": fg,
+        "text.color": fg,
+        "grid.color": grid_color,
+        "savefig.facecolor": bg,
+        "savefig.edgecolor": bg,
     }
     # LaTeX externo (requer TeX no PATH). Usuário assume responsabilidade
     # de instalar o ambiente. Se o render falhar no runtime, matplotlib
@@ -885,14 +914,20 @@ def plot_tensor_full(
         ["Hzx", "Hzy", "Hzz"],
     ]
     # Cria axes uma única vez; curvas são adicionadas dentro do loop.
+    # v2.6 P1: sharey vincula todos os 18 subplots ao primeiro — zoom em
+    # qualquer um propaga para todos. Y-axis = profundidade compartilhada.
     axes_re: List[Any] = []
     axes_im: List[Any] = []
+    first_ax: Optional[Any] = None
     for row in range(n_comp_rows):
         for col_pair in range(pair_cols):
             comp_name = comp_order[row][col_pair]
             base_col = (1 if have_rho else 0) + 2 * col_pair
-            ax_re = canvas.figure.add_subplot(gs[row, base_col])
-            ax_im = canvas.figure.add_subplot(gs[row, base_col + 1])
+            kw = {"sharey": first_ax} if first_ax is not None else {}
+            ax_re = canvas.figure.add_subplot(gs[row, base_col], **kw)
+            ax_im = canvas.figure.add_subplot(gs[row, base_col + 1], **kw)
+            if first_ax is None:
+                first_ax = ax_re
             _draw_layer_boundaries(ax_re, thick_arr, style)
             _draw_layer_boundaries(ax_im, thick_arr, style)
             ax_re.set_title(f"Re$({{{comp_name}}})$")
@@ -1501,9 +1536,14 @@ def plot_geosignals(
         )
         ax_rho = canvas.figure.add_subplot(gs[:, 0])
         axes = np.empty((n_rows, 2), dtype=object)
+        # v2.6 P1: sharey vincula geosinais N×2 ao primeiro — zoom Y propaga.
+        first_geo_ax: Optional[Any] = None
         for r in range(n_rows):
-            axes[r][0] = canvas.figure.add_subplot(gs[r, 1])
-            axes[r][1] = canvas.figure.add_subplot(gs[r, 2])
+            kw = {"sharey": first_geo_ax} if first_geo_ax is not None else {}
+            axes[r][0] = canvas.figure.add_subplot(gs[r, 1], **kw)
+            axes[r][1] = canvas.figure.add_subplot(gs[r, 2], **kw)
+            if first_geo_ax is None:
+                first_geo_ax = axes[r][0]
         # Desenha o perfil ρ (log10 com axhlines nas interfaces).
         # Reaproveita o mesmo helper canônico v2.4b usado por plot_tensor_full.
         z_flat_rho = (
