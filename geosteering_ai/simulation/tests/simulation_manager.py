@@ -6184,7 +6184,15 @@ class PreferencesPage(QtWidgets.QWidget):
         try:
             from .sm_plot_backends import available_backends
 
-            backends = [b.value for b in available_backends()]
+            # Vispy marcado como "(experimental)" — sem axes/labels nativos
+            backends = [
+                (
+                    f"{b.value} (experimental — sem labels)"
+                    if b.value == "vispy"
+                    else b.value
+                )
+                for b in available_backends()
+            ]
         except Exception:
             backends = ["matplotlib"]
         if "matplotlib" not in backends:
@@ -9034,6 +9042,83 @@ def _run_smoke_test() -> int:
         )
     except Exception as exc:
         check(False, f"v2.6b A1 layout grp_filt ({exc})")
+
+    # ── v2.7a smoke tests: PyQt6+PySide6 migration + bug fixes ────────────
+    print("\n── v2.7a: Migração PyQt6+PySide6 ──")
+
+    # T1: sm_qt_compat não usa PyQt5 — binding deve ser PyQt6 ou PySide6
+    try:
+        from geosteering_ai.simulation.tests.sm_qt_compat import QT_BINDING
+
+        check(
+            QT_BINDING in {"PyQt6", "PySide6"},
+            f"v2.7a T1: QT_BINDING é PyQt6 ou PySide6 (got '{QT_BINDING}')",
+        )
+    except Exception as exc:
+        check(False, f"v2.7a T1: QT_BINDING ({exc})")
+
+    # T2: constantes ALIGN_*/ORIENT_* removidas de sm_qt_compat.__all__
+    try:
+        import geosteering_ai.simulation.tests.sm_qt_compat as _compat
+
+        removed = {
+            "ALIGN_LEFT",
+            "ALIGN_CENTER",
+            "ALIGN_RIGHT",
+            "ALIGN_VCENTER",
+            "ORIENT_H",
+            "ORIENT_V",
+        }
+        remaining = removed & set(getattr(_compat, "__all__", []))
+        check(
+            len(remaining) == 0,
+            f"v2.7a T2: ALIGN_*/ORIENT_* ausentes de sm_qt_compat.__all__ (remaining={remaining})",
+        )
+    except Exception as exc:
+        check(False, f"v2.7a T2: ALIGN_*/ORIENT_* ({exc})")
+
+    # T3: detect_os_dark_mode() retorna bool sem exceção
+    try:
+        from geosteering_ai.simulation.tests.sm_qt_compat import detect_os_dark_mode
+
+        result = detect_os_dark_mode()
+        check(
+            isinstance(result, bool),
+            f"v2.7a T3: detect_os_dark_mode() retorna bool (got {result!r})",
+        )
+    except Exception as exc:
+        check(False, f"v2.7a T3: detect_os_dark_mode() ({exc})")
+
+    # T4: CollapsibleGroupBox._on_toggled() cria QPropertyAnimation sem erro
+    try:
+        from geosteering_ai.simulation.tests.sm_widgets import CollapsibleGroupBox
+
+        box = CollapsibleGroupBox("Teste v2.7a", collapsed=True)
+        box._on_toggled(True)  # expandir — deve criar QPropertyAnimation
+        box._on_toggled(False)  # colapsar
+        check(
+            True,
+            "v2.7a T4: CollapsibleGroupBox._on_toggled() cria QPropertyAnimation sem erro",
+        )
+    except Exception as exc:
+        check(False, f"v2.7a T4: CollapsibleGroupBox QPropertyAnimation ({exc})")
+
+    # T5: PyQtGraph backend set_dark_mode() não invoca pg.setConfigOption global
+    try:
+        import inspect
+
+        from geosteering_ai.simulation.tests.sm_plot_backends.pyqtgraph_canvas import (
+            PyQtGraphCanvas,
+        )
+
+        src = inspect.getsource(PyQtGraphCanvas.set_dark_mode)
+        uses_global_config = "setConfigOption" in src and "background" in src
+        check(
+            not uses_global_config,
+            "v2.7a T5: PyQtGraphCanvas.set_dark_mode() não usa pg.setConfigOption() global",
+        )
+    except Exception as exc:
+        check(False, f"v2.7a T5: PyQtGraphCanvas set_dark_mode ({exc})")
 
     print(f"\n=== Resultado: {len(failures)} falha(s) ===")
     window.close()
