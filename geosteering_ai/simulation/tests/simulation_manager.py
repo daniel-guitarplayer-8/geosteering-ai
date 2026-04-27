@@ -63,10 +63,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .sm_qt_compat import (
-    ALIGN_CENTER,
-    ALIGN_RIGHT,
-    ALIGN_VCENTER,
-    ORIENT_H,
     QT_AVAILABLE,
     QT_BINDING,
     QtCore,
@@ -760,17 +756,13 @@ def _parse_float_list(text: str, default: List[float]) -> List[float]:
 
 
 def _frame_shape(name: str) -> Any:
-    shape_enum = getattr(QtWidgets.QFrame, "Shape", None)
-    if shape_enum is not None:
-        return getattr(shape_enum, name)
-    return getattr(QtWidgets.QFrame, name)
+    """Retorna enum Qt6 QFrame.Shape por nome (ex.: 'HLine', 'NoFrame')."""
+    return getattr(QtWidgets.QFrame.Shape, name)
 
 
 def _frame_shadow(name: str) -> Any:
-    shadow_enum = getattr(QtWidgets.QFrame, "Shadow", None)
-    if shadow_enum is not None:
-        return getattr(shadow_enum, name)
-    return getattr(QtWidgets.QFrame, name)
+    """Retorna enum Qt6 QFrame.Shadow por nome (ex.: 'Sunken', 'Plain')."""
+    return getattr(QtWidgets.QFrame.Shadow, name)
 
 
 def _hsep() -> "QtWidgets.QFrame":
@@ -795,8 +787,12 @@ def _centered_form() -> Tuple["QtWidgets.QFormLayout", "QtWidgets.QHBoxLayout"]:
     ao layout pai; o ``form`` já vive dentro dele centralizado.
     """
     form = QtWidgets.QFormLayout()
-    form.setLabelAlignment(ALIGN_RIGHT)
-    form.setFormAlignment(ALIGN_CENTER | ALIGN_VCENTER if ALIGN_CENTER else 0x4)
+    form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+    form.setFormAlignment(
+        QtCore.Qt.AlignmentFlag.AlignCenter | QtCore.Qt.AlignmentFlag.AlignVCenter
+        if QtCore.Qt.AlignmentFlag.AlignCenter
+        else 0x4
+    )
     form.setHorizontalSpacing(16)
     form.setVerticalSpacing(8)
     outer = QtWidgets.QHBoxLayout()
@@ -839,7 +835,7 @@ class NewExperimentDialog(QtWidgets.QDialog):
         self._result: Optional[ExperimentState] = None
 
         form = QtWidgets.QFormLayout()
-        form.setLabelAlignment(ALIGN_RIGHT)
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         form.setHorizontalSpacing(12)
 
         self.edit_name = _qline(
@@ -2072,11 +2068,7 @@ class ParametersPage(QtWidgets.QWidget):
             }
 
         dlg = LayersManualDialog(self, initial=initial)
-        if (
-            dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted
-            if hasattr(QtWidgets.QDialog, "DialogCode")
-            else dlg.exec()
-        ):
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             layers = dlg.get_layers()
             if layers is None:
                 return
@@ -2222,7 +2214,7 @@ class SimulatorPage(QtWidgets.QWidget):
 
         grp_backend = QtWidgets.QGroupBox("Backend")
         form_bk = QtWidgets.QFormLayout(grp_backend)
-        form_bk.setLabelAlignment(ALIGN_RIGHT)
+        form_bk.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         self.combo_backend = QtWidgets.QComboBox()
         self.combo_backend.addItems(["numba", "fortran"])
         _tooltip(
@@ -2264,7 +2256,7 @@ class SimulatorPage(QtWidgets.QWidget):
             "Paralelismo — Central Master-Plan · Parallel Execution"
         )
         par_form = QtWidgets.QFormLayout(grp_par)
-        par_form.setLabelAlignment(ALIGN_RIGHT)
+        par_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         self.spin_workers = _spin_int(max(1, ncpu // 4), 1, 256)
         self.spin_threads = _spin_int(max(2, ncpu // max(1, ncpu // 4)), 1, 256)
         _tooltip(
@@ -2300,7 +2292,7 @@ class SimulatorPage(QtWidgets.QWidget):
 
         grp_out = QtWidgets.QGroupBox("Saída")
         out_form = QtWidgets.QFormLayout(grp_out)
-        out_form.setLabelAlignment(ALIGN_RIGHT)
+        out_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         self.edit_output_dir = _qline("", "Diretório de saída")
         _tooltip(
             self.edit_output_dir,
@@ -2480,7 +2472,7 @@ class SimulatorPage(QtWidgets.QWidget):
                 "exportados (.dat/.out)."
             ),
         )
-        hist_splitter = QtWidgets.QSplitter(ORIENT_H)
+        hist_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         hist_splitter.addWidget(self.sim_history_list)
         hist_splitter.addWidget(self.sim_history_info)
         hist_splitter.setStretchFactor(0, 2)
@@ -2541,21 +2533,13 @@ class SimulatorPage(QtWidgets.QWidget):
         """Clique simples — emite snapshot_id para o MainWindow."""
         if current is None:
             return
-        snap_id = (
-            current.data(QtCore.Qt.ItemDataRole.UserRole)
-            if hasattr(QtCore.Qt, "ItemDataRole")
-            else current.data(QtCore.Qt.UserRole)
-        )
+        snap_id = current.data(QtCore.Qt.ItemDataRole.UserRole)
         if snap_id:
             self.request_history_select.emit(str(snap_id))
 
     def _on_history_item_doubleclicked(self, item: QtWidgets.QListWidgetItem) -> None:
         """Duplo-clique — emite snapshot_id para reabrir em Resultados."""
-        snap_id = (
-            item.data(QtCore.Qt.ItemDataRole.UserRole)
-            if hasattr(QtCore.Qt, "ItemDataRole")
-            else item.data(QtCore.Qt.UserRole)
-        )
+        snap_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
         if snap_id:
             self.request_history_open.emit(str(snap_id))
 
@@ -2591,11 +2575,7 @@ class SimulatorPage(QtWidgets.QWidget):
         tooltip rico com backend, n_models, tempo, threads/workers, timestamp.
         """
         item = QtWidgets.QListWidgetItem(("● " if in_cache else "○ ") + label)
-        role = (
-            QtCore.Qt.ItemDataRole.UserRole
-            if hasattr(QtCore.Qt, "ItemDataRole")
-            else QtCore.Qt.UserRole
-        )
+        role = QtCore.Qt.ItemDataRole.UserRole
         item.setData(role, snapshot_id)
         # v2.6b U8 — Tooltip rico com snapshot info (HTML)
         cache_line = (
@@ -2647,11 +2627,7 @@ class SimulatorPage(QtWidgets.QWidget):
         que o tensor H não está mais em RAM e que duplo-clique exigirá
         reexecução para plotar.
         """
-        role = (
-            QtCore.Qt.ItemDataRole.UserRole
-            if hasattr(QtCore.Qt, "ItemDataRole")
-            else QtCore.Qt.UserRole
-        )
+        role = QtCore.Qt.ItemDataRole.UserRole
         for i in range(self.sim_history_list.count()):
             item = self.sim_history_list.item(i)
             if item is None:
@@ -2777,7 +2753,7 @@ class ConfigDRowEditor(QtWidgets.QDialog):
         eff = {**default, **(current or {})}
 
         form = QtWidgets.QFormLayout()
-        form.setLabelAlignment(ALIGN_RIGHT)
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         form.setHorizontalSpacing(12)
 
         self.edit_freqs = _qline(
@@ -3155,7 +3131,7 @@ class BenchmarkPage(QtWidgets.QWidget):
         # ── Paralelismo ─────────────────────────────────────────────────
         grp_par = QtWidgets.QGroupBox("Paralelismo")
         par_form = QtWidgets.QFormLayout(grp_par)
-        par_form.setLabelAlignment(ALIGN_RIGHT)
+        par_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         self.spin_workers_numba = _spin_int(max(1, ncpu // 4), 1, 256)
         self.spin_threads_numba = _spin_int(4, 1, 256)
         self.spin_workers_fortran = _spin_int(max(1, ncpu // 2), 1, 256)
@@ -3364,7 +3340,11 @@ class BenchmarkPage(QtWidgets.QWidget):
             ]
             for col, v in enumerate(vals):
                 item = QtWidgets.QTableWidgetItem(v)
-                item.setTextAlignment(ALIGN_CENTER if ALIGN_CENTER else 0x4)
+                item.setTextAlignment(
+                    QtCore.Qt.AlignmentFlag.AlignCenter
+                    if QtCore.Qt.AlignmentFlag.AlignCenter
+                    else 0x4
+                )
                 self.table.setItem(row, col, item)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -3465,26 +3445,10 @@ class SaveFigureDialog(QtWidgets.QDialog):
         self.resize(560, 620)
 
         # Compatibilidade Qt5/Qt6: enum paths diferentes
-        self._checkable_flag = (
-            QtCore.Qt.ItemFlag.ItemIsUserCheckable
-            if hasattr(QtCore.Qt, "ItemFlag")
-            else QtCore.Qt.ItemIsUserCheckable
-        )
-        self._checked = (
-            QtCore.Qt.CheckState.Checked
-            if hasattr(QtCore.Qt, "CheckState")
-            else QtCore.Qt.Checked
-        )
-        self._unchecked = (
-            QtCore.Qt.CheckState.Unchecked
-            if hasattr(QtCore.Qt, "CheckState")
-            else QtCore.Qt.Unchecked
-        )
-        self._user_role = (
-            QtCore.Qt.ItemDataRole.UserRole
-            if hasattr(QtCore.Qt, "ItemDataRole")
-            else QtCore.Qt.UserRole
-        )
+        self._checkable_flag = QtCore.Qt.ItemFlag.ItemIsUserCheckable
+        self._checked = QtCore.Qt.CheckState.Checked
+        self._unchecked = QtCore.Qt.CheckState.Unchecked
+        self._user_role = QtCore.Qt.ItemDataRole.UserRole
 
         self.mode: str = "quick"
         self.selected_components: List[str] = list(current_components)
@@ -3748,26 +3712,10 @@ class PlotComposerDialog(QtWidgets.QDialog):
         self.resize(720, 720)
 
         # ── Compatibilidade Qt5/Qt6 ──────────────────────────────────────
-        self._checkable_flag = (
-            QtCore.Qt.ItemFlag.ItemIsUserCheckable
-            if hasattr(QtCore.Qt, "ItemFlag")
-            else QtCore.Qt.ItemIsUserCheckable
-        )
-        self._checked = (
-            QtCore.Qt.CheckState.Checked
-            if hasattr(QtCore.Qt, "CheckState")
-            else QtCore.Qt.Checked
-        )
-        self._unchecked = (
-            QtCore.Qt.CheckState.Unchecked
-            if hasattr(QtCore.Qt, "CheckState")
-            else QtCore.Qt.Unchecked
-        )
-        self._user_role = (
-            QtCore.Qt.ItemDataRole.UserRole
-            if hasattr(QtCore.Qt, "ItemDataRole")
-            else QtCore.Qt.UserRole
-        )
+        self._checkable_flag = QtCore.Qt.ItemFlag.ItemIsUserCheckable
+        self._checked = QtCore.Qt.CheckState.Checked
+        self._unchecked = QtCore.Qt.CheckState.Unchecked
+        self._user_role = QtCore.Qt.ItemDataRole.UserRole
 
         # ── Estado de saída (resultado do dialog) ────────────────────────
         self.action: str = "cancel"
@@ -4150,7 +4098,7 @@ class ResultsPage(QtWidgets.QWidget):
         # Painel esquerdo — controles
         controls = QtWidgets.QGroupBox("Controles de Plot")
         ctrl_layout = QtWidgets.QFormLayout(controls)
-        ctrl_layout.setLabelAlignment(ALIGN_RIGHT)
+        ctrl_layout.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         ctrl_layout.setHorizontalSpacing(12)
 
         # ── v2.4c: Combo de seleção de experimento ──────────────────────
@@ -4160,8 +4108,6 @@ class ResultsPage(QtWidgets.QWidget):
         self.combo_experiment = QtWidgets.QComboBox()
         self.combo_experiment.setSizeAdjustPolicy(
             QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
-            if hasattr(QtWidgets.QComboBox, "SizeAdjustPolicy")
-            else 0
         )
         _tooltip(
             self.combo_experiment,
@@ -4213,8 +4159,6 @@ class ResultsPage(QtWidgets.QWidget):
         self.list_components = QtWidgets.QListWidget()
         self.list_components.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.MultiSelection
-            if hasattr(QtWidgets.QAbstractItemView, "SelectionMode")
-            else QtWidgets.QAbstractItemView.MultiSelection
         )
         self.list_components.setMaximumHeight(150)
         for c in COMPONENT_NAMES:
@@ -4284,8 +4228,6 @@ class ResultsPage(QtWidgets.QWidget):
         self.list_combos.setAlternatingRowColors(True)
         self.list_combos.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.NoSelection
-            if hasattr(QtWidgets.QAbstractItemView, "SelectionMode")
-            else QtWidgets.QAbstractItemView.NoSelection
         )
         _tooltip(
             self.list_combos,
@@ -4505,7 +4447,9 @@ class ResultsPage(QtWidgets.QWidget):
         # Painel direito — canvas
         self.canvas = EMCanvas(self, figsize=(14, 9), style=self._style)
 
-        splitter = QtWidgets.QSplitter(ORIENT_H if ORIENT_H else 0x1)
+        splitter = QtWidgets.QSplitter(
+            QtCore.Qt.Orientation.Horizontal if QtCore.Qt.Orientation.Horizontal else 0x1
+        )
         left_wrap = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left_wrap)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -4657,11 +4601,7 @@ class ResultsPage(QtWidgets.QWidget):
         self.list_combos.blockSignals(True)
         try:
             self.list_combos.clear()
-            role = (
-                QtCore.Qt.ItemDataRole.UserRole
-                if hasattr(QtCore.Qt, "ItemDataRole")
-                else QtCore.Qt.UserRole
-            )
+            role = QtCore.Qt.ItemDataRole.UserRole
             for itr, tr in enumerate(trs or []):
                 for iang, ang in enumerate(dips or []):
                     for ifq, fq in enumerate(freqs or []):
@@ -4688,11 +4628,7 @@ class ResultsPage(QtWidgets.QWidget):
 
     def _selected_combos(self) -> List[Tuple[int, int, int]]:
         """Retorna lista de tuples (iTR, iAng, iFq) das combinações marcadas."""
-        role = (
-            QtCore.Qt.ItemDataRole.UserRole
-            if hasattr(QtCore.Qt, "ItemDataRole")
-            else QtCore.Qt.UserRole
-        )
+        role = QtCore.Qt.ItemDataRole.UserRole
         out: List[Tuple[int, int, int]] = []
         for i in range(self.list_combos.count()):
             item = self.list_combos.item(i)
@@ -5373,11 +5309,7 @@ class ResultsPage(QtWidgets.QWidget):
             current_geosignals = list(all_geosignals)
 
         # Combinações (labels + tuples + índices marcados)
-        role = (
-            QtCore.Qt.ItemDataRole.UserRole
-            if hasattr(QtCore.Qt, "ItemDataRole")
-            else QtCore.Qt.UserRole
-        )
+        role = QtCore.Qt.ItemDataRole.UserRole
         combos_labels: List[str] = []
         combos_data: List[Tuple[int, int, int]] = []
         current_combo_idx: List[int] = []
@@ -5449,11 +5381,7 @@ class ResultsPage(QtWidgets.QWidget):
             pass
         # Combinações (tuples → marcar quem está em spec["combos"])
         wanted_combos = set(tuple(c) for c in spec.get("combos", []))
-        role = (
-            QtCore.Qt.ItemDataRole.UserRole
-            if hasattr(QtCore.Qt, "ItemDataRole")
-            else QtCore.Qt.UserRole
-        )
+        role = QtCore.Qt.ItemDataRole.UserRole
         for i in range(self.list_combos.count()):
             it = self.list_combos.item(i)
             if it is None:
@@ -6037,7 +5965,7 @@ class PreferencesPage(QtWidgets.QWidget):
             "para geosteering_ai, tatu.x e o interpretador Python."
         )
         paths_form = QtWidgets.QFormLayout(grp_paths)
-        paths_form.setLabelAlignment(ALIGN_RIGHT)
+        paths_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
 
         self.edit_pkg = _qline(self._paths.get("geosteering_ai", ""), "…/geosteering_ai")
         _tooltip(
@@ -6136,7 +6064,7 @@ class PreferencesPage(QtWidgets.QWidget):
         # ─── Plot style ──────────────────────────────────────────────────
         grp_style = QtWidgets.QGroupBox("Estilo de Plot")
         style_form = QtWidgets.QFormLayout(grp_style)
-        style_form.setLabelAlignment(ALIGN_RIGHT)
+        style_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
 
         self.spin_dpi = _spin_int(style.dpi, 50, 600)
         _tooltip(
@@ -6412,7 +6340,18 @@ class PreferencesPage(QtWidgets.QWidget):
             _tooltip(btn, f"<b>Cor · {lbl}</b><br/>Clique para abrir o seletor de cores.")
 
         style_form.addRow("Resolução (DPI):", self.spin_dpi)
-        style_form.addRow("Tipografia:", self.combo_font_family)
+        # Botão QFontDialog ao lado do combo de família de fonte
+        self.btn_font_picker = QtWidgets.QPushButton("Escolher…")
+        self.btn_font_picker.setMaximumWidth(90)
+        self.btn_font_picker.setToolTip(
+            "<b>Escolher fonte</b><br/>Abre o seletor nativo de fontes do sistema.<br/>"
+            "Família e tamanho são aplicados ao canvas imediatamente."
+        )
+        self.btn_font_picker.clicked.connect(self._on_pick_font)
+        font_row = QtWidgets.QHBoxLayout()
+        font_row.addWidget(self.combo_font_family)
+        font_row.addWidget(self.btn_font_picker)
+        style_form.addRow("Tipografia:", font_row)
         style_form.addRow("Tamanho da fonte (pt):", self.spin_font)
         style_form.addRow("Espessura da linha:", self.spin_lw)
         style_form.addRow("Espessura dos eixos:", self.spin_spine_w)
@@ -6683,6 +6622,21 @@ class PreferencesPage(QtWidgets.QWidget):
             "output_dir": self.edit_output.text().strip(),
         }
 
+    def _on_pick_font(self) -> None:
+        """Abre QFontDialog nativo para selecionar família e tamanho da fonte."""
+        current = QtGui.QFont(
+            self.combo_font_family.currentText().strip() or "DejaVu Sans",
+            int(self.spin_font.value()),
+        )
+        font, ok = QtWidgets.QFontDialog.getFont(current, self, "Fonte dos Gráficos")
+        if ok:
+            self.combo_font_family.setCurrentText(font.family())
+            self.spin_font.setValue(font.pointSize())
+            main = self.window()
+            tm = getattr(main, "_toast_manager", None)
+            if tm:
+                tm.show(f"Fonte: {font.family()} {font.pointSize()}pt", "success", 2000)
+
     def _on_save(self) -> None:
         paths = self._collect_paths()
         style = self._collect_style()
@@ -6777,7 +6731,9 @@ class SimulatorTab(QtWidgets.QWidget):
         history_group = self.sim.take_history_group()
         col3_layout.addWidget(history_group, 1)
 
-        splitter = QtWidgets.QSplitter(ORIENT_H if ORIENT_H else 0x1)
+        splitter = QtWidgets.QSplitter(
+            QtCore.Qt.Orientation.Horizontal if QtCore.Qt.Orientation.Horizontal else 0x1
+        )
         splitter.addWidget(self.params)
         splitter.addWidget(self.sim)
         splitter.addWidget(self._history_column)

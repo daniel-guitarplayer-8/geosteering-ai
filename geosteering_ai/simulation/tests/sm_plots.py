@@ -70,7 +70,7 @@ from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .sm_qt_compat import QtGui, QtWidgets
+from .sm_qt_compat import QtGui, QtWidgets, detect_os_dark_mode
 
 # Import matplotlib com backend Qt — fallback leve se matplotlib ausente
 try:
@@ -212,9 +212,9 @@ def apply_style(style: PlotStyle) -> None:
     """
     if not _HAS_MPL:
         return
-    # v2.6 U1+P1: tema dark/light. "auto" segue app (default = dark hoje).
+    # v2.7a: tema dark/light/auto. "auto" detecta dark mode do SO via QPalette.
     theme = getattr(style, "theme", "auto")
-    is_dark = theme == "dark" or theme == "auto"
+    is_dark = theme == "dark" or (theme == "auto" and detect_os_dark_mode())
     if is_dark:
         bg = "#1e1e1e"
         fg = "#d4d4d4"
