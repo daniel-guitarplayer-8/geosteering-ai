@@ -2,6 +2,20 @@
 
 Pipeline de Inversão Geofísica 1D com Deep Learning para Geosteering.
 
+## Requisitos
+
+- **Python 3.13.x** (obrigatório — Python 3.14+ não suportado)
+- Sistema operacional: macOS, Linux ou Windows
+- GPU opcional: CUDA 11.8+ (para treinamento em Colab/local)
+
+```bash
+# Ativar ambiente de desenvolvimento
+source ~/Geosteering_AI_venv/bin/activate
+
+# Verificar versão
+python --version  # Python 3.13.x
+```
+
 Reproduz, com fidelidade física, a inversão eletromagnética em tempo real
 através de arquiteturas de Deep Learning. Suporta componentes EM + geosinais
 e/ou Feature Views como features para inversão de resistividade em cenários
