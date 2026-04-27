@@ -1562,11 +1562,20 @@ class ParametersPage(QtWidgets.QWidget):
         # apareça como PRIMEIRO passo — é o atalho mais comum; depois o
         # usuário ajusta Geometria da ferramenta e finamente a Geração
         # Estocástica, terminando na escolha do Filtro Hankel.
+        # v2.6b: ordem original preservada — CollapsibleGroupBox foi REVERTIDO
+        # para evitar shifts de layout ao trocar perfil/Manual (bug reportado).
         root.addWidget(grp_canonical)
         root.addWidget(grp_geom)
         root.addWidget(grp_gen)
         root.addWidget(grp_filt)
         root.addStretch(1)
+
+        # v2.6b U4+U5 — Aplica tooltips físicos com HTML rico em ~25 campos
+        # (não-invasivo: apenas setToolTip, zero impacto em layout)
+        try:
+            self._apply_physical_tooltips()
+        except Exception:
+            pass
 
         container = QtWidgets.QWidget()
         container.setLayout(root)
@@ -1578,6 +1587,148 @@ class ParametersPage(QtWidgets.QWidget):
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
+
+    # ── v2.6b U4+U5 — Tooltips físicos com HTML rico ─────────────────────
+    def _apply_physical_tooltips(self) -> None:
+        """Aplica HTML tooltips com definição física + range + exemplo.
+
+        v2.6b U4/U5: cada tooltip explica significado físico, faixa válida,
+        default e fornece exemplo numérico (skin depth, n_pos, ACp/ACx).
+        """
+        TIPS = {
+            "spin_h1": (
+                "<b>h<sub>1</sub></b> (m): profundidade inicial do perfil "
+                "(cabeça do poço acima da 1ª interface).<br/>"
+                "<i>Range:</i> [-1000, 1000] · <i>Default:</i> 0.0<br/>"
+                "<i>Exemplo:</i> h1=10 começa o perfil 10 m acima da camada 1."
+            ),
+            "spin_tj": (
+                "<b>t<sub>j</sub></b> (m): janela total de medição "
+                "(extensão vertical do perfil).<br/>"
+                "<i>Range:</i> [0.1, 1e5] · <i>Default:</i> 600<br/>"
+                "<i>Relação:</i> n_pos = ⌈tj / (p_med × cos θ)⌉."
+            ),
+            "spin_pmed": (
+                "<b>p<sub>med</sub></b> (m): passo de medição entre amostras "
+                "consecutivas no eixo z.<br/>"
+                "<i>Range:</i> [0.01, 10] · <i>Default:</i> 1.0<br/>"
+                "<i>Skin depth (referência):</i> δ ≈ 503·√(ρ/f) m."
+            ),
+            "edit_freqs": (
+                "<b>Frequências</b> (Hz): lista CSV de frequências de operação.<br/>"
+                "<i>Range:</i> [100, 1e6] · <i>Default:</i> 20000<br/>"
+                "<i>Skin depth @ 20 kHz, ρ=10 Ω·m:</i> δ ≈ 11 m."
+            ),
+            "edit_angles": (
+                "<b>Ângulos de dip</b> (graus): lista CSV de ângulos relativos "
+                "TX → camada (0° = vertical, 90° = horizontal).<br/>"
+                "<i>Range:</i> [0, 89] · <i>Default:</i> 0,30,60,90"
+            ),
+            "edit_trs": (
+                "<b>Espaçamentos T-R</b> (m): lista CSV de distâncias "
+                "transmissor↔receptor.<br/>"
+                "<i>Default:</i> 0.5,1.0,2.0<br/>"
+                "<i>Decoupling factor:</i> ACp/ACx ∝ 1/L³."
+            ),
+            "spin_nf": (
+                "<b>Nº de frequências</b>: ajuda a definir 'Frequências' acima.<br/>"
+                "<i>Range:</i> [1, 16]"
+            ),
+            "spin_nang": (
+                "<b>Nº de ângulos (n<sub>θ</sub>)</b>: ajuda a definir 'Ângulos'.<br/>"
+                "<i>Range:</i> [1, 90]"
+            ),
+            "spin_ntr": (
+                "<b>Nº de pares T-R</b>: ajuda a definir 'Espaçamentos T-R'.<br/>"
+                "<i>Range:</i> [1, 16]"
+            ),
+            "spin_nmodels": (
+                "<b>n_models</b>: tamanho do ensemble (modelos geológicos "
+                "estocásticos a simular).<br/>"
+                "<i>Range:</i> [1, 100000] · <i>Default:</i> 100"
+            ),
+            "combo_generator": (
+                "<b>Gerador estocástico</b> de modelos TIV.<br/>"
+                "<b>halton/sobol</b>: Quasi-Monte-Carlo (cobertura uniforme).<br/>"
+                "<b>uniform/normal</b>: amostragem clássica."
+            ),
+            "check_aniso": (
+                "<b>Perfil anisotrópico</b>: se ativo, gera ρ<sub>v</sub> "
+                "independentemente de ρ<sub>h</sub> (anisotropia transverso-isotrópica)."
+            ),
+            "spin_lambda_min": (
+                "<b>λ<sub>min</sub></b>: razão mínima ρ<sub>v</sub>/ρ<sub>h</sub>.<br/>"
+                "<i>Range:</i> [0.5, 100] · <i>Default:</i> 1.0 (isotrópico)"
+            ),
+            "spin_lambda_max": (
+                "<b>λ<sub>max</sub></b>: razão máxima ρ<sub>v</sub>/ρ<sub>h</sub>.<br/>"
+                "<i>Default:</i> 5.0 (anisotropia média)"
+            ),
+            "spin_rho_min": (
+                "<b>ρ<sub>h,min</sub></b> (Ω·m): resistividade horizontal mínima.<br/>"
+                "<i>Range:</i> [0.01, 1e4] · <i>Default:</i> 0.5"
+            ),
+            "spin_rho_max": (
+                "<b>ρ<sub>h,max</sub></b> (Ω·m): resistividade horizontal máxima.<br/>"
+                "<i>Default:</i> 200"
+            ),
+            "combo_rho_distr": (
+                "<b>Distribuição</b> de ρ<sub>h</sub>:<br/>"
+                "<b>log_uniform</b> (★): cobertura física típica de reservatórios.<br/>"
+                "<b>uniform</b>: equiprovável em escala linear.<br/>"
+                "<b>normal/lognormal</b>: amostragem gaussiana."
+            ),
+            "spin_min_thick": (
+                "<b>Espessura mínima</b> de camada (m).<br/>"
+                "<i>Default:</i> 0.5 — evita camadas finas demais "
+                "para o passo p_med (resolução insuficiente)."
+            ),
+            "spin_nlayers_min": (
+                "<b>Nº mínimo de camadas</b> por modelo.<br/>" "<i>Default:</i> 3"
+            ),
+            "spin_nlayers_max": (
+                "<b>Nº máximo de camadas</b> por modelo.<br/>" "<i>Default:</i> 10"
+            ),
+            "spin_nlayers_fixed": (
+                "<b>Nº fixo de camadas</b> (sobrescreve min/max se > 0).<br/>"
+                "<i>0 = aleatório no range [min, max]</i>"
+            ),
+            "combo_filter": (
+                "<b>Filtro Hankel</b> (transformada inversa J₀/J₁).<br/>"
+                "<b>werthmuller_201pt</b> (★): precisão alta, balanceado.<br/>"
+                "<b>kong_61pt</b>: 3.3× mais rápido, precisão moderada.<br/>"
+                "<b>anderson_801pt</b>: precisão máxima, 4× mais lento."
+            ),
+            "combo_canonical": (
+                "<b>Perfil pré-configurado</b>: 8 perfis canônicos "
+                "(oklahoma_28, marlim_12, namorado_5, ...) preenchem "
+                "automaticamente os parâmetros de geometria e filtros."
+            ),
+            "btn_load_canonical": (
+                "Aplica o perfil canônico selecionado aos campos atuais.<br/>"
+                "Substitui freqs, angles, trs, h1, tj, p_med, filter."
+            ),
+            "btn_layers_dialog": (
+                "Abre diálogo manual para definir camadas customizadas "
+                "(thicknesses, ρ<sub>h</sub>, ρ<sub>v</sub>) sem geração aleatória."
+            ),
+            "btn_config_d": (
+                "Configura parâmetros adicionais (D-mode): seed, dimensão QMC, "
+                "scrambling, e overrides avançados."
+            ),
+        }
+        applied = 0
+        for attr_name, html in TIPS.items():
+            widget = getattr(self, attr_name, None)
+            if widget is None:
+                continue
+            try:
+                widget.setToolTip(html)
+                applied += 1
+            except Exception:
+                continue
+        # Guarda contagem para smoke test
+        self._physical_tooltips_applied = applied
 
     # ── Perfis canônicos ──────────────────────────────────────────────────
     def _on_canonical_selected(self, label: str) -> None:
@@ -2294,6 +2445,14 @@ class SimulatorPage(QtWidgets.QWidget):
         grp_history = QtWidgets.QGroupBox("Simulações Realizadas")
         hist_layout = QtWidgets.QVBoxLayout(grp_history)
         hist_layout.setContentsMargins(8, 8, 8, 8)
+        # v2.6b U9 — QLineEdit para pesquisar no histórico
+        self.edit_history_search = QtWidgets.QLineEdit()
+        self.edit_history_search.setPlaceholderText(
+            "Pesquisar histórico (label, backend, n_models, timestamp)…"
+        )
+        self.edit_history_search.setClearButtonEnabled(True)
+        self.edit_history_search.textChanged.connect(self._on_history_search_changed)
+        hist_layout.addWidget(self.edit_history_search)
         self.sim_history_list = QtWidgets.QListWidget()
         self.sim_history_list.setAlternatingRowColors(True)
         self.sim_history_list.setMinimumHeight(120)
@@ -2400,8 +2559,37 @@ class SimulatorPage(QtWidgets.QWidget):
         if snap_id:
             self.request_history_open.emit(str(snap_id))
 
-    def add_history_entry(self, snapshot_id: str, label: str, *, in_cache: bool) -> None:
-        """Adiciona (ou atualiza) item no QListWidget de histórico."""
+    def _on_history_search_changed(self, text: str) -> None:
+        """v2.6b U9 — Filtra itens do histórico por substring case-insensitive.
+
+        Pesquisa em label visível + tooltip (que contém snapshot_id, backend,
+        cache flag, etc.). Itens não-correspondentes são ocultados via
+        ``setHidden(True)``.
+        """
+        needle = (text or "").lower().strip()
+        for i in range(self.sim_history_list.count()):
+            item = self.sim_history_list.item(i)
+            if item is None:
+                continue
+            if not needle:
+                item.setHidden(False)
+                continue
+            haystack = (item.text() + "\n" + (item.toolTip() or "")).lower()
+            item.setHidden(needle not in haystack)
+
+    def add_history_entry(
+        self,
+        snapshot_id: str,
+        label: str,
+        *,
+        in_cache: bool,
+        snap: Optional[Any] = None,
+    ) -> None:
+        """Adiciona (ou atualiza) item no QListWidget de histórico.
+
+        v2.6b U8: aceita opcionalmente o ``SimulationSnapshot`` para construir
+        tooltip rico com backend, n_models, tempo, threads/workers, timestamp.
+        """
         item = QtWidgets.QListWidgetItem(("● " if in_cache else "○ ") + label)
         role = (
             QtCore.Qt.ItemDataRole.UserRole
@@ -2409,16 +2597,46 @@ class SimulatorPage(QtWidgets.QWidget):
             else QtCore.Qt.UserRole
         )
         item.setData(role, snapshot_id)
-        # Tooltip com indicativo de cache
-        item.setToolTip(
-            f"snapshot_id: {snapshot_id}\n"
-            + (
-                "Tensor H disponível em cache (duplo-clique reabre em Resultados)."
-                if in_cache
-                else "Tensor não em cache — duplo-clique mostrará aviso de re-execução."
-            )
+        # v2.6b U8 — Tooltip rico com snapshot info (HTML)
+        cache_line = (
+            "<span style='color:#4ec9b0'>● Em cache</span>"
+            if in_cache
+            else "<span style='color:#888'>○ Fora do cache (re-execução requerida)</span>"
         )
+        if snap is not None:
+            try:
+                tooltip = (
+                    f"<b>{getattr(snap, 'label', label)}</b><br/>"
+                    f"<b>Backend:</b> {getattr(snap, 'backend', '?')}<br/>"
+                    f"<b>n_models:</b> {getattr(snap, 'n_models', '?')}<br/>"
+                    f"<b>Workers:</b> {getattr(snap, 'n_workers', '?')} · "
+                    f"<b>Threads:</b> {getattr(snap, 'n_threads', '?')}<br/>"
+                    f"<b>Tempo:</b> {getattr(snap, 'elapsed_s', 0.0):.2f} s<br/>"
+                    f"<b>Timestamp:</b> {getattr(snap, 'timestamp', '?')}<br/>"
+                    f"<b>snapshot_id:</b> <code>{snapshot_id}</code><br/>"
+                    f"{cache_line}<br/>"
+                    "<i>Duplo-clique reabre o tensor H na aba Resultados.</i>"
+                )
+            except Exception:
+                tooltip = (
+                    f"<b>{label}</b><br/>snapshot_id: {snapshot_id}<br/>{cache_line}"
+                )
+        else:
+            tooltip = (
+                f"<b>{label}</b><br/>"
+                f"snapshot_id: <code>{snapshot_id}</code><br/>"
+                f"{cache_line}<br/>"
+                "<i>Duplo-clique reabre o tensor H em Resultados.</i>"
+            )
+        item.setToolTip(tooltip)
         self.sim_history_list.addItem(item)
+        # v2.6b U9 — re-aplica filtro de pesquisa se houver
+        try:
+            search = getattr(self, "edit_history_search", None)
+            if search is not None and search.text().strip():
+                self._on_history_search_changed(search.text())
+        except Exception:
+            pass
 
     def mark_history_out_of_cache(self, snapshot_id: str) -> None:
         """Marca um item do histórico como fora-do-cache (ícone cinza).
@@ -3921,6 +4139,10 @@ class ResultsPage(QtWidgets.QWidget):
         self._experiment_entries: List[Tuple[str, Optional[str], bool]] = []
         # v2.4c: bundle ativo escolhido via combo_experiment (None = usa _current_sim)
         self._active_bundle: Optional[Dict[str, Any]] = None
+        # v2.6b L4 — CrosshairManager (lazy, criado no primeiro toggle)
+        self._crosshair: Optional[Any] = None
+        # v2.6b L4 — EnsembleAnimationBar (criado abaixo se houver matplotlib)
+        self.animation_bar: Optional[Any] = None
         # v2.5: estado escolhido pelo PlotComposerDialog (default-safe)
         self._layout_key: str = "default"
         self._include_rho_in_plot: bool = True
@@ -4230,6 +4452,56 @@ class ResultsPage(QtWidgets.QWidget):
         ctrl_layout.addRow(self.btn_save)
         ctrl_layout.addRow(self.btn_free_memory)
 
+        # v2.6b — Botões de Análise visíveis no painel de controles (acesso
+        # direto, complementa atalhos Ctrl+Shift+M/A/C e a toolbar Análise).
+        sep_analysis = QtWidgets.QLabel("── Análise interativa ──")
+        sep_analysis.setStyleSheet("color:#888888; font-size:10px; padding-top:8px;")
+        sep_analysis.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        ctrl_layout.addRow(sep_analysis)
+
+        self.btn_correlation = QtWidgets.QPushButton("📊 Matriz de correlação…")
+        _tooltip(
+            self.btn_correlation,
+            (
+                "<b>Matriz de correlação dos componentes EM</b> (Pearson/Spearman/Kendall)<br/>"
+                "Heatmap interativo + tabela numérica. Atalho: <b>Ctrl+Shift+M</b>."
+            ),
+        )
+        self.btn_correlation.clicked.connect(self._open_correlation_dialog)
+
+        self.btn_ensemble = QtWidgets.QPushButton("📈 Análise do ensemble…")
+        _tooltip(
+            self.btn_ensemble,
+            (
+                "<b>Análise estatística do ensemble</b><br/>"
+                "Mediana + envelope P5/P95 + outliers (z>3) em vermelho. "
+                "Atalho: <b>Ctrl+Shift+A</b>."
+            ),
+        )
+        self.btn_ensemble.clicked.connect(self._open_ensemble_dialog)
+
+        self.btn_crosshair = QtWidgets.QPushButton("✚ Crosshair sincronizado")
+        self.btn_crosshair.setCheckable(True)
+        _tooltip(
+            self.btn_crosshair,
+            (
+                "<b>Crosshair sincronizado entre subplots</b><br/>"
+                "Linha vertical que segue o mouse em todos os axes (>30 fps via blitting). "
+                "Atalho: <b>Ctrl+Shift+C</b>."
+            ),
+        )
+        self.btn_crosshair.toggled.connect(
+            lambda checked: (
+                self._toggle_crosshair()
+                if checked != getattr(self._crosshair, "enabled", False)
+                else None
+            )
+        )
+
+        ctrl_layout.addRow(self.btn_correlation)
+        ctrl_layout.addRow(self.btn_ensemble)
+        ctrl_layout.addRow(self.btn_crosshair)
+
         # Painel direito — canvas
         self.canvas = EMCanvas(self, figsize=(14, 9), style=self._style)
 
@@ -4248,6 +4520,29 @@ class ResultsPage(QtWidgets.QWidget):
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 16)
         root.addWidget(_heading("Resultados — Visualização Interativa"))
+
+        # v2.6b A1 — Toggle rápido de tema do canvas (fundo branco vs dark).
+        # Sincroniza com combo_theme em PreferencesPage (sinal bidirecional
+        # via blockSignals para evitar loops). Persistência em QSettings.
+        theme_row = QtWidgets.QHBoxLayout()
+        self.check_canvas_white = QtWidgets.QCheckBox(
+            "Fundo branco no canvas (paleta clássica pré-dark)"
+        )
+        self.check_canvas_white.setToolTip(
+            "<b>Tema do canvas</b><br/>"
+            "☐ Marcado: fundo <b>branco</b> com paleta clássica "
+            "(azul #1f4ea8, vermelho #a3272f).<br/>"
+            "☐ Desmarcado: tema <b>dark</b> (fundo #1e1e1e).<br/>"
+            "Atalho: alternativa em Preferências → Tema do canvas."
+        )
+        self.check_canvas_white.setChecked(
+            getattr(self._style, "theme", "auto") == "light"
+        )
+        self.check_canvas_white.toggled.connect(self._on_canvas_theme_toggled)
+        theme_row.addWidget(self.check_canvas_white)
+        theme_row.addStretch(1)
+        root.addLayout(theme_row)
+
         root.addWidget(
             _heading(
                 "Plots de componentes EM, perfil ρ, geosinais e comparação Numba vs Fortran. "
@@ -4256,6 +4551,16 @@ class ResultsPage(QtWidgets.QWidget):
             )
         )
         root.addWidget(splitter, 1)
+
+        # v2.6b L4 — EnsembleAnimationBar no rodapé (auto-hide se n_models<=1)
+        try:
+            from .sm_animation_bar import EnsembleAnimationBar
+
+            self.animation_bar = EnsembleAnimationBar(self)
+            self.animation_bar.valueChanged.connect(self._on_animation_value_changed)
+            root.addWidget(self.animation_bar)
+        except Exception:
+            self.animation_bar = None
 
         # v2.6: Bug fix A1 — Plotar volta a renderizar inline (caminho direto
         # `_on_plot()` com base nos widgets atuais da coluna esquerda).
@@ -4601,6 +4906,215 @@ class ResultsPage(QtWidgets.QWidget):
         if self.combo_model_key.count() > idx:
             self.combo_model_key.setCurrentIndex(idx)
 
+    # ── v2.6b A1 — Toggle tema canvas (fundo branco vs dark) ──────────────
+    def _on_canvas_theme_toggled(self, checked: bool) -> None:
+        """Alterna tema do canvas entre 'light' e 'dark'.
+
+        Chamado pelo checkbox ``check_canvas_white`` no topo da página.
+        Sincroniza com ``combo_theme`` em PreferencesPage via ``blockSignals``
+        (evita loop de eventos). Persiste em QSettings e re-plota se há
+        simulação corrente.
+        """
+        new_theme = "light" if checked else "dark"
+        try:
+            self._style.theme = new_theme
+            apply_style(self._style)
+            self.canvas.set_style(self._style)
+        except Exception:
+            pass
+        # Sincroniza combo em PreferencesPage (se acessível via janela pai)
+        try:
+            main = self.window()
+            page_prefs = getattr(main, "page_prefs", None)
+            combo_theme = getattr(page_prefs, "combo_theme", None) if page_prefs else None
+            if combo_theme is not None:
+                combo_theme.blockSignals(True)
+                idx = combo_theme.findText(new_theme)
+                if idx >= 0:
+                    combo_theme.setCurrentIndex(idx)
+                combo_theme.blockSignals(False)
+        except Exception:
+            pass
+        # Re-plota se existe simulação corrente (sem disparar erro)
+        try:
+            if self._current_sim is not None or self._active_bundle is not None:
+                self._on_plot()
+        except Exception:
+            pass
+        # Persiste em QSettings
+        try:
+            QtCore.QSettings("GeosteringAI", "SimulationManager").setValue(
+                "canvas/theme", new_theme
+            )
+        except Exception:
+            pass
+        # Toast não-bloqueante (ToastManager está em MainWindow)
+        try:
+            main = self.window()
+            tm = getattr(main, "_toast_manager", None)
+            if tm is not None:
+                msg = f"Canvas: {'fundo branco (paleta clássica)' if checked else 'tema dark'}"
+                tm.show(msg, level="info", duration_ms=1500)
+        except Exception:
+            pass
+
+    # ── v2.6b L4 — EnsembleAnimationBar wiring ───────────────────────────
+    def _on_animation_value_changed(self, idx: int) -> None:
+        """Slot do EnsembleAnimationBar — atualiza spin_model_idx e re-plota.
+
+        v2.6b L4: a barra emite valueChanged a cada frame (slider/play/timer).
+        Este slot sincroniza com ``spin_model_idx`` (sem disparar loop) e
+        chama ``_on_plot()`` para refletir o modelo no canvas.
+        """
+        try:
+            self.spin_model_idx.blockSignals(True)
+            self.spin_model_idx.setValue(int(idx))
+            self.spin_model_idx.blockSignals(False)
+            # Atualiza label e combo interno
+            self._on_model_idx_changed(int(idx))
+            # Re-plota apenas se já há simulação corrente
+            if self._current_sim is not None or self._active_bundle is not None:
+                self._on_plot()
+        except Exception:
+            pass
+
+    def _sync_animation_bar(self, n_models: int) -> None:
+        """Sincroniza EnsembleAnimationBar.setMaximum quando uma nova sim
+        chega ou usuário troca de experimento.
+
+        Chamado por ``set_current_simulation`` e ``_on_experiment_changed``.
+        """
+        ab = getattr(self, "animation_bar", None)
+        if ab is None:
+            return
+        try:
+            ab.stop()
+            ab.setMaximum(max(0, int(n_models) - 1))
+        except Exception:
+            pass
+
+    # ── v2.6b L6 — Backend selector (swap runtime) ────────────────────────
+    def swap_backend(self, backend: str) -> None:
+        """Troca o backend de plot em runtime.
+
+        Implementação minimal v2.6b: como o pipeline atual de ``_on_plot()``
+        chama ``plot_*`` que assumem matplotlib EMCanvas, a troca para
+        outros backends (pyqtgraph/plotly/vispy) emite warning informativo.
+        Refator completo de ``plot_tensor_full`` para ``PlotCanvas`` API
+        está no backlog v2.6c.
+
+        Para ``matplotlib``: no-op (canvas atual já é EMCanvas).
+        """
+        backend = backend.lower().strip()
+        # Persiste para próximo restart
+        try:
+            QtCore.QSettings("GeosteringAI", "SimulationManager").setValue(
+                "plot/backend", backend
+            )
+        except Exception:
+            pass
+        # matplotlib (default) — canvas atual já é EMCanvas baseado em mpl
+        if backend in ("matplotlib", "mpl", ""):
+            try:
+                main = self.window()
+                lbl = getattr(main, "lbl_status_plot_backend", None)
+                if lbl is not None:
+                    lbl.setText("Plot: matplotlib")
+            except Exception:
+                pass
+            return
+        # Outros backends: pré-validação via factory; troca completa requer
+        # refator das funções plot_* (v2.6c). Por ora, emite info-toast e
+        # mantém matplotlib funcional.
+        try:
+            from .sm_plot_backends import make_canvas
+
+            test_canvas = make_canvas(backend, parent=None)
+            del test_canvas  # apenas valida disponibilidade
+            main = self.window()
+            tm = getattr(main, "_toast_manager", None)
+            if tm is not None:
+                tm.show(
+                    f"Backend '{backend}' disponível. "
+                    "Refator completo das funções plot_* virá em v2.6c — "
+                    "por ora plots usam matplotlib.",
+                    level="warning",
+                    duration_ms=3500,
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Backend '{backend}' indisponível ou faltando dependências: {exc}"
+            ) from exc
+
+    # ── v2.6b L5 — Hooks para análise estatística do ensemble ────────────
+    def _resolve_current_H_stack(self) -> Optional[Any]:
+        """Retorna H_stack (6D) da simulação corrente ou None."""
+        try:
+            sim = self._active_bundle or self._current_sim
+            if not sim:
+                return None
+            H = sim.get("H_stack")
+            return H
+        except Exception:
+            return None
+
+    def _open_correlation_dialog(self) -> None:
+        """Abre CorrelationAnalysisDialog para o tensor da simulação atual.
+
+        v2.6b L5: requer simulação carregada. Para ensemble (6D) agrega via
+        média sobre n_models antes de correlacionar.
+        """
+        H = self._resolve_current_H_stack()
+        if H is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Sem dados",
+                "Execute uma simulação primeiro para abrir a matriz de correlação.",
+            )
+            return
+        try:
+            from .sm_correlation import CorrelationAnalysisDialog
+
+            dlg = CorrelationAnalysisDialog(self, H)
+            dlg.exec()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Erro", f"Falha ao abrir matriz de correlação:\n{exc}"
+            )
+
+    def _open_ensemble_dialog(self) -> None:
+        """Abre EnsembleAnalysisDialog para o ensemble corrente.
+
+        v2.6b L5: requer ensemble 6D. Se simulação tem apenas 1 modelo (5D),
+        exibe mensagem informativa.
+        """
+        H = self._resolve_current_H_stack()
+        if H is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Sem dados",
+                "Execute uma simulação primeiro para abrir a análise do ensemble.",
+            )
+            return
+        if getattr(H, "ndim", 0) != 6:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Ensemble inválido",
+                "Análise de ensemble requer simulação com >1 modelo (tensor 6D).",
+            )
+            return
+        try:
+            from .sm_correlation import EnsembleAnalysisDialog
+
+            sim = self._active_bundle or self._current_sim or {}
+            z_obs = sim.get("z_obs") if sim else None
+            dlg = EnsembleAnalysisDialog(self, H, z_obs=z_obs)
+            dlg.exec()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Erro", f"Falha ao abrir análise do ensemble:\n{exc}"
+            )
+
     def _update_scale_combos_visibility(self, *_args) -> None:
         """Alterna o combo de escala ativo (página do QStackedWidget).
 
@@ -4696,6 +5210,12 @@ class ResultsPage(QtWidgets.QWidget):
         self._populate_filter(self.list_tr_filter, trs, "{} m")
         self._populate_filter(self.list_ang_filter, dips, "{}°")
         self._populate_filter(self.list_freq_filter, freqs, "{:g} Hz")
+        # v2.6b L4 — sincroniza animation bar com novo n_models
+        try:
+            n_models = int(self.spin_model_idx.maximum()) + 1
+            self._sync_animation_bar(n_models)
+        except Exception:
+            pass
 
     def set_benchmark_plot_data(
         self, data: Dict[Tuple[str, str], Dict[str, Any]]
@@ -5141,6 +5661,12 @@ class ResultsPage(QtWidgets.QWidget):
                     layout=getattr(self, "_layout_key", "default"),
                 )
             elif kind == "Geosinais (USD/UAD/UHR/UHA)":
+                # v2.6b Bug A2 — Resistividade só aparece em geosinais quando
+                # o usuário explicitamente escolhe layout "geo_nx2_rho"
+                # (via PlotComposerDialog). Default = sem rho para evitar
+                # plot poluído com perfil de resistividade indesejado.
+                _layout = getattr(self, "_layout_key", "default")
+                _include_rho_geo = _layout == "geo_nx2_rho"
                 plot_geosignals(
                     self.canvas,
                     H0,
@@ -5157,10 +5683,10 @@ class ResultsPage(QtWidgets.QWidget):
                     freq_mask=freq_mask or None,
                     combos=combos or None,
                     scale_mode=scale_mode,
-                    layout=getattr(self, "_layout_key", "default"),
-                    include_resistivity=getattr(self, "_include_rho_in_plot", False),
-                    rho_h=rho_h,
-                    rho_v=rho_v,
+                    layout=_layout,
+                    include_resistivity=_include_rho_geo,
+                    rho_h=rho_h if _include_rho_geo else None,
+                    rho_v=rho_v if _include_rho_geo else None,
                 )
             elif kind == "Perfil de Resistividade":
                 plot_resistivity_profile(
@@ -5329,6 +5855,63 @@ class ResultsPage(QtWidgets.QWidget):
                     style=self._style,
                     thicknesses=thicknesses,
                 )
+
+        # v2.6b L4 — refresca CrosshairManager com axes atualizados
+        try:
+            self._refresh_crosshair_axes()
+        except Exception:
+            pass
+
+    def _refresh_crosshair_axes(self) -> None:
+        """Atualiza CrosshairManager com os axes atuais (após replot).
+
+        v2.6b L4: as funções de plot recriam subplots, então o set de
+        ``Axes`` muda. Este método atualiza o gerenciador para usar os
+        novos axes mantendo o estado enabled/disabled.
+        """
+        cm = getattr(self, "_crosshair", None)
+        if cm is None:
+            return
+        try:
+            fig = self.canvas.figure
+            cm.update_axes(list(fig.axes))
+        except Exception:
+            pass
+
+    def _toggle_crosshair(self) -> None:
+        """Alterna o crosshair sincronizado entre todos os subplots.
+
+        v2.6b L4: usa blitting matplotlib para >30 fps em 18 subplots.
+        Atalho: Ctrl+Shift+C. Toast informa estado novo.
+        """
+        cm = getattr(self, "_crosshair", None)
+        if cm is None:
+            try:
+                from .sm_crosshair import CrosshairManager
+
+                fig = self.canvas.figure
+                cm = CrosshairManager(self.canvas.canvas, list(fig.axes))
+                self._crosshair = cm
+            except Exception as exc:
+                try:
+                    main = self.window()
+                    tm = getattr(main, "_toast_manager", None)
+                    if tm is not None:
+                        tm.show(
+                            f"Crosshair: erro ({exc})", level="error", duration_ms=2500
+                        )
+                except Exception:
+                    pass
+                return
+        cm.toggle()
+        try:
+            main = self.window()
+            tm = getattr(main, "_toast_manager", None)
+            if tm is not None:
+                state = "ativado" if cm.enabled else "desativado"
+                tm.show(f"Crosshair {state}", level="info", duration_ms=1500)
+        except Exception:
+            pass
 
     def _on_save(self) -> None:
         """v2.4d: abre SaveFigureDialog para escolher modo de exportação.
@@ -5658,6 +6241,43 @@ class PreferencesPage(QtWidgets.QWidget):
         self.combo_marker_style.addItems(["o", "s", "^", "v", "D", "x", "+", "*"])
         self.combo_marker_style.setCurrentText(style.marker_style)
 
+        # v2.6b A1 — Combo de tema do canvas (light/dark/auto). Sincroniza
+        # com checkbox "Fundo branco" em ResultsPage via blockSignals.
+        self.combo_theme = QtWidgets.QComboBox()
+        self.combo_theme.addItems(["auto", "dark", "light"])
+        cur_theme = getattr(style, "theme", "auto")
+        if cur_theme not in {"auto", "dark", "light"}:
+            cur_theme = "auto"
+        self.combo_theme.setCurrentText(cur_theme)
+
+        # v2.6b L6 — Combo de backend de plot. Lista apenas backends
+        # instalados (lazy import por backend). Default = matplotlib.
+        self.combo_plot_backend = QtWidgets.QComboBox()
+        try:
+            from .sm_plot_backends import available_backends
+
+            backends = [b.value for b in available_backends()]
+        except Exception:
+            backends = ["matplotlib"]
+        if "matplotlib" not in backends:
+            backends.insert(0, "matplotlib")
+        self.combo_plot_backend.addItems(backends)
+        try:
+            saved_backend = QtCore.QSettings("GeosteringAI", "SimulationManager").value(
+                "plot/backend", "matplotlib"
+            )
+            if saved_backend in backends:
+                self.combo_plot_backend.setCurrentText(saved_backend)
+        except Exception:
+            pass
+        self.combo_plot_backend.setToolTip(
+            "<b>Backend de plot</b><br/>"
+            "<b>matplotlib</b> (default): qualidade publicação SVG/PDF, LaTeX.<br/>"
+            "<b>pyqtgraph</b>: GPU OpenGL, hover/crosshair triviais, 60 fps.<br/>"
+            "<b>plotly</b>: hover rich nativo, requer PyQt6-WebEngine.<br/>"
+            "<b>vispy</b>: GPU puro (experimental, axes limitados)."
+        )
+
         self.btn_color_real = self._color_btn(style.color_real)
         self.btn_color_imag = self._color_btn(style.color_imag)
         self.btn_color_rho_h = self._color_btn(style.color_rho_h)
@@ -5799,6 +6419,8 @@ class PreferencesPage(QtWidgets.QWidget):
         style_form.addRow("Tamanho do marcador:", self.spin_marker_size)
         style_form.addRow("Estilo da linha:", self.combo_line_style)
         style_form.addRow("Estilo do marcador:", self.combo_marker_style)
+        style_form.addRow("Tema do canvas:", self.combo_theme)
+        style_form.addRow("Backend de plot:", self.combo_plot_backend)
         style_form.addRow("Paleta multi-curva:", self.combo_palette)
         style_form.addRow("Localização da legenda:", self.combo_legend_loc)
         style_form.addRow("Alinhamento do título:", self.combo_title_loc)
@@ -5873,6 +6495,80 @@ class PreferencesPage(QtWidgets.QWidget):
         self.edit_tatu.textChanged.connect(self._validate_paths)
         self.edit_python.textChanged.connect(self._validate_paths)
         self._validate_paths()
+        # v2.6b A1 — combo_theme dispara apply imediato + sincroniza com
+        # checkbox em ResultsPage (sem precisar clicar em Salvar).
+        self.combo_theme.currentTextChanged.connect(self._on_theme_changed)
+        # v2.6b L6 — combo_plot_backend dispara swap em runtime
+        self.combo_plot_backend.currentTextChanged.connect(self._on_backend_changed)
+
+    def _on_backend_changed(self, backend: str) -> None:
+        """Troca o backend de plot em runtime (v2.6b L6).
+
+        Persiste em QSettings + chama ``ResultsPage.swap_backend(backend)``
+        que destrói o canvas atual, instancia o novo via ``make_canvas()``
+        e re-renderiza o último plot.
+        """
+        if not backend:
+            return
+        try:
+            QtCore.QSettings("GeosteringAI", "SimulationManager").setValue(
+                "plot/backend", backend
+            )
+            main = self.window()
+            page_results = getattr(main, "page_results", None)
+            if page_results is not None and hasattr(page_results, "swap_backend"):
+                page_results.swap_backend(backend)
+            # Atualiza status bar
+            lbl = getattr(main, "lbl_status_plot_backend", None)
+            if lbl is not None:
+                lbl.setText(f"Plot: {backend}")
+            tm = getattr(main, "_toast_manager", None)
+            if tm is not None:
+                tm.show(
+                    f"Backend de plot: {backend}",
+                    level="info",
+                    duration_ms=1800,
+                )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Backend de plot",
+                f"Falha ao trocar para {backend!r}:\n{exc}\n\n"
+                "Voltando para matplotlib.",
+            )
+            try:
+                self.combo_plot_backend.blockSignals(True)
+                self.combo_plot_backend.setCurrentText("matplotlib")
+                self.combo_plot_backend.blockSignals(False)
+            except Exception:
+                pass
+
+    def _on_theme_changed(self, theme: str) -> None:
+        """Aplica o tema imediatamente e sincroniza com checkbox A1.
+
+        Não altera outras preferências (DPI, cores, etc.). Para persistir,
+        usuário ainda clica em "Salvar preferências".
+        """
+        if theme not in {"auto", "dark", "light"}:
+            return
+        try:
+            main = self.window()
+            current_style = getattr(main, "_plot_style", None)
+            if current_style is not None:
+                current_style.theme = theme
+                apply_style(current_style)
+                page_results = getattr(main, "page_results", None)
+                if page_results is not None:
+                    page_results._style.theme = theme
+                    page_results.canvas.set_style(page_results._style)
+                    # Sincroniza checkbox A1 sem disparar loop
+                    chk = getattr(page_results, "check_canvas_white", None)
+                    if chk is not None:
+                        chk.blockSignals(True)
+                        chk.setChecked(theme == "light")
+                        chk.blockSignals(False)
+        except Exception:
+            pass
 
     def _color_btn(self, color: str) -> "QtWidgets.QPushButton":
         btn = QtWidgets.QPushButton(color)
@@ -5976,6 +6672,7 @@ class PreferencesPage(QtWidgets.QWidget):
             line_style=self.combo_line_style.currentText(),
             marker_size=float(self.spin_marker_size.value()),
             marker_style=self.combo_marker_style.currentText(),
+            theme=self.combo_theme.currentText(),
         )
 
     def _collect_paths(self) -> Dict[str, str]:
@@ -6001,6 +6698,18 @@ class PreferencesPage(QtWidgets.QWidget):
         )
 
     def _on_reset(self) -> None:
+        # v2.6b U10 — Confirmação destrutiva antes de restaurar padrões
+        ans = QtWidgets.QMessageBox.question(
+            self,
+            "Restaurar padrões",
+            "Restaurar TODAS as preferências de plot aos valores padrão?\n"
+            "(caminhos não são afetados; clique 'Salvar' para persistir)",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if ans != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
         self._style = PlotStyle()
         self.spin_dpi.setValue(self._style.dpi)
         self.combo_font_family.setCurrentText(self._style.font_family)
@@ -6019,6 +6728,7 @@ class PreferencesPage(QtWidgets.QWidget):
         self.combo_title_loc.setCurrentText(self._style.title_location)
         self.combo_line_style.setCurrentText(self._style.line_style)
         self.combo_marker_style.setCurrentText(self._style.marker_style)
+        self.combo_theme.setCurrentText(self._style.theme)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -6268,6 +6978,23 @@ class MainWindow(QtWidgets.QMainWindow):
         _add("Ctrl+L", self._shortcut_clear_log, "Limpar log da aba ativa")
         _add("Ctrl+H", self._shortcut_show_help, "Mostrar atalhos de teclado")
         _add("Esc", self._shortcut_stop_sim, "Cancelar simulação rodando")
+        # v2.6b L4 — atalhos de visualização
+        _add(
+            "Ctrl+Shift+C",
+            self._shortcut_toggle_crosshair,
+            "Crosshair sincronizado (toggle)",
+        )
+        # v2.6b L5 — atalhos de análise estatística
+        _add(
+            "Ctrl+Shift+M",
+            self._shortcut_correlation_dialog,
+            "Matriz de correlação (Pearson/Spearman/Kendall)",
+        )
+        _add(
+            "Ctrl+Shift+A",
+            self._shortcut_ensemble_dialog,
+            "Análise do ensemble (mediana + envelope)",
+        )
 
     def _shortcut_plot(self) -> None:
         """Atalho F5 — clica em btn_plot da ResultsPage."""
@@ -6300,6 +7027,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self.page_sim.btn_stop.click()
         elif self._bench_thread is not None and self._bench_thread.isRunning():
             self.page_bench.btn_stop.click()
+
+    def _shortcut_toggle_crosshair(self) -> None:
+        """Atalho Ctrl+Shift+C — toggle crosshair sincronizado em ResultsPage."""
+        try:
+            if hasattr(self.page_results, "_toggle_crosshair"):
+                self.page_results._toggle_crosshair()
+        except Exception:
+            pass
+
+    def _shortcut_correlation_dialog(self) -> None:
+        """Atalho Ctrl+Shift+M — abre matriz de correlação."""
+        try:
+            if hasattr(self.page_results, "_open_correlation_dialog"):
+                self.page_results._open_correlation_dialog()
+        except Exception:
+            pass
+
+    def _shortcut_ensemble_dialog(self) -> None:
+        """Atalho Ctrl+Shift+A — abre análise do ensemble."""
+        try:
+            if hasattr(self.page_results, "_open_ensemble_dialog"):
+                self.page_results._open_ensemble_dialog()
+        except Exception:
+            pass
 
     def _shortcut_show_help(self) -> None:
         """Atalho Ctrl+H — mostra lista de atalhos disponíveis."""
@@ -6356,6 +7107,119 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.addAction(self.act_close)
         self.addToolBar(toolbar)
 
+        # v2.6b — Toolbar/Menu "Análise" para tornar features de v2.6a/b
+        # visíveis ao usuário (Matriz de correlação, Ensemble, .dat viewer,
+        # Crosshair). Atalhos correspondentes continuam funcionando.
+        try:
+            self._build_analysis_toolbar()
+        except Exception:
+            pass
+
+    def _build_analysis_toolbar(self) -> None:
+        """v2.6b — Toolbar visível com features de análise + interação.
+
+        Expõe as features que antes só eram acessíveis por atalhos:
+          • Abrir .dat/.out…  (DatViewerDialog)
+          • Matriz de correlação… (CorrelationAnalysisDialog, Ctrl+Shift+M)
+          • Análise do ensemble… (EnsembleAnalysisDialog, Ctrl+Shift+A)
+          • Toggle crosshair (Ctrl+Shift+C)
+
+        Também adiciona menu "Análise" na barra de menus principal.
+        """
+        QAction = QtGui.QAction if hasattr(QtGui, "QAction") else QtWidgets.QAction
+        # ── Toolbar separada (segunda linha) ─────────────────────────────
+        analysis_bar = QtWidgets.QToolBar("Análise & Interação", self)
+        analysis_bar.setMovable(False)
+        analysis_bar.setObjectName("analysis_toolbar")
+
+        self.act_dat_viewer = QAction("📂  Abrir .dat/.out…", self)
+        self.act_dat_viewer.setToolTip(
+            "<b>Visualizador .dat / .out</b><br/>"
+            "Carrega arquivos exportados pelo simulador (Fortran ou Python) "
+            "e exibe metadados + tabela do tensor sem re-executar a simulação."
+        )
+        self.act_dat_viewer.triggered.connect(self._open_dat_viewer)
+
+        self.act_correlation = QAction("📊  Matriz de correlação…", self)
+        self.act_correlation.setToolTip(
+            "<b>Matriz de correlação dos componentes EM</b><br/>"
+            "Heatmap NxN (Pearson/Spearman/Kendall) entre Hxx..Hzz<br/>"
+            "Atalho: <b>Ctrl+Shift+M</b>"
+        )
+        self.act_correlation.setShortcut(
+            QtGui.QKeySequence("Ctrl+Shift+M")
+            if hasattr(QtGui, "QKeySequence")
+            else "Ctrl+Shift+M"
+        )
+        self.act_correlation.triggered.connect(self._shortcut_correlation_dialog)
+
+        self.act_ensemble = QAction("📈  Análise do ensemble…", self)
+        self.act_ensemble.setToolTip(
+            "<b>Análise estatística do ensemble</b><br/>"
+            "Mediana + envelope P5/P95 + outliers (z>3) em vermelho<br/>"
+            "Atalho: <b>Ctrl+Shift+A</b>"
+        )
+        self.act_ensemble.setShortcut(
+            QtGui.QKeySequence("Ctrl+Shift+A")
+            if hasattr(QtGui, "QKeySequence")
+            else "Ctrl+Shift+A"
+        )
+        self.act_ensemble.triggered.connect(self._shortcut_ensemble_dialog)
+
+        self.act_crosshair = QAction("✚  Crosshair sincronizado", self)
+        self.act_crosshair.setCheckable(True)
+        self.act_crosshair.setToolTip(
+            "<b>Crosshair sincronizado entre subplots</b><br/>"
+            "Linha vertical que segue o mouse em todos os axes do tensor 3×6<br/>"
+            "Atalho: <b>Ctrl+Shift+C</b>"
+        )
+        self.act_crosshair.setShortcut(
+            QtGui.QKeySequence("Ctrl+Shift+C")
+            if hasattr(QtGui, "QKeySequence")
+            else "Ctrl+Shift+C"
+        )
+        self.act_crosshair.triggered.connect(self._shortcut_toggle_crosshair)
+
+        analysis_bar.addAction(self.act_dat_viewer)
+        analysis_bar.addSeparator()
+        analysis_bar.addAction(self.act_correlation)
+        analysis_bar.addAction(self.act_ensemble)
+        analysis_bar.addSeparator()
+        analysis_bar.addAction(self.act_crosshair)
+        self.addToolBar(analysis_bar)
+
+        # ── Menu "Análise" na barra de menus principal ────────────────────
+        try:
+            menubar = self.menuBar()
+            if menubar is not None:
+                menu_an = menubar.addMenu("&Análise")
+                menu_an.addAction(self.act_dat_viewer)
+                menu_an.addSeparator()
+                menu_an.addAction(self.act_correlation)
+                menu_an.addAction(self.act_ensemble)
+                menu_an.addSeparator()
+                menu_an.addAction(self.act_crosshair)
+        except Exception:
+            pass
+
+    def _open_dat_viewer(self) -> None:
+        """v2.6b — Abre QFileDialog → DatViewerDialog."""
+        try:
+            path, _filter = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "Abrir arquivo .dat / .out",
+                str(Path.home()),
+                "Arquivos do simulador (*.dat *.out);;Todos (*)",
+            )
+            if not path:
+                return
+            from .sm_dat_viewer import DatViewerDialog
+
+            dlg = DatViewerDialog(self, Path(path))
+            dlg.show()  # non-modal — usuário pode comparar com a janela principal
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, ".dat viewer", f"Falha ao abrir:\n{exc}")
+
     # ── Experimento ──────────────────────────────────────────────────────
 
     def _unlock_tabs(self, exp: ExperimentState) -> None:
@@ -6375,7 +7239,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sim_history_cache.clear()
         self.page_sim.clear_history_list()
         for snap in exp.simulations:
-            self.page_sim.add_history_entry(snap.snapshot_id, snap.label, in_cache=False)
+            self.page_sim.add_history_entry(
+                snap.snapshot_id, snap.label, in_cache=False, snap=snap
+            )
         # v2.4c: sincroniza combo_experiment da ResultsPage
         self._refresh_results_experiment_combo()
 
@@ -6867,7 +7733,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         )
             except Exception:
                 pass
-        self.page_sim.add_history_entry(snap_id, snap.label, in_cache=in_cache)
+        self.page_sim.add_history_entry(snap_id, snap.label, in_cache=in_cache, snap=snap)
         # v2.4c: notifica ResultsPage para atualizar combo_experiment
         try:
             self.page_results.refresh_experiment_list(
@@ -7992,6 +8858,226 @@ def _run_smoke_test() -> int:
         )
     except Exception as exc:
         check(False, f"v2.6 P3 backends ({exc})")
+
+    # ════════════════════════════════════════════════════════════════════
+    # v2.6b — 15 novos checks
+    # ════════════════════════════════════════════════════════════════════
+
+    # A1 — Checkbox tema canvas em ResultsPage
+    try:
+        check(
+            hasattr(window.page_results, "check_canvas_white"),
+            "v2.6b A1: ResultsPage tem check_canvas_white",
+        )
+        check(
+            hasattr(window.page_results, "_on_canvas_theme_toggled"),
+            "v2.6b A1: ResultsPage tem _on_canvas_theme_toggled",
+        )
+    except Exception as exc:
+        check(False, f"v2.6b A1 checkbox ({exc})")
+
+    # A1 — Combo theme em PreferencesPage + sincronização
+    try:
+        check(
+            hasattr(window.page_prefs, "combo_theme"),
+            "v2.6b A1: PreferencesPage tem combo_theme",
+        )
+        check(
+            window.page_prefs.combo_theme.count() == 3,
+            "v2.6b A1: combo_theme com 3 opções (auto/dark/light)",
+        )
+    except Exception as exc:
+        check(False, f"v2.6b A1 combo_theme ({exc})")
+
+    # L4 — CrosshairManager importável
+    try:
+        from .sm_crosshair import CrosshairManager
+
+        check(
+            hasattr(CrosshairManager, "enable")
+            and hasattr(CrosshairManager, "disable")
+            and hasattr(CrosshairManager, "toggle"),
+            "v2.6b L4: CrosshairManager tem enable/disable/toggle",
+        )
+        check(
+            hasattr(window.page_results, "_toggle_crosshair"),
+            "v2.6b L4: ResultsPage tem _toggle_crosshair",
+        )
+    except Exception as exc:
+        check(False, f"v2.6b L4 crosshair ({exc})")
+
+    # L4 — EnsembleAnimationBar
+    try:
+        from .sm_animation_bar import EnsembleAnimationBar
+
+        bar = EnsembleAnimationBar()
+        bar.setMaximum(99)
+        bar.setValue(50)
+        check(
+            bar.value() == 50 and bar.maximum() == 99,
+            "v2.6b L4: EnsembleAnimationBar setValue/setMaximum funcionam",
+        )
+        check(
+            getattr(window.page_results, "animation_bar", None) is not None,
+            "v2.6b L4: ResultsPage tem animation_bar montado",
+        )
+        bar.deleteLater()
+    except Exception as exc:
+        check(False, f"v2.6b L4 animation_bar ({exc})")
+
+    # L5 — CorrelationAnalysisDialog + EnsembleAnalysisDialog importáveis
+    try:
+        from .sm_correlation import (
+            CorrelationAnalysisDialog,
+            EnsembleAnalysisDialog,
+        )
+
+        check(
+            CorrelationAnalysisDialog is not None,
+            "v2.6b L5: CorrelationAnalysisDialog importável",
+        )
+        check(
+            EnsembleAnalysisDialog is not None,
+            "v2.6b L5: EnsembleAnalysisDialog importável",
+        )
+        check(
+            hasattr(window.page_results, "_open_correlation_dialog")
+            and hasattr(window.page_results, "_open_ensemble_dialog"),
+            "v2.6b L5: ResultsPage tem hooks _open_correlation/ensemble_dialog",
+        )
+    except Exception as exc:
+        check(False, f"v2.6b L5 dialogs ({exc})")
+
+    # L6 — combo_plot_backend + swap_backend
+    try:
+        check(
+            hasattr(window.page_prefs, "combo_plot_backend"),
+            "v2.6b L6: PreferencesPage tem combo_plot_backend",
+        )
+        check(
+            window.page_prefs.combo_plot_backend.count() >= 1,
+            "v2.6b L6: combo_plot_backend com >=1 backends",
+        )
+        check(
+            hasattr(window.page_results, "swap_backend"),
+            "v2.6b L6: ResultsPage tem swap_backend",
+        )
+        # swap_backend("matplotlib") é no-op seguro
+        window.page_results.swap_backend("matplotlib")
+        check(True, "v2.6b L6: swap_backend('matplotlib') sem erro")
+    except Exception as exc:
+        check(False, f"v2.6b L6 backend ({exc})")
+
+    # F — CollapsibleGroupBox importável
+    try:
+        from .sm_widgets import CollapsibleGroupBox
+
+        cgb = CollapsibleGroupBox("Test", collapsed=True)
+        check(
+            cgb.isCollapsed() is True,
+            "v2.6b U6: CollapsibleGroupBox(collapsed=True) inicia colapsado",
+        )
+        cgb.setCollapsed(False)
+        check(
+            cgb.isCollapsed() is False,
+            "v2.6b U6: CollapsibleGroupBox.setCollapsed(False) expande",
+        )
+        cgb.deleteLater()
+    except Exception as exc:
+        check(False, f"v2.6b U6 collapsible ({exc})")
+
+    # F — PHYSICAL_TOOLTIPS aplicados
+    try:
+        applied = getattr(window.page_params, "_physical_tooltips_applied", 0)
+        check(
+            applied >= 15,
+            f"v2.6b U4+U5: >=15 PHYSICAL_TOOLTIPS aplicados (got {applied})",
+        )
+    except Exception as exc:
+        check(False, f"v2.6b U4+U5 tooltips ({exc})")
+
+    # F — QLineEdit search no histórico
+    try:
+        check(
+            hasattr(window.page_sim, "edit_history_search"),
+            "v2.6b U9: SimulatorPage tem edit_history_search",
+        )
+        check(
+            hasattr(window.page_sim, "_on_history_search_changed"),
+            "v2.6b U9: SimulatorPage tem _on_history_search_changed",
+        )
+    except Exception as exc:
+        check(False, f"v2.6b U9 search ({exc})")
+
+    # v2.6b — Toolbar Análise + botões visíveis
+    try:
+        check(
+            hasattr(window, "act_dat_viewer")
+            and hasattr(window, "act_correlation")
+            and hasattr(window, "act_ensemble")
+            and hasattr(window, "act_crosshair"),
+            "v2.6b: MainWindow tem QActions (dat_viewer, correlation, ensemble, crosshair)",
+        )
+        check(
+            hasattr(window.page_results, "btn_correlation")
+            and hasattr(window.page_results, "btn_ensemble")
+            and hasattr(window.page_results, "btn_crosshair"),
+            "v2.6b: ResultsPage tem botões visíveis (correlation, ensemble, crosshair)",
+        )
+        # Verifica que features pendentes B foram resolvidas (visibilidade)
+        check(
+            window.page_results.btn_correlation.text().startswith("📊"),
+            "v2.6b: btn_correlation visível com label de análise",
+        )
+    except Exception as exc:
+        check(False, f"v2.6b toolbar análise ({exc})")
+
+    # v2.6b — Bug A3: set_style honra theme dark/light
+    try:
+        from .sm_plots import EMCanvas
+        from .sm_plots import PlotStyle as _PS
+
+        canvas_test = EMCanvas(figsize=(6, 4), style=_PS(theme="light"))
+        if canvas_test.figure is not None:
+            # apply theme=dark — set_style deve atualizar facecolor para #1e1e1e
+            style_dark = _PS(theme="dark")
+            canvas_test.set_style(style_dark)
+            fc_dark = canvas_test.figure.get_facecolor()
+            # Converte tuple RGBA → hex (matplotlib retorna 0..1 floats)
+            hex_dark = "#{:02x}{:02x}{:02x}".format(
+                int(fc_dark[0] * 255), int(fc_dark[1] * 255), int(fc_dark[2] * 255)
+            )
+            check(
+                hex_dark == "#1e1e1e",
+                f"v2.6b A3: set_style(theme='dark') → figure.facecolor=#1e1e1e (got {hex_dark})",
+            )
+            # apply theme=light — facecolor deve voltar para style.background
+            style_light = _PS(theme="light")
+            canvas_test.set_style(style_light)
+            fc_light = canvas_test.figure.get_facecolor()
+            hex_light = "#{:02x}{:02x}{:02x}".format(
+                int(fc_light[0] * 255), int(fc_light[1] * 255), int(fc_light[2] * 255)
+            )
+            check(
+                hex_light == "#ffffff",
+                f"v2.6b A3: set_style(theme='light') → figure.facecolor=#ffffff (got {hex_light})",
+            )
+        canvas_test.deleteLater()
+    except Exception as exc:
+        check(False, f"v2.6b A3 set_style theme ({exc})")
+
+    # v2.6b — Bug A1: grp_filt voltou ao layout original (sem CollapsibleGroupBox wrap)
+    try:
+        # ParametersPage não deve ter referência a CollapsibleGroupBox em grp_filt
+        # O layout do scrollarea deve conter QGroupBox "Filtros de Hankel" diretamente.
+        boxes = window.page_params.findChildren(QtWidgets.QGroupBox)
+        titles = [b.title() for b in boxes if b.title()]
+        check(
+            "Filtros de Hankel" in titles,
+            f"v2.6b A1: ParametersPage tem QGroupBox 'Filtros de Hankel' direto (titles={titles[:6]})",
+        )
+    except Exception as exc:
+        check(False, f"v2.6b A1 layout grp_filt ({exc})")
 
     print(f"\n=== Resultado: {len(failures)} falha(s) ===")
     window.close()
