@@ -8,11 +8,46 @@
 | **Versao** | v2.0 (arquitetura de software) |
 | **Autor** | Daniel Leal |
 | **Framework** | TensorFlow 2.x / Keras **EXCLUSIVO** (PyTorch PROIBIDO) |
-| **Ambiente** | VSCode + Claude Code (dev) · GitHub (CI) · Google Colab Pro+ GPU (exec) |
-| **Linguagem** | Python 3.10+ · Variaveis em ingles · Comentarios/docs em PT-BR |
+| **Ambiente** | VSCode + Claude Code (dev, Python 3.13) · GitHub (CI, Python 3.13) · Google Colab Pro+ GPU (exec, Python 3.13) |
+| **Linguagem** | Python 3.13 · Variaveis em ingles · Comentarios/docs em PT-BR |
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |
 | **Pacote** | `geosteering_ai/` (pip installable) |
 | **Referencia** | `docs/ARCHITECTURE_v2.md` (documento completo da arquitetura) |
+
+---
+
+## Ambiente Python (Obrigatório)
+
+**Versão:** Python 3.13.x — versão estável oficial para TODO o desenvolvimento.
+
+| Contexto | Versão | Ambiente |
+| :------- | :----- | :------- |
+| Desenvolvimento local | Python 3.13 | `~/Geosteering_AI_venv` |
+| CI/CD GitHub Actions | Python 3.13 (primária), 3.12 (fallback) | ubuntu-latest |
+| Google Colab GPU | Python 3.13 ou 3.10 a 3.12 | aceitar ambos |
+| PROIBIDO | Python 3.14+ | sem wheels PyQt6/JAX/SciPy |
+
+### Setup local (primeira vez)
+
+```bash
+# O venv já foi criado em ~/Geosteering_AI_venv (Python 3.13)
+source ~/Geosteering_AI_venv/bin/activate
+pip install -e ".[dev,all]"
+pytest tests/ -v --tb=short
+```
+
+### Ativar ambiente (sessão de trabalho)
+
+```bash
+source ~/Geosteering_AI_venv/bin/activate
+# OU configurar no VS Code: Python: Select Interpreter → ~/Geosteering_AI_venv
+```
+
+### Por que Python 3.13 e não 3.14?
+
+Python 3.14 é nightly/beta. PyQt6, JAX e SciPy não têm wheels compiladas para 3.14,
+causando `ModuleNotFoundError` em runtime mesmo após `pip install` bem-sucedido.
+Python 3.13 tem compatibilidade 100% com todas as dependências do projeto.
 
 ---
 

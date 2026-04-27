@@ -6,43 +6,41 @@
 # ║  Subsistema  : Simulation Manager — Camada de Compatibilidade Qt          ║
 # ║  Autor       : Daniel Leal                                                ║
 # ║  Criação     : 2026-04-18                                                 ║
-# ║  Atualizado  : 2026-04-18 (locale C + helpers tipográficos)               ║
+# ║  Atualizado  : 2026-04-27 (v2.7a — migração PyQt6+PySide6; remove PyQt5)  ║
 # ║  Status      : Produção                                                   ║
-# ║  Dependências: PyQt6 (preferido) | PySide6 | PyQt5                        ║
+# ║  Dependências: PyQt6 (preferido) | PySide6 (fallback oficial Qt Company)  ║
 # ║  ---------------------------------------------------------------------    ║
 # ║  FINALIDADE                                                               ║
 # ║    Exporta símbolos Qt (QtWidgets, QtCore, QtGui, QThread, Signal, Slot)  ║
-# ║    de forma neutra entre os bindings Python mais usados, garantindo que   ║
-# ║    o Simulation Manager rode no maior número de ambientes Python sem     ║
-# ║    exigir uma instalação específica de binding Qt.                       ║
+# ║    de forma neutra entre PyQt6 e PySide6, garantindo que o Simulation    ║
+# ║    Manager rode sem exigir um binding específico.                         ║
 # ║                                                                           ║
 # ║  ORDEM DE RESOLUÇÃO                                                       ║
-# ║    1. PyQt6      (moderno, API Qt 6, requer Python ≥ 3.9)                 ║
-# ║    2. PySide6    (oficial Nokia/Qt Company, API idêntica a PyQt6)         ║
-# ║    3. PyQt5      (legado, Qt 5 — uso com WARN por obsolescência)          ║
+# ║    1. PyQt6      (recomendado, GPL v3, Python ≥ 3.9)                      ║
+# ║    2. PySide6    (fallback, LGPL, Qt Company oficial)                     ║
+# ║    Nota: PyQt5 (Qt 5) foi removido em v2.7a — incompatível com Python     ║
+# ║          3.13+ e com EOL do ramo open-source em 2023.                     ║
 # ║                                                                           ║
 # ║  DIFERENÇAS TRATADAS                                                      ║
-# ║    • pyqtSignal (PyQt) vs Signal (PySide)   → exporta como ``Signal``     ║
-# ║    • pyqtSlot   (PyQt) vs Slot   (PySide)   → exporta como ``Slot``       ║
-# ║    • QAction em QtWidgets (PyQt5) vs QtGui  → reexport uniforme           ║
-# ║    • Enums Qt6 (Qt.AlignmentFlag.AlignLeft) vs Qt5 (Qt.AlignLeft)         ║
-# ║      → constantes auxiliares ``ALIGN_*`` / ``ORIENT_*`` isentas de break  ║
+# ║    • pyqtSignal (PyQt6) vs Signal (PySide6) → exporta como ``Signal``     ║
+# ║    • pyqtSlot   (PyQt6) vs Slot   (PySide6) → exporta como ``Slot``       ║
+# ║    • Enums Qt6 tipados (Qt.AlignmentFlag.AlignLeft) — use diretamente;    ║
+# ║      constantes ALIGN_*/ORIENT_* removidas em v2.7a.                      ║
 # ║                                                                           ║
-# ║  NOVOS HELPERS (2026-04-18)                                               ║
-# ║    • enforce_c_locale(app)     → força ponto como separador decimal      ║
-# ║    • make_double_spin(..)       → QDoubleSpinBox com locale C             ║
-# ║    • format_float(value, prec)  → formatação universal com ponto         ║
+# ║  HELPERS DISPONÍVEIS                                                      ║
+# ║    • enforce_c_locale(app)       → força ponto como separador decimal     ║
+# ║    • make_double_spin(..)        → QDoubleSpinBox com locale C            ║
+# ║    • format_float(value, prec)   → formatação universal com ponto         ║
+# ║    • detect_os_dark_mode()       → detecta dark mode do SO via QPalette   ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-"""Camada de compatibilidade entre PyQt6, PySide6 e PyQt5.
+"""Camada de compatibilidade entre PyQt6 e PySide6.
 
-Este módulo provê imports *unified* para permitir que todo o restante do
-Simulation Manager use uma única convenção (``Signal``, ``Slot``,
-``QT_BINDING``) independente do binding Qt disponível no ambiente.
+Provê imports *unified* para que o Simulation Manager use uma única
+convenção (``Signal``, ``Slot``, ``QT_BINDING``) independente do binding
+Qt6 disponível no ambiente.
 
-Também fornece helpers para garantir que a apresentação de números
-decimais seja **sempre** com ponto (``.``) — jamais vírgula (``,``) —
-independente do locale do sistema (pt_BR usa vírgula por padrão em
-``QDoubleSpinBox`` Qt6, o que é incorreto para dados científicos).
+Helpers para locale C (ponto decimal em dados científicos) e detecção
+nativa de dark mode do sistema operacional via ``QPalette`` (Qt6-native).
 
 Example:
     Uso típico em módulos da aplicação::
@@ -52,11 +50,14 @@ Example:
         ... )
         >>> class MyWidget(QtWidgets.QWidget):
         ...     my_sig = Signal(int)
+        >>>
+        >>> # Enums Qt6 — usar diretamente (não mais constantes ALIGN_*):
+        >>> lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
 Note:
-    Se nenhum binding estiver instalado, ``import sm_qt_compat`` ainda
-    funciona, mas o atributo ``QT_AVAILABLE`` será ``False``. O programa
-    principal detecta isso e apresenta uma mensagem de instalação clara.
+    Se nenhum binding Qt6 estiver instalado, ``import sm_qt_compat`` ainda
+    funciona, mas ``QT_AVAILABLE`` será ``False``. O programa principal
+    detecta isso e apresenta mensagem de instalação clara.
 """
 from __future__ import annotations
 
@@ -102,7 +103,7 @@ def _try_pyqt6() -> bool:
 
 
 def _try_pyside6() -> bool:
-    """Tenta importar PySide6. Retorna True se bem-sucedido."""
+    """Tenta importar PySide6 (fallback oficial Qt Company). Retorna True se bem-sucedido."""
     global QtCore, QtGui, QtWidgets, Qt, Signal, Slot, QThread, QObject
     global QT_BINDING, QT_AVAILABLE
     try:
@@ -125,89 +126,37 @@ def _try_pyside6() -> bool:
         return False
 
 
-def _try_pyqt5() -> bool:
-    """Tenta importar PyQt5 (legado). Retorna True se bem-sucedido."""
-    global QtCore, QtGui, QtWidgets, Qt, Signal, Slot, QThread, QObject
-    global QT_BINDING, QT_AVAILABLE
-    try:
-        from PyQt5 import QtCore as _QtCore
-        from PyQt5 import QtGui as _QtGui
-        from PyQt5 import QtWidgets as _QtWidgets
-
-        QtCore = _QtCore
-        QtGui = _QtGui
-        QtWidgets = _QtWidgets
-        Qt = _QtCore.Qt
-        Signal = _QtCore.pyqtSignal
-        Slot = _QtCore.pyqtSlot
-        QThread = _QtCore.QThread
-        QObject = _QtCore.QObject
-        QT_BINDING = "PyQt5"
-        QT_AVAILABLE = True
-        return True
-    except ImportError:
-        return False
-
-
-# Resolve o binding na importação deste módulo (uma única vez por processo).
+# ── Resolução do binding (uma única vez por processo) ─────────────────────
+# Ordem: PyQt6 (preferido) → PySide6 (fallback). PyQt5 removido em v2.7a.
 if not _try_pyqt6():
     if not _try_pyside6():
-        if not _try_pyqt5():
-            QT_IMPORT_ERROR = (
-                "Nenhum binding Qt disponível. Instale um dos seguintes:\n"
-                "  pip install PyQt6           (recomendado — Qt 6)\n"
-                "  pip install PySide6         (alternativa oficial Qt Company)\n"
-                "  pip install PyQt5           (legado Qt 5)\n"
-            )
+        QT_IMPORT_ERROR = (
+            "Nenhum binding Qt6 disponível. Instale um dos seguintes:\n"
+            "  pip install PyQt6           (recomendado — GPL v3)\n"
+            "  pip install PySide6         (alternativa oficial Qt Company — LGPL)\n"
+        )
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# Helpers de enum — Qt6 usa IntEnum sub-namespaced; Qt5 exporta flat.
-# Fornecemos constantes estáveis para evitar "if QT_BINDING == ..." em
-# toda a aplicação. Quando ``Qt`` não existir (sem binding instalado),
-# retornamos ``None`` para evitar AttributeError na import time.
-# ──────────────────────────────────────────────────────────────────────────
-def _get_attr_chain(root: Any, *names: str) -> Any:
-    """Retorna ``root.a.b.c`` para a primeira cadeia existente.
+# ── Locale — ponto como separador decimal (jamais vírgula) ────────────────
 
-    Em Qt6, ``Qt.AlignmentFlag.AlignLeft`` é o caminho canônico.
-    Em Qt5 / PyQt5 com API v1, ``Qt.AlignLeft`` é o caminho flat.
+
+def _make_c_locale() -> Any:
+    """Cria QLocale C (ponto decimal, sem separador de grupos).
+
+    Qt6 garante ``QLocale.Language.C`` como enum tipado — acesso direto
+    sem necessidade de fallbacks Qt5.
     """
-    if root is None:
+    if QtCore is None:
         return None
-    for name in names:
-        root = getattr(root, name, None)
-        if root is None:
-            return None
-    return root
+    locale = QtCore.QLocale(QtCore.QLocale.Language.C)
+    try:
+        locale.setNumberOptions(QtCore.QLocale.NumberOption.OmitGroupSeparator)
+    except Exception:
+        pass
+    return locale
 
 
-ALIGN_LEFT = _get_attr_chain(Qt, "AlignmentFlag", "AlignLeft") or _get_attr_chain(
-    Qt, "AlignLeft"
-)
-ALIGN_CENTER = _get_attr_chain(Qt, "AlignmentFlag", "AlignCenter") or _get_attr_chain(
-    Qt, "AlignCenter"
-)
-ALIGN_RIGHT = _get_attr_chain(Qt, "AlignmentFlag", "AlignRight") or _get_attr_chain(
-    Qt, "AlignRight"
-)
-ALIGN_VCENTER = _get_attr_chain(Qt, "AlignmentFlag", "AlignVCenter") or _get_attr_chain(
-    Qt, "AlignVCenter"
-)
-ORIENT_H = _get_attr_chain(Qt, "Orientation", "Horizontal") or _get_attr_chain(
-    Qt, "Horizontal"
-)
-ORIENT_V = _get_attr_chain(Qt, "Orientation", "Vertical") or _get_attr_chain(
-    Qt, "Vertical"
-)
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Locale — ponto como separador decimal (jamais vírgula)
-# ──────────────────────────────────────────────────────────────────────────
-
-
-def enforce_c_locale(app: Optional[Any] = None) -> None:
+def enforce_c_locale(app: Optional[Any] = None) -> None:  # noqa: ARG001
     """Força o locale C (ponto como separador decimal) em toda a aplicação.
 
     pt_BR (locale comum em sistemas macOS/Linux no Brasil) usa vírgula
@@ -215,38 +164,19 @@ def enforce_c_locale(app: Optional[Any] = None) -> None:
     científicos devem usar ponto. Este helper:
 
     1. Altera ``QLocale`` default para ``QLocale::C`` (ponto, sem grupos).
-    2. Quando ``app`` é fornecido, também ajusta o ``QApplication`` e
-       ``QStyle`` para respeitar o novo default.
+    2. Qualquer widget criado após este call herda o locale automaticamente.
 
     Args:
-        app: Instância ``QApplication`` opcional — se ausente, apenas
-            ajusta a default do QLocale.
+        app: Instância ``QApplication`` opcional — aceita para assinatura
+            compatível, mas Qt6 aplica o default globalmente sem precisar
+            ajustar o QApplication individualmente.
     """
     if QtCore is None:
         return
-    # Default classe — respeita por qualquer widget criado após este call
-    c_locale = (
-        QtCore.QLocale(QtCore.QLocale.Language.C)
-        if _get_attr_chain(QtCore.QLocale, "Language", "C")
-        else QtCore.QLocale.c() if hasattr(QtCore.QLocale, "c") else QtCore.QLocale()
-    )
-    try:
-        # Remove separador de grupo (1,000,000 → 1000000) em spinboxes.
+    locale = _make_c_locale()
+    if locale is not None:
         try:
-            c_locale.setNumberOptions(QtCore.QLocale.NumberOption.OmitGroupSeparator)
-        except Exception:
-            try:
-                c_locale.setNumberOptions(QtCore.QLocale.OmitGroupSeparator)
-            except Exception:
-                pass
-        QtCore.QLocale.setDefault(c_locale)
-    except Exception:
-        pass
-    if app is not None:
-        try:
-            # PyQt5/6: QApplication herda o QLocale.default automaticamente
-            # quando criado após o setDefault. Nenhum setter é requerido.
-            pass
+            QtCore.QLocale.setDefault(locale)
         except Exception:
             pass
 
@@ -259,34 +189,29 @@ def make_double_spin(
     decimals: int = 3,
     suffix: str = "",
 ) -> Any:
-    """``QDoubleSpinBox`` com locale C (ponto) aplicado explicitamente.
+    """``QDoubleSpinBox`` com locale C (ponto decimal) aplicado explicitamente.
 
     Args:
         default: Valor inicial.
-        lo/hi: Limites inferior/superior.
-        step: Passo do botão incremento.
+        lo: Limite inferior.
+        hi: Limite superior.
+        step: Passo do botão de incremento.
         decimals: Número de casas decimais visíveis.
-        suffix: Texto anexo (ex.: " m", " Hz").
+        suffix: Texto anexo ao valor (ex.: ``" m"``, ``" Hz"``).
+
+    Returns:
+        ``QDoubleSpinBox`` configurado, ou ``None`` se QtWidgets não estiver
+        disponível.
     """
     if QtWidgets is None:
         return None
     w = QtWidgets.QDoubleSpinBox()
-    try:
-        c_locale = (
-            QtCore.QLocale(QtCore.QLocale.Language.C)
-            if _get_attr_chain(QtCore.QLocale, "Language", "C")
-            else QtCore.QLocale.c() if hasattr(QtCore.QLocale, "c") else QtCore.QLocale()
-        )
+    locale = _make_c_locale()
+    if locale is not None:
         try:
-            c_locale.setNumberOptions(QtCore.QLocale.NumberOption.OmitGroupSeparator)
+            w.setLocale(locale)
         except Exception:
-            try:
-                c_locale.setNumberOptions(QtCore.QLocale.OmitGroupSeparator)
-            except Exception:
-                pass
-        w.setLocale(c_locale)
-    except Exception:
-        pass
+            pass
     w.setRange(lo, hi)
     w.setDecimals(decimals)
     w.setSingleStep(step)
@@ -297,7 +222,7 @@ def make_double_spin(
 
 
 def format_float(value: float, precision: int = 4, thousands: bool = False) -> str:
-    """Formata float com ponto (nunca vírgula) — universal para labels/tabelas.
+    """Formata float com ponto (nunca vírgula) — universal para labels e tabelas.
 
     Args:
         value: Valor a formatar.
@@ -305,19 +230,48 @@ def format_float(value: float, precision: int = 4, thousands: bool = False) -> s
         thousands: Se ``True``, separa milhares com ``','`` (padrão inglês).
 
     Returns:
-        String com ponto como separador decimal.
+        String com ponto como separador decimal, independente do locale do SO.
     """
     if thousands:
         return f"{value:,.{precision}f}"
     return f"{value:.{precision}f}"
 
 
+def detect_os_dark_mode() -> bool:
+    """Detecta dark mode do sistema operacional via QPalette (Qt6-native).
+
+    Usa a cor de fundo da janela do sistema (``QPalette.ColorRole.Window``)
+    para determinar se o SO está em modo escuro. Luminância < 128 indica
+    tema escuro ativo.
+
+    Returns:
+        ``True`` se o SO estiver em dark mode, ``False`` caso contrário ou
+        se não houver ``QApplication`` ativa.
+
+    Note:
+        Requer que ``QApplication`` já tenha sido criada. Retorna ``False``
+        se chamado antes da criação da aplicação.
+    """
+    if QtWidgets is None or QtGui is None:
+        return False
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return False
+    try:
+        palette = app.palette()
+        window_color = palette.color(QtGui.QPalette.ColorRole.Window)
+        # Luminância < 128 → fundo escuro → dark mode ativo no SO
+        return window_color.lightness() < 128
+    except Exception:
+        return False
+
+
 def check_qt_available() -> None:
-    """Verifica disponibilidade de binding Qt — aborta com mensagem se ausente.
+    """Verifica disponibilidade de binding Qt6 — aborta com mensagem se ausente.
 
     Raises:
-        SystemExit: Se nenhum binding Qt estiver instalado. A mensagem de
-            erro inclui comandos ``pip install`` para cada binding suportado.
+        SystemExit: Se nenhum binding Qt6 estiver instalado. A mensagem de
+            erro inclui comandos ``pip install`` para PyQt6 e PySide6.
     """
     if not QT_AVAILABLE:
         sys.stderr.write("\n[Simulation Manager] ERRO: " + (QT_IMPORT_ERROR or "") + "\n")
@@ -325,12 +279,6 @@ def check_qt_available() -> None:
 
 
 __all__ = [
-    "ALIGN_CENTER",
-    "ALIGN_LEFT",
-    "ALIGN_RIGHT",
-    "ALIGN_VCENTER",
-    "ORIENT_H",
-    "ORIENT_V",
     "QObject",
     "QT_AVAILABLE",
     "QT_BINDING",
@@ -343,6 +291,7 @@ __all__ = [
     "Signal",
     "Slot",
     "check_qt_available",
+    "detect_os_dark_mode",
     "enforce_c_locale",
     "format_float",
     "make_double_spin",

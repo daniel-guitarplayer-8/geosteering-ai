@@ -70,7 +70,7 @@ from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .sm_qt_compat import QtWidgets
+from .sm_qt_compat import QtGui, QtWidgets, detect_os_dark_mode
 
 # Import matplotlib com backend Qt — fallback leve se matplotlib ausente
 try:
@@ -212,9 +212,9 @@ def apply_style(style: PlotStyle) -> None:
     """
     if not _HAS_MPL:
         return
-    # v2.6 U1+P1: tema dark/light. "auto" segue app (default = dark hoje).
+    # v2.7a: tema dark/light/auto. "auto" detecta dark mode do SO via QPalette.
     theme = getattr(style, "theme", "auto")
-    is_dark = theme == "dark" or theme == "auto"
+    is_dark = theme == "dark" or (theme == "auto" and detect_os_dark_mode())
     if is_dark:
         bg = "#1e1e1e"
         fg = "#d4d4d4"
@@ -330,14 +330,66 @@ class EMCanvas(QtWidgets.QWidget):
             self.canvas.draw_idle()
 
     def set_style(self, style: PlotStyle) -> None:
-        """Atualiza o estilo e o dpi da figura sem recriar o canvas."""
+        """Atualiza o estilo e o dpi da figura sem recriar o canvas.
+
+        v2.6b Bug A3: honra ``style.theme`` ao escolher facecolor — antes
+        usava sempre ``style.background`` (=#ffffff) mesmo em dark mode,
+        causando canvas com fundo branco mas plot dark sobreposto.
+        Atualiza também ``axes.facecolor`` de TODOS os axes existentes e
+        força redraw via ``draw_idle()``.
+        """
         self.style = style
-        if self.figure is not None:
+        if self.figure is None:
+            return
+        try:
+            self.figure.set_dpi(style.dpi)
+        except Exception:
+            pass
+        # Determina facecolor conforme theme (light/dark/auto)
+        theme = getattr(style, "theme", "auto")
+        if theme == "dark":
+            bg = "#1e1e1e"
+            fg = "#d4d4d4"
+        elif theme == "light":
+            bg = style.background  # default "#ffffff"
+            fg = "#000000"
+        else:  # "auto" — mantém comportamento v2.6a (default dark)
+            bg = "#1e1e1e"
+            fg = "#d4d4d4"
+        try:
+            self.figure.set_facecolor(bg)
+            # Atualiza facecolor + spines/ticks/labels de cada axes existente
+            for ax in self.figure.axes:
+                ax.set_facecolor(bg)
+                try:
+                    for spine in ax.spines.values():
+                        spine.set_edgecolor(fg)
+                    ax.tick_params(colors=fg, which="both")
+                    ax.xaxis.label.set_color(fg)
+                    ax.yaxis.label.set_color(fg)
+                    ax.title.set_color(fg)
+                except Exception:
+                    continue
+            # Atualiza palette do widget Qt para matar moldura branca/preta
+            # ao redor do FigureCanvas (compat PyQt6 ColorRole.Window vs PyQt5)
             try:
-                self.figure.set_dpi(style.dpi)
-                self.figure.set_facecolor(style.background)
+                pal = self.palette()
+                role = getattr(
+                    getattr(QtGui.QPalette, "ColorRole", QtGui.QPalette),
+                    "Window",
+                    None,
+                )
+                if role is not None:
+                    pal.setColor(role, QtGui.QColor(bg))
+                    self.setPalette(pal)
+                    self.setAutoFillBackground(True)
             except Exception:
                 pass
+            # Força redraw imediato
+            if self.canvas is not None:
+                self.canvas.draw_idle()
+        except Exception:
+            pass
 
     def save(self, path: str, dpi: Optional[int] = None) -> None:
         """Salva o conteúdo atual em disco (PNG/PDF/SVG via extensão)."""

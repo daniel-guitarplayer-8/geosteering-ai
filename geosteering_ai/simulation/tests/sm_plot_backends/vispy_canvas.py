@@ -186,14 +186,18 @@ class VispyCanvas(PlotCanvas):
         ax.add(line)
 
     def set_axis_config(self, ax: SubplotHandle, cfg: AxisConfig) -> None:
-        # Vispy stub: features avançadas de eixo não implementadas.
-        # Para títulos/labels reais, use Matplotlib ou PyQtGraph.
+        # Vispy stub: eixos nativos (~400 LOC) não implementados.
+        # invertY já configurado em add_subplot_grid via flip=(False, True, False).
         if cfg.title or cfg.xlabel or cfg.ylabel:
-            # No-op silencioso — features ausentes neste stub
-            pass
-        if cfg.invert_y:
-            # Já configurado em add_subplot_grid via flip=(False, True, False)
-            pass
+            import warnings
+
+            warnings.warn(
+                "VispyCanvas.set_axis_config() não suporta títulos/labels — "
+                "use Matplotlib ou PyQtGraph para visualização com labels. "
+                "Vispy é adequado apenas para benchmark com >100k pontos.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def set_dark_mode(self, dark: bool) -> None:
         self._dark = dark
