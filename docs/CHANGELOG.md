@@ -7,7 +7,7 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
-## [2.11] — 2026-04-29 (em desenvolvimento)
+## [2.11] — 2026-04-29
 
 ### Análise Causa-Raiz do Freezing GUI
 

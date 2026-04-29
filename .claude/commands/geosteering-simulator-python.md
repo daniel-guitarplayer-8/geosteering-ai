@@ -1853,3 +1853,91 @@ export_multi_tr_dat(result, "wellA", "/data/datasets/")
 - Sprint 11-JAX: port de `simulate_multi` para backend JAX (depende de Sprint 10)
 - `SyntheticDataGenerator` ainda usa rota single-TR (Sprint 6.4 backlog)
 - Multi-ângulo em benchmark Fortran requer nmed variável por ângulo (não crítico)
+
+---
+
+## 28 — Simulation Manager v2.11 (UI/UX async — 2026-04-29)
+
+### 28.1 Contexto e problema
+
+Em produção (30k+ modelos), a GUI travava por tempo proporcional a N ao
+clicar "Iniciar Simulação". Profiling instrumentado identificou 5
+gargalos `O(N)` na main thread Qt. Causa fundamental: GIL Python +
+work síncrono na main thread = event loop bloqueado = "freezing".
+
+### 28.2 Análise causa-raiz (5 gargalos identificados)
+
+| # | Gargalo                 | Linha (smgr) | N=30k     | Status v2.11   |
+|:-:|:------------------------|:------------:|:---------:|:--------------:|
+| 1 | `generate_models(N)`    | 7659         | 114s ⚠️   | ✅ Resolvido    |
+| 2 | `appendPlainText` log   | 7735         | 5-30s ⚠️  | ✅ Resolvido    |
+| 3 | `_refresh_keys` combo   | 5352         | 50ms      | ⚠️ Mitigado     |
+| 4 | snapshot persist JSON   | 7824         | 100-500ms | 🚧 Async stub   |
+| 5 | Pool spawn first-time   | smw:114      | 3-10s     | ⚠️ NumbaPrimer  |
+
+### 28.3 Componentes novos
+
+| Arquivo                                                  | Classe                  | Propósito                                    |
+|:---------------------------------------------------------|:------------------------|:---------------------------------------------|
+| `geosteering_ai/simulation/tests/sm_phase_timer.py`      | `PhaseTimer`            | Cronologia das 8 fases canônicas + sinais Qt |
+| `geosteering_ai/simulation/tests/sm_heartbeat.py`        | `MainThreadHeartbeat`   | Sentinel de gaps via `QTimer` 16ms           |
+| `geosteering_ai/simulation/tests/sm_snapshot_persist.py` | `SnapshotPersistThread` | I/O JSON assíncrono                          |
+| `geosteering_ai/simulation/tests/sm_model_gen.py`        | `ModelGenerationThread` | Geração assíncrona em chunks (DEFAULT=500)   |
+| `benchmarks/profile_freezing_baseline.py`                | CLI                     | Script baseline + post_fix com heartbeat     |
+
+### 28.4 Validação empírica
+
+```
+Baseline (sem fix):
+  N=100   max_gap = 1846 ms
+  N=1000  max_gap = 3580 ms
+  N=10000 max_gap = 35742 ms
+  N=30000 max_gap = 114232 ms (~2 minutos!)
+
+Pós-fix v2.11:
+  N=100   max_gap = 2104 ms (Sobol init dominante p/ N pequeno)
+  N=1000  max_gap = 87 ms    (97.6% redução)
+  N=10000 max_gap = 906 ms   (97.5% redução)
+  N=30000 max_gap = 2770 ms  (97.6% redução, de 2 min para 2.7s)
+```
+
+### 28.5 Cancelamento cooperativo (Pause/Resume/Cancel)
+
+`SimulationThread` ganhou três pares request_X/sinal:
+
+```python
+class SimulationThread(QThread):
+    paused = Signal()
+    resumed = Signal()
+    cancelled = Signal()
+
+    def request_pause(self): ...   # bloqueia em checkpoints via Event
+    def request_resume(self): ...  # libera Event
+    def request_cancel(self): ...  # libera + marca _cancel_requested
+```
+
+UI: `btn_pause` (toggle Pausar↔Retomar) e `btn_cancel` (distinto de
+"Parar" legado, emite cancelled após cleanup).
+
+### 28.6 Triggers para próximas conversas
+
+- "freezing GUI", "pause simulation", "cancelar simulação"
+- "ModelGenerationThread", "PhaseTimer", "MainThreadHeartbeat"
+- "SnapshotPersistThread", "log buffer", "btn_pause"
+- "30k modelos", "main thread blocking", "GIL Python Qt"
+- "cronologia", "sm_phase_timer", "sm_heartbeat"
+- "feat/simulation-manager-v2.11"
+
+### 28.7 Smoke tests
+
+156 → 197 (+41). Novos: T17 (PhaseTimer), T18 (Heartbeat), T19
+(ModelGenerationThread), T20 (SnapshotPersistThread), T21 (log
+buffer), T22 (MainWindow async pipeline), T23 (Pause/Cancel
+cooperativo).
+
+### 28.8 Pendências v2.12
+
+- Worker Progress UI (barras individuais com health status)
+- P-values Per-Slice em `CorrelationAnalysisDialog`
+- Stream incremental de `H_stack` para `.dat` (sem buffer 2.5GB)
+- Pause persistente (salvar estado em disco para retomar após app fechar)
