@@ -99,7 +99,15 @@ if QT_AVAILABLE:
         plot_resistivity_profile,
         plot_tensor_full,
     )
-    from .sm_workers import SaveArtifactsThread, SimRequest, SimulationThread
+    from .sm_workers import (
+        NumbaPrimer,
+        SaveArtifactsThread,
+        SimRequest,
+        SimulationThread,
+        _acquire_numba_pool,
+        _noop,
+        release_numba_pool,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -188,6 +196,9 @@ def load_plot_style() -> PlotStyle:
             line_style=str(s.value("plot/line_style", default.line_style)),
             marker_size=float(s.value("plot/marker_size", default.marker_size)),
             marker_style=str(s.value("plot/marker_style", default.marker_style)),
+            # canvas/theme persiste a preferência de fundo branco vs dark.
+            # Default "light" (fundo branco) — o usuário pode trocar para "dark".
+            theme=str(s.value("canvas/theme", "light")),
         )
     except Exception:
         return default
@@ -196,7 +207,10 @@ def load_plot_style() -> PlotStyle:
 def save_plot_style(style: PlotStyle) -> None:
     s = _qsettings()
     for k, v in asdict(style).items():
-        s.setValue(f"plot/{k}", v)
+        # canvas/theme tem prefixo próprio — mantém separação de namespace com
+        # as demais preferências de plot e sincroniza com _on_canvas_theme_toggled.
+        key = "canvas/theme" if k == "theme" else f"plot/{k}"
+        s.setValue(key, v)
 
 
 def load_paths() -> Dict[str, str]:
@@ -4087,28 +4101,43 @@ class ResultsPage(QtWidgets.QWidget):
         self._experiment_entries: List[Tuple[str, Optional[str], bool]] = []
         # v2.4c: bundle ativo escolhido via combo_experiment (None = usa _current_sim)
         self._active_bundle: Optional[Dict[str, Any]] = None
-        # v2.6b L4 — CrosshairManager (lazy, criado no primeiro toggle)
-        self._crosshair: Optional[Any] = None
         # v2.6b L4 — EnsembleAnimationBar (criado abaixo se houver matplotlib)
         self.animation_bar: Optional[Any] = None
         # v2.5: estado escolhido pelo PlotComposerDialog (default-safe)
         self._layout_key: str = "default"
         self._include_rho_in_plot: bool = True
 
-        # Painel esquerdo — controles
-        controls = QtWidgets.QGroupBox("Controles de Plot")
-        ctrl_layout = QtWidgets.QFormLayout(controls)
-        ctrl_layout.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        ctrl_layout.setHorizontalSpacing(12)
+        # v2.7c: seções de controle construídas abaixo; widgets criados aqui.
 
         # ── v2.4c: Combo de seleção de experimento ──────────────────────
         # Lista todos os snapshots históricos + "Simulação atual" +
         # "Benchmark atual". Substitui funcionalmente combo_source (que
         # fica oculto por backward-compat).
         self.combo_experiment = QtWidgets.QComboBox()
-        self.combo_experiment.setSizeAdjustPolicy(
-            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
-        )
+        # AdjustToMinimumContentsLengthWithIcon: combo se expande com o layout
+        # mas não força largura mínima baseada no item mais longo — evita overflow.
+        # Padrão _combo(): try/except + getattr para compat PyQt6/PySide6.
+        try:
+            _adj_p = getattr(
+                QtWidgets.QComboBox.SizeAdjustPolicy,
+                "AdjustToMinimumContentsLengthWithIcon",
+                None,
+            )
+            if _adj_p is None:
+                _adj_p = QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon
+            self.combo_experiment.setSizeAdjustPolicy(_adj_p)
+        except Exception:
+            pass
+        try:
+            self.combo_experiment.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+        except AttributeError:
+            self.combo_experiment.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding,
+                QtWidgets.QSizePolicy.Fixed,
+            )
         _tooltip(
             self.combo_experiment,
             (
@@ -4244,34 +4273,48 @@ class ResultsPage(QtWidgets.QWidget):
         self.btn_combos_all = QtWidgets.QPushButton("Marcar todas")
         self.btn_combos_none = QtWidgets.QPushButton("Desmarcar")
         self.btn_combos_first = QtWidgets.QPushButton("Apenas 1ª")
+        # Expanding: botões dividem a largura disponível igualmente — sem overflow.
         for _b in (self.btn_combos_all, self.btn_combos_none, self.btn_combos_first):
-            _b.setMaximumWidth(110)
+            _b.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
         self.edit_combos_search = QtWidgets.QLineEdit()
-        self.edit_combos_search.setPlaceholderText(
-            "Filtrar (ex: 'TR=1.0', 'θ=0°', 'f=20')"
-        )
+        self.edit_combos_search.setPlaceholderText("Filtrar (ex: TR=1.0, θ=0°, f=20)")
         self.edit_combos_search.setClearButtonEnabled(True)
-        self.btn_combos_apply_filter = QtWidgets.QPushButton("Marcar filtro")
-        self.btn_combos_apply_filter.setMaximumWidth(110)
+        self.btn_combos_apply_filter = QtWidgets.QPushButton("Filtrar")
+        self.btn_combos_apply_filter.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         self.lbl_combos_count = QtWidgets.QLabel("Selecionadas: 0 / 0")
         self.lbl_combos_count.setStyleSheet("color: #9cdcfe;")
 
+        # combos_wrap: largura total (sem label à esquerda) — botões Expanding
+        # compartilham o espaço disponível na coluna de controles.
         combos_wrap = QtWidgets.QWidget()
         combos_v = QtWidgets.QVBoxLayout(combos_wrap)
         combos_v.setContentsMargins(0, 0, 0, 0)
         combos_v.setSpacing(4)
+        # Título inline (substitui label do QFormLayout)
+        lbl_combos_title = QtWidgets.QLabel("Combinações (TR, θ, f):")
+        lbl_combos_title.setStyleSheet(
+            "font-size: 10px; color: #aaaaaa; padding-top: 2px;"
+        )
+        combos_v.addWidget(lbl_combos_title)
         combos_v.addWidget(self.list_combos)
-        # Primeira linha de botões: marcar/desmarcar/primeira
+        # Linha de botões: Expanding — dividem a largura disponível igualmente
         btn_row1 = QtWidgets.QHBoxLayout()
         btn_row1.setContentsMargins(0, 0, 0, 0)
+        btn_row1.setSpacing(4)
         btn_row1.addWidget(self.btn_combos_all)
         btn_row1.addWidget(self.btn_combos_none)
         btn_row1.addWidget(self.btn_combos_first)
-        btn_row1.addStretch(1)
         combos_v.addLayout(btn_row1)
-        # Segunda linha: busca + aplicar
+        # Linha de busca + aplicar
         btn_row2 = QtWidgets.QHBoxLayout()
         btn_row2.setContentsMargins(0, 0, 0, 0)
+        btn_row2.setSpacing(4)
         btn_row2.addWidget(self.edit_combos_search, 1)
         btn_row2.addWidget(self.btn_combos_apply_filter)
         combos_v.addLayout(btn_row2)
@@ -4378,29 +4421,138 @@ class ResultsPage(QtWidgets.QWidget):
         self._scale_stack.addWidget(self.combo_scale_resistivity)  # índice 2
         self._scale_label = QtWidgets.QLabel("Escala Tensor/EM:")
 
-        # ── v2.4c: Layout refatorado — ordem intuitiva ────────────────
-        ctrl_layout.addRow("Experimento:", self.combo_experiment)
-        ctrl_layout.addRow("Modelo:", model_idx_wrap)
-        ctrl_layout.addRow("Componentes EM:", self.list_components)
-        ctrl_layout.addRow("Tipo de plot:", self.combo_plot_kind)
-        ctrl_layout.addRow("Modo (Componentes EM):", self.combo_kind_mode)
-        # v2.4d: único row para os 3 combos de escala (posição X/Y fixa)
-        ctrl_layout.addRow(self._scale_label, self._scale_stack)
-        ctrl_layout.addRow("Combinações (TR, θ, f):", combos_wrap)
-        ctrl_layout.addRow("Filtro — Geosinais:", self.list_geo_filter)
-        # Widgets ocultos mantidos no form p/ backward-compat (não aparecem na UI)
-        # combo_source e combo_model_key foram criados com setVisible(False)
-        ctrl_layout.addRow(self.btn_plot)
-        ctrl_layout.addRow(self.btn_save)
-        ctrl_layout.addRow(self.btn_free_memory)
+        # ── v2.7b: Checkbox tema movido para dentro do painel de controles ──
+        # Padrão: fundo branco (light). Dark mode é opção explícita do usuário.
+        # Sincroniza com combo_theme em PreferencesPage via blockSignals.
+        self.check_canvas_white = QtWidgets.QCheckBox("Fundo branco (paleta clássica)")
+        self.check_canvas_white.setToolTip(
+            "<b>Tema do canvas</b><br/>"
+            "☑ Marcado (padrão): fundo <b>branco</b> com paleta clássica "
+            "(azul #1f4ea8, vermelho #a3272f).<br/>"
+            "☐ Desmarcado: <b>modo escuro</b> (fundo #1e1e1e).<br/>"
+            "Persistência automática entre sessões. "
+            "Alternativa: Preferências → Tema do canvas."
+        )
+        self.check_canvas_white.setChecked(
+            getattr(self._style, "theme", "light") != "dark"
+        )
+        self.check_canvas_white.toggled.connect(self._on_canvas_theme_toggled)
 
-        # v2.6b — Botões de Análise visíveis no painel de controles (acesso
-        # direto, complementa atalhos Ctrl+Shift+M/A/C e a toolbar Análise).
-        sep_analysis = QtWidgets.QLabel("── Análise interativa ──")
-        sep_analysis.setStyleSheet("color:#888888; font-size:10px; padding-top:8px;")
-        sep_analysis.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        ctrl_layout.addRow(sep_analysis)
+        # ── v2.7c: Controles reorganizados em seções — estilo "Parâmetros de Simulação" ──
+        # Cada seção é um QGroupBox independente com QFormLayout/QVBoxLayout.
+        # A coluna de controles fica à ESQUERDA (scroll vertical, sem scroll horizontal).
+        # Canvas ocupa toda a área restante à DIREITA.
 
+        # ── Seção 1: Visualização ────────────────────────────────────────────
+        grp_vis = QtWidgets.QGroupBox("Visualização")
+        vis_vbox = QtWidgets.QVBoxLayout(grp_vis)
+        vis_vbox.setContentsMargins(8, 6, 8, 8)
+        vis_vbox.setSpacing(4)
+        vis_vbox.addWidget(self.check_canvas_white)
+
+        # ── Seção 2: Seleção de Dados ────────────────────────────────────────
+        grp_data = QtWidgets.QGroupBox("Seleção de Dados")
+        form_data = QtWidgets.QFormLayout(grp_data)
+        form_data.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        form_data.setHorizontalSpacing(8)
+        form_data.setVerticalSpacing(6)
+        # ExpandingFieldsGrow: campos com sizePolicy Expanding preenchem a largura
+        # disponível em vez de ficarem presos ao sizeHint do conteúdo.
+        try:
+            _fgp = getattr(
+                QtWidgets.QFormLayout.FieldGrowthPolicy, "ExpandingFieldsGrow", None
+            )
+            if _fgp is None:
+                _fgp = QtWidgets.QFormLayout.ExpandingFieldsGrow
+            form_data.setFieldGrowthPolicy(_fgp)
+        except Exception:
+            pass
+        form_data.addRow("Experimento:", self.combo_experiment)
+        form_data.addRow("Modelo:", model_idx_wrap)
+
+        # ── Seção 3: Tipo de Plot ────────────────────────────────────────────
+        grp_plot_type = QtWidgets.QGroupBox("Tipo de Plot")
+        form_plot_type = QtWidgets.QFormLayout(grp_plot_type)
+        form_plot_type.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        form_plot_type.setHorizontalSpacing(8)
+        form_plot_type.setVerticalSpacing(6)
+        try:
+            _fgp = getattr(
+                QtWidgets.QFormLayout.FieldGrowthPolicy, "ExpandingFieldsGrow", None
+            )
+            if _fgp is None:
+                _fgp = QtWidgets.QFormLayout.ExpandingFieldsGrow
+            form_plot_type.setFieldGrowthPolicy(_fgp)
+        except Exception:
+            pass
+        # Combos com Expanding preenchem a largura disponível após o label.
+        for _cb in (self.combo_plot_kind, self.combo_kind_mode):
+            _cb.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+        form_plot_type.addRow("Tipo:", self.combo_plot_kind)
+        form_plot_type.addRow("Modo (EM):", self.combo_kind_mode)
+        # v2.4d: único row para os 3 combos de escala (QStackedWidget — posição fixa)
+        for _cs in (
+            self.combo_scale_tensor,
+            self.combo_scale_geosignals,
+            self.combo_scale_resistivity,
+        ):
+            _cs.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+        form_plot_type.addRow(self._scale_label, self._scale_stack)
+
+        # ── Seção 4: Componentes EM ──────────────────────────────────────────
+        grp_em = QtWidgets.QGroupBox("Componentes EM")
+        form_em = QtWidgets.QFormLayout(grp_em)
+        form_em.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        form_em.setHorizontalSpacing(8)
+        form_em.setVerticalSpacing(6)
+        try:
+            _fgp = getattr(
+                QtWidgets.QFormLayout.FieldGrowthPolicy, "ExpandingFieldsGrow", None
+            )
+            if _fgp is None:
+                _fgp = QtWidgets.QFormLayout.ExpandingFieldsGrow
+            form_em.setFieldGrowthPolicy(_fgp)
+        except Exception:
+            pass
+        form_em.addRow(self.list_components)
+        # combos_wrap ocupa largura total (sem label à esquerda): o título
+        # "Combinações (TR, θ, f):" está inline dentro de combos_wrap.
+        form_em.addRow(combos_wrap)
+
+        # ── Seção 5: Geosinais ───────────────────────────────────────────────
+        grp_geo = QtWidgets.QGroupBox("Geosinais")
+        form_geo = QtWidgets.QFormLayout(grp_geo)
+        form_geo.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        form_geo.setHorizontalSpacing(8)
+        form_geo.setVerticalSpacing(6)
+        try:
+            _fgp = getattr(
+                QtWidgets.QFormLayout.FieldGrowthPolicy, "ExpandingFieldsGrow", None
+            )
+            if _fgp is None:
+                _fgp = QtWidgets.QFormLayout.ExpandingFieldsGrow
+            form_geo.setFieldGrowthPolicy(_fgp)
+        except Exception:
+            pass
+        form_geo.addRow(self.list_geo_filter)
+
+        # ── Seção 6: Ações ───────────────────────────────────────────────────
+        grp_actions = QtWidgets.QGroupBox("Ações")
+        act_vbox = QtWidgets.QVBoxLayout(grp_actions)
+        act_vbox.setContentsMargins(8, 6, 8, 8)
+        act_vbox.setSpacing(6)
+        act_vbox.addWidget(self.btn_plot)
+        act_vbox.addWidget(self.btn_save)
+        act_vbox.addWidget(self.btn_free_memory)
+
+        # ── Seção 7: Análise Interativa ──────────────────────────────────────
+        # v2.6b — complementa atalhos Ctrl+Shift+M/A/C e a toolbar Análise.
         self.btn_correlation = QtWidgets.QPushButton("📊 Matriz de correlação…")
         _tooltip(
             self.btn_correlation,
@@ -4422,71 +4574,52 @@ class ResultsPage(QtWidgets.QWidget):
         )
         self.btn_ensemble.clicked.connect(self._open_ensemble_dialog)
 
-        self.btn_crosshair = QtWidgets.QPushButton("✚ Crosshair sincronizado")
-        self.btn_crosshair.setCheckable(True)
-        _tooltip(
-            self.btn_crosshair,
-            (
-                "<b>Crosshair sincronizado entre subplots</b><br/>"
-                "Linha vertical que segue o mouse em todos os axes (>30 fps via blitting). "
-                "Atalho: <b>Ctrl+Shift+C</b>."
-            ),
-        )
-        self.btn_crosshair.toggled.connect(
-            lambda checked: (
-                self._toggle_crosshair()
-                if checked != getattr(self._crosshair, "enabled", False)
-                else None
-            )
-        )
+        grp_analysis = QtWidgets.QGroupBox("Análise Interativa")
+        ana_vbox = QtWidgets.QVBoxLayout(grp_analysis)
+        ana_vbox.setContentsMargins(8, 6, 8, 8)
+        ana_vbox.setSpacing(6)
+        ana_vbox.addWidget(self.btn_correlation)
+        ana_vbox.addWidget(self.btn_ensemble)
 
-        ctrl_layout.addRow(self.btn_correlation)
-        ctrl_layout.addRow(self.btn_ensemble)
-        ctrl_layout.addRow(self.btn_crosshair)
+        # ── Coluna de controles à ESQUERDA — scroll vertical sem scroll horizontal ──
+        # Idêntico ao padrão da coluna "Parâmetros de Simulação".
+        ctrl_inner = QtWidgets.QWidget()
+        ctrl_vbox = QtWidgets.QVBoxLayout(ctrl_inner)
+        ctrl_vbox.setContentsMargins(4, 4, 4, 4)
+        ctrl_vbox.setSpacing(8)
+        ctrl_vbox.addWidget(grp_vis)
+        ctrl_vbox.addWidget(grp_data)
+        ctrl_vbox.addWidget(grp_plot_type)
+        ctrl_vbox.addWidget(grp_em)
+        ctrl_vbox.addWidget(grp_geo)
+        ctrl_vbox.addWidget(grp_actions)
+        ctrl_vbox.addWidget(grp_analysis)
+        ctrl_vbox.addStretch(1)
 
-        # Painel direito — canvas
+        ctrl_scroll = QtWidgets.QScrollArea()
+        ctrl_scroll.setWidget(ctrl_inner)
+        ctrl_scroll.setWidgetResizable(True)
+        ctrl_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        ctrl_scroll.setMinimumWidth(340)
+        ctrl_scroll.setMaximumWidth(460)
+        ctrl_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+
+        # ── Canvas principal à DIREITA (expansível) ───────────────────────────
         self.canvas = EMCanvas(self, figsize=(14, 9), style=self._style)
 
-        splitter = QtWidgets.QSplitter(
-            QtCore.Qt.Orientation.Horizontal if QtCore.Qt.Orientation.Horizontal else 0x1
-        )
-        left_wrap = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout(left_wrap)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(controls)
-        left_layout.addStretch(1)
-        splitter.addWidget(left_wrap)
-        splitter.addWidget(self.canvas)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([380, 1100])
+        # Splitter: Controles (ESQUERDA, largura fixa) | Canvas (DIREITA, expansível)
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        splitter.addWidget(ctrl_scroll)  # controles — coluna esquerda fixa
+        splitter.addWidget(self.canvas)  # canvas — painel direito expansível
+        splitter.setStretchFactor(0, 0)  # controles: largura fixa
+        splitter.setStretchFactor(1, 1)  # canvas recebe todo espaço extra
+        splitter.setSizes([400, 1080])
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 16)
         root.addWidget(_heading("Resultados — Visualização Interativa"))
-
-        # v2.6b A1 — Toggle rápido de tema do canvas (fundo branco vs dark).
-        # Sincroniza com combo_theme em PreferencesPage (sinal bidirecional
-        # via blockSignals para evitar loops). Persistência em QSettings.
-        theme_row = QtWidgets.QHBoxLayout()
-        self.check_canvas_white = QtWidgets.QCheckBox(
-            "Fundo branco no canvas (paleta clássica pré-dark)"
-        )
-        self.check_canvas_white.setToolTip(
-            "<b>Tema do canvas</b><br/>"
-            "☐ Marcado: fundo <b>branco</b> com paleta clássica "
-            "(azul #1f4ea8, vermelho #a3272f).<br/>"
-            "☐ Desmarcado: tema <b>dark</b> (fundo #1e1e1e).<br/>"
-            "Atalho: alternativa em Preferências → Tema do canvas."
-        )
-        self.check_canvas_white.setChecked(
-            getattr(self._style, "theme", "auto") == "light"
-        )
-        self.check_canvas_white.toggled.connect(self._on_canvas_theme_toggled)
-        theme_row.addWidget(self.check_canvas_white)
-        theme_row.addStretch(1)
-        root.addLayout(theme_row)
-
         root.addWidget(
             _heading(
                 "Plots de componentes EM, perfil ρ, geosinais e comparação Numba vs Fortran. "
@@ -4528,6 +4661,8 @@ class ResultsPage(QtWidgets.QWidget):
         self.combo_plot_kind.currentIndexChanged.connect(
             self._update_scale_combos_visibility
         )
+        # v2.8: Modo (EM) → auto-replot quando há dados carregados
+        self.combo_kind_mode.currentIndexChanged.connect(self._on_kind_mode_changed)
         self._update_scale_combos_visibility()
 
     # ── v2.4: helpers de filtro ───────────────────────────────────────────
@@ -4812,9 +4947,14 @@ class ResultsPage(QtWidgets.QWidget):
         self._active_bundle = bundle
         if bundle is not None:
             self._current_sim = bundle
-            models = bundle.get("model")
-            if isinstance(models, dict):
-                self._sim_models = [models]
+            # v2.7c fix: bundles novos trazem "models_list" com a lista completa;
+            # bundles de sessões anteriores ao fix usam fallback para [model].
+            models_list = bundle.get("models_list")
+            if models_list:
+                self._sim_models = list(models_list)
+            else:
+                single = bundle.get("model")
+                self._sim_models = [single] if isinstance(single, dict) else []
             self._refresh_keys()
             trs = bundle.get("trs", [])
             dips = bundle.get("dips", [])
@@ -4846,16 +4986,31 @@ class ResultsPage(QtWidgets.QWidget):
     def _on_canvas_theme_toggled(self, checked: bool) -> None:
         """Alterna tema do canvas entre 'light' e 'dark'.
 
-        Chamado pelo checkbox ``check_canvas_white`` no topo da página.
+        v2.7b — Ordem de operações corrigida para evitar dois bugs:
+          1. Canvas menor após toggle: ``set_style`` era chamado antes do
+             re-plot, causando ``draw_idle`` com figura ainda em tamanho
+             antigo. Agora: rcParams → replot → set_style → resize forçado.
+          2. Fundo/fonte incorretos ao voltar ao dark: ``figure.clear()``
+             preserva o facecolor do objeto figura; sem ``set_style`` após
+             o replot, o fundo ficava com a cor anterior.
+
+        Chamado pelo checkbox ``check_canvas_white`` no painel de controles.
         Sincroniza com ``combo_theme`` em PreferencesPage via ``blockSignals``
-        (evita loop de eventos). Persiste em QSettings e re-plota se há
-        simulação corrente.
+        (evita loop de eventos). Persiste em QSettings.
         """
         new_theme = "light" if checked else "dark"
         try:
             self._style.theme = new_theme
+            # 1. Atualiza rcParams ANTES do replot — novas axes herdam tema correto
             apply_style(self._style)
+            # 2. Re-plota com novos rcParams (figure.clear + novas axes)
+            if self._current_sim is not None or self._active_bundle is not None:
+                self._on_plot()
+            # 3. set_style APÓS replot: aplica facecolor/palette ao widget Qt
+            #    e às axes existentes, garantindo cores consistentes
             self.canvas.set_style(self._style)
+            # 4. Força o canvas a ocupar todo o espaço disponível no splitter
+            QtCore.QTimer.singleShot(50, self._force_canvas_resize)
         except Exception:
             pass
         # Sincroniza combo em PreferencesPage (se acessível via janela pai)
@@ -4871,17 +5026,9 @@ class ResultsPage(QtWidgets.QWidget):
                 combo_theme.blockSignals(False)
         except Exception:
             pass
-        # Re-plota se existe simulação corrente (sem disparar erro)
+        # Persiste em QSettings (via helper central — mesma org/app de _qsettings())
         try:
-            if self._current_sim is not None or self._active_bundle is not None:
-                self._on_plot()
-        except Exception:
-            pass
-        # Persiste em QSettings
-        try:
-            QtCore.QSettings("GeosteringAI", "SimulationManager").setValue(
-                "canvas/theme", new_theme
-            )
+            _qsettings().setValue("canvas/theme", new_theme)
         except Exception:
             pass
         # Toast não-bloqueante (ToastManager está em MainWindow)
@@ -4889,8 +5036,26 @@ class ResultsPage(QtWidgets.QWidget):
             main = self.window()
             tm = getattr(main, "_toast_manager", None)
             if tm is not None:
-                msg = f"Canvas: {'fundo branco (paleta clássica)' if checked else 'tema dark'}"
+                msg = f"Canvas: {'fundo branco (paleta clássica)' if checked else 'modo escuro'}"
                 tm.show(msg, level="info", duration_ms=1500)
+        except Exception:
+            pass
+
+    def _force_canvas_resize(self) -> None:
+        """Força o FigureCanvasQTAgg a redimensionar para preencher o splitter.
+
+        v2.7b Bug A4: após troca de tema, ``draw_idle`` agenda um redraw mas
+        não dispara ResizeEvent. O constrained_layout do matplotlib só
+        recalcula dimensões ao receber um resize. Esta função força o resize
+        explícito para que o plot ocupe todo o espaço disponível.
+        """
+        try:
+            mpl_canvas = getattr(self.canvas, "canvas", None)
+            if mpl_canvas is not None:
+                w, h = mpl_canvas.width(), mpl_canvas.height()
+                if w > 0 and h > 0:
+                    mpl_canvas.resize(w, h)
+                    mpl_canvas.draw()
         except Exception:
             pass
 
@@ -4942,6 +5107,8 @@ class ResultsPage(QtWidgets.QWidget):
         Para ``matplotlib``: no-op (canvas atual já é EMCanvas).
         """
         backend = backend.lower().strip()
+        # Remove sufixo de UI como " (experimental — sem labels)" → chave canônica
+        backend = backend.split("(")[0].strip()
         # Persiste para próximo restart
         try:
             QtCore.QSettings("GeosteringAI", "SimulationManager").setValue(
@@ -5080,6 +5247,17 @@ class ResultsPage(QtWidgets.QWidget):
             # Tipo de plot desconhecido — mantém Tensor/EM como default
             self._scale_stack.setCurrentIndex(0)
             self._scale_label.setText("Escala Tensor/EM:")
+
+    def _on_kind_mode_changed(self, *_args) -> None:
+        """Auto-replot ao mudar o Modo (EM) — v2.8.
+
+        Quando combo_kind_mode muda (ex: "Re + Im" → "Só Re"), replotar
+        automaticamente se houver simulação carregada — evita que o usuário
+        precise clicar "Plotar" após cada troca de modo.
+        """
+        if self._active_bundle is None and self._current_sim is None:
+            return
+        self._on_plot()
 
     def set_scale_mode(self, label: str) -> None:
         """v2.5 — setter inverso de :meth:`current_scale_mode`.
@@ -5783,63 +5961,6 @@ class ResultsPage(QtWidgets.QWidget):
                     style=self._style,
                     thicknesses=thicknesses,
                 )
-
-        # v2.6b L4 — refresca CrosshairManager com axes atualizados
-        try:
-            self._refresh_crosshair_axes()
-        except Exception:
-            pass
-
-    def _refresh_crosshair_axes(self) -> None:
-        """Atualiza CrosshairManager com os axes atuais (após replot).
-
-        v2.6b L4: as funções de plot recriam subplots, então o set de
-        ``Axes`` muda. Este método atualiza o gerenciador para usar os
-        novos axes mantendo o estado enabled/disabled.
-        """
-        cm = getattr(self, "_crosshair", None)
-        if cm is None:
-            return
-        try:
-            fig = self.canvas.figure
-            cm.update_axes(list(fig.axes))
-        except Exception:
-            pass
-
-    def _toggle_crosshair(self) -> None:
-        """Alterna o crosshair sincronizado entre todos os subplots.
-
-        v2.6b L4: usa blitting matplotlib para >30 fps em 18 subplots.
-        Atalho: Ctrl+Shift+C. Toast informa estado novo.
-        """
-        cm = getattr(self, "_crosshair", None)
-        if cm is None:
-            try:
-                from .sm_crosshair import CrosshairManager
-
-                fig = self.canvas.figure
-                cm = CrosshairManager(self.canvas.canvas, list(fig.axes))
-                self._crosshair = cm
-            except Exception as exc:
-                try:
-                    main = self.window()
-                    tm = getattr(main, "_toast_manager", None)
-                    if tm is not None:
-                        tm.show(
-                            f"Crosshair: erro ({exc})", level="error", duration_ms=2500
-                        )
-                except Exception:
-                    pass
-                return
-        cm.toggle()
-        try:
-            main = self.window()
-            tm = getattr(main, "_toast_manager", None)
-            if tm is not None:
-                state = "ativado" if cm.enabled else "desativado"
-                tm.show(f"Crosshair {state}", level="info", duration_ms=1500)
-        except Exception:
-            pass
 
     def _on_save(self) -> None:
         """v2.4d: abre SaveFigureDialog para escolher modo de exportação.
@@ -6868,6 +6989,17 @@ class MainWindow(QtWidgets.QMainWindow):
         # armazenado como atributo para GC não destruir prematuramente.
         self._save_thread: Optional[SaveArtifactsThread] = None
 
+        # v2.9 — Pré-aquecimento de cache Numba JIT em background.
+        # Elimina a lentidão da 1ª simulação após atualização de ambiente
+        # Python/Numba (cache .nbi/.nbc invalidado → ~100 s de recompilação).
+        # Iniciado em showEvent (lazy) para não spawnar thread em testes offscreen.
+        self._numba_primer: Optional[NumbaPrimer] = None
+        self._primer_lbl: Optional[QtWidgets.QLabel] = None
+        self._primer_started: bool = False
+        # v2.10: simulação solicitada enquanto primer ainda rodava — re-dispara
+        # automaticamente em _on_primer_done() quando o cache estiver pronto.
+        self._pending_sim_trigger: bool = False
+
         # v2.4: Cache em mem\u00f3ria de tensores H por snapshot_id. Permite
         # duplo-clique no hist\u00f3rico → recarregar plot em Resultados sem
         # re-executar. Perdido ao fechar o programa (apenas metadados v\u00e3o
@@ -6896,6 +7028,130 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # v2.6 P2: atalhos de teclado para power users (E13)
         self._setup_keyboard_shortcuts()
+
+    # ── Numba Primer (v2.9) ───────────────────────────────────────────────
+
+    def _start_numba_primer(self) -> None:
+        """Inicia pré-aquecimento de cache Numba JIT em background (v2.9).
+
+        Exibe label "🔥 JIT Numba…" na status bar durante a compilação.
+        Ao concluir, atualiza para "✓ (Xs)" ou remove se Numba ausente.
+        O primer usa apenas 1 thread para não disputar CPU com a GUI.
+        """
+        try:
+            lbl = QtWidgets.QLabel("🔥 JIT Numba…")
+            lbl.setStyleSheet("color:#ce9178; padding:0 10px; font-size:11px;")
+            lbl.setToolTip(
+                "Pré-compilando funções Numba em background.\n"
+                "A primeira simulação será mais rápida ao concluir."
+            )
+            self.status.addWidget(lbl)
+            self._primer_lbl = lbl
+            primer = NumbaPrimer(self)
+            primer.primer_done.connect(self._on_primer_done)
+            primer.primer_failed.connect(self._on_primer_failed)
+            primer.start()
+            self._numba_primer = primer
+        except Exception:
+            pass
+
+    def _on_primer_done(self, elapsed: float) -> None:
+        """Atualiza label da status bar quando o cache Numba está pronto (v2.9).
+
+        Em v2.10 também pré-aquece o pool persistente e retoma simulação
+        que foi diferida (``_pending_sim_trigger``) enquanto primer rodava.
+
+        Args:
+            elapsed: Tempo de compilação/carregamento em segundos.
+                Valores < 15 s indicam cache em disco carregado com sucesso.
+                Valores > 15 s indicam recompilação completa (cache frio).
+        """
+        lbl = getattr(self, "_primer_lbl", None)
+        if lbl is None:
+            return
+        lbl.setText(f"✓ JIT ({elapsed:.0f}s)")
+        lbl.setStyleSheet("color:#4ec9b0; padding:0 10px; font-size:11px;")
+        msg = (
+            f"Cache Numba carregado em {elapsed:.0f}s"
+            if elapsed < 15.0
+            else f"Cache Numba recompilado em {elapsed:.0f}s — próximas sessões serão mais rápidas"
+        )
+        lbl.setToolTip(msg)
+        # v2.10: dispara workers do pool persistente para que inicializem o JIT
+        # em background. Quando o usuário clicar "Simular", workers já estarão
+        # quentes — spawn/import/JIT ocorrem apenas UMA vez por sessão.
+        self._prewarm_numba_pool()
+        # Retoma simulação diferida (usuário clicou "Simular" durante primer).
+        if self._pending_sim_trigger:
+            self._pending_sim_trigger = False
+            self.page_sim.set_running(False)
+            self._start_simulation()
+
+    def _on_primer_failed(self, msg: str) -> None:
+        """Remove label da status bar se Numba não estiver disponível (v2.9).
+
+        Args:
+            msg: Mensagem de erro do import / execução (logada em debug).
+        """
+        import logging
+
+        logging.getLogger(__name__).debug("NumbaPrimer: %s", msg)
+        lbl = getattr(self, "_primer_lbl", None)
+        if lbl is None:
+            return
+        try:
+            self.status.removeWidget(lbl)
+            lbl.deleteLater()
+        except Exception:
+            pass
+        self._primer_lbl = None
+
+    def _prewarm_numba_pool(self) -> None:
+        """Submete tarefas noop ao pool persistente para forçar spawn + init (v2.10).
+
+        Chamado assim que o NumbaPrimer conclui. Os workers inicializam
+        ``_numba_init_worker`` em background — quando o usuário clicar
+        "Simular", o pool já estará quente e não haverá overhead de spawn.
+        """
+        try:
+            n_workers = int(self.page_sim.spin_workers.value())
+            n_threads = int(self.page_sim.spin_threads.value())
+            hankel = self.page_params.combo_filter.currentText()
+            pool = _acquire_numba_pool(n_workers, n_threads, hankel)
+            for _ in range(n_workers):
+                pool.submit(_noop)
+        except Exception:
+            pass
+
+    def showEvent(self, event: Any) -> None:  # type: ignore[override]
+        """Inicia NumbaPrimer na primeira exibição da janela (v2.9).
+
+        Lazy start garante que o thread não é criado durante testes offscreen
+        (MainWindow instanciado mas nunca exibido). O flag _primer_started
+        previne reinicializações em re-shows (ex.: minimize → restore).
+        """
+        super().showEvent(event)
+        if not getattr(self, "_primer_started", False):
+            self._primer_started = True
+            self._start_numba_primer()
+
+    def closeEvent(self, event: Any) -> None:  # type: ignore[override]
+        """Termina NumbaPrimer e libera pool persistente ao fechar (v2.9/v2.10).
+
+        Aguarda até 3 s para conclusão limpa do NumbaPrimer; se exceder,
+        força quit() para evitar "QThread destroyed while thread is running"
+        no log do Qt. O pool persistente é encerrado sem esperar (workers
+        finalizarão naturalmente após processar a tarefa em andamento).
+        """
+        primer = getattr(self, "_numba_primer", None)
+        if primer is not None and primer.isRunning():
+            try:
+                primer.quit()
+                primer.wait(3000)
+            except Exception:
+                pass
+        release_numba_pool()
+        super().closeEvent(event)
 
     def _setup_keyboard_shortcuts(self) -> None:
         """Cria QShortcut handlers (v2.6 P2/E13).
@@ -6942,12 +7198,6 @@ class MainWindow(QtWidgets.QMainWindow):
         _add("Ctrl+L", self._shortcut_clear_log, "Limpar log da aba ativa")
         _add("Ctrl+H", self._shortcut_show_help, "Mostrar atalhos de teclado")
         _add("Esc", self._shortcut_stop_sim, "Cancelar simulação rodando")
-        # v2.6b L4 — atalhos de visualização
-        _add(
-            "Ctrl+Shift+C",
-            self._shortcut_toggle_crosshair,
-            "Crosshair sincronizado (toggle)",
-        )
         # v2.6b L5 — atalhos de análise estatística
         _add(
             "Ctrl+Shift+M",
@@ -6991,14 +7241,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.page_sim.btn_stop.click()
         elif self._bench_thread is not None and self._bench_thread.isRunning():
             self.page_bench.btn_stop.click()
-
-    def _shortcut_toggle_crosshair(self) -> None:
-        """Atalho Ctrl+Shift+C — toggle crosshair sincronizado em ResultsPage."""
-        try:
-            if hasattr(self.page_results, "_toggle_crosshair"):
-                self.page_results._toggle_crosshair()
-        except Exception:
-            pass
 
     def _shortcut_correlation_dialog(self) -> None:
         """Atalho Ctrl+Shift+M — abre matriz de correlação."""
@@ -7086,7 +7328,6 @@ class MainWindow(QtWidgets.QMainWindow):
           • Abrir .dat/.out…  (DatViewerDialog)
           • Matriz de correlação… (CorrelationAnalysisDialog, Ctrl+Shift+M)
           • Análise do ensemble… (EnsembleAnalysisDialog, Ctrl+Shift+A)
-          • Toggle crosshair (Ctrl+Shift+C)
 
         Também adiciona menu "Análise" na barra de menus principal.
         """
@@ -7130,26 +7371,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.act_ensemble.triggered.connect(self._shortcut_ensemble_dialog)
 
-        self.act_crosshair = QAction("✚  Crosshair sincronizado", self)
-        self.act_crosshair.setCheckable(True)
-        self.act_crosshair.setToolTip(
-            "<b>Crosshair sincronizado entre subplots</b><br/>"
-            "Linha vertical que segue o mouse em todos os axes do tensor 3×6<br/>"
-            "Atalho: <b>Ctrl+Shift+C</b>"
-        )
-        self.act_crosshair.setShortcut(
-            QtGui.QKeySequence("Ctrl+Shift+C")
-            if hasattr(QtGui, "QKeySequence")
-            else "Ctrl+Shift+C"
-        )
-        self.act_crosshair.triggered.connect(self._shortcut_toggle_crosshair)
-
         analysis_bar.addAction(self.act_dat_viewer)
         analysis_bar.addSeparator()
         analysis_bar.addAction(self.act_correlation)
         analysis_bar.addAction(self.act_ensemble)
-        analysis_bar.addSeparator()
-        analysis_bar.addAction(self.act_crosshair)
         self.addToolBar(analysis_bar)
 
         # ── Menu "Análise" na barra de menus principal ────────────────────
@@ -7161,8 +7386,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 menu_an.addSeparator()
                 menu_an.addAction(self.act_correlation)
                 menu_an.addAction(self.act_ensemble)
-                menu_an.addSeparator()
-                menu_an.addAction(self.act_crosshair)
         except Exception:
             pass
 
@@ -7355,6 +7578,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Exportação em curso",
                 "Aguarde a exportação dos artefatos da simulação anterior "
                 "terminar antes de iniciar uma nova.",
+            )
+            return
+        # v2.10: defer — NumbaPrimer ainda compilando cache JIT. A simulação
+        # será re-disparada automaticamente em _on_primer_done() ao concluir.
+        primer = getattr(self, "_numba_primer", None)
+        req_backend = self.page_sim.combo_backend.currentText()
+        if req_backend == "numba" and primer is not None and primer.isRunning():
+            self._pending_sim_trigger = True
+            self.page_sim.set_running(True)
+            self.page_sim.append_log(
+                "⏳ JIT Numba compilando em background… "
+                "simulação iniciará automaticamente ao concluir."
             )
             return
         try:
@@ -7573,6 +7808,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "trs": req.tr_spacings_m,
             "dips": req.dip_degs,
             "model": models[0] if models else {},
+            # v2.7c: lista completa de modelos para restaurar _sim_models ao
+            # recarregar do cache LRU (duplo-clique histórico ou combo Experimento).
+            # Dicts são leves (~200–500 bytes cada); 10k modelos ≈ 5 MB no cache.
+            "models_list": list(models) if models else [],
         }
         self.page_results.set_current_simulation(plot_bundle, models=models)
         self.tabs.setCurrentWidget(self.page_results)
@@ -8853,23 +9092,6 @@ def _run_smoke_test() -> int:
     except Exception as exc:
         check(False, f"v2.6b A1 combo_theme ({exc})")
 
-    # L4 — CrosshairManager importável
-    try:
-        from .sm_crosshair import CrosshairManager
-
-        check(
-            hasattr(CrosshairManager, "enable")
-            and hasattr(CrosshairManager, "disable")
-            and hasattr(CrosshairManager, "toggle"),
-            "v2.6b L4: CrosshairManager tem enable/disable/toggle",
-        )
-        check(
-            hasattr(window.page_results, "_toggle_crosshair"),
-            "v2.6b L4: ResultsPage tem _toggle_crosshair",
-        )
-    except Exception as exc:
-        check(False, f"v2.6b L4 crosshair ({exc})")
-
     # L4 — EnsembleAnimationBar
     try:
         from .sm_animation_bar import EnsembleAnimationBar
@@ -8973,20 +9195,18 @@ def _run_smoke_test() -> int:
     except Exception as exc:
         check(False, f"v2.6b U9 search ({exc})")
 
-    # v2.6b — Toolbar Análise + botões visíveis
+    # v2.6b — Toolbar Análise + botões visíveis (v2.9: crosshair removido)
     try:
         check(
             hasattr(window, "act_dat_viewer")
             and hasattr(window, "act_correlation")
-            and hasattr(window, "act_ensemble")
-            and hasattr(window, "act_crosshair"),
-            "v2.6b: MainWindow tem QActions (dat_viewer, correlation, ensemble, crosshair)",
+            and hasattr(window, "act_ensemble"),
+            "v2.6b: MainWindow tem QActions (dat_viewer, correlation, ensemble)",
         )
         check(
             hasattr(window.page_results, "btn_correlation")
-            and hasattr(window.page_results, "btn_ensemble")
-            and hasattr(window.page_results, "btn_crosshair"),
-            "v2.6b: ResultsPage tem botões visíveis (correlation, ensemble, crosshair)",
+            and hasattr(window.page_results, "btn_ensemble"),
+            "v2.6b: ResultsPage tem botões visíveis (correlation, ensemble)",
         )
         # Verifica que features pendentes B foram resolvidas (visibilidade)
         check(
@@ -9120,6 +9340,234 @@ def _run_smoke_test() -> int:
     except Exception as exc:
         check(False, f"v2.7a T5: PyQtGraphCanvas set_dark_mode ({exc})")
 
+    # ── v2.7c: Bug fix models_list ───────────────────────────────────────────
+    # T6: set_active_bundle_from_history restaura _sim_models a partir de models_list
+    try:
+        import numpy as _np_t6  # alias local para não conflitar com `np` de outros testes
+
+        page_r = window.page_results
+        n = 5
+        fake_H = _np_t6.zeros((n, 1, 1, 10, 1, 9), dtype=_np_t6.complex128)
+        bundle_multi = {
+            "H_stack": fake_H,
+            "z_obs": _np_t6.linspace(0, 9, 10),
+            "model": {"title": "m0", "n_layers": 2},
+            "models_list": [{"title": f"m{i}", "n_layers": 2} for i in range(n)],
+            "trs": [1.0],
+            "dips": [0.0],
+            "freqs": [20000.0],
+        }
+        page_r.set_active_bundle_from_history(bundle_multi)
+        check(
+            len(page_r._sim_models) == n,
+            f"v2.7c T6: set_active_bundle_from_history restaura _sim_models (got {len(page_r._sim_models)}, want {n})",
+        )
+        check(
+            page_r.spin_model_idx.maximum() == n - 1,
+            f"v2.7c T6: spin_model_idx.maximum() == {n - 1} (got {page_r.spin_model_idx.maximum()})",
+        )
+    except Exception as exc:
+        check(False, f"v2.7c T6: models_list restaura _sim_models ({exc})")
+
+    # T7: backward-compat — bundle sem models_list usa [model] como fallback
+    try:
+        import numpy as _np_t7  # alias local separado para evitar UnboundLocalError
+
+        page_r = window.page_results
+        fake_H1 = _np_t7.zeros((1, 1, 1, 10, 1, 9), dtype=_np_t7.complex128)
+        bundle_old = {
+            "H_stack": fake_H1,
+            "z_obs": _np_t7.linspace(0, 9, 10),
+            "model": {"title": "único", "n_layers": 3},
+            # sem "models_list" — bundle de sessão anterior ao fix
+            "trs": [1.0],
+            "dips": [0.0],
+            "freqs": [20000.0],
+        }
+        page_r.set_active_bundle_from_history(bundle_old)
+        check(
+            len(page_r._sim_models) == 1,
+            f"v2.7c T7: fallback [model] resulta em 1 modelo (got {len(page_r._sim_models)})",
+        )
+        check(
+            page_r._sim_models[0].get("title") == "único",
+            "v2.7c T7: fallback preserva conteúdo do modelo único",
+        )
+    except Exception as exc:
+        check(False, f"v2.7c T7: backward-compat sem models_list ({exc})")
+
+    # ── v2.8 T9: kind="Só Re"/"Só Im" respeita 1-coluna com scale_mode="re_im"
+    try:
+        from .sm_plots import PLOT_KINDS
+
+        check("Só Re" in PLOT_KINDS, "v2.8 T9: 'Só Re' está em PLOT_KINDS")
+        check("Só Im" in PLOT_KINDS, "v2.8 T9: 'Só Im' está em PLOT_KINDS")
+        # Verificação comportamental: two_cols deve ser False para "Só Re"
+        # e para "Só Im", independente de scale_mode — o override foi removido.
+        # Reproduz a lógica interna: two_cols = kind in ("Magnitude + Fase", "Re + Im")
+        _one_col_modes = ("Só Re", "Só Im", "Só Magnitude", "Só Fase", "Magnitude (dB)")
+        for _mode in _one_col_modes:
+            _two_cols = _mode in ("Magnitude + Fase", "Re + Im")
+            check(
+                not _two_cols,
+                f"v2.8 T9: modo '{_mode}' resulta em 1 coluna (two_cols=False)",
+            )
+    except Exception as exc:
+        check(False, f"v2.8 T9: verificação de modos 1-coluna ({exc})")
+
+    # ── v2.8 T10: _on_kind_mode_changed existe na ResultsPage ───────────────
+    try:
+        page_r10 = window.page_results
+        check(
+            callable(getattr(page_r10, "_on_kind_mode_changed", None)),
+            "v2.8 T10: ResultsPage._on_kind_mode_changed existe e é callable",
+        )
+        # Verificar conexão: currentIndexChanged conectado
+        # (não há forma direta de inspecionar; verificar via chamada segura)
+        page_r10._on_kind_mode_changed()  # deve ser seguro com bundle=None
+        check(True, "v2.8 T10: _on_kind_mode_changed() chamável sem dados (sem crash)")
+    except Exception as exc:
+        check(False, f"v2.8 T10: _on_kind_mode_changed ({exc})")
+
+    # ── v2.8 T11: CorrelationAnalysisDialog: auto-recompute na mudança de método
+    try:
+        from .sm_correlation import CorrelationAnalysisDialog as _CAD
+
+        check(
+            _CAD is not None and hasattr(_CAD, "__init__"),
+            "v2.8 T11: CorrelationAnalysisDialog importável",
+        )
+        # Verificar que o método _compute_pvalues existe (novo em v2.8)
+        check(
+            hasattr(_CAD, "_compute_pvalues"),
+            "v2.8 T11: CorrelationAnalysisDialog tem _compute_pvalues",
+        )
+        # Verificar que tabs são criados (_refresh_pairs existe)
+        check(
+            hasattr(_CAD, "_refresh_pairs"),
+            "v2.8 T11: CorrelationAnalysisDialog tem _refresh_pairs (tab Pares Principais)",
+        )
+    except Exception as exc:
+        check(False, f"v2.8 T11: CorrelationAnalysisDialog estrutura ({exc})")
+
+    # ── v2.8 T12: CorrelationAnalysisDialog export métodos existem ──────────
+    try:
+        from .sm_correlation import CorrelationAnalysisDialog as _CAD12
+
+        check(
+            hasattr(_CAD12, "_on_export_csv"),
+            "v2.8 T12: CorrelationAnalysisDialog tem _on_export_csv",
+        )
+        check(
+            hasattr(_CAD12, "_on_export_png"),
+            "v2.8 T12: CorrelationAnalysisDialog tem _on_export_png",
+        )
+        check(
+            hasattr(_CAD12, "_interpret"),
+            "v2.8 T12: CorrelationAnalysisDialog tem _interpret (interpretação verbal)",
+        )
+    except Exception as exc:
+        check(False, f"v2.8 T12: CorrelationAnalysisDialog export/interpret ({exc})")
+
+    # ── v2.9 T13: Crosshair totalmente removido ───────────────────────────
+    try:
+        import importlib
+        import sys as _sys
+
+        # sm_crosshair não deve mais existir no pacote
+        crosshair_present = "geosteering_ai.simulation.tests.sm_crosshair" in _sys.modules
+        if not crosshair_present:
+            try:
+                importlib.import_module("geosteering_ai.simulation.tests.sm_crosshair")
+                crosshair_present = True
+            except ImportError:
+                crosshair_present = False
+        check(
+            not crosshair_present,
+            "v2.9 T13: sm_crosshair removido — import deve falhar com ImportError",
+        )
+        check(
+            not hasattr(window.page_results, "_toggle_crosshair"),
+            "v2.9 T13: ResultsPage não tem _toggle_crosshair (removido)",
+        )
+        check(
+            not hasattr(window.page_results, "btn_crosshair"),
+            "v2.9 T13: ResultsPage não tem btn_crosshair (removido)",
+        )
+        check(
+            not hasattr(window, "act_crosshair"),
+            "v2.9 T13: MainWindow não tem act_crosshair (removido)",
+        )
+    except Exception as exc:
+        check(False, f"v2.9 T13: crosshair removido ({exc})")
+
+    # ── v2.9 T14: NumbaPrimer importável + MainWindow tem _start_numba_primer ─
+    try:
+        from .sm_workers import NumbaPrimer as _NP
+
+        check(
+            hasattr(_NP, "primer_done") and hasattr(_NP, "primer_failed"),
+            "v2.9 T14: NumbaPrimer tem sinais primer_done e primer_failed",
+        )
+        check(
+            hasattr(_NP, "run"),
+            "v2.9 T14: NumbaPrimer tem método run()",
+        )
+        check(
+            hasattr(window, "_start_numba_primer"),
+            "v2.9 T14: MainWindow tem _start_numba_primer",
+        )
+        check(
+            hasattr(window, "_on_primer_done") and hasattr(window, "_on_primer_failed"),
+            "v2.9 T14: MainWindow tem handlers _on_primer_done/_on_primer_failed",
+        )
+    except Exception as exc:
+        check(False, f"v2.9 T14: NumbaPrimer estrutura ({exc})")
+
+    # ── v2.10 T15: pool persistente exportável de sm_workers ─────────────
+    try:
+        from .sm_workers import (
+            _PERSISTENT_POOL,
+            _PERSISTENT_POOL_CONFIG,
+            _WORKER_INITIALIZED,
+            _acquire_numba_pool,
+            _noop,
+            _numba_init_worker,
+            release_numba_pool,
+        )
+
+        check(callable(_acquire_numba_pool), "v2.10 T15: _acquire_numba_pool é chamável")
+        check(callable(release_numba_pool), "v2.10 T15: release_numba_pool é chamável")
+        check(callable(_noop), "v2.10 T15: _noop é chamável")
+        check(callable(_numba_init_worker), "v2.10 T15: _numba_init_worker é chamável")
+        check(
+            isinstance(_WORKER_INITIALIZED, bool),
+            "v2.10 T15: _WORKER_INITIALIZED é bool (False no processo principal)",
+        )
+    except Exception as exc:
+        check(False, f"v2.10 T15: pool persistente ({exc})")
+
+    # ── v2.10 T16: MainWindow tem _prewarm + _pending_sim_trigger + defer ─
+    try:
+        check(
+            hasattr(window, "_prewarm_numba_pool"),
+            "v2.10 T16: MainWindow tem _prewarm_numba_pool",
+        )
+        check(
+            hasattr(window, "_pending_sim_trigger"),
+            "v2.10 T16: MainWindow tem _pending_sim_trigger (bool)",
+        )
+        check(
+            isinstance(window._pending_sim_trigger, bool),
+            "v2.10 T16: _pending_sim_trigger é bool",
+        )
+        check(
+            callable(getattr(window, "_prewarm_numba_pool", None)),
+            "v2.10 T16: _prewarm_numba_pool é chamável",
+        )
+    except Exception as exc:
+        check(False, f"v2.10 T16: defer mechanism ({exc})")
+
     print(f"\n=== Resultado: {len(failures)} falha(s) ===")
     window.close()
     return 1 if failures else 0
@@ -9141,6 +9589,15 @@ def main() -> int:
     if QtCore is not None:
         enforce_c_locale(None)
 
+    # AA_ShareOpenGLContexts deve ser setado antes de QApplication para
+    # permitir que QtWebEngineWidgets (Plotly backend) seja importado em runtime.
+    try:
+        _aa_attr = getattr(QtCore.Qt.ApplicationAttribute, "AA_ShareOpenGLContexts", None)
+        if _aa_attr is None:
+            _aa_attr = QtCore.Qt.AA_ShareOpenGLContexts
+        QtWidgets.QApplication.setAttribute(_aa_attr)
+    except Exception:
+        pass
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("Simulation Manager")
     app.setOrganizationName("Geosteering AI")

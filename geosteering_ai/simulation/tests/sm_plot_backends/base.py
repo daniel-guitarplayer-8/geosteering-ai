@@ -228,7 +228,6 @@ def available_backends() -> List[PlotBackend]:
     try:
         import plotly  # noqa: F401
 
-        # QWebEngineView opcional — se não estiver, Plotly só exporta HTML
         available.append(PlotBackend.PLOTLY)
     except ImportError:
         pass

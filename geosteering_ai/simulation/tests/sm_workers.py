@@ -41,6 +41,7 @@ um ``ProcessPoolExecutor`` com workers sandbox, além de funções
 """
 from __future__ import annotations
 
+import multiprocessing as _mp
 import os
 import shutil
 import subprocess
@@ -55,6 +56,106 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .sm_qt_compat import QObject, QThread, Signal
+
+# ──────────────────────────────────────────────────────────────────────────
+# Pool persistente — elimina overhead de spawn/import/JIT por simulação
+# ──────────────────────────────────────────────────────────────────────────
+
+# Flag de controle: True dentro de um worker após o inicializador rodar.
+# False no processo principal — impede warmup redundante.
+_WORKER_INITIALIZED: bool = False
+
+# Pool singleton reaproveitado entre simulações consecutivas.
+_PERSISTENT_POOL: Optional[ProcessPoolExecutor] = None
+_PERSISTENT_POOL_CONFIG: Optional[Tuple[int, int, str]] = None
+
+
+def _numba_init_worker(n_threads: int, hankel_filter: str) -> None:
+    """Inicializador do pool — roda UMA vez por worker ao spawnar.
+
+    Configura variáveis de ambiente, importa o simulador e aquece o cache
+    JIT Numba com um modelo trivial. Após este ponto, ``run_numba_chunk``
+    pula a fase de warmup graças ao flag ``_WORKER_INITIALIZED``.
+    """
+    global _WORKER_INITIALIZED
+    if _WORKER_INITIALIZED:
+        return
+    os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
+    os.environ["OMP_NUM_THREADS"] = str(n_threads)
+    os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
+    os.environ.setdefault("KMP_WARNINGS", "FALSE")
+    try:
+        import numpy as _np
+
+        from geosteering_ai.simulation import SimulationConfig, simulate_multi
+
+        _cfg = SimulationConfig(
+            backend="numba", num_threads=n_threads, hankel_filter=hankel_filter
+        )
+        simulate_multi(
+            rho_h=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
+            rho_v=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
+            esp=_np.array([5.0, 5.0], dtype=_np.float64),
+            positions_z=_np.array([0.0], dtype=_np.float64),
+            frequencies_hz=[20000.0],
+            tr_spacings_m=[1.0],
+            dip_degs=[0.0],
+            cfg=_cfg,
+        )
+    except Exception:
+        pass
+    _WORKER_INITIALIZED = True
+
+
+def _noop() -> None:
+    """Função vazia usada para forçar spawn + init do worker sem carga real."""
+
+
+def _acquire_numba_pool(
+    n_workers: int, n_threads: int, hankel_filter: str
+) -> ProcessPoolExecutor:
+    """Retorna (ou cria) o pool persistente com os parâmetros especificados.
+
+    Se o pool existente tiver configuração diferente, o antigo é encerrado
+    sem esperar antes de criar o novo.
+    """
+    global _PERSISTENT_POOL, _PERSISTENT_POOL_CONFIG
+    cfg_key = (n_workers, n_threads, hankel_filter)
+    if _PERSISTENT_POOL is None or _PERSISTENT_POOL_CONFIG != cfg_key:
+        if _PERSISTENT_POOL is not None:
+            try:
+                _PERSISTENT_POOL.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                _PERSISTENT_POOL.shutdown(wait=False)
+            except Exception:
+                pass
+        _PERSISTENT_POOL = ProcessPoolExecutor(
+            max_workers=n_workers,
+            mp_context=_mp.get_context("spawn"),
+            initializer=_numba_init_worker,
+            initargs=(n_threads, hankel_filter),
+        )
+        _PERSISTENT_POOL_CONFIG = cfg_key
+    return _PERSISTENT_POOL
+
+
+def release_numba_pool() -> None:
+    """Encerra o pool persistente de forma limpa.
+
+    Deve ser chamado em ``closeEvent()`` da janela principal para liberar
+    os subprocessos antes do encerramento do aplicativo.
+    """
+    global _PERSISTENT_POOL, _PERSISTENT_POOL_CONFIG
+    if _PERSISTENT_POOL is not None:
+        try:
+            _PERSISTENT_POOL.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            _PERSISTENT_POOL.shutdown(wait=False)
+        except Exception:
+            pass
+        _PERSISTENT_POOL = None
+        _PERSISTENT_POOL_CONFIG = None
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # Estruturas de configuração
@@ -137,6 +238,10 @@ def run_numba_chunk(
     """
     os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
     os.environ["OMP_NUM_THREADS"] = str(n_threads)
+    # Suprimir aviso "omp_set_nested deprecated" do libomp (LLVM OMP usado pelo Numba).
+    # OMP_MAX_ACTIVE_LEVELS=2 substitui OMP_NESTED e deve ser definido antes do import.
+    os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
+    os.environ.setdefault("KMP_WARNINGS", "FALSE")
 
     from geosteering_ai.simulation import SimulationConfig, simulate_multi
 
@@ -150,7 +255,11 @@ def run_numba_chunk(
     )
 
     # ── Warmup JIT (1 chamada descartada por processo) ───────────────────
-    if chunk:
+    # Pulado quando _numba_init_worker já executou o warmup via pool initializer
+    # (pool persistente). Em modo legado (ProcessPoolExecutor efêmero) ou em
+    # workers criados sem initializer, _WORKER_INITIALIZED permanece False e o
+    # warmup ocorre normalmente aqui.
+    if chunk and not _WORKER_INITIALIZED:
         m0 = chunk[0]
         _ = simulate_multi(
             rho_h=np.asarray(m0["rho_h"], dtype=np.float64),
@@ -163,12 +272,13 @@ def run_numba_chunk(
             cfg=cfg,
             hankel_filter=hankel_filter,
         )
-        # Publica evento de warmup concluído (útil p/ warmup feedback em E8).
-        if progress_q is not None:
-            try:
-                progress_q.put({"event": "warmup_done", "worker_id": worker_id})
-            except Exception:
-                pass
+    # Publica evento de warmup concluído — sempre, para que o master
+    # atualize o log independentemente do caminho tomado acima.
+    if progress_q is not None:
+        try:
+            progress_q.put({"event": "warmup_done", "worker_id": worker_id})
+        except Exception:
+            pass
 
     total = int(total_hint) if total_hint is not None else len(chunk)
     t0 = time.perf_counter()
@@ -552,65 +662,75 @@ class SimulationThread(QThread):
                     f"Numba — {n_workers} workers × {req.n_threads} threads "
                     f"({n_total} modelos)."
                 )
-                if n_workers > 1:
-                    # Warmup JIT feedback inline: avisa antes do primeiro
-                    # future.result() que silenciaria 10-30 s de compilação.
-                    self.log.emit(
-                        f"  Aquecendo JIT em {n_workers} workers "
-                        f"(~10–30 s no primeiro modelo de cada worker)…"
-                    )
-                with ProcessPoolExecutor(max_workers=n_workers) as pool:
-                    futures = {
-                        pool.submit(
-                            run_numba_chunk,
-                            wid,
-                            chunk,
-                            req.positions_z,
-                            req.frequencies_hz,
-                            req.tr_spacings_m,
-                            req.dip_degs,
-                            req.hankel_filter,
-                            req.n_threads,
-                            progress_q if use_progress_q else None,
-                            100,
-                            n_total if use_progress_q else None,
-                        ): (wid, chunk, s, e)
-                        for wid, chunk, s, e in batches
-                    }
+                # Pool persistente: workers já aquecidos pelo _numba_init_worker
+                # (pool initializer). Spawn/import/JIT só ocorrem na PRIMEIRA
+                # simulação ou quando n_workers/n_threads/hankel_filter mudam.
+                pool = _acquire_numba_pool(n_workers, req.n_threads, req.hankel_filter)
+                futures = {
+                    pool.submit(
+                        run_numba_chunk,
+                        wid,
+                        chunk,
+                        req.positions_z,
+                        req.frequencies_hz,
+                        req.tr_spacings_m,
+                        req.dip_degs,
+                        req.hankel_filter,
+                        req.n_threads,
+                        progress_q if use_progress_q else None,
+                        100,
+                        n_total if use_progress_q else None,
+                    ): (wid, chunk, s, e)
+                    for wid, chunk, s, e in batches
+                }
 
-                    if use_progress_q:
-                        # Modo sequencial: drena progress_q enquanto o único
-                        # future roda (single future, usamos list() para pegar).
-                        (fut,) = list(futures.keys())
-                        warmup_logged = False
-                        while not fut.done():
-                            if self._stopped:
-                                break
-                            try:
-                                evt = progress_q.get(timeout=0.5)
-                            except Exception:
-                                continue
-                            if not isinstance(evt, dict):
-                                continue
-                            if evt.get("event") == "warmup_done":
-                                if not warmup_logged:
-                                    self.log.emit(
-                                        "  JIT aquecido — iniciando processamento."
-                                    )
-                                    warmup_logged = True
-                                continue
-                            if evt.get("event") == "block":
-                                self._emit_block_log(evt)
-                                dt = max(time.perf_counter() - t0, 1e-6)
-                                throughput = float(evt["done"]) / dt * 3600.0
-                                self.progress_update.emit(
-                                    int(evt["done"]), n_total, throughput
-                                )
-                        wid, H_stack, z_obs, elapsed_w = fut.result()
+                if use_progress_q:
+                    # Modo sequencial: drena progress_q enquanto o único
+                    # future roda (single future, usamos list() para pegar).
+                    (fut,) = list(futures.keys())
+                    warmup_logged = False
+                    while not fut.done():
+                        if self._stopped:
+                            break
+                        try:
+                            evt = progress_q.get(timeout=0.5)
+                        except Exception:
+                            continue
+                        if not isinstance(evt, dict):
+                            continue
+                        if evt.get("event") == "warmup_done":
+                            if not warmup_logged:
+                                self.log.emit("  JIT aquecido — iniciando processamento.")
+                                warmup_logged = True
+                            continue
+                        if evt.get("event") == "block":
+                            self._emit_block_log(evt)
+                            dt = max(time.perf_counter() - t0, 1e-6)
+                            throughput = float(evt["done"]) / dt * 3600.0
+                            self.progress_update.emit(
+                                int(evt["done"]), n_total, throughput
+                            )
+                    wid, H_stack, z_obs, elapsed_w = fut.result()
+                    H_parts[wid] = H_stack
+                    if z_obs_ref is None and z_obs.size > 0:
+                        z_obs_ref = z_obs
+                    done = H_stack.shape[0]
+                    dt = max(time.perf_counter() - t0, 1e-6)
+                    throughput = done / dt * 3600.0
+                    self.progress_update.emit(done, n_total, throughput)
+                    self.log.emit(
+                        f"  Worker {wid}: {H_stack.shape[0]} modelos "
+                        f"em {elapsed_w:.2f}s"
+                    )
+                else:
+                    for future in as_completed(futures):
+                        if self._stopped:
+                            break
+                        wid, H_stack, z_obs, elapsed_w = future.result()
                         H_parts[wid] = H_stack
                         if z_obs_ref is None and z_obs.size > 0:
                             z_obs_ref = z_obs
-                        done = H_stack.shape[0]
+                        done += H_stack.shape[0]
                         dt = max(time.perf_counter() - t0, 1e-6)
                         throughput = done / dt * 3600.0
                         self.progress_update.emit(done, n_total, throughput)
@@ -618,22 +738,6 @@ class SimulationThread(QThread):
                             f"  Worker {wid}: {H_stack.shape[0]} modelos "
                             f"em {elapsed_w:.2f}s"
                         )
-                    else:
-                        for future in as_completed(futures):
-                            if self._stopped:
-                                break
-                            wid, H_stack, z_obs, elapsed_w = future.result()
-                            H_parts[wid] = H_stack
-                            if z_obs_ref is None and z_obs.size > 0:
-                                z_obs_ref = z_obs
-                            done += H_stack.shape[0]
-                            dt = max(time.perf_counter() - t0, 1e-6)
-                            throughput = done / dt * 3600.0
-                            self.progress_update.emit(done, n_total, throughput)
-                            self.log.emit(
-                                f"  Worker {wid}: {H_stack.shape[0]} modelos "
-                                f"em {elapsed_w:.2f}s"
-                            )
                 # Reagrupa preservando ordem dos workers (id asc). Filtra
                 # arrays vazios para evitar ValueError "arrays must have
                 # same number of dimensions" quando algum worker não
@@ -860,10 +964,83 @@ class SaveArtifactsThread(QThread):
             self.error.emit(f"{exc}\n{traceback.format_exc()[:1500]}")
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Pré-aquecimento de cache Numba JIT (v2.9)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class NumbaPrimer(QThread):
+    """Pré-aquece o cache Numba JIT em background no startup do GUI.
+
+    Executa ``simulate_multi`` com um modelo trivial no processo principal,
+    escrevendo artefatos compilados (.nbi/.nbc) em disco via ``cache=True``.
+    Quando a primeira simulação real iniciar, os workers subprocessos
+    carregarão o cache do disco (~3–5 s) em vez de recompilar do zero
+    (~90–110 s após atualização de ambiente Python/Numba).
+
+    Signals:
+        primer_done(float): Tempo elapsed em segundos. Valor baixo (<15 s)
+            indica que o cache já estava em disco; valor alto indica que o
+            compilador LLVM precisou recompilar as funções @njit(cache=True).
+        primer_failed(str): Emitido se Numba não estiver disponível ou se
+            ``simulate_multi`` lançar exceção. O argumento é a msg de erro.
+
+    Note:
+        O primer usa ``NUMBA_NUM_THREADS=1`` para não disputar CPU com a GUI.
+        Os workers de simulação usam ``n_threads`` configurado pelo usuário.
+        Após o primer concluir, o cache em disco é válido para qualquer
+        quantidade de threads (Numba compila por assinatura de tipos, não por
+        contagem de threads).
+    """
+
+    primer_done = Signal(float)
+    primer_failed = Signal(str)
+
+    def run(self) -> None:
+        """Configura env OMP, importa simulate_multi e roda 1 modelo trivial."""
+        # NÃO setar NUMBA_NUM_THREADS/OMP_NUM_THREADS aqui — modificaria o ambiente
+        # do processo pai, envenenando workers filhos (spawn herda o env): eles
+        # inicializariam o pool Numba com max=1 thread e falhariam em
+        # set_num_threads(N>1) com "must be between 1 and 1".
+        # O SimulationConfig(num_threads=1) abaixo já garante thread única via
+        # _numba.set_num_threads(1) dentro de simulate_multi — sem afetar o env.
+        os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
+        os.environ.setdefault("KMP_WARNINGS", "FALSE")
+
+        try:
+            from geosteering_ai.simulation import SimulationConfig, simulate_multi
+        except Exception as exc:
+            self.primer_failed.emit(str(exc))
+            return
+
+        t0 = time.perf_counter()
+        try:
+            cfg = SimulationConfig(backend="numba", num_threads=1)
+            simulate_multi(
+                rho_h=np.array([1.0, 10.0, 1.0], dtype=np.float64),
+                rho_v=np.array([1.0, 10.0, 1.0], dtype=np.float64),
+                esp=np.array([5.0, 5.0], dtype=np.float64),
+                positions_z=np.array([0.0], dtype=np.float64),
+                frequencies_hz=[20000.0],
+                tr_spacings_m=[1.0],
+                dip_degs=[0.0],
+                cfg=cfg,
+            )
+        except Exception as exc:
+            self.primer_failed.emit(str(exc))
+            return
+
+        self.primer_done.emit(time.perf_counter() - t0)
+
+
 __all__ = [
+    "NumbaPrimer",
     "SaveArtifactsThread",
     "SimRequest",
     "SimulationThread",
+    "_acquire_numba_pool",
+    "_noop",
+    "release_numba_pool",
     "run_fortran_chunk",
     "run_numba_chunk",
 ]
