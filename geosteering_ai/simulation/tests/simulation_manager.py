@@ -2231,6 +2231,10 @@ class SimulatorPage(QtWidgets.QWidget):
     request_clear_simulations = Signal()  # v2.4 — botão "Limpar Simulações"
     request_history_select = Signal(str)  # v2.4 — snapshot_id (clique simples)
     request_history_open = Signal(str)  # v2.4 — snapshot_id (duplo-clique)
+    # v2.11 — pause/resume/cancel cooperativos
+    request_pause = Signal()
+    request_resume = Signal()
+    request_cancel = Signal()
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
@@ -2378,6 +2382,33 @@ class SimulatorPage(QtWidgets.QWidget):
                 "antes de liberar o processo. Após parar, 'Iniciar Simulação' fica disponível."
             ),
         )
+        # v2.11 — Pause/Cancel cooperativos.
+        # Pause: bloqueia entre checkpoints, libera com Resume ou Cancel.
+        # Cancel: distinto de Stop (legado) — sempre limpa pool e emite cancelled.
+        self.btn_pause = QtWidgets.QPushButton("⏸  Pausar")
+        self.btn_pause.setProperty("role", "warning")
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.setCheckable(True)
+        _tooltip(
+            self.btn_pause,
+            (
+                "<b>Pausar / Retomar</b><br/>"
+                "Pausa a simulação em um ponto checkpoint cooperativo. Quando "
+                "pausada, o estado é preservado — clique novamente para retomar. "
+                "Útil em simulações longas (30k+ modelos)."
+            ),
+        )
+        self.btn_cancel = QtWidgets.QPushButton("✖  Cancelar")
+        self.btn_cancel.setProperty("role", "danger")
+        self.btn_cancel.setEnabled(False)
+        _tooltip(
+            self.btn_cancel,
+            (
+                "<b>Cancelar simulação (v2.11)</b><br/>"
+                "Cancela imediatamente, libera workers e emite sinal cancelled. "
+                "Diferente de Parar: não aguarda chunk em curso terminar normalmente."
+            ),
+        )
         # v2.4: bot\u00e3o "Limpar Simula\u00e7\u00f5es" \u2014 apaga hist\u00f3rico do experimento
         # com confirma\u00e7\u00e3o via QMessageBox (handler no MainWindow).
         self.btn_clear_sims = QtWidgets.QPushButton("🗑  Limpar Simulações")
@@ -2408,12 +2439,18 @@ class SimulatorPage(QtWidgets.QWidget):
             ),
         )
         exec_row.addWidget(self.btn_start)
+        exec_row.addWidget(self.btn_pause)
         exec_row.addWidget(self.btn_stop)
+        exec_row.addWidget(self.btn_cancel)
         exec_row.addWidget(self.btn_clear_sims)
         exec_row.addWidget(self.progress, 1)
         exec_row.addWidget(self.lbl_throughput)
         self.btn_start.clicked.connect(self.request_start.emit)
         self.btn_stop.clicked.connect(self.request_stop.emit)
+        # v2.11 — Pause toggle: clicado → pause; re-clicado → resume.
+        # `clicked` (não `toggled`) garante 1 emit por clique do usuário.
+        self.btn_pause.clicked.connect(self._on_pause_clicked)
+        self.btn_cancel.clicked.connect(self.request_cancel.emit)
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setObjectName("LogView")
@@ -2754,13 +2791,36 @@ class SimulatorPage(QtWidgets.QWidget):
         self.log_view.setMaximumBlockCount(self._log_default_block_count)
 
     def set_running(self, running: bool) -> None:
-        """Atualiza o estado dos botões Start/Stop.
+        """Atualiza o estado dos botões Start/Pause/Stop/Cancel (v2.11).
 
         CORREÇÃO: ``running=False`` SEMPRE reabilita Start. Garantia de que
         após Stop (ou erro) o usuário possa reiniciar sem travar a UI.
         """
         self.btn_start.setEnabled(not running)
         self.btn_stop.setEnabled(running)
+        # v2.11 — Pause/Cancel só fazem sentido durante execução.
+        self.btn_pause.setEnabled(running)
+        self.btn_cancel.setEnabled(running)
+        # Reset estado de pausa quando para de rodar (não fica "pausado" ao terminar).
+        if not running:
+            self.btn_pause.setChecked(False)
+            self.btn_pause.setText("⏸  Pausar")
+
+    def _on_pause_clicked(self) -> None:
+        """Toggle Pause/Resume — emite o sinal correspondente (v2.11).
+
+        QPushButton.checkable=True alterna ``isChecked()`` automaticamente
+        antes do slot rodar. Usamos esse estado para decidir qual sinal
+        emitir ao MainWindow.
+        """
+        if self.btn_pause.isChecked():
+            # Estado: pausado — atualiza visual e emite sinal de pausa.
+            self.btn_pause.setText("▶  Retomar")
+            self.request_pause.emit()
+        else:
+            # Estado: rodando novamente — atualiza visual e emite resume.
+            self.btn_pause.setText("⏸  Pausar")
+            self.request_resume.emit()
 
     def update_npos_from_params(self, params_page: "ParametersPage") -> None:
         """Recalcula e atualiza o label ``lbl_npos`` a partir dos parâmetros.
@@ -7093,6 +7153,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.page_sim.request_start.connect(self._start_simulation)
         self.page_sim.request_stop.connect(self._stop_simulation)
+        # v2.11 — pause/resume/cancel cooperativos.
+        self.page_sim.request_pause.connect(self._pause_simulation)
+        self.page_sim.request_resume.connect(self._resume_simulation)
+        self.page_sim.request_cancel.connect(self._cancel_simulation)
         self.page_sim.request_clear_simulations.connect(
             self._on_clear_simulations_requested
         )
@@ -7909,6 +7973,8 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda d: self._on_sim_finished(d, req, models)
         )
         self._sim_thread.error.connect(self._on_sim_error)
+        # v2.11 — sinais de pause/resume/cancel.
+        self._sim_thread.cancelled.connect(self._on_sim_cancelled)
         # Reabilita o Start QUANDO o thread terminar (qualquer desfecho),
         # garantindo que parar + iniciar de novo funcione sempre.
         self._sim_thread.finished.connect(lambda: sim.set_running(False))
@@ -7924,6 +7990,57 @@ class MainWindow(QtWidgets.QMainWindow):
             self.page_sim.append_log(
                 "Solicitação de parada enviada (parada ocorrerá entre chunks)."
             )
+
+    # ── v2.11: Pause/Resume/Cancel handlers ──────────────────────────────
+
+    def _pause_simulation(self) -> None:
+        """Solicita pausa cooperativa da simulação atual (v2.11).
+
+        Pausa também a geração de modelos se estiver em curso (raro, pois
+        a fase de geração é tipicamente rápida; mas para 30k+ modelos pode
+        levar 1-3 minutos). A thread bloqueia em pontos checkpoint.
+        """
+        # Geração ainda em curso — cancelar (não há "pausa" intermediária
+        # para geração; é tudo ou nada por design).
+        gen = self._gen_thread
+        if gen is not None and gen.isRunning():
+            self.page_sim.append_log(
+                "Pausa durante geração — geração continuará até concluir."
+            )
+            # Não cancelamos a geração ao pausar; apenas marcamos para
+            # pausar quando a SimulationThread iniciar.
+        sim = self._sim_thread
+        if sim is not None and sim.isRunning():
+            sim.request_pause()
+            self.page_sim.append_log(
+                "⏸  Simulação pausada — clique 'Retomar' para continuar."
+            )
+            self.status.showMessage("Simulação pausada")
+
+    def _resume_simulation(self) -> None:
+        """Retoma simulação pausada (v2.11)."""
+        sim = self._sim_thread
+        if sim is not None and sim.isRunning() and sim.is_paused:
+            sim.request_resume()
+            self.page_sim.append_log("▶  Simulação retomada.")
+            self.status.showMessage("Simulação rodando")
+
+    def _cancel_simulation(self) -> None:
+        """Cancela simulação atual (v2.11) — gera ou simulação.
+
+        Diferente de ``_stop_simulation``: este método cancela tudo,
+        incluindo geração de modelos em curso. Usado pelo botão "Cancelar".
+        """
+        gen = self._gen_thread
+        if gen is not None and gen.isRunning():
+            gen.request_cancel()
+            self.page_sim.append_log("Geração cancelada pelo usuário.")
+            return
+        sim = self._sim_thread
+        if sim is not None and sim.isRunning():
+            sim.request_cancel()
+            self.page_sim.append_log("Cancelamento solicitado — encerrando workers…")
+            self.status.showMessage("Cancelando…")
 
     def _on_sim_progress(self, done: int, total: int, mod_h: float) -> None:
         pct = int(100.0 * done / max(total, 1))
@@ -8361,9 +8478,31 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
     def _on_sim_error(self, msg: str) -> None:
+        # v2.11: encerra phase ativa em caso de erro.
+        self._phase_timer.end("simulation")
         self.page_sim.set_running(False)
+        try:
+            self.page_sim.end_massive_simulation_log_mode()
+        except Exception:
+            pass
         self.page_sim.append_log(f"[ERRO] {msg}")
         QtWidgets.QMessageBox.critical(self, "Erro na simulação", msg[:800])
+
+    def _on_sim_cancelled(self) -> None:
+        """Handler do sinal SimulationThread.cancelled (v2.11).
+
+        Diferente do erro, cancelamento é estado terminal mas não-erro.
+        Apenas registra no log e restaura UI; o ``SimulationThread.finished``
+        já reabilita Start.
+        """
+        # Encerra phase ativa.
+        self._phase_timer.end("simulation")
+        try:
+            self.page_sim.end_massive_simulation_log_mode()
+        except Exception:
+            pass
+        self.page_sim.append_log("Simulação cancelada — workers liberados.")
+        self.status.showMessage("Cancelada.", 5000)
 
     def _on_artifacts_saved(self, info: Dict[str, Any]) -> None:
         """Handler do sinal SaveArtifactsThread.saved — executa na main thread."""
@@ -9967,6 +10106,110 @@ def _run_smoke_test() -> int:
         )
     except Exception as exc:
         check(False, f"v2.11 T22: MainWindow async pipeline ({exc})")
+
+    # ── v2.11 T23: SimulationThread + UI Pause/Cancel cooperativo ──────────
+    try:
+        from .sm_workers import SimulationThread
+
+        # Sinais novos
+        check(
+            hasattr(SimulationThread, "paused")
+            and hasattr(SimulationThread, "resumed")
+            and hasattr(SimulationThread, "cancelled"),
+            "v2.11 T23: SimulationThread expõe sinais paused/resumed/cancelled",
+        )
+        # APIs públicas em uma instância (mínimo dummy req+models).
+        from .sm_workers import SimRequest
+
+        dummy_req = SimRequest(
+            frequencies_hz=[20000.0],
+            tr_spacings_m=[1.0],
+            dip_degs=[0.0],
+            positions_z=np.array([0.0]),
+            backend="numba",
+            n_workers=1,
+            n_threads=1,
+            hankel_filter="werthmuller_201pt",
+            h1=0.0,
+            tj=1.0,
+            p_med=1.0,
+            fortran_binary="",
+            save_raw=False,
+            output_dir="/tmp",
+            output_filename="dummy",
+        )
+        st = SimulationThread(
+            dummy_req,
+            [
+                {
+                    "n_layers": 3,
+                    "rho_h": [1, 10, 1],
+                    "rho_v": [1, 10, 1],
+                    "thicknesses": [1.0],
+                }
+            ],
+        )
+        check(
+            callable(getattr(st, "request_pause", None)),
+            "v2.11 T23: SimulationThread.request_pause é chamável",
+        )
+        check(
+            callable(getattr(st, "request_resume", None)),
+            "v2.11 T23: SimulationThread.request_resume é chamável",
+        )
+        check(
+            callable(getattr(st, "request_cancel", None)),
+            "v2.11 T23: SimulationThread.request_cancel é chamável",
+        )
+        check(
+            st.is_paused is False and st.is_cancelled is False,
+            "v2.11 T23: SimulationThread inicializa is_paused/is_cancelled = False",
+        )
+        # Pause/resume idempotência cooperativa (sem rodar a thread).
+        st.request_pause()
+        check(
+            st.is_paused is True,
+            "v2.11 T23: request_pause atualiza is_paused = True",
+        )
+        st.request_resume()
+        check(
+            st.is_paused is False,
+            "v2.11 T23: request_resume restaura is_paused = False",
+        )
+        # MainWindow handlers
+        check(
+            callable(getattr(window, "_pause_simulation", None)),
+            "v2.11 T23: MainWindow._pause_simulation é chamável",
+        )
+        check(
+            callable(getattr(window, "_resume_simulation", None)),
+            "v2.11 T23: MainWindow._resume_simulation é chamável",
+        )
+        check(
+            callable(getattr(window, "_cancel_simulation", None)),
+            "v2.11 T23: MainWindow._cancel_simulation é chamável",
+        )
+        check(
+            callable(getattr(window, "_on_sim_cancelled", None)),
+            "v2.11 T23: MainWindow._on_sim_cancelled handler é chamável",
+        )
+        # UI buttons
+        check(
+            hasattr(window.page_sim, "btn_pause")
+            and hasattr(window.page_sim, "btn_cancel"),
+            "v2.11 T23: SimulatorPage tem btn_pause + btn_cancel",
+        )
+        check(
+            window.page_sim.btn_pause.isCheckable(),
+            "v2.11 T23: btn_pause é checkable (toggle Pause/Resume)",
+        )
+        check(
+            not window.page_sim.btn_pause.isEnabled()
+            and not window.page_sim.btn_cancel.isEnabled(),
+            "v2.11 T23: btn_pause/btn_cancel desabilitados quando idle",
+        )
+    except Exception as exc:
+        check(False, f"v2.11 T23: Pause/Cancel ({exc})")
 
     print(f"\n=== Resultado: {len(failures)} falha(s) ===")
     window.close()

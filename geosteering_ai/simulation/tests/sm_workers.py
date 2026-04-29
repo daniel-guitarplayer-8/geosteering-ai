@@ -560,6 +560,10 @@ class SimulationThread(QThread):
     log = Signal(str)
     finished_all = Signal(dict)
     error = Signal(str)
+    # v2.11 — sinais de pausa/retomada/cancelamento cooperativo
+    paused = Signal()
+    resumed = Signal()
+    cancelled = Signal()
 
     def __init__(
         self,
@@ -570,11 +574,80 @@ class SimulationThread(QThread):
         super().__init__(parent)
         self._req = req
         self._models = models
+        # Flag legada de cancelamento — preservada para retro-compat.
+        # request_stop() = "pare ao final do chunk em curso" (cancelamento).
         self._stopped = False
+        # v2.11 — flag separada para "cancelamento agressivo" pedido pelo
+        # botão Cancel da UI. Distingue cancel intencional vs stop legado.
+        self._cancel_requested = False
+        # v2.11 — Event para pausa cooperativa. Quando setado (default),
+        # a thread roda livremente; quando clear, a thread bloqueia em wait().
+        # Uso em pontos checkpoint dentro do loop run().
+        import threading as _threading
+
+        self._pause_event = _threading.Event()
+        self._pause_event.set()
+        self._is_paused: bool = False
 
     def request_stop(self) -> None:
-        """Solicita interrupção cooperativa (entre chunks)."""
+        """Solicita interrupção cooperativa (entre chunks).
+
+        Mantém comportamento v2.10 — usado pelo botão "Parar" legado.
+        Para cancelamento explícito v2.11, ver :meth:`request_cancel`.
+        """
         self._stopped = True
+
+    def request_pause(self) -> None:
+        """Solicita pausa cooperativa (v2.11).
+
+        A thread bloqueia em pontos checkpoint dentro do loop ``run()``
+        até :meth:`request_resume` ou :meth:`request_cancel`. Idempotente.
+        """
+        if self._is_paused:
+            return
+        self._is_paused = True
+        self._pause_event.clear()
+        self.paused.emit()
+
+    def request_resume(self) -> None:
+        """Retoma a execução após :meth:`request_pause` (v2.11). Idempotente."""
+        if not self._is_paused:
+            return
+        self._is_paused = False
+        self._pause_event.set()
+        self.resumed.emit()
+
+    def request_cancel(self) -> None:
+        """Solicita cancelamento agressivo da simulação (v2.11).
+
+        Diferente de ``request_stop``, este método também libera a thread
+        de qualquer pausa em andamento, garantindo que o cleanup ocorra
+        imediatamente. Emite ``cancelled`` quando o cleanup conclui.
+        """
+        self._cancel_requested = True
+        self._stopped = True  # também sinaliza para o loop legado
+        # Libera qualquer wait pendente em pause checkpoint.
+        self._pause_event.set()
+
+    @property
+    def is_paused(self) -> bool:
+        """Estado atual da pausa cooperativa (v2.11)."""
+        return self._is_paused
+
+    @property
+    def is_cancelled(self) -> bool:
+        """Estado atual do cancelamento (v2.11)."""
+        return self._cancel_requested
+
+    def _wait_if_paused(self) -> None:
+        """Bloqueia se houver pausa solicitada (v2.11). Chamado em checkpoints.
+
+        Usar timeout interno em ``Event.wait`` permitiria checagem de
+        cancelamento durante a pausa — mas como ``request_cancel`` faz
+        ``_pause_event.set()`` para liberar o wait, basta um wait simples.
+        """
+        if not self._pause_event.is_set():
+            self._pause_event.wait()
 
     def _emit_block_log(self, evt: Dict[str, Any]) -> None:
         """Converte um evento de ``progress_q`` em mensagem de log estruturada.
@@ -690,6 +763,9 @@ class SimulationThread(QThread):
                     (fut,) = list(futures.keys())
                     warmup_logged = False
                     while not fut.done():
+                        # v2.11: pausa cooperativa — bloqueia se _pause_event
+                        # foi clear via request_pause(). request_cancel libera.
+                        self._wait_if_paused()
                         if self._stopped:
                             break
                         try:
@@ -724,6 +800,8 @@ class SimulationThread(QThread):
                     )
                 else:
                     for future in as_completed(futures):
+                        # v2.11: pausa cooperativa entre workers concluídos.
+                        self._wait_if_paused()
                         if self._stopped:
                             break
                         wid, H_stack, z_obs, elapsed_w = future.result()
@@ -818,6 +896,8 @@ class SimulationThread(QThread):
                 if use_progress_q:
                     (fut,) = list(futures.keys())
                     while not fut.done():
+                        # v2.11: pausa cooperativa Fortran path (sequencial).
+                        self._wait_if_paused()
                         if self._stopped:
                             break
                         try:
@@ -840,6 +920,8 @@ class SimulationThread(QThread):
                     self.log.emit(f"  Worker {wid}: chunk processado em {elapsed_w:.2f}s")
                 else:
                     for future in as_completed(futures):
+                        # v2.11: pausa cooperativa Fortran path (paralelo).
+                        self._wait_if_paused()
                         if self._stopped:
                             break
                         wid, files, elapsed_w = future.result()
@@ -871,6 +953,10 @@ class SimulationThread(QThread):
 
             self.error.emit(f"{exc}\n{traceback.format_exc()[:2000]}")
         finally:
+            # v2.11 — emit cancelled após cleanup se foi cancelamento explícito.
+            # Diferencia stop legado (apenas _stopped) de cancel intencional.
+            if self._cancel_requested:
+                self.cancelled.emit()
             # Encerra o Manager (se criado) para liberar o subprocess auxiliar.
             if mp_manager is not None:
                 try:
