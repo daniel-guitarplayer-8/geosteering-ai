@@ -67,3 +67,11 @@ Fortran_Gerador/*.out
 # ── Pacotes de Skill legados ─────────────────────────────────────────────────
 *.skill
 .claude/worktrees/
+
+# ── Dados de usuário do Simulation Manager (não versionados) ─────────────────
+sm_experiments/*.exp.json
+sm_heartbeat.log
+benchmarks/reports/
+
+# ── Tooling local (harness Claude Code) ──────────────────────────────────────
+.agents/
