@@ -13,6 +13,7 @@
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |
 | **Pacote** | `geosteering_ai/` (pip installable) |
 | **Referencia** | `docs/ARCHITECTURE_v2.md` (documento completo da arquitetura) |
+| **Simulation Manager** | v2.11 (2026-04-29) — async generation + Pause/Cancel cooperativo · 197 smoke tests |
 
 ---
 
@@ -77,12 +78,23 @@ Python 3.13 tem compatibilidade 100% com todas as dependências do projeto.
   "implementação", "configuração", "não", "função". Esta regra se aplica a qualquer arquivo
   gerado ou editado, incluindo comentários em blocos de código Fortran, Python e YAML.
 
-- **Geração de relatórios MD — perguntar antes** — Por padrão, NÃO gere arquivos MD de
-  relatórios/análises sem solicitação explícita do usuário. Se a geração parecer importante
-  para documentar uma decisão ou análise, PERGUNTE PRIMEIRO ao usuário antes de criar o
-  arquivo. Exceção: arquivos MD que são atualização de documentos existentes no `docs/`
-  (ex.: ROADMAP.md, documentacao_simulador_fortran_otimizado.md) podem ser editados sem
-  confirmação quando o contexto da tarefa indica claramente que é esperado.
+- **Geração de relatórios MD — automática com critérios** — Gerar relatório MD
+  automaticamente (sem solicitar confirmação) se qualquer um dos critérios abaixo for
+  satisfeito:
+  1. Usuário pediu explicitamente ("gere relatório", "documente isso");
+  2. Mudança de versão (git tag, merge de PR major, bump de `__version__`);
+  3. Sessão de trabalho com ≥5 commits desde o último relatório em `docs/reports/`.
+
+  **Formato obrigatório** — via template estruturado (`.claude/templates/report_template.md`):
+  - ≥70% dados estruturados (tabelas, listas, blocos de código com linhas exatas);
+  - ≤30% prosa original;
+  - Salvar em `docs/reports/v{VERSION}_{YYYY-MM-DD}.md`;
+  - Atualizar `docs/CHANGELOG.md` com entrada resumida (append, nunca replace).
+
+  **Exceção** — análises exploratórias abertas (DECISION.md, ANALYSIS.md) ou documentos
+  que não seguem o template (pesquisas, comparações de algoritmos): perguntar antes.
+  Atualização de documentos existentes em `docs/` (ROADMAP.md, ARCHITECTURE_v2.md)
+  pode ser feita sem confirmação quando o contexto indica claramente que é esperado.
 
 ---
 

@@ -1,10 +1,27 @@
 # Roadmap Completo — Geosteering AI v2.0+
 
-**Versão do documento:** 1.0 (Abril 2026)
+**Versão do documento:** 1.1 (Abril 2026)
 **Autor:** Daniel Leal
 **Projeto:** Inversão 1D de Resistividade via Deep Learning para Geosteering
 **Framework:** TensorFlow 2.x / Keras (exclusivo)
 **Repositório:** `github.com/daniel-guitarplayer-8/geosteering-ai`
+
+---
+
+## Marcos recentes do Simulation Manager
+
+| Versão  | Data       | Tema central                                                  | Smoke tests | Branch / PR                          |
+|:-------:|:-----------|:-------------------------------------------------------------|:-----------:|:-------------------------------------|
+| v2.5    | 2026-04-25 | PlotComposerDialog + cache LRU multi-freq×angle + JAX chunk  | 70/70       | PR #26 (mergeado)                    |
+| v2.6b   | -          | Bug fix A1 + multi-backend foundation                        | -           | PR (mergeado)                        |
+| v2.7a   | 2026-04-27 | Migração PyQt6+PySide6 + bug fixes + UX polish               | -           | PR #29 (mergeado)                    |
+| v2.8    | -          | Plot kinds dinâmicos + CorrelationAnalysisDialog             | 142         | -                                    |
+| v2.9    | 2026-04-28 | NumbaPrimer + remoção crosshair + QSettings fix              | 148         | -                                    |
+| v2.10   | 2026-04-28 | Pool persistente Numba + p-value fallback conservador        | 156         | -                                    |
+| **v2.11** | **2026-04-29** | **Eliminação freezing GUI + Pause/Cancel cooperativo + PhaseTimer** | **197**     | **`feat/simulation-manager-v2.11`** |
+
+Documentação detalhada em `docs/reports/v2.{N}_2026-04-{D}.md` e
+`docs/CHANGELOG.md`.
 
 ---
 
