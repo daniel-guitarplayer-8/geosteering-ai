@@ -83,8 +83,17 @@ if QT_AVAILABLE:
         BenchRecord,
         default_canonical_config,
     )
+    from .sm_heartbeat import (
+        MainThreadHeartbeat,
+    )
+    from .sm_heartbeat import is_enabled_via_env as heartbeat_is_enabled_via_env
     from .sm_io import compute_nmeds_per_angle
-    from .sm_model_gen import GENERATORS_AVAILABLE, GenConfig, generate_models
+    from .sm_model_gen import (
+        GENERATORS_AVAILABLE,
+        GenConfig,
+        ModelGenerationThread,
+    )
+    from .sm_phase_timer import PhaseTimer
     from .sm_plot_cache import LRUPlotCache
     from .sm_plots import (
         COMPONENT_NAMES,
@@ -99,6 +108,7 @@ if QT_AVAILABLE:
         plot_resistivity_profile,
         plot_tensor_full,
     )
+    from .sm_snapshot_persist import SnapshotPersistThread
     from .sm_workers import (
         NumbaPrimer,
         SaveArtifactsThread,
@@ -2409,13 +2419,28 @@ class SimulatorPage(QtWidgets.QWidget):
         self.log_view.setObjectName("LogView")
         self.log_view.setReadOnly(True)
         self.log_view.setPlaceholderText("Log de execução aparecerá aqui.")
-        self.log_view.setMaximumBlockCount(5000)
+        # v2.11: limite reduzido durante simulações massivas para minimizar
+        # custo de paint do QPlainTextEdit. Restaurado ao default em
+        # ``end_massive_simulation_log_mode``.
+        self._log_default_block_count = 5000
+        self.log_view.setMaximumBlockCount(self._log_default_block_count)
+        # ── Log buffer + flush throttled (v2.11) ────────────────────────
+        # Resolve Gargalo #2 (appendPlainText O(N²/100²) acumulativo na main
+        # thread). Mensagens vão para um buffer (custo O(1) por append). Um
+        # QTimer fire a cada 250ms e flusha o buffer em uma única chamada
+        # appendPlainText — colapsando 100s de updates em 1.
+        self._log_buffer: List[str] = []
+        self._log_flush_timer = QtCore.QTimer(self)
+        self._log_flush_timer.setInterval(250)  # 250ms = 4 Hz, imperceptível
+        self._log_flush_timer.timeout.connect(self._flush_log_buffer)
+        self._log_flush_timer.start()
         _tooltip(
             self.log_view,
             (
                 "<b>Log de execução</b><br/>"
                 "Mensagens informativas, avisos e erros da simulação + workers. "
-                "Limite de ~5000 linhas (rotação automática)."
+                "Limite de ~5000 linhas (rotação automática). v2.11: buffer "
+                "throttled (flush a cada 250ms) para preservar GUI responsiva."
             ),
         )
 
@@ -2687,7 +2712,46 @@ class SimulatorPage(QtWidgets.QWidget):
             self.edit_output_dir.setText(path)
 
     def append_log(self, msg: str) -> None:
-        self.log_view.appendPlainText(msg)
+        """Adiciona mensagem ao buffer de log (v2.11 — não-bloqueante).
+
+        O custo é O(1): apenas anexa à lista interna. O ``QPlainTextEdit``
+        é atualizado em batch pelo ``_log_flush_timer`` a cada 250ms,
+        eliminando o overhead O(N²) de centenas de appendPlainText
+        (Gargalo #2 do profiling baseline v2.11).
+        """
+        self._log_buffer.append(msg)
+
+    def _flush_log_buffer(self) -> None:
+        """Flush throttled — chamado pelo QTimer a cada 250ms (v2.11).
+
+        Concatena todas as mensagens pendentes em uma única chamada
+        ``appendPlainText`` (1 reflow + 1 repaint por janela de 250ms,
+        em vez de N reflows). Idempotente quando o buffer está vazio.
+        """
+        if not self._log_buffer:
+            return
+        # Snapshot e clear atômicos (main thread serial — sem race).
+        batch = "\n".join(self._log_buffer)
+        self._log_buffer.clear()
+        # Single appendPlainText em vez de N — economia O(N) por flush.
+        self.log_view.appendPlainText(batch)
+
+    def begin_massive_simulation_log_mode(self) -> None:
+        """Reduz ``setMaximumBlockCount`` para limitar uso de memória (v2.11).
+
+        Chamado em ``MainWindow._start_simulation`` quando ``n_models > 5000``.
+        O block count menor (1000) reduz a quantidade de linhas mantidas no
+        documento, diminuindo o custo de cada paint frame durante a sessão
+        massiva. Restaurado ao default por ``end_massive_simulation_log_mode``.
+        """
+        self.log_view.setMaximumBlockCount(1000)
+
+    def end_massive_simulation_log_mode(self) -> None:
+        """Restaura ``setMaximumBlockCount`` ao valor default (v2.11)."""
+        # Flush imediato antes de restaurar — garante que mensagens finais
+        # da simulação fiquem visíveis sem aguardar o próximo timer tick.
+        self._flush_log_buffer()
+        self.log_view.setMaximumBlockCount(self._log_default_block_count)
 
     def set_running(self, running: bool) -> None:
         """Atualiza o estado dos botões Start/Stop.
@@ -6988,6 +7052,24 @@ class MainWindow(QtWidgets.QMainWindow):
         # SaveArtifactsThread sobrevive ao retorno de _on_sim_finished —
         # armazenado como atributo para GC não destruir prematuramente.
         self._save_thread: Optional[SaveArtifactsThread] = None
+        # v2.11 — ModelGenerationThread (geração de modelos não-bloqueante).
+        # Atributo para sobreviver ao escopo de _start_simulation; main thread
+        # aguarda finished_models antes de lançar SimulationThread.
+        self._gen_thread: Optional[ModelGenerationThread] = None
+        # Estado intermediário entre geração e simulação. None quando não há
+        # geração em curso; tupla (req, sim_page) quando aguardando modelos.
+        self._stochastic_models_in_progress: Optional[tuple] = None
+        # v2.11 — SnapshotPersistThread (gravação de .exp.json não-bloqueante).
+        self._snapshot_thread: Optional[SnapshotPersistThread] = None
+
+        # v2.11 — Cronologia das fases (PhaseTimer) e sentinel da main thread
+        # (MainThreadHeartbeat). Ambos são instrumentação permanente, leve e
+        # opt-in para o heartbeat (env var ``SM_HEARTBEAT=1`` ativa medição).
+        self._phase_timer: PhaseTimer = PhaseTimer(self)
+        self._heartbeat: Optional[MainThreadHeartbeat] = None
+        if heartbeat_is_enabled_via_env():
+            self._heartbeat = MainThreadHeartbeat(parent=self)
+            self._heartbeat.start()
 
         # v2.9 — Pré-aquecimento de cache Numba JIT em background.
         # Elimina a lentidão da 1ª simulação após atualização de ambiente
@@ -7562,6 +7644,23 @@ class MainWindow(QtWidgets.QMainWindow):
     # ── Simulação ─────────────────────────────────────────────────────────
 
     def _start_simulation(self) -> None:
+        """Entry point do botão "Iniciar Simulação" (v2.11 async).
+
+        Pipeline em fases:
+
+        1. Pre-checks (threads em execução, NumbaPrimer)
+        2. **validation**: coleta + validação de parâmetros UI (rápido,
+           main thread).
+        3. **generation**: para o modo estocástico (gerador de modelos),
+           delegado a :class:`ModelGenerationThread` em QThread separada
+           (Gargalo #1 do profiling baseline v2.11). Para modos
+           Manual/Canônico, geração ocorre síncrona (loop barato).
+        4. Continuação em :meth:`_continue_simulation_with_models`,
+           que cria a :class:`SimulationThread` e a inicia.
+
+        Para detalhes do diagnóstico de freezing eliminado nesta versão
+        ver ``docs/reports/v2.11_baseline_profiling.md``.
+        """
         if self._sim_thread and self._sim_thread.isRunning():
             QtWidgets.QMessageBox.warning(
                 self,
@@ -7580,6 +7679,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 "terminar antes de iniciar uma nova.",
             )
             return
+        # v2.11: ModelGenerationThread anterior ainda em curso (improvável,
+        # mas guard contra duplo-clique no botão durante geração massiva).
+        gen_thread = getattr(self, "_gen_thread", None)
+        if gen_thread is not None and gen_thread.isRunning():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Geração em curso",
+                "Modelos ainda sendo gerados. Aguarde ou cancele.",
+            )
+            return
         # v2.10: defer — NumbaPrimer ainda compilando cache JIT. A simulação
         # será re-disparada automaticamente em _on_primer_done() ao concluir.
         primer = getattr(self, "_numba_primer", None)
@@ -7593,6 +7702,10 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
         try:
+            # v2.11: nova sessão — limpar timings da execução anterior.
+            self._phase_timer.reset()
+            self._phase_timer.begin("validation")
+
             params = self.page_params
             sim = self.page_sim
             freqs = params.collect_freqs() or [20000.0]
@@ -7618,47 +7731,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"(z ∈ [{-h1_val:.2f}, {tj_val - h1_val:.2f}] m, interfaces em z=0)"
             )
 
-            # Hierarquia de geração (v2.4): Manual → Canônico → Estocástico.
-            # Manual tem prioridade porque o usuário pode ter editado a tabela
-            # (inclusive partindo de um perfil canônico pré-preenchido).
-            n_models = max(1, int(params.spin_nmodels.value()))
-            if params.has_manual_override():
-                manual = params.get_manual_override() or {}
-                models = [
-                    {
-                        "n_layers": int(manual.get("n_layers", 3)),
-                        "thicknesses": list(manual.get("thicknesses", [])),
-                        "rho_h": list(manual.get("rho_h", [])),
-                        "rho_v": list(manual.get("rho_v", [])),
-                    }
-                    for _ in range(n_models)
-                ]
-                sim.append_log(
-                    f"Perfil manual ativo — {int(manual.get('n_layers', 0))} "
-                    f"camadas · {n_models} cópia(s) idêntica(s)."
-                )
-            elif params.has_canonical_override():
-                # Se houver perfil canônico aplicado (e o usuário não está em
-                # Manual), replica o canônico — preservado para compat com
-                # fluxos que não passam pela tabela manual.
-                from .sm_canonical_profiles import build_single_model_dict
-
-                cm = params.get_canonical_override()
-                single = build_single_model_dict(cm)
-                models = [dict(single) for _ in range(n_models)]
-                sim.append_log(
-                    f"Perfil canônico ativo: {cm.title} — "
-                    f"{n_models} cópia(s) idêntica(s)."
-                )
-            else:
-                gen_cfg = params.build_gen_config()
-                n_models = int(params.spin_nmodels.value())
-                sim.append_log(
-                    f"Gerando {n_models} modelos (generator={gen_cfg.generator})…"
-                )
-                models = generate_models(gen_cfg, n_models=n_models, rng_seed=42)
-                sim.append_log(f"  → {len(models)} perfis prontos.")
-
             output_dir = sim.edit_output_dir.text().strip() or str(
                 Path.cwd() / "sm_output"
             )
@@ -7673,6 +7745,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"O binário Fortran não foi encontrado em {fortran_bin!r}.\n"
                     "Defina o caminho em Preferências.",
                 )
+                self._phase_timer.end("validation")
                 return
 
             save_flag = sim.check_save_artifacts.isChecked()
@@ -7694,23 +7767,156 @@ class MainWindow(QtWidgets.QMainWindow):
                 output_filename="sim_output",
             )
 
-            self._sim_thread = SimulationThread(req, models, parent=self)
-            self._sim_thread.log.connect(sim.append_log)
-            self._sim_thread.progress_update.connect(self._on_sim_progress)
-            self._sim_thread.finished_all.connect(
-                lambda d: self._on_sim_finished(d, req, models)
-            )
-            self._sim_thread.error.connect(self._on_sim_error)
-            # Reabilita o Start QUANDO o thread terminar (qualquer desfecho),
-            # garantindo que parar + iniciar de novo funcione sempre.
-            self._sim_thread.finished.connect(lambda: sim.set_running(False))
+            self._phase_timer.end("validation")
+
+            # Hierarquia de geração (v2.4): Manual → Canônico → Estocástico.
+            # Manual tem prioridade porque o usuário pode ter editado a tabela
+            # (inclusive partindo de um perfil canônico pré-preenchido).
+            n_models = max(1, int(params.spin_nmodels.value()))
+
+            if params.has_manual_override():
+                # Caminho síncrono (cópia barata) — sem QThread necessária.
+                manual = params.get_manual_override() or {}
+                self._phase_timer.begin("generation")
+                models = [
+                    {
+                        "n_layers": int(manual.get("n_layers", 3)),
+                        "thicknesses": list(manual.get("thicknesses", [])),
+                        "rho_h": list(manual.get("rho_h", [])),
+                        "rho_v": list(manual.get("rho_v", [])),
+                    }
+                    for _ in range(n_models)
+                ]
+                self._phase_timer.end("generation")
+                sim.append_log(
+                    f"Perfil manual ativo — {int(manual.get('n_layers', 0))} "
+                    f"camadas · {n_models} cópia(s) idêntica(s)."
+                )
+                self._continue_simulation_with_models(models, req, sim)
+                return
+
+            if params.has_canonical_override():
+                # Caminho síncrono (canônico replicado).
+                from .sm_canonical_profiles import build_single_model_dict
+
+                cm = params.get_canonical_override()
+                single = build_single_model_dict(cm)
+                self._phase_timer.begin("generation")
+                models = [dict(single) for _ in range(n_models)]
+                self._phase_timer.end("generation")
+                sim.append_log(
+                    f"Perfil canônico ativo: {cm.title} — "
+                    f"{n_models} cópia(s) idêntica(s)."
+                )
+                self._continue_simulation_with_models(models, req, sim)
+                return
+
+            # Caminho ESTOCÁSTICO — assíncrono via ModelGenerationThread.
+            # Aqui está o fix do Gargalo #1: o loop Sobol/PRNG roda em uma
+            # QThread separada, deixando a main thread livre para processar
+            # o event loop Qt (mouse, paint, scroll, etc.) durante a geração.
+            gen_cfg = params.build_gen_config()
+            sim.append_log(f"Gerando {n_models} modelos (generator={gen_cfg.generator})…")
             sim.set_running(True)
             sim.progress.setValue(0)
-            sim.append_log("Iniciando simulação…")
-            self._sim_thread.start()
+            # Snapshot do estado pendente — recuperado em _on_models_ready.
+            self._stochastic_models_in_progress = (req, sim)
+            # Cria a thread; ela fica viva até finished_models/error/cancelled.
+            self._gen_thread = ModelGenerationThread(
+                gen_cfg, n_models=n_models, rng_seed=42, parent=self
+            )
+            self._gen_thread.progress.connect(self._on_gen_progress)
+            self._gen_thread.finished_models.connect(self._on_models_ready)
+            self._gen_thread.error.connect(self._on_gen_error)
+            self._gen_thread.cancelled.connect(self._on_gen_cancelled)
+            self._phase_timer.begin("generation")
+            self._gen_thread.start()
         except Exception as exc:
+            # Garantir que phase_timer não fique com fase aberta em erro.
+            self._phase_timer.end("validation")
+            self._phase_timer.end("generation")
             QtWidgets.QMessageBox.critical(self, "Erro", str(exc))
             self.page_sim.set_running(False)
+
+    # ── v2.11: continuação assíncrona após geração de modelos ───────────
+
+    def _on_gen_progress(self, done: int, total: int) -> None:
+        """Slot chamado pela ``ModelGenerationThread`` a cada chunk gerado.
+
+        Atualiza a barra de progresso e o status com a porcentagem da
+        fase de geração. O log usa o buffer (não bloqueia main thread).
+        """
+        pct = int(100.0 * done / max(total, 1))
+        self.page_sim.progress.setValue(pct)
+        self.status.showMessage(f"Gerando modelos: {done}/{total}")
+        # Throttling natural: ModelGenerationThread emite a cada chunk
+        # (default 500 modelos), então o log já é razoável sem mais filtro.
+        if done % 2000 == 0 or done == total:
+            self.page_sim.append_log(f"  Geração: {done}/{total} modelos prontos…")
+
+    def _on_models_ready(self, models: List[dict]) -> None:
+        """Slot chamado quando ``ModelGenerationThread`` conclui (sucesso).
+
+        Args:
+            models: Lista completa de modelos gerados.
+        """
+        elapsed = self._phase_timer.end("generation") or 0.0
+        self.page_sim.append_log(f"  → {len(models)} perfis prontos em {elapsed:.2f}s.")
+        pending = self._stochastic_models_in_progress
+        if pending is None:
+            return
+        req, sim = pending
+        self._stochastic_models_in_progress = None
+        self._continue_simulation_with_models(models, req, sim)
+
+    def _on_gen_error(self, msg: str) -> None:
+        """Slot chamado se ``ModelGenerationThread`` falhar com exceção."""
+        self._phase_timer.end("generation")
+        self._stochastic_models_in_progress = None
+        self.page_sim.append_log(f"[ERRO] Geração falhou: {msg}")
+        QtWidgets.QMessageBox.critical(self, "Erro de geração", msg)
+        self.page_sim.set_running(False)
+
+    def _on_gen_cancelled(self) -> None:
+        """Slot chamado após cancelamento cooperativo da geração."""
+        self._phase_timer.end("generation")
+        self._stochastic_models_in_progress = None
+        self.page_sim.append_log("Geração de modelos cancelada pelo usuário.")
+        self.page_sim.set_running(False)
+
+    def _continue_simulation_with_models(
+        self,
+        models: List[dict],
+        req: "SimRequest",
+        sim: "SimulatorPage",
+    ) -> None:
+        """Lança a ``SimulationThread`` após os modelos estarem prontos.
+
+        Args:
+            models: Lista de modelos (gerada síncrona ou async).
+            req: Configuração da simulação (already validada).
+            sim: Página do simulador (UI).
+        """
+        # v2.11: log mode massivo — reduz overhead de paint para N grande.
+        # Restaurado em _on_sim_finished após a simulação terminar.
+        if len(models) > 5000:
+            sim.begin_massive_simulation_log_mode()
+
+        self._sim_thread = SimulationThread(req, models, parent=self)
+        self._sim_thread.log.connect(sim.append_log)
+        self._sim_thread.progress_update.connect(self._on_sim_progress)
+        self._sim_thread.finished_all.connect(
+            lambda d: self._on_sim_finished(d, req, models)
+        )
+        self._sim_thread.error.connect(self._on_sim_error)
+        # Reabilita o Start QUANDO o thread terminar (qualquer desfecho),
+        # garantindo que parar + iniciar de novo funcione sempre.
+        self._sim_thread.finished.connect(lambda: sim.set_running(False))
+        sim.set_running(True)
+        sim.progress.setValue(0)
+        sim.append_log("Iniciando simulação…")
+        self._phase_timer.begin("simulation")
+        self._sim_thread.start()
 
     def _stop_simulation(self) -> None:
         if self._sim_thread and self._sim_thread.isRunning():
@@ -7743,6 +7949,8 @@ class MainWindow(QtWidgets.QMainWindow):
         req: "SimRequest",
         models: List[dict],
     ) -> None:
+        # v2.11: encerra fase "simulation" no PhaseTimer.
+        self._phase_timer.end("simulation")
         self.page_sim.progress.setValue(100)
         elapsed = float(result.get("elapsed", 0.0))
         mod_h = float(result.get("throughput_mod_h", 0.0))
@@ -7751,6 +7959,11 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{format_float(mod_h, 0, thousands=True)} mod/h"
         )
         self.lbl_status_elapsed.setText(f"Elapsed: {format_float(elapsed, 1)}s")
+        # v2.11: restaura modo de log normal se foi alterado para massivo.
+        try:
+            self.page_sim.end_massive_simulation_log_mode()
+        except Exception:
+            pass
         # v2.6 U3+P2: toast notification não-bloqueante de conclusão
         self._set_sim_state("Parado")
         self._show_toast(
@@ -7813,19 +8026,35 @@ class MainWindow(QtWidgets.QMainWindow):
             # Dicts são leves (~200–500 bytes cada); 10k modelos ≈ 5 MB no cache.
             "models_list": list(models) if models else [],
         }
+        # v2.11: rastreia fase "set_current_sim" (Gargalo #3 — popula combo).
+        self._phase_timer.begin("set_current_sim")
         self.page_results.set_current_simulation(plot_bundle, models=models)
         self.tabs.setCurrentWidget(self.page_results)
+        self._phase_timer.end("set_current_sim")
 
         # ── v2.4: Registra snapshot no hist\u00f3rico do experimento ───────
         # O snapshot cont\u00e9m par\u00e2metros (leve, serializ\u00e1vel) e \u00e9 persistido
         # no .exp.json. O tensor H (pesado) fica apenas em cache de sess\u00e3o
         # via self._sim_history_cache[snapshot_id].
+        # v2.11: rastreia fase "snapshot_persist".
+        self._phase_timer.begin("snapshot_persist")
         try:
             self._append_simulation_snapshot(req, result, models, plot_bundle)
         except Exception as exc:
             self.page_sim.append_log(
                 f"  [AVISO] Falha ao registrar snapshot no hist\u00f3rico: {exc}"
             )
+        self._phase_timer.end("snapshot_persist")
+
+        # v2.11: log final consolidado da cronologia das fases.
+        # \u00datil ao usu\u00e1rio (apresenta tempos exatos) e ao desenvolvedor
+        # (debug r\u00e1pido sem precisar abrir docs/reports/v2.11_*.md).
+        try:
+            summary = self._phase_timer.format_summary_pt()
+            if summary:
+                self.page_sim.append_log(f"Cronologia: {summary}")
+        except Exception:
+            pass
 
     def _append_simulation_snapshot(
         self,
@@ -9567,6 +9796,177 @@ def _run_smoke_test() -> int:
         )
     except Exception as exc:
         check(False, f"v2.10 T16: defer mechanism ({exc})")
+
+    # ── v2.11 T17: PhaseTimer rastreia 8 fases canônicas ───────────────────
+    try:
+        from .sm_phase_timer import PHASE_LABELS, PHASE_ORDER, PhaseTimer
+
+        check(
+            len(PHASE_ORDER) == 8,
+            "v2.11 T17: PHASE_ORDER tem 8 fases canônicas",
+        )
+        check(
+            len(PHASE_LABELS) == len(PHASE_ORDER),
+            "v2.11 T17: PHASE_LABELS sincronizado com PHASE_ORDER",
+        )
+        timer = PhaseTimer()
+        timer.begin("validation")
+        elapsed = timer.end("validation")
+        check(
+            elapsed is not None and elapsed >= 0.0,
+            "v2.11 T17: PhaseTimer.begin/end retorna elapsed >= 0",
+        )
+        check(
+            "validation" in timer.get_summary(),
+            "v2.11 T17: PhaseTimer.get_summary persiste fases concluídas",
+        )
+    except Exception as exc:
+        check(False, f"v2.11 T17: PhaseTimer ({exc})")
+
+    # ── v2.11 T18: MainThreadHeartbeat sentinel ────────────────────────────
+    try:
+        from .sm_heartbeat import (
+            DEFAULT_THRESHOLD_MS,
+            HeartbeatReport,
+            MainThreadHeartbeat,
+            is_enabled_via_env,
+        )
+
+        check(
+            DEFAULT_THRESHOLD_MS == 50.0,
+            "v2.11 T18: DEFAULT_THRESHOLD_MS = 50.0 ms",
+        )
+        hb = MainThreadHeartbeat()
+        check(
+            hasattr(hb, "start") and hasattr(hb, "stop") and hasattr(hb, "report"),
+            "v2.11 T18: MainThreadHeartbeat tem start/stop/report",
+        )
+        empty_rep = hb.report()
+        check(
+            isinstance(empty_rep, HeartbeatReport)
+            and empty_rep.total_gaps == 0
+            and empty_rep.passes_v211_criteria(),
+            "v2.11 T18: HeartbeatReport vazio passa critérios v2.11",
+        )
+        check(
+            callable(is_enabled_via_env),
+            "v2.11 T18: is_enabled_via_env é chamável",
+        )
+    except Exception as exc:
+        check(False, f"v2.11 T18: MainThreadHeartbeat ({exc})")
+
+    # ── v2.11 T19: ModelGenerationThread async ─────────────────────────────
+    try:
+        from .sm_model_gen import (
+            DEFAULT_GEN_CHUNK_SIZE,
+            GenConfig,
+            ModelGenerationThread,
+        )
+
+        check(
+            DEFAULT_GEN_CHUNK_SIZE == 500,
+            "v2.11 T19: DEFAULT_GEN_CHUNK_SIZE = 500",
+        )
+        gen = ModelGenerationThread(GenConfig(), n_models=10, rng_seed=42)
+        check(
+            hasattr(gen, "progress")
+            and hasattr(gen, "finished_models")
+            and hasattr(gen, "error")
+            and hasattr(gen, "cancelled"),
+            "v2.11 T19: ModelGenerationThread expõe 4 sinais (progress/finished/error/cancelled)",
+        )
+        check(
+            callable(getattr(gen, "request_cancel", None)),
+            "v2.11 T19: ModelGenerationThread.request_cancel é chamável",
+        )
+        check(
+            gen.is_cancelled is False,
+            "v2.11 T19: ModelGenerationThread.is_cancelled inicializa False",
+        )
+    except Exception as exc:
+        check(False, f"v2.11 T19: ModelGenerationThread ({exc})")
+
+    # ── v2.11 T20: SnapshotPersistThread async I/O ─────────────────────────
+    try:
+        from .sm_snapshot_persist import SnapshotPersistThread
+
+        st = SnapshotPersistThread('{"k": 1}', "/tmp/v211_smoke_test.json")
+        check(
+            hasattr(st, "finished_ok") and hasattr(st, "error"),
+            "v2.11 T20: SnapshotPersistThread expõe sinais finished_ok/error",
+        )
+        check(
+            callable(getattr(st, "run", None)),
+            "v2.11 T20: SnapshotPersistThread.run é chamável",
+        )
+    except Exception as exc:
+        check(False, f"v2.11 T20: SnapshotPersistThread ({exc})")
+
+    # ── v2.11 T21: SimulatorPage log buffer + flush throttled ──────────────
+    try:
+        check(
+            hasattr(window.page_sim, "_log_buffer"),
+            "v2.11 T21: SimulatorPage tem _log_buffer",
+        )
+        check(
+            hasattr(window.page_sim, "_flush_log_buffer"),
+            "v2.11 T21: SimulatorPage tem _flush_log_buffer (chamado pelo QTimer)",
+        )
+        check(
+            callable(getattr(window.page_sim, "begin_massive_simulation_log_mode", None)),
+            "v2.11 T21: SimulatorPage tem begin_massive_simulation_log_mode",
+        )
+        check(
+            callable(getattr(window.page_sim, "end_massive_simulation_log_mode", None)),
+            "v2.11 T21: SimulatorPage tem end_massive_simulation_log_mode",
+        )
+        # Test buffered append: deve ir para buffer, não ao QPlainTextEdit imediatamente.
+        before = len(window.page_sim._log_buffer)
+        window.page_sim.append_log("v2.11 T21 test message")
+        after = len(window.page_sim._log_buffer)
+        check(
+            after == before + 1,
+            "v2.11 T21: append_log adiciona ao buffer (O(1), não-bloqueante)",
+        )
+    except Exception as exc:
+        check(False, f"v2.11 T21: log buffer ({exc})")
+
+    # ── v2.11 T22: MainWindow pipeline async (ModelGenerationThread wiring) ─
+    try:
+        check(
+            hasattr(window, "_phase_timer"),
+            "v2.11 T22: MainWindow tem _phase_timer (PhaseTimer instance)",
+        )
+        check(
+            hasattr(window, "_gen_thread"),
+            "v2.11 T22: MainWindow tem _gen_thread (ModelGenerationThread slot)",
+        )
+        check(
+            hasattr(window, "_stochastic_models_in_progress"),
+            "v2.11 T22: MainWindow tem _stochastic_models_in_progress",
+        )
+        check(
+            callable(getattr(window, "_on_models_ready", None)),
+            "v2.11 T22: MainWindow._on_models_ready é chamável",
+        )
+        check(
+            callable(getattr(window, "_on_gen_progress", None)),
+            "v2.11 T22: MainWindow._on_gen_progress é chamável",
+        )
+        check(
+            callable(getattr(window, "_on_gen_error", None)),
+            "v2.11 T22: MainWindow._on_gen_error é chamável",
+        )
+        check(
+            callable(getattr(window, "_on_gen_cancelled", None)),
+            "v2.11 T22: MainWindow._on_gen_cancelled é chamável",
+        )
+        check(
+            callable(getattr(window, "_continue_simulation_with_models", None)),
+            "v2.11 T22: MainWindow._continue_simulation_with_models é chamável",
+        )
+    except Exception as exc:
+        check(False, f"v2.11 T22: MainWindow async pipeline ({exc})")
 
     print(f"\n=== Resultado: {len(failures)} falha(s) ===")
     window.close()
