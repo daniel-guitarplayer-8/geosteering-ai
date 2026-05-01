@@ -1146,22 +1146,11 @@ def plot_em_profile(
         combo_iter_em = [
             (itr, iang, ifq) for itr in _tr_sel for iang in _ang_sel for ifq in _freq_sel
         ]
-    # v2.4d: scale_mode só sobrescreve `kind` para modos 1-col. Para modos
-    # 2-col ("Magnitude + Fase" e "Re + Im") o `kind` vem do combo_kind_mode
-    # e determina o LAYOUT; scale_mode apenas modula COMO cada coluna é
-    # calculada (log10/dB/rad) — preserva o comportamento v2.4/v2.4b no qual
-    # "Magnitude + Fase" plota ambos lado-a-lado na mesma imagem.
-    if kind not in ("Magnitude + Fase", "Re + Im"):
-        _scale_to_kind = {
-            "re_im": "Re + Im",
-            "mag_lin": "Só Magnitude",
-            "mag_log10": "Só Magnitude",
-            "mag_db": "Magnitude (dB)",
-            "phase_deg": "Só Fase",
-            "phase_rad": "Só Fase",
-        }
-        if scale_mode in _scale_to_kind:
-            kind = _scale_to_kind[scale_mode]
+    # v2.8: kind vem diretamente do combo_kind_mode selecionado pelo usuário.
+    # scale_mode modula COMO magnitude/fase é computada (log10/dB/linear/rad),
+    # mas NUNCA sobrescreve o tipo de layout escolhido (1-col vs 2-col).
+    # Modos 1-coluna ("Só Re", "Só Im", etc.) são respeitados mesmo quando
+    # scale_mode="re_im" — o override que causava regressão foi removido.
     n_comp = max(1, len(components))
     two_cols = kind in ("Magnitude + Fase", "Re + Im")
     ncols = 2 if two_cols else 1

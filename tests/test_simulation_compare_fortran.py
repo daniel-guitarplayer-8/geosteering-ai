@@ -28,12 +28,19 @@ from geosteering_ai.simulation.validation.compare_fortran import (
     read_fortran_dat_22col,
     run_tatu_x,
 )
+from tests._fortran_helpers import _tatu_runnable
 
-FORTRAN_AVAILABLE = DEFAULT_FORTRAN_EXEC.exists()
+# Gate CI-safe: ``_tatu_runnable()`` verifica execução real do binário,
+# protegendo CI Linux de ``Exec format error`` quando o repo contém
+# binário compilado em macOS. Ver ``tests/_fortran_helpers.py``.
+FORTRAN_AVAILABLE = _tatu_runnable(DEFAULT_FORTRAN_EXEC)
 fortran_required = pytest.mark.skipif(
     not FORTRAN_AVAILABLE,
-    reason=f"tatu.x não compilado em {DEFAULT_FORTRAN_EXEC}. "
-    "Execute `make -C Fortran_Gerador` para habilitar.",
+    reason=(
+        f"tatu.x não executável em {DEFAULT_FORTRAN_EXEC}. "
+        "Execute `make -C Fortran_Gerador` para habilitar localmente "
+        "(arquivo ausente ou incompatível com a arquitetura do OS atual)."
+    ),
 )
 
 

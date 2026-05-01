@@ -617,3 +617,64 @@ class TestSprint22Integration:
         assert cfg.use_compensation is True
         assert cfg.use_tilted_antennas is True
         assert cfg.export_model_in is True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 12.1 (v2.12) — Workers Nativos
+# ──────────────────────────────────────────────────────────────────────────────
+class TestSprint121WorkersFields:
+    """Validação de `n_workers` e `threads_per_worker` em SimulationConfig.
+
+    Estes campos foram adicionados em v2.12 (Sprint 12.1) para suportar
+    o caminho batch multi-modelo de `simulate_multi(models=[...])`.
+    Defaults são `None` (backward-compat com v2.11).
+    """
+
+    def test_defaults_none(self) -> None:
+        """Defaults: n_workers=None, threads_per_worker=None."""
+        cfg = SimulationConfig()
+        assert cfg.n_workers is None
+        assert cfg.threads_per_worker is None
+
+    def test_n_workers_valid_range(self) -> None:
+        """Valores válidos: 1 a 1024."""
+        for n in [1, 4, 16, 256, 1024]:
+            cfg = SimulationConfig(n_workers=n)
+            assert cfg.n_workers == n
+
+    def test_n_workers_zero_fails(self) -> None:
+        """n_workers=0 é inválido."""
+        with pytest.raises(AssertionError, match="n_workers"):
+            SimulationConfig(n_workers=0)
+
+    def test_n_workers_negative_fails(self) -> None:
+        """n_workers negativo é inválido."""
+        with pytest.raises(AssertionError, match="n_workers"):
+            SimulationConfig(n_workers=-1)
+
+    def test_n_workers_overflow_fails(self) -> None:
+        """n_workers > 1024 é rejeitado (defesa contra erro de tipo)."""
+        with pytest.raises(AssertionError, match="n_workers"):
+            SimulationConfig(n_workers=2048)
+
+    def test_threads_per_worker_valid_range(self) -> None:
+        """Valores válidos: 1 a 256."""
+        for t in [1, 2, 8, 64, 256]:
+            cfg = SimulationConfig(threads_per_worker=t)
+            assert cfg.threads_per_worker == t
+
+    def test_threads_per_worker_zero_fails(self) -> None:
+        """threads_per_worker=0 é inválido."""
+        with pytest.raises(AssertionError, match="threads_per_worker"):
+            SimulationConfig(threads_per_worker=0)
+
+    def test_threads_per_worker_overflow_fails(self) -> None:
+        """threads_per_worker > 256 é rejeitado."""
+        with pytest.raises(AssertionError, match="threads_per_worker"):
+            SimulationConfig(threads_per_worker=512)
+
+    def test_combination_valid(self) -> None:
+        """Combinação válida: n_workers=4, threads_per_worker=2 (Modo D)."""
+        cfg = SimulationConfig(n_workers=4, threads_per_worker=2)
+        assert cfg.n_workers == 4
+        assert cfg.threads_per_worker == 2

@@ -55,11 +55,20 @@ from geosteering_ai.simulation.validation.canonical_models import get_canonical_
 # Fixtures
 # ──────────────────────────────────────────────────────────────────────────────
 DEFAULT_FORTRAN_EXEC = Path(__file__).parent.parent / "Fortran_Gerador" / "tatu.x"
-FORTRAN_AVAILABLE = DEFAULT_FORTRAN_EXEC.exists()
+
+# Gate CI-safe: usa ``_tatu_runnable()`` que verifica execução real do binário
+# (não apenas existência), protegendo CI Linux quando o repo contém um
+# binário macOS commitado. Ver ``tests/_fortran_helpers.py``.
+from tests._fortran_helpers import _tatu_runnable  # noqa: E402
+
+FORTRAN_AVAILABLE = _tatu_runnable(DEFAULT_FORTRAN_EXEC)
 
 fortran_required = pytest.mark.skipif(
     not FORTRAN_AVAILABLE,
-    reason=f"Fortran executable not found: {DEFAULT_FORTRAN_EXEC}",
+    reason=(
+        f"tatu.x não executável: {DEFAULT_FORTRAN_EXEC} "
+        "(arquivo ausente ou incompatível com a arquitetura atual)."
+    ),
 )
 
 

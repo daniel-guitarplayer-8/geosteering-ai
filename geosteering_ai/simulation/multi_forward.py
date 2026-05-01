@@ -116,8 +116,9 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -155,6 +156,111 @@ logger = logging.getLogger(__name__)
 # ~1 ppt (parte por trilhão), muito abaixo do menor `hordist` fisicamente
 # distinguível no contexto de perfilagem LWD.
 _HORDIST_KEY_DECIMALS: int = 12
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 13.2 (v2.13) — Cache cross-call para precompute_common_arrays_cache
+# ──────────────────────────────────────────────────────────────────────────────
+# Cache global persistente entre chamadas de `simulate_multi` (opt-in via
+# `cache_persistent=True`). Acelera cenários PINN/inversão onde a mesma
+# geometria é simulada 50× ou mais com perturbações pequenas — primeira
+# chamada paga setup, próximas reutilizam.
+#
+# Estrutura da chave:
+#   (round(hordist, 12), freqs_signature, n_layers, eta_hash, h_hash)
+#
+# - hordist arredondado a 12 casas decimais (~1 ppt — abaixo do ruído físico)
+# - freqs_signature: tuple ordenada de frequências arredondadas a 1 Hz
+# - n_layers: número de camadas (invariante de modelo)
+# - eta_hash, h_hash: tuple de valores arredondados (12 casas) — garante
+#   colisão zero entre modelos com mesma geometria mas perfis distintos
+#
+# Thread-safety: `_CACHE_LOCK` protege acesso concorrente quando chamadas
+# múltiplas de `simulate_multi` rodam em ThreadPoolExecutor (notebooks,
+# treino offline, UI responsiva).
+#
+# Memória: cache cresce indefinidamente com chamadas de geometrias distintas.
+# Default `cache_persistent=False` preserva comportamento v2.12 (cache local
+# por chamada). Usuário deve chamar `release_numba_cache()` para liberar.
+_GLOBAL_HORDIST_CACHE: Dict[Tuple[Any, ...], Tuple[np.ndarray, ...]] = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def _build_cache_key(
+    hordist: float,
+    freqs_hz: np.ndarray,
+    n: int,
+    h_arr: np.ndarray,
+    eta: np.ndarray,
+) -> Tuple[Any, ...]:
+    """Constrói chave hashable para `_GLOBAL_HORDIST_CACHE` (Sprint 13.2 v2.13).
+
+    A chave codifica TODAS as entradas que afetam o resultado de
+    `precompute_common_arrays_cache`:
+
+    - ``hordist``: distância horizontal arredondada a 12 casas decimais
+    - ``freqs_signature``: tuple ordenada de frequências (Hz, int rounded)
+    - ``n``: número de camadas
+    - ``eta_hash``: bytes da view contígua de ``eta`` (n×2 complex128)
+    - ``h_hash``: bytes da view contígua de ``h_arr`` (n float64)
+
+    Retornar bytes (em vez de tuple float) garante detecção bit-exata de
+    qualquer variação numérica. A chave é hashable e picklable.
+
+    Args:
+        hordist: Distância horizontal (m).
+        freqs_hz: (nf,) — frequências em Hz.
+        n: Número de camadas.
+        h_arr: (n,) — espessuras (m).
+        eta: (n, 2) — condutividades complexas.
+
+    Returns:
+        Tupla hashable única para os argumentos dados.
+    """
+    hordist_key = round(float(hordist), _HORDIST_KEY_DECIMALS)
+    freqs_signature = tuple(int(round(float(f))) for f in freqs_hz)
+    eta_bytes = np.ascontiguousarray(eta, dtype=np.complex128).tobytes()
+    h_bytes = np.ascontiguousarray(h_arr, dtype=np.float64).tobytes()
+    return (hordist_key, freqs_signature, int(n), eta_bytes, h_bytes)
+
+
+def release_numba_cache() -> int:
+    """Libera o cache global de common_arrays (Sprint 13.2 v2.13).
+
+    Chamar quando o usuário terminar uma sessão de simulações com
+    ``cache_persistent=True``. Recomendado em ``closeEvent`` de UI
+    (espelha ``release_pool()`` da v2.12).
+
+    Thread-safe via ``_CACHE_LOCK``.
+
+    Returns:
+        Número de entradas liberadas (útil para diagnóstico / logging).
+
+    Example:
+        >>> from geosteering_ai.simulation import release_numba_cache
+        >>> n_freed = release_numba_cache()
+        >>> print(f"Liberadas {n_freed} entradas de cache.")
+    """
+    with _CACHE_LOCK:
+        n_freed = len(_GLOBAL_HORDIST_CACHE)
+        _GLOBAL_HORDIST_CACHE.clear()
+    if n_freed > 0:
+        logger.debug(
+            "release_numba_cache: %d entradas liberadas do _GLOBAL_HORDIST_CACHE",
+            n_freed,
+        )
+    return n_freed
+
+
+def get_numba_cache_size() -> int:
+    """Retorna número atual de entradas em ``_GLOBAL_HORDIST_CACHE`` (Sprint 13.2).
+
+    Útil para diagnóstico, logging, e tests. Thread-safe.
+
+    Returns:
+        Número de entradas vivas no cache global.
+    """
+    with _CACHE_LOCK:
+        return len(_GLOBAL_HORDIST_CACHE)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -278,6 +384,8 @@ def _build_unique_hordist_caches(
     freqs_hz: np.ndarray,
     h_arr: np.ndarray,
     eta: np.ndarray,
+    *,
+    cache_persistent: bool = False,
 ) -> Dict[float, Tuple[np.ndarray, ...]]:
     """Pré-computa caches de common_arrays deduplicados por `hordist`.
 
@@ -314,21 +422,55 @@ def _build_unique_hordist_caches(
         distintos — o cache é corretamente reutilizado.
     """
     caches: Dict[float, Tuple[np.ndarray, ...]] = {}
+    # Sprint 13.2 (v2.13): contadores para diagnóstico do cache cross-call
+    n_global_hits = 0
+    n_global_misses = 0
+
     for L in tr_spacings_m:
         for dip_rad in dip_rads:
             # hordist = 2·r_half = 2·(L/2)·|sin(dip)| = L·|sin(dip)|
             hordist = float(L) * abs(math.sin(float(dip_rad)))
             key = round(hordist, _HORDIST_KEY_DECIMALS)
-            if key not in caches:
-                caches[key] = precompute_common_arrays_cache(
-                    n,
-                    npt,
-                    hordist,
-                    krJ0J1,
-                    freqs_hz,
-                    h_arr,
-                    eta,
-                )
+            if key in caches:
+                # Já populado nesta chamada (dedup local clássico)
+                continue
+
+            # Sprint 13.2: tenta cache global persistente quando opt-in
+            if cache_persistent:
+                global_key = _build_cache_key(hordist, freqs_hz, n, h_arr, eta)
+                with _CACHE_LOCK:
+                    cached = _GLOBAL_HORDIST_CACHE.get(global_key)
+                if cached is not None:
+                    caches[key] = cached
+                    n_global_hits += 1
+                    continue
+                n_global_misses += 1
+
+            cache_tuple = precompute_common_arrays_cache(
+                n,
+                npt,
+                hordist,
+                krJ0J1,
+                freqs_hz,
+                h_arr,
+                eta,
+            )
+            caches[key] = cache_tuple
+
+            # Sprint 13.2: persiste no cache global se opt-in
+            if cache_persistent:
+                with _CACHE_LOCK:
+                    _GLOBAL_HORDIST_CACHE[global_key] = cache_tuple
+
+    if cache_persistent and (n_global_hits or n_global_misses):
+        logger.debug(
+            "simulate_multi cache_persistent: %d global-hits, %d global-misses, "
+            "cache global agora com %d entradas",
+            n_global_hits,
+            n_global_misses,
+            get_numba_cache_size(),
+        )
+
     return caches
 
 
@@ -405,10 +547,10 @@ def _validate_multi_inputs(
 # simulate_multi — API pública multi-dimensional
 # ──────────────────────────────────────────────────────────────────────────────
 def simulate_multi(
-    rho_h: np.ndarray,
-    rho_v: np.ndarray,
-    esp: np.ndarray,
-    positions_z: np.ndarray,
+    rho_h: Optional[np.ndarray] = None,
+    rho_v: Optional[np.ndarray] = None,
+    esp: Optional[np.ndarray] = None,
+    positions_z: Optional[np.ndarray] = None,
     *,
     frequencies_hz: Optional[Sequence[float]] = None,
     tr_spacings_m: Optional[Sequence[float]] = None,
@@ -419,13 +561,32 @@ def simulate_multi(
     comp_pairs: Optional[Tuple[Tuple[int, int], ...]] = None,
     use_tilted: bool = False,
     tilted_configs: Optional[Tuple[Tuple[float, float], ...]] = None,
-) -> MultiSimulationResult:
+    # ── Sprint 12.1 (v2.12) — Workers Nativos ───────────────────────────
+    models: Optional[List[Dict[str, Any]]] = None,
+    n_workers: Optional[int] = None,
+    threads_per_worker: Optional[int] = None,
+    # ── Sprint 13.2 (v2.13) — Cache cross-call ─────────────────────────
+    cache_persistent: bool = False,
+) -> Union["MultiSimulationResult", "MultiSimulationResultBatch"]:
     """Simulação forward EM 1D TIV com multi-TR, multi-ângulo, multi-freq.
 
     API multi-dimensional **fielmente equivalente** ao Fortran v10.0:
     combina todas as dimensões de parâmetros da ferramenta (nTR × ntheta
     × nf) em uma única chamada, com deduplicação automática de cache
     por hordist e wiring F6/F7 opcional.
+
+    **Sprint 12.1 (v2.12)** — adiciona suporte nativo a batch
+    multi-modelo via 3 kwargs opcionais:
+
+      • ``models``: lista de dicts ``{rho_h, rho_v, esp}`` — quando
+        fornecido, ativa o caminho batch (`_workers.run_batch`).
+      • ``n_workers``: número de workers do `ProcessPoolExecutor`
+        (default = 1, single-process). Requer ``models`` definido.
+      • ``threads_per_worker``: threads Numba por worker. ``None`` ativa
+        anti-oversubscription auto: ``cpu // n_workers``.
+
+    Quando ``models is None`` (default), o comportamento permanece o
+    de v2.11: 1 modelo single-pass. Backward-compat total.
 
     Args:
         rho_h: (n,) Ω·m — resistividades horizontais por camada (inclui
@@ -489,7 +650,93 @@ def simulate_multi(
             (3, 1, 100, 1, 9)
             >>> result.H_comp is not None
             True
+
+        Sprint 12.1 (v2.12) — Batch multi-modelo com 4 workers::
+
+            >>> models = [
+            ...     {"rho_h": np.array([1.0, 10.0+i, 1.0]),
+            ...      "rho_v": np.array([1.0, 10.0+i, 1.0]),
+            ...      "esp": np.array([5.0])} for i in range(8)
+            ... ]
+            >>> result = simulate_multi(
+            ...     models=models,
+            ...     positions_z=np.linspace(-2, 7, 100),
+            ...     n_workers=4, threads_per_worker=2,
+            ... )
+            >>> result.H_stack.shape
+            (8, 1, 1, 100, 1, 9)
+            >>> result.mode
+            'D'
     """
+    # ── Sprint 12.1 (v2.12) — Dispatcher: batch multi-modelo ──────
+    # Quando `models` é fornecido, delega para `_workers.run_batch`
+    # que orquestra o ProcessPoolExecutor (Modos C/D) ou execução
+    # sequencial in-process (Modos A/B). Backward-compat total:
+    # `models is None` mantém o caminho single-modelo abaixo.
+    if models is not None:
+        if rho_h is not None or rho_v is not None or esp is not None:
+            raise ValueError(
+                "simulate_multi(models=[...]) é mutuamente exclusivo com "
+                "rho_h/rho_v/esp. Forneça apenas um dos modos: "
+                "(a) single: rho_h=..., rho_v=..., esp=...; "
+                "(b) batch: models=[...]."
+            )
+        if positions_z is None:
+            raise ValueError("simulate_multi(models=[...]) requer positions_z explícito.")
+        # Import lazy para evitar ciclo na inicialização do módulo.
+        from geosteering_ai.simulation._workers import run_batch
+
+        # Resolve cfg para extrair backend/hankel_filter (passados ao pool).
+        _cfg = cfg if cfg is not None else SimulationConfig()
+        _filter = hankel_filter if hankel_filter is not None else _cfg.hankel_filter
+        # Resolve n_workers/threads (kwargs explícitos vencem cfg).
+        _n_workers = (
+            n_workers
+            if n_workers is not None
+            else (_cfg.n_workers if _cfg.n_workers is not None else 1)
+        )
+        _threads = (
+            threads_per_worker
+            if threads_per_worker is not None
+            else _cfg.threads_per_worker
+        )
+        # Kwargs comuns repassados a `simulate_multi` dentro de cada worker.
+        # Code-review fix P0 #2 (pickling): coerção `list(...)` para
+        # frequencies_hz/tr_spacings_m/dip_degs. `Sequence[float]` aceita
+        # generators/maps que não são picklables — quando o ProcessPool
+        # serializa `sim_kwargs`, falharia silenciosamente em workers C/D.
+        # `list()` converte iteráveis arbitrários em estrutura picklável.
+        sim_kwargs: Dict[str, Any] = {
+            "positions_z": np.asarray(positions_z, dtype=np.float64),
+            "frequencies_hz": (
+                list(frequencies_hz) if frequencies_hz is not None else None
+            ),
+            "tr_spacings_m": (list(tr_spacings_m) if tr_spacings_m is not None else None),
+            "dip_degs": list(dip_degs) if dip_degs is not None else None,
+            "cfg": _cfg,
+            "hankel_filter": hankel_filter,
+            "use_compensation": use_compensation,
+            "comp_pairs": comp_pairs,
+            "use_tilted": use_tilted,
+            "tilted_configs": tilted_configs,
+        }
+        return run_batch(
+            models=models,
+            sim_kwargs=sim_kwargs,
+            n_workers=int(_n_workers),
+            threads_per_worker=_threads,
+            backend=_cfg.backend,
+            hankel_filter=str(_filter),
+        )
+
+    # ── Caminho single-modelo (v2.11 e anteriores) ────────────────
+    # `rho_h`, `rho_v`, `esp`, `positions_z` são obrigatórios aqui.
+    if rho_h is None or rho_v is None or esp is None or positions_z is None:
+        raise ValueError(
+            "simulate_multi single-modelo requer rho_h, rho_v, esp e "
+            "positions_z não-None. Para batch, use models=[...]."
+        )
+
     # ── Config + defaults ──────────────────────────────────────────
     if cfg is None:
         cfg = SimulationConfig()
@@ -587,7 +834,10 @@ def simulate_multi(
     dip_rads = np.deg2rad(dip_arr)
 
     # ── Deduplicação de caches por hordist ─────────────────────────
-    # Chama a versão Sprint 2.10: um cache por `hordist` único.
+    # Chama a versão Sprint 2.10 + 13.2: um cache por `hordist` único.
+    # Sprint 13.2 (v2.13): se `cache_persistent=True`, reutiliza entradas
+    # do cache global (`_GLOBAL_HORDIST_CACHE`) entre chamadas para
+    # acelerar PINN/inversão (50× chamadas com mesma geometria).
     caches = _build_unique_hordist_caches(
         tr_arr,
         dip_rads,
@@ -597,6 +847,7 @@ def simulate_multi(
         freqs_hz,
         h_arr_static,
         eta_static,
+        cache_persistent=cache_persistent,
     )
     logger.debug(
         "simulate_multi: deduplicação produziu %d cache(s) distinto(s) "
@@ -616,6 +867,10 @@ def simulate_multi(
     # ── Loop principal: iTR × iAng (serial-outer, paralelo-inner) ──
     # Import tardio para evitar import circular via forward.py no teste
     from geosteering_ai.simulation.forward import (
+        _simulate_combined_prange,  # Sprint 13.3: prange flat TR×ang
+    )
+    from geosteering_ai.simulation.forward import (
+        _simulate_combined_prange,  # Sprint 13.3: prange flat TR*ang
         _simulate_positions_njit_cached,
         _simulate_positions_parallel,
     )
@@ -626,92 +881,180 @@ def simulate_multi(
 
         _numba.set_num_threads(cfg.num_threads)
 
-    for i_tr in range(nTR):
-        L = float(tr_arr[i_tr])
+    # ── Sprint 13.3: Materialização pré-dispatch para prange(nTR*nAngles*n_pos) flat ──
+    # Estrutura para despacho adaptativo: usar nova prange quando n_combos >= 2
+    n_combos = nTR * nAngles
+
+    if n_combos >= 2 and cfg.parallel and HAS_NUMBA and n_pos > 1:
+        # ── Passo 1: Geometria flat ────────────────────────────────────
+        dz_halfs = np.empty(n_combos, dtype=np.float64)
+        r_halfs = np.empty(n_combos, dtype=np.float64)
+        dip_rads_flat = np.empty(n_combos, dtype=np.float64)
+        for i_tr in range(nTR):
+            L = float(tr_arr[i_tr])
+            for i_ang in range(nAngles):
+                k = i_tr * nAngles + i_ang
+                dip_rad = float(dip_rads[i_ang])
+                dz_halfs[k] = 0.5 * L * math.cos(dip_rad)
+                r_halfs[k] = 0.5 * L * math.sin(dip_rad)
+                dip_rads_flat[k] = dip_rad
+
+        # ── Passo 2: Deduplicação (cache_indices + key_to_idx) ─────────
+        unique_keys = list(dict.fromkeys(
+            round(2.0 * r_halfs[k], _HORDIST_KEY_DECIMALS) for k in range(n_combos)
+        ))
+        key_to_idx = {key: idx for idx, key in enumerate(unique_keys)}
+        cache_indices = np.array([
+            key_to_idx[round(2.0 * r_halfs[k], _HORDIST_KEY_DECIMALS)]
+            for k in range(n_combos)
+        ], dtype=np.int64)
+
+        # ── Passo 3: Stack de caches únicos [n_unique, nf, npt, n] ─────
+        unique_tuples = [caches[key] for key in unique_keys]
+        u_unique = np.stack([t[0] for t in unique_tuples], axis=0)
+        s_unique = np.stack([t[1] for t in unique_tuples], axis=0)
+        uh_unique = np.stack([t[2] for t in unique_tuples], axis=0)
+        sh_unique = np.stack([t[3] for t in unique_tuples], axis=0)
+        RTEdw_unique = np.stack([t[4] for t in unique_tuples], axis=0)
+        RTEup_unique = np.stack([t[5] for t in unique_tuples], axis=0)
+        RTMdw_unique = np.stack([t[6] for t in unique_tuples], axis=0)
+        RTMup_unique = np.stack([t[7] for t in unique_tuples], axis=0)
+        AdmInt_unique = np.stack([t[8] for t in unique_tuples], axis=0)
+
+        # ── Passo 4: Despacho adaptativo Sprint 13.3 — prange flat ──────
+        _simulate_combined_prange(
+            dz_halfs,
+            r_halfs,
+            dip_rads_flat,
+            cache_indices,
+            nAngles,
+            u_unique,
+            s_unique,
+            uh_unique,
+            sh_unique,
+            RTEdw_unique,
+            RTEup_unique,
+            RTMdw_unique,
+            RTMup_unique,
+            AdmInt_unique,
+            positions_z,
+            n,
+            rho_h,
+            rho_v,
+            h_arr_static,
+            prof_arr_static,
+            eta_static,
+            freqs_hz,
+            krJ0J1,
+            wJ0,
+            wJ1,
+            H_tensor,
+        )
+
+        # ── Passo 5: z_obs em Python (não hot-path) ───────────────────
         for i_ang in range(nAngles):
             dip_rad = float(dip_rads[i_ang])
-            dz_half = 0.5 * L * math.cos(dip_rad)
-            r_half = 0.5 * L * math.sin(dip_rad)
-            hordist = 2.0 * r_half
-            key = round(hordist, _HORDIST_KEY_DECIMALS)
-            cache_tuple = caches[key]
-
-            # Output slice para este par (iTR, iAng)
-            H_slice = H_tensor[i_tr, i_ang]  # (n_pos, nf, 9)
-            z_slice = z_obs[i_ang]
-            rh_slice = rho_h_at_obs[i_ang]
-            rv_slice = rho_v_at_obs[i_ang]
-
-            # Para (i_ang) já preenchido, use um buffer temporário descartável
-            if z_obs_filled[i_ang]:
-                z_tmp = np.empty(n_pos, dtype=np.float64)
-                rh_tmp = np.empty(n_pos, dtype=np.float64)
-                rv_tmp = np.empty(n_pos, dtype=np.float64)
-            else:
-                z_tmp = z_slice
-                rh_tmp = rh_slice
-                rv_tmp = rv_slice
-                z_obs_filled[i_ang] = True
-
-            if cfg.parallel and HAS_NUMBA and n_pos > 1:
-                # Caminho paralelo preferido (Sprint 2.10: prange + cache)
-                _simulate_positions_njit_cached(
-                    positions_z,
-                    dz_half,
-                    r_half,
-                    dip_rad,
-                    n,
-                    rho_h,
-                    rho_v,
-                    esp,
-                    h_arr_static,
-                    prof_arr_static,
-                    eta_static,
-                    freqs_hz,
-                    krJ0J1,
-                    wJ0,
-                    wJ1,
-                    *cache_tuple,
-                    H_slice,
-                    z_tmp,
-                    rh_tmp,
-                    rv_tmp,
-                )
-            else:
-                # Caminho serial (debug ou Numba ausente)
-                for j in range(n_pos):
-                    z_mid = positions_z[j]
-                    # Convenção Fortran (PerfilaAnisoOmp.f08:677-679):
-                    # Transmissor ABAIXO do ponto-médio (+z), Receptor ACIMA (−z).
-                    # Transmissor em +x, Receptor em −x.
+            for j in range(n_pos):
+                z_mid = positions_z[j]
+                for i_tr in range(nTR):
+                    L = float(tr_arr[i_tr])
+                    dz_half = 0.5 * L * math.cos(dip_rad)
                     Tz = z_mid + dz_half
                     cz = z_mid - dz_half
-                    Tx = r_half
-                    cx = -r_half
-                    Ty = 0.0
-                    cy = 0.0
-                    cH = fields_in_freqs(
-                        Tx,
-                        Ty,
-                        Tz,
-                        cx,
-                        cy,
-                        cz,
+                    z_obs_j, rh_j, rv_j = compute_zrho(Tz, cz, n, rho_h, rho_v, esp)
+                    z_obs[i_ang, j] = z_obs_j
+                    rho_h_at_obs[i_ang, j] = rh_j
+                    rho_v_at_obs[i_ang, j] = rv_j
+                    break  # Só preencher uma vez por ângulo
+
+    else:
+        # ── Fallback: dispatcher serial v2.13 (single-combo ou serial) ──
+        for i_tr in range(nTR):
+            L = float(tr_arr[i_tr])
+            for i_ang in range(nAngles):
+                dip_rad = float(dip_rads[i_ang])
+                dz_half = 0.5 * L * math.cos(dip_rad)
+                r_half = 0.5 * L * math.sin(dip_rad)
+                hordist = 2.0 * r_half
+                key = round(hordist, _HORDIST_KEY_DECIMALS)
+                cache_tuple = caches[key]
+
+                # Output slice para este par (iTR, iAng)
+                H_slice = H_tensor[i_tr, i_ang]  # (n_pos, nf, 9)
+                z_slice = z_obs[i_ang]
+                rh_slice = rho_h_at_obs[i_ang]
+                rv_slice = rho_v_at_obs[i_ang]
+
+                # Para (i_ang) já preenchido, use um buffer temporário descartável
+                if z_obs_filled[i_ang]:
+                    z_tmp = np.empty(n_pos, dtype=np.float64)
+                    rh_tmp = np.empty(n_pos, dtype=np.float64)
+                    rv_tmp = np.empty(n_pos, dtype=np.float64)
+                else:
+                    z_tmp = z_slice
+                    rh_tmp = rh_slice
+                    rv_tmp = rv_slice
+                    z_obs_filled[i_ang] = True
+
+                if cfg.parallel and HAS_NUMBA and n_pos > 1:
+                    # Caminho paralelo preferido (Sprint 2.10: prange + cache)
+                    _simulate_positions_njit_cached(
+                        positions_z,
+                        dz_half,
+                        r_half,
                         dip_rad,
                         n,
                         rho_h,
                         rho_v,
                         esp,
+                        h_arr_static,
+                        prof_arr_static,
+                        eta_static,
                         freqs_hz,
                         krJ0J1,
                         wJ0,
                         wJ1,
+                        *cache_tuple,
+                        H_slice,
+                        z_tmp,
+                        rh_tmp,
+                        rv_tmp,
                     )
-                    H_slice[j, :, :] = cH
-                    z_obs_j, rh_j, rv_j = compute_zrho(Tz, cz, n, rho_h, rho_v, esp)
-                    z_tmp[j] = z_obs_j
-                    rh_tmp[j] = rh_j
-                    rv_tmp[j] = rv_j
+                else:
+                    # Caminho serial (debug ou Numba ausente)
+                    for j in range(n_pos):
+                        z_mid = positions_z[j]
+                        # Convenção Fortran (PerfilaAnisoOmp.f08:677-679):
+                        # Transmissor ABAIXO do ponto-médio (+z), Receptor ACIMA (−z).
+                        # Transmissor em +x, Receptor em −x.
+                        Tz = z_mid + dz_half
+                        cz = z_mid - dz_half
+                        Tx = r_half
+                        cx = -r_half
+                        Ty = 0.0
+                        cy = 0.0
+                        cH = fields_in_freqs(
+                            Tx,
+                            Ty,
+                            Tz,
+                            cx,
+                            cy,
+                            cz,
+                            dip_rad,
+                            n,
+                            rho_h,
+                            rho_v,
+                            esp,
+                            freqs_hz,
+                            krJ0J1,
+                            wJ0,
+                            wJ1,
+                        )
+                        H_slice[j, :, :] = cH
+                        z_obs_j, rh_j, rv_j = compute_zrho(Tz, cz, n, rho_h, rho_v, esp)
+                        z_tmp[j] = z_obs_j
+                        rh_tmp[j] = rh_j
+                        rv_tmp[j] = rv_j
 
     # ── Construção do resultado base ───────────────────────────────
     result = MultiSimulationResult(
