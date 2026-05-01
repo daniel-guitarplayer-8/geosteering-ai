@@ -460,19 +460,102 @@ def clear_jit_cache() -> int:
 
 
 def get_jit_cache_info() -> dict:
-    """Retorna dicionário com estatísticas do cache JIT.
+    """Retorna dicionário com estatísticas dos 3 caches JIT (v2.15).
+
+    Em v2.15 (Sprint 14.3), esta função foi estendida para reportar
+    também ``_UNIFIED_JIT_CACHE`` e ``_UNIFIED_CHUNKED_JIT_CACHE``,
+    permitindo observability completa do triple-cache (bucketed,
+    unified e chunked) usado no backend híbrido JAX (Sprints 10 a 12).
+
+    Backward compat preservada: as chaves ``n_entries``, ``maxsize`` e
+    ``keys`` continuam apontando para ``_BUCKET_JIT_CACHE`` (semântica
+    de v1.5.0). Novas chaves são prefixadas para indicar a origem.
 
     Returns:
         dict com chaves:
 
-        - ``n_entries`` (int): buckets compilados atualmente.
-        - ``maxsize`` (int): limite antes de eviction.
-        - ``keys`` (list): chaves ``(ct, cr, n, npt)`` das entradas presentes.
+        Backward-compat (v1.5.0):
+        - ``n_entries`` (int): entradas em ``_BUCKET_JIT_CACHE``.
+        - ``maxsize`` (int): limite LRU compartilhado pelos 3 caches.
+        - ``keys`` (list): chaves ``(ct, cr, n, npt)`` do cache bucketed.
+
+        Novas (v2.15):
+        - ``bucketed_size`` (int): entradas em ``_BUCKET_JIT_CACHE``.
+        - ``unified_size`` (int): entradas em ``_UNIFIED_JIT_CACHE``.
+        - ``chunked_size`` (int): entradas em ``_UNIFIED_CHUNKED_JIT_CACHE``.
+        - ``total_xla_programs`` (int): soma dos 3 caches — número total de
+          programas XLA compilados pendentes em memória.
+        - ``estimated_vram_mb`` (float): heurística baseada em
+          ``soma((n × npt × 28 × 16 bytes) / 1024²)`` por entrada
+          (tensor common_arrays típico shape (3, n, npt, nf=1) complex128).
+        - ``strategy_distribution`` (dict[str, int]): mapeia
+          ``"bucketed"|"unified"|"chunked"`` → contagem.
+
+    Note:
+        Função read-only: NÃO modifica caches. Útil para PINN/Colab onde
+        VRAM em GPU T4 (16 GB) ou A100 (40 GB) precisa ser monitorada
+        em loops longos. Heurística de VRAM é conservadora — assume que
+        cada XLA program retém o tensor maior compilado durante sua vida.
+
+    Example:
+        >>> from geosteering_ai.simulation._jax.forward_pure import (
+        ...     get_jit_cache_info, clear_jit_cache, clear_unified_jit_cache,
+        ... )
+        >>> _ = clear_jit_cache(); _ = clear_unified_jit_cache()
+        >>> info = get_jit_cache_info()
+        >>> info["total_xla_programs"]
+        0
     """
+    bucketed_size = len(_BUCKET_JIT_CACHE)
+    unified_size = len(_UNIFIED_JIT_CACHE)
+    chunked_size = len(_UNIFIED_CHUNKED_JIT_CACHE)
+    total = bucketed_size + unified_size + chunked_size
+
+    # ── Heurística VRAM estimate ─────────────────────────────────────────────
+    # Cada entrada de cache corresponde a um XLA program compilado. O tensor
+    # principal materializado durante a execução é ``common_arrays`` com shape
+    # ``(3, n, npt, nf=1)`` complex128 (16 bytes/elem). Usamos isso como proxy.
+    # Essa estimativa NÃO inclui buffers temporários de ``vmap`` ou
+    # propagação TE/TM (~3-5× a mais em pico de execução), apenas os
+    # buffers de entrada/saída persistentes ao programa XLA.
+    BYTES_PER_COMPLEX128 = 16
+    vram_bytes = 0
+    for cache, key_layout in (
+        (_BUCKET_JIT_CACHE, "bucket"),
+        (_UNIFIED_JIT_CACHE, "unified"),
+        (_UNIFIED_CHUNKED_JIT_CACHE, "chunked"),
+    ):
+        for k in cache:
+            # bucket: (ct, cr, n, npt); unified: (n, npt); chunked: (n, npt, chunk)
+            if key_layout == "bucket" and len(k) == 4:
+                n_idx, npt_idx = 2, 3
+            elif key_layout == "unified" and len(k) == 2:
+                n_idx, npt_idx = 0, 1
+            elif key_layout == "chunked" and len(k) >= 3:
+                n_idx, npt_idx = 0, 1
+            else:
+                continue
+            n_val = int(k[n_idx])
+            npt_val = int(k[npt_idx])
+            vram_bytes += 3 * n_val * npt_val * BYTES_PER_COMPLEX128
+    estimated_vram_mb = vram_bytes / (1024.0 * 1024.0)
+
     return {
-        "n_entries": len(_BUCKET_JIT_CACHE),
+        # ── Backward-compat (v1.5.0) ─────────────────────────────────────────
+        "n_entries": bucketed_size,
         "maxsize": _BUCKET_JIT_CACHE_MAXSIZE,
         "keys": list(_BUCKET_JIT_CACHE.keys()),
+        # ── Novas chaves v2.15 ───────────────────────────────────────────────
+        "bucketed_size": bucketed_size,
+        "unified_size": unified_size,
+        "chunked_size": chunked_size,
+        "total_xla_programs": total,
+        "estimated_vram_mb": estimated_vram_mb,
+        "strategy_distribution": {
+            "bucketed": bucketed_size,
+            "unified": unified_size,
+            "chunked": chunked_size,
+        },
     }
 
 
