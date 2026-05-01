@@ -73,14 +73,35 @@ _PERSISTENT_POOL_CONFIG: Optional[Tuple[int, int, str]] = None
 def _numba_init_worker(n_threads: int, hankel_filter: str) -> None:
     """Inicializador do pool — roda UMA vez por worker ao spawnar.
 
-    Configura variáveis de ambiente, importa o simulador e aquece o cache
-    JIT Numba com um modelo trivial. Após este ponto, ``run_numba_chunk``
-    pula a fase de warmup graças ao flag ``_WORKER_INITIALIZED``.
+    Aquece o cache JIT Numba com modelos triviais (single-combo e multi-combo).
+    Após este ponto, ``run_numba_chunk`` pula a fase de warmup.
+
+    Note:
+        NÃO setamos ``NUMBA_NUM_THREADS`` aqui. Quando este inicializador
+        é chamado, ``geosteering_ai.simulation`` já foi importado como
+        efeito colateral do unpickle do próprio worker (Python importa o
+        pacote pai ``geosteering_ai.simulation.__init__`` para resolver o
+        módulo onde esta função está definida). Nesse ponto Numba já foi
+        inicializado com ``NUMBA_NUM_THREADS = os.cpu_count()`` (valor
+        padrão quando a env var não está presente no ambiente herdado).
+
+        Mudar ``os.environ["NUMBA_NUM_THREADS"]`` APÓS o import de Numba
+        faz com que ``reload_config()`` (chamado internamente pelo compilador
+        JIT durante a primeira compilação de funções ``prange``) detecte uma
+        discrepância entre a env var ("4") e o valor em
+        ``numba.config.NUMBA_NUM_THREADS`` (cpu_count) e lance
+        ``RuntimeError: Cannot set NUMBA_NUM_THREADS to a different value``.
+
+        A contagem ATIVA de threads é controlada exclusivamente via
+        ``numba.set_num_threads(n_threads)`` dentro de ``simulate_multi``
+        (através de ``SimulationConfig.num_threads``). Esse mecanismo
+        *mascara* threads (pool completo lançado, mas só n_threads ativas)
+        sem alterar o env var nem causar o erro de reconfiguração.
     """
     global _WORKER_INITIALIZED
     if _WORKER_INITIALIZED:
         return
-    os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
+    # OMP_NUM_THREADS controla BLAS/MKL — seguro setar após import de Numba.
     os.environ["OMP_NUM_THREADS"] = str(n_threads)
     os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
     os.environ.setdefault("KMP_WARNINGS", "FALSE")
@@ -92,13 +113,26 @@ def _numba_init_worker(n_threads: int, hankel_filter: str) -> None:
         _cfg = SimulationConfig(
             backend="numba", num_threads=n_threads, hankel_filter=hankel_filter
         )
+        # Warmup 1: single-combo → compila _simulate_positions_njit_cached
         simulate_multi(
             rho_h=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
             rho_v=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
             esp=_np.array([5.0, 5.0], dtype=_np.float64),
-            positions_z=_np.array([0.0], dtype=_np.float64),
+            positions_z=_np.array([0.0, 5.0], dtype=_np.float64),
             frequencies_hz=[20000.0],
             tr_spacings_m=[1.0],
+            dip_degs=[0.0],
+            cfg=_cfg,
+        )
+        # Warmup 2: multi-combo → pré-compila _simulate_combined_prange para
+        # evitar JIT cold-start na primeira simulação real multi-TR/multi-ângulo.
+        simulate_multi(
+            rho_h=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
+            rho_v=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
+            esp=_np.array([5.0, 5.0], dtype=_np.float64),
+            positions_z=_np.array([0.0, 5.0], dtype=_np.float64),
+            frequencies_hz=[20000.0, 40000.0],
+            tr_spacings_m=[1.0, 2.0],
             dip_degs=[0.0],
             cfg=_cfg,
         )
@@ -218,9 +252,11 @@ def run_numba_chunk(
 ) -> Tuple[int, np.ndarray, np.ndarray, float]:
     """Executa ``simulate_multi`` num chunk de modelos dentro de um worker.
 
-    O ambiente ``NUMBA_NUM_THREADS`` é definido ANTES do import de numba,
-    garantindo que o thread pool do subprocesso respeite o valor solicitado.
-    A primeira chamada é descartada (warmup JIT).
+    O número ativo de threads Numba é controlado via ``cfg.num_threads``
+    (mascaramento interno com ``numba.set_num_threads``). Não alteramos
+    ``NUMBA_NUM_THREADS`` em env var — ver nota em ``_numba_init_worker``.
+    A primeira chamada é descartada (warmup JIT) quando o pool initializer
+    não a executou.
 
     Args:
         progress_q: ``multiprocessing.Queue`` opcional. Quando fornecido, o
@@ -236,10 +272,9 @@ def run_numba_chunk(
         Tupla ``(worker_id, H_stack, z_obs, elapsed_sec)`` onde
         ``H_stack`` tem shape ``(n_chunk, nTR, nAng, n_pos, nf, 9)``.
     """
-    os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
+    # OMP_NUM_THREADS: limita BLAS/MKL por worker (seguro setar após import Numba).
+    # NUMBA_NUM_THREADS NÃO é setado aqui — ver docstring de _numba_init_worker.
     os.environ["OMP_NUM_THREADS"] = str(n_threads)
-    # Suprimir aviso "omp_set_nested deprecated" do libomp (LLVM OMP usado pelo Numba).
-    # OMP_MAX_ACTIVE_LEVELS=2 substitui OMP_NESTED e deve ser definido antes do import.
     os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
     os.environ.setdefault("KMP_WARNINGS", "FALSE")
 

@@ -233,38 +233,40 @@ def _detect_mode(n_workers: int, eff_threads: int) -> str:
 def _simulate_worker_init(n_threads: int, hankel_filter: str) -> None:
     """Inicializador picklable executado UMA vez por worker spawned.
 
-    Estratégia em 3 passos (espelha `sm_workers._numba_init_worker`):
-
-      1. Configura env vars de Numba/OMP **antes** de importar Numba.
-         Isso é crítico porque Numba lê `NUMBA_NUM_THREADS` na primeira
-         vez que é importado e fixa o tamanho do pool de threads.
-         Configurar depois do import não tem efeito.
-      2. Importa o pacote Geosteering AI (forçando init de Numba).
-      3. Aquece o cache JIT com modelo trivial (1 simulação descartável).
-         Após isso, futuras chamadas em `_run_simulate_chunk` rodam JIT-puro.
+    Aquece o cache JIT Numba com modelos triviais (single e multi-combo).
+    Após isso, futuras chamadas em ``_run_simulate_chunk`` rodam JIT-puro.
 
     Args:
-        n_threads: Threads Numba por worker. Setado em ambiente.
-        hankel_filter: Nome do filtro Hankel para warmup. Garante que o
-            cache JIT cobre o filtro que será usado em produção.
+        n_threads: Threads Numba ativas por worker (mascaramento via
+            ``numba.set_num_threads``). NÃO seta ``NUMBA_NUM_THREADS`` em
+            env var — ver nota abaixo.
+        hankel_filter: Nome do filtro Hankel para warmup.
 
     Note:
-        Marcado idempotente via flag global ``_WORKER_INITIALIZED``: se
-        chamado novamente em uma worker já inicializada, retorna no-op.
-        Isso evita warmup redundante caso o pool seja reciclado.
+        NÃO setamos ``NUMBA_NUM_THREADS`` aqui. Quando este inicializador
+        é chamado, ``geosteering_ai.simulation`` já foi importado como
+        efeito colateral do unpickle do próprio worker — Python importa o
+        pacote pai para resolver o módulo desta função. Nesse ponto Numba
+        já foi inicializado com ``NUMBA_NUM_THREADS = os.cpu_count()``.
 
-        Falhas no warmup são silenciosamente ignoradas — o worker ainda
-        funciona, apenas pagará o custo JIT na primeira simulação real.
+        Mudar ``os.environ["NUMBA_NUM_THREADS"]`` APÓS o import de Numba
+        faz ``reload_config()`` (chamado pelo compilador JIT) detectar
+        discrepância env vs config e lançar ``RuntimeError: Cannot set
+        NUMBA_NUM_THREADS to a different value``.
+
+        Threads ativas são controladas via ``SimulationConfig.num_threads``
+        que chama ``numba.set_num_threads(n)`` — mascaramento correto.
+
+        Marcado idempotente via ``_WORKER_INITIALIZED``.
     """
     global _WORKER_INITIALIZED
     if _WORKER_INITIALIZED:
         return
-    os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
+    # OMP_NUM_THREADS limita BLAS/MKL (seguro após import de Numba).
     os.environ["OMP_NUM_THREADS"] = str(n_threads)
     os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
     os.environ.setdefault("KMP_WARNINGS", "FALSE")
     try:
-        # Import tardio: evita pagar custo de Numba se o init falhar.
         from geosteering_ai.simulation.config import SimulationConfig
         from geosteering_ai.simulation.multi_forward import simulate_multi as _sm
 
@@ -273,19 +275,29 @@ def _simulate_worker_init(n_threads: int, hankel_filter: str) -> None:
             num_threads=n_threads,
             hankel_filter=hankel_filter,
         )
+        # Warmup 1: single-combo → compila _simulate_positions_njit_cached
         _sm(
             rho_h=np.array([1.0, 10.0, 1.0], dtype=np.float64),
             rho_v=np.array([1.0, 10.0, 1.0], dtype=np.float64),
-            esp=np.array([5.0], dtype=np.float64),
-            positions_z=np.array([0.0], dtype=np.float64),
+            esp=np.array([5.0, 5.0], dtype=np.float64),
+            positions_z=np.array([0.0, 5.0], dtype=np.float64),
             frequencies_hz=[20000.0],
             tr_spacings_m=[1.0],
             dip_degs=[0.0],
             cfg=_cfg,
         )
+        # Warmup 2: multi-combo → pré-compila _simulate_combined_prange
+        _sm(
+            rho_h=np.array([1.0, 10.0, 1.0], dtype=np.float64),
+            rho_v=np.array([1.0, 10.0, 1.0], dtype=np.float64),
+            esp=np.array([5.0, 5.0], dtype=np.float64),
+            positions_z=np.array([0.0, 5.0], dtype=np.float64),
+            frequencies_hz=[20000.0, 40000.0],
+            tr_spacings_m=[1.0, 2.0],
+            dip_degs=[0.0],
+            cfg=_cfg,
+        )
     except Exception:
-        # Falha de warmup é tolerada — o worker funciona, mas pagará JIT
-        # na primeira chamada real. Não elevar exceção bloquearia o pool.
         pass
     _WORKER_INITIALIZED = True
 
