@@ -57,10 +57,80 @@ Note:
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 import numpy as np
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Gate de executabilidade do tatu.x (CI-safe)
+# ──────────────────────────────────────────────────────────────────────────────
+# O binário ``Fortran_Gerador/tatu.x`` é commitado no repositório como artefato
+# de validação local em macOS (arm64/x86_64). Em CI Linux x86_64 o sistema
+# rejeita o binário com ``OSError: [Errno 8] Exec format error`` durante
+# ``subprocess.run``, mesmo com ``Path.exists()`` retornando True.
+#
+# A função ``_tatu_runnable()`` resolve isso testando, uma única vez por
+# sessão (cache), se o OS aceita ``tatu.x`` como executável. Substitui o
+# antigo gate ``Path.exists()`` em ``@pytest.mark.skipif`` em
+# ``test_simulation_compare_fortran.py`` e ``test_simulation_multi.py``.
+_TATU_RUNNABLE_CACHE: Optional[bool] = None
+_DEFAULT_TATU_PATH = Path(__file__).parent.parent / "Fortran_Gerador" / "tatu.x"
+
+
+def _tatu_runnable(tatu_path: Path = _DEFAULT_TATU_PATH) -> bool:
+    """Verifica se ``tatu.x`` é executável no sistema atual (cached por sessão).
+
+    Tenta invocar ``tatu.x`` via :func:`subprocess.run` com stdin vazio e
+    timeout curto. O exit code é irrelevante — apenas queremos saber se o
+    sistema operacional aceita o binário (formato compatível). Em ambientes
+    incompatíveis (ex: binário macOS em CI Linux), :class:`OSError`
+    é lançada com errno 8 (``Exec format error``) e capturada aqui.
+
+    Args:
+        tatu_path: Caminho para o executável Fortran. Default
+            ``Fortran_Gerador/tatu.x`` na raiz do repositório.
+
+    Returns:
+        ``True`` se ``subprocess.run`` consegue invocar o binário sem
+        :class:`OSError`/:class:`FileNotFoundError`/:class:`subprocess.TimeoutExpired`;
+        ``False`` caso contrário (binário ausente ou incompatível com o OS).
+
+    Note:
+        O resultado é memoizado em ``_TATU_RUNNABLE_CACHE`` (módulo-level)
+        para evitar custo de fork em cada teste. Cache é invalidado apenas
+        com restart do processo Python.
+
+    Example:
+        >>> # Em macOS com tatu.x compilado:
+        >>> _tatu_runnable()  # doctest: +SKIP
+        True
+        >>> # Em CI Linux com binário macOS commitado:
+        >>> _tatu_runnable()  # doctest: +SKIP
+        False
+    """
+    global _TATU_RUNNABLE_CACHE
+    if _TATU_RUNNABLE_CACHE is not None:
+        return _TATU_RUNNABLE_CACHE
+    if not tatu_path.exists():
+        _TATU_RUNNABLE_CACHE = False
+        return False
+    try:
+        # tatu.x lê stdin/model.in; alimentar input=b"" provoca leitura
+        # falha (exit code != 0), mas isso é OK: queremos apenas verificar
+        # que o OS conseguiu invocar o binário sem ``Exec format error``.
+        subprocess.run(
+            [str(tatu_path)],
+            input=b"",
+            timeout=2.0,
+            capture_output=True,
+            check=False,
+        )
+        _TATU_RUNNABLE_CACHE = True
+    except (OSError, FileNotFoundError, subprocess.TimeoutExpired):
+        _TATU_RUNNABLE_CACHE = False
+    return _TATU_RUNNABLE_CACHE
 
 
 def compute_pz_for_dip(dip_deg: float, *, p_med: float = 0.2) -> float:
@@ -253,6 +323,7 @@ def write_model_in_multi(
 
 
 __all__ = [
+    "_tatu_runnable",
     "compute_n_pos_for_dip",
     "compute_pz_for_dip",
     "write_model_in_multi",
