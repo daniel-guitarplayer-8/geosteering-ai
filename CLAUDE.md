@@ -13,7 +13,7 @@
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |
 | **Pacote** | `geosteering_ai/` (pip installable) |
 | **Referencia** | `docs/ARCHITECTURE_v2.md` (documento completo da arquitetura) |
-| **Simulation Manager** | v2.13 (2026-05-01) — Otimizações Numba JIT: prange(nf) + cache cross-call + nogil universal · 152 simulation tests pass · 13 novos testes v2.13 |
+| **Simulation Manager** | v2.15 (2026-05-01) — Hardware validation 4 cenários, JIT cache observability (`get_jit_cache_info`), code review P1 aplicado, fix CI tatu.x exec format Linux · 13 (v2.13) + 14 (v2.14: 8 prange + 6 fastmath) + 4 (v2.15: JIT cache info) novos testes pass |
 
 ---
 

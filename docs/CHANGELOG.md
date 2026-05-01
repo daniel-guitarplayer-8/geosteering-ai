@@ -7,6 +7,112 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [2.15] — 2026-05-01
+
+### Hardware validation, JIT cache observability, code review, fix CI v2.14
+
+Sprint 14 de finalização: corrige CI quebrada do PR #33 (binário Fortran
+incompatível em runner Linux), valida ganhos v2.14 em hardware real
+(8 cores físicos × 2 threads), expande observability do triple-cache
+JAX (bucketed/unified/chunked) e aplica P1 findings do code review
+v2.13→v2.14 (zero P0 encontrado).
+
+### Adicionado
+
+- **Sprint 14.0 — Gate CI-safe `_tatu_runnable()`**:
+  - Helper em [tests/_fortran_helpers.py](../tests/_fortran_helpers.py) (+73 LOC)
+  - Detecta via `subprocess.run` se `tatu.x` é executável no OS atual
+    (resolve `OSError [Errno 8] Exec format error` em CI Linux quando
+    o repo contém binário macOS commitado)
+  - Cache módulo-level memoiza resultado por sessão (sem custo recorrente)
+  - 12 testes em `test_simulation_compare_fortran.py` e `test_simulation_multi.py`
+    migram de `Path.exists()` para `_tatu_runnable()`
+- **Sprint 14.1 — `--threads-per-worker` no benchmark**:
+  - Novo arg CLI em [benchmarks/bench_v214_numba.py](../benchmarks/bench_v214_numba.py) (+30 LOC)
+  - Helper `_configure_threads()` seta `OMP_NUM_THREADS`,
+    `NUMBA_NUM_THREADS`, `MKL_NUM_THREADS` antes do worker pool fork
+  - Default `2` (ideal para 4 workers × 2 threads = 8 cores físicos)
+  - Total threads = `workers × threads_per_worker` (anti-oversubscription)
+- **Sprint 14.3 — `get_jit_cache_info()` expandido**:
+  - Função em [forward_pure.py](../geosteering_ai/simulation/_jax/forward_pure.py)
+    (+80 LOC) reporta os 3 caches: `bucketed_size`, `unified_size`,
+    `chunked_size`, `total_xla_programs`, `estimated_vram_mb`,
+    `strategy_distribution`
+  - Heurística VRAM: `Σ (3 × n × npt × 16 bytes) / 1024²` por entrada
+    (proxy do tensor `common_arrays` shape `(3, n, npt, nf)` complex128)
+  - Backward-compat preservada: chaves `n_entries`, `maxsize`, `keys`
+    de v1.5.0 continuam apontando para `_BUCKET_JIT_CACHE`
+  - 4 novos testes em
+    [test_simulation_jax_sprint13.py](../tests/test_simulation_jax_sprint13.py)
+    (~180 LOC): empty, after_simulate_unified, vram_estimate, idempotent
+- **Relatórios técnicos**:
+  - `docs/reports/v2.15_2026-05-01.md` — relatório técnico Sprint 14
+  - `docs/reports/v2.15_benchmark_hardware_2026-05-01.md` — 4 cenários
+    no hardware do usuário (8 cores físicos × 2 threads × 4 workers)
+  - `docs/reports/v2.15_fastmath_dipoles_analysis_2026-05-01.md` —
+    decisão técnica de NÃO aplicar fastmath em dipoles.py/kernel.py
+
+### Mudado
+
+- **Sprint 14.4 P1 — code review aplicado**:
+  - Eliminado import duplicado de `_simulate_combined_prange` em
+    [multi_forward.py](../geosteering_ai/simulation/multi_forward.py):867-876
+    (bloco unificado em uma única tupla)
+  - Loop triplo z_obs simplificado: O(nTR × nAngles × n_pos) com
+    `break` imediato → O(nAngles × n_pos) sem inner loop, semântica
+    bit-exata preservada (primeiro TR sempre amostrado)
+  - Teste `test_fastmath_propagation_remains_false` agora inspeciona
+    `targetoptions` do dispatcher Numba para detectar regressão
+    (em vez de smoke + finitude apenas)
+
+### Corrigido
+
+- **CI PR #33 v2.14**:
+  `Fortran_Gerador/tatu.x` é binário macOS arm64/x86_64 commitado no
+  repositório como artefato de validação local. Em runner Linux x86_64
+  o sistema rejeitava com `OSError [Errno 8] Exec format error`,
+  fazendo 12 testes Fortran-dependentes falharem na CI mesmo com
+  `Path.exists() == True`. Agora `_tatu_runnable()` testa execução
+  real e os testes ficam *skipped* (não falham) em ambientes
+  incompatíveis. Ver [tests/_fortran_helpers.py](../tests/_fortran_helpers.py).
+
+### Notas técnicas
+
+- **Decisão fastmath dipoles.py/kernel.py — NÃO APLICAR (oficial)**:
+  Análise técnica documentada em
+  `docs/reports/v2.15_fastmath_dipoles_analysis_2026-05-01.md`.
+  Erro FMA acumulado em `hmd_tiv` (~600 ops × 2e-16 ≈ 1.2e-13)
+  está em 0.83× do gate Fortran 1e-12 — qualquer ordering reordering
+  pode quebrar paridade. `vmd` apresenta ~8e-14. Cancelamento
+  catastrófico em recursão TE/TM (`1 + RTEup` com exp quase-iguais)
+  amplificaria o erro FMA. Apenas `hankel.py` (4 funções dot-product)
+  permanece com fastmath=True (decisão v2.14, validada).
+- **Hardware spec testbed**: macOS Darwin 25.4.0 x86_64,
+  16 logical cores (hyperthreaded), 8 physical cores, 64 GB RAM
+  (Mac Pro / Mac Studio Intel).
+- **JIT cache observability — uso recomendado**:
+  ```python
+  from geosteering_ai.simulation._jax.forward_pure import get_jit_cache_info
+  info = get_jit_cache_info()
+  print(f"Total XLA programs: {info['total_xla_programs']}")
+  print(f"Estimated VRAM: {info['estimated_vram_mb']:.1f} MB")
+  ```
+  Útil em loops PINN longos (T4 16 GB / A100 40 GB) para detectar
+  vazamento de VRAM antes de OOM.
+
+### Testes (zero regressão vs v2.14)
+
+| Suite | Testes | Status |
+|:------|:------:|:------:|
+| `test_simulation_compare_fortran.py` | 10 | PASS local macOS / SKIP CI Linux |
+| `test_simulation_multi.py` (Fortran-deps) | 2 | PASS local / SKIP CI |
+| `test_simulation_v213_optimizations.py` | 13 | PASS |
+| `test_simulation_v214_prange_combined.py` | 8 | PASS |
+| `test_simulation_v214_fastmath.py` | 6 | PASS (com introspecção P1) |
+| `test_simulation_jax_sprint13.py` | 4 | PASS (NOVO) |
+
+---
+
 ## [2.14] — 2026-05-01
 
 ### Otimizações Numba JIT — Sprints 13.3 + 13.4
