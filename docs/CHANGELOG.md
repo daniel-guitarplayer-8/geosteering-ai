@@ -7,6 +7,99 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [2.14] — 2026-05-01
+
+### Otimizações Numba JIT — Sprints 13.3 + 13.4
+
+Implementação das 2 otimizações Numba deferidas de v2.13:
+- Sprint 13.3: `prange(n_combos * n_pos)` combinado para colapsar 24 transições
+  Python→Numba em loop TR×ângulo serial, eliminando overhead fork/join
+- Sprint 13.4: `fastmath=True` seletivo em 4 helpers hankel.py (dot-product FMA-safe)
+
+Benchmark formal v2.14 com 4 cenários (single-freq, multi-freq, multi-TR, PINN).
+
+### Adicionado
+
+- **Sprint 13.3 — prange combinado TR×ângulo**:
+  - Nova função `_simulate_combined_prange` em
+    [forward.py](../geosteering_ai/simulation/forward.py) (~150 LOC)
+    com `@njit(parallel=True, cache=True, nogil=True)`
+  - Materialização pré-dispatch em `multi_forward.py`: flat geometry arrays
+    `dz_halfs[n_combos]`, `r_halfs[n_combos]`, `cache_indices[n_combos]`
+  - Deduplicação de cache via `key_to_idx` mapping — múltiplos combos
+    com mesmo hordist compartilham entrada única
+  - Stack de caches únicos: `u_unique[n_unique, nf, npt, n]`, idem para 9 arrays
+  - Dispatch adaptativo: usa prange quando `n_combos >= 2`, fallback v2.13 para
+    single-combo (preserva prange(n_pos) sem paralelismo insuficiente)
+  - Nested prange serialização automática Numba: prange(n_total) →
+    prange(nf) serializa sem regressão (validado Sprint 13.1)
+- **Sprint 13.4 — fastmath seletivo**:
+  - `@njit(fastmath=True)` em 4 funções hankel.py:
+    `prepare_kr`, `integrate_j0`, `integrate_j1`, `integrate_j0_j1`
+  - Justificativa: loops pure dot-product (FMA-safe, erro máx ~2e-14)
+  - **INTOCADOS** (fastmath=False obrigatório):
+    `propagation.common_arrays`, `common_factors` (recursão TE/TM orden-sensível),
+    `dipoles.hmd_tiv`, `vmd` (fatores transmissão antes sums),
+    `kernel._fields_in_freqs_kernel_cached`, `precompute_common_arrays_cache`
+- **Benchmark CLI**:
+  - Novo arquivo `benchmarks/bench_v214_numba.py` (~370 LOC)
+  - 4 cenários: A (single-freq 30k mod), B (multi-freq 10 freqs, 30k),
+    C (multi-TR×ang 3×5, 5k mod), D (PINN 50 calls, cache_persistent)
+  - Métricas: modelos/hora (A/B/C), ms/chamada (D)
+  - CLI: `python benchmarks/bench_v214_numba.py --scenario [A|B|C|D|--all]`
+
+### Testes
+
+- **Novo arquivo** `tests/test_simulation_v214_prange_combined.py`:
+  - 8 testes Sprint 13.3 — paridade vs v2.13, single-combo fallback,
+    multi-TR×multi-ang, deduplicação, Fortran parity <1e-12, determinismo
+  - **Todos passam (2.30s)**
+- **Novo arquivo** `tests/test_simulation_v214_fastmath.py`:
+  - 6 testes Sprint 13.4 — paridade Fortran pós-fastmath (3-layer, oklahoma28),
+    determinismo, validação propagation.py=False, smoke zero-regressão
+  - **Todos passam (2.25s)**
+- **Zero regressão**: 27/27 testes v2.13 + v2.14 PASS (2.45s) — backward-compat total
+
+### Backward-compat
+
+- Prange combinado (Sprint 13.3): fallback automático para v2.13 quando
+  `n_combos < 2` ou `parallel=False` ou n_workers=1
+- Fastmath (Sprint 13.4): aplicado SOMENTE em hankel.py — dipoles.py,
+  propagation.py, kernel.py mantêm fastmath=False (ordem-sensível)
+- API `simulate_multi()` 100% compatível: sem novos kwargs, comportamento
+  idêntico quando `cache_persistent=False` (default) e `n_workers` não especificado
+
+### Validado
+
+- Paridade v2.13 → v2.14 bit-exata em single-TR×single-ang (fallback path)
+- Paridade v2.13 → v2.14 determinística em multi-TR×multi-ang (prange combinado)
+- Paridade Fortran <1e-12 em 3-layer + oklahoma28 simulado pós-fastmath hankel
+- Thread-safety: prange(n_combos*n_pos) com índices exclusivos por construção
+- Nested prange: serialização automática Numba validada (prange(n_total) →
+  prange(nf) serializa)
+
+### Pendências (v2.15+)
+
+- Benchmark em hardware do usuário: validar ganhos reais vs v2.12
+  (meta v2.13 Sprint 13.1: ≥1.5× multi-freq; meta v2.14 Sprint 13.3: ≥1.3× multi-TR)
+- Fastmath=True seletivo em outras operações (dipoles.py factors, kernel.py,
+  conforme validação Fortran <1e-12)
+- Análise JIT caching: monitorar número de compilações XLA para Numba/JAX
+  no backend híbrido
+
+### Modificado
+
+| Arquivo | Mudanças |
+|:--------|:---------|
+| `forward.py` | +`_simulate_combined_prange` (~150 LOC) |
+| `multi_forward.py` | Materialização pré-dispatch + dispatch adaptativo (~100 LOC) |
+| `_numba/hankel.py` | `@njit(fastmath=True)` em 4 funções (+4 LOC) |
+| `tests/test_simulation_v214_prange_combined.py` | NOVO (8 testes, ~270 LOC) |
+| `tests/test_simulation_v214_fastmath.py` | NOVO (6 testes, ~180 LOC) |
+| `benchmarks/bench_v214_numba.py` | NOVO (4 cenários, ~370 LOC) |
+
+---
+
 ## [2.13] — 2026-05-01
 
 ### Otimizações Numba JIT — Sprints 13.1 + 13.2 + 13.4

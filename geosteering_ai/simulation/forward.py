@@ -334,6 +334,140 @@ def _simulate_positions_njit_cached(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# _simulate_combined_prange — Sprint 13.3: prange(nTR*nAngles*n_pos) flat
+# ──────────────────────────────────────────────────────────────────────────────
+# Colapsa o dispatcher serial Python `for i_tr: for i_ang:` em uma única
+# chamada Numba com `prange(n_combos * n_pos)` flat — máximo paralelismo,
+# elimina overhead fork/join de múltiplas chamadas.
+#
+# Geometria é materializada em Python (dz_halfs, r_halfs, dip_rads_flat,
+# cache_indices) antes de chamar esta função. Caches são empilhados
+# (u_unique, s_unique, ...) com shape [n_unique, nf, npt, n].
+#
+# z_obs/rho_h_at_obs/rho_v_at_obs são computadas separadamente em Python
+# após esta chamada (simples loop sobre ângulos).
+
+
+@njit(parallel=True, cache=True, nogil=True)
+def _simulate_combined_prange(
+    # Geometria flat [n_combos = nTR * nAngles]
+    dz_halfs: np.ndarray,
+    r_halfs: np.ndarray,
+    dip_rads_flat: np.ndarray,
+    cache_indices: np.ndarray,
+    nAngles: int,
+    # Caches empilhados [n_unique, nf, npt, n]
+    u_unique: np.ndarray,
+    s_unique: np.ndarray,
+    uh_unique: np.ndarray,
+    sh_unique: np.ndarray,
+    RTEdw_unique: np.ndarray,
+    RTEup_unique: np.ndarray,
+    RTMdw_unique: np.ndarray,
+    RTMup_unique: np.ndarray,
+    AdmInt_unique: np.ndarray,
+    # Dados estáticos do modelo
+    positions_z: np.ndarray,
+    n: int,
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    h_arr: np.ndarray,
+    prof_arr: np.ndarray,
+    eta: np.ndarray,
+    freqs_hz: np.ndarray,
+    krJ0J1: np.ndarray,
+    wJ0: np.ndarray,
+    wJ1: np.ndarray,
+    # Output pré-alocado
+    H_tensor: np.ndarray,
+) -> None:
+    """Prange flat sobre (TR, ângulo, posição) combinados (Sprint 13.3).
+
+    Substitui o dispatcher serial Python `for i_tr: for i_ang:` por
+    uma única chamada Numba com `prange(n_combos * n_pos)`. Cada tarefa
+    paralela processa uma (posição, combo de TR/ângulo) pair.
+
+    Args:
+        dz_halfs, r_halfs, dip_rads_flat: Geometria flat [n_combos].
+        cache_indices: int64[n_combos] — índice na stack de caches únicos.
+        nAngles: número de ângulos (para decomposição de índice flat).
+        u_unique, ..., AdmInt_unique: Caches empilhados [n_unique, nf, npt, n].
+        positions_z: Profundidades ponto-médio [n_pos].
+        n: Número de camadas.
+        rho_h, rho_v, h_arr, prof_arr, eta: Dados geológicos estáticos.
+        freqs_hz, krJ0J1, wJ0, wJ1: Frequências e filtro Hankel.
+        H_tensor: Output pré-alocado [nTR, nAngles, n_pos, nf, 9].
+
+    Note:
+        Função sem retorno: preenche H_tensor inplace.
+        z_obs/rho_h_at_obs/rho_v_at_obs são computadas separadamente em
+        Python após a chamada (não são hot-path).
+        O prange(nf) interno em _fields_in_freqs_kernel_cached é
+        serializado automaticamente por Numba quando chamado do contexto
+        prange(n_total) — sem regressão.
+    """
+    n_combos = dz_halfs.shape[0]
+    n_pos = positions_z.shape[0]
+    n_total = n_combos * n_pos
+
+    for k in _prange(n_total):
+        # Decomposição de índice flat
+        i_combo = k // n_pos
+        j = k % n_pos
+
+        i_tr = i_combo // nAngles
+        i_ang = i_combo % nAngles
+
+        # Parâmetros geométricos para este combo
+        dz_half = dz_halfs[i_combo]
+        r_half = r_halfs[i_combo]
+        dip_rad = dip_rads_flat[i_combo]
+
+        # Índice na stack de caches únicos (deduplicação)
+        ci = cache_indices[i_combo]
+
+        # Coordenadas T/R — Convenção Fortran (PerfilaAnisoOmp.f08:677-679)
+        z_mid = positions_z[j]
+        Tz = z_mid + dz_half
+        cz = z_mid - dz_half
+        Tx = r_half
+        cx = -r_half
+        Ty = 0.0
+        cy = 0.0
+
+        # Chamada ao kernel @njit com cache sliced
+        cH = _fields_in_freqs_kernel_cached(
+            Tx,
+            Ty,
+            Tz,
+            cx,
+            cy,
+            cz,
+            dip_rad,
+            n,
+            rho_h,
+            rho_v,
+            h_arr,
+            prof_arr,
+            eta,
+            freqs_hz,
+            krJ0J1,
+            wJ0,
+            wJ1,
+            u_unique[ci],
+            s_unique[ci],
+            uh_unique[ci],
+            sh_unique[ci],
+            RTEdw_unique[ci],
+            RTEup_unique[ci],
+            RTMdw_unique[ci],
+            RTMup_unique[ci],
+            AdmInt_unique[ci],
+        )
+        H_tensor[i_tr, i_ang, j, :, :] = cH
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # _simulate_positions_parallel — Pool de threads sobre posições (Sprint 2.8)
 # ──────────────────────────────────────────────────────────────────────────────
 # LEGADO da Sprint 2.8 — kept como fallback/debug. A Sprint 2.9 tornou

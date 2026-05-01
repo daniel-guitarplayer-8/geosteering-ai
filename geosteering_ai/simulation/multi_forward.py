@@ -867,6 +867,10 @@ def simulate_multi(
     # ── Loop principal: iTR × iAng (serial-outer, paralelo-inner) ──
     # Import tardio para evitar import circular via forward.py no teste
     from geosteering_ai.simulation.forward import (
+        _simulate_combined_prange,  # Sprint 13.3: prange flat TR×ang
+    )
+    from geosteering_ai.simulation.forward import (
+        _simulate_combined_prange,  # Sprint 13.3: prange flat TR*ang
         _simulate_positions_njit_cached,
         _simulate_positions_parallel,
     )
@@ -877,92 +881,180 @@ def simulate_multi(
 
         _numba.set_num_threads(cfg.num_threads)
 
-    for i_tr in range(nTR):
-        L = float(tr_arr[i_tr])
+    # ── Sprint 13.3: Materialização pré-dispatch para prange(nTR*nAngles*n_pos) flat ──
+    # Estrutura para despacho adaptativo: usar nova prange quando n_combos >= 2
+    n_combos = nTR * nAngles
+
+    if n_combos >= 2 and cfg.parallel and HAS_NUMBA and n_pos > 1:
+        # ── Passo 1: Geometria flat ────────────────────────────────────
+        dz_halfs = np.empty(n_combos, dtype=np.float64)
+        r_halfs = np.empty(n_combos, dtype=np.float64)
+        dip_rads_flat = np.empty(n_combos, dtype=np.float64)
+        for i_tr in range(nTR):
+            L = float(tr_arr[i_tr])
+            for i_ang in range(nAngles):
+                k = i_tr * nAngles + i_ang
+                dip_rad = float(dip_rads[i_ang])
+                dz_halfs[k] = 0.5 * L * math.cos(dip_rad)
+                r_halfs[k] = 0.5 * L * math.sin(dip_rad)
+                dip_rads_flat[k] = dip_rad
+
+        # ── Passo 2: Deduplicação (cache_indices + key_to_idx) ─────────
+        unique_keys = list(dict.fromkeys(
+            round(2.0 * r_halfs[k], _HORDIST_KEY_DECIMALS) for k in range(n_combos)
+        ))
+        key_to_idx = {key: idx for idx, key in enumerate(unique_keys)}
+        cache_indices = np.array([
+            key_to_idx[round(2.0 * r_halfs[k], _HORDIST_KEY_DECIMALS)]
+            for k in range(n_combos)
+        ], dtype=np.int64)
+
+        # ── Passo 3: Stack de caches únicos [n_unique, nf, npt, n] ─────
+        unique_tuples = [caches[key] for key in unique_keys]
+        u_unique = np.stack([t[0] for t in unique_tuples], axis=0)
+        s_unique = np.stack([t[1] for t in unique_tuples], axis=0)
+        uh_unique = np.stack([t[2] for t in unique_tuples], axis=0)
+        sh_unique = np.stack([t[3] for t in unique_tuples], axis=0)
+        RTEdw_unique = np.stack([t[4] for t in unique_tuples], axis=0)
+        RTEup_unique = np.stack([t[5] for t in unique_tuples], axis=0)
+        RTMdw_unique = np.stack([t[6] for t in unique_tuples], axis=0)
+        RTMup_unique = np.stack([t[7] for t in unique_tuples], axis=0)
+        AdmInt_unique = np.stack([t[8] for t in unique_tuples], axis=0)
+
+        # ── Passo 4: Despacho adaptativo Sprint 13.3 — prange flat ──────
+        _simulate_combined_prange(
+            dz_halfs,
+            r_halfs,
+            dip_rads_flat,
+            cache_indices,
+            nAngles,
+            u_unique,
+            s_unique,
+            uh_unique,
+            sh_unique,
+            RTEdw_unique,
+            RTEup_unique,
+            RTMdw_unique,
+            RTMup_unique,
+            AdmInt_unique,
+            positions_z,
+            n,
+            rho_h,
+            rho_v,
+            h_arr_static,
+            prof_arr_static,
+            eta_static,
+            freqs_hz,
+            krJ0J1,
+            wJ0,
+            wJ1,
+            H_tensor,
+        )
+
+        # ── Passo 5: z_obs em Python (não hot-path) ───────────────────
         for i_ang in range(nAngles):
             dip_rad = float(dip_rads[i_ang])
-            dz_half = 0.5 * L * math.cos(dip_rad)
-            r_half = 0.5 * L * math.sin(dip_rad)
-            hordist = 2.0 * r_half
-            key = round(hordist, _HORDIST_KEY_DECIMALS)
-            cache_tuple = caches[key]
-
-            # Output slice para este par (iTR, iAng)
-            H_slice = H_tensor[i_tr, i_ang]  # (n_pos, nf, 9)
-            z_slice = z_obs[i_ang]
-            rh_slice = rho_h_at_obs[i_ang]
-            rv_slice = rho_v_at_obs[i_ang]
-
-            # Para (i_ang) já preenchido, use um buffer temporário descartável
-            if z_obs_filled[i_ang]:
-                z_tmp = np.empty(n_pos, dtype=np.float64)
-                rh_tmp = np.empty(n_pos, dtype=np.float64)
-                rv_tmp = np.empty(n_pos, dtype=np.float64)
-            else:
-                z_tmp = z_slice
-                rh_tmp = rh_slice
-                rv_tmp = rv_slice
-                z_obs_filled[i_ang] = True
-
-            if cfg.parallel and HAS_NUMBA and n_pos > 1:
-                # Caminho paralelo preferido (Sprint 2.10: prange + cache)
-                _simulate_positions_njit_cached(
-                    positions_z,
-                    dz_half,
-                    r_half,
-                    dip_rad,
-                    n,
-                    rho_h,
-                    rho_v,
-                    esp,
-                    h_arr_static,
-                    prof_arr_static,
-                    eta_static,
-                    freqs_hz,
-                    krJ0J1,
-                    wJ0,
-                    wJ1,
-                    *cache_tuple,
-                    H_slice,
-                    z_tmp,
-                    rh_tmp,
-                    rv_tmp,
-                )
-            else:
-                # Caminho serial (debug ou Numba ausente)
-                for j in range(n_pos):
-                    z_mid = positions_z[j]
-                    # Convenção Fortran (PerfilaAnisoOmp.f08:677-679):
-                    # Transmissor ABAIXO do ponto-médio (+z), Receptor ACIMA (−z).
-                    # Transmissor em +x, Receptor em −x.
+            for j in range(n_pos):
+                z_mid = positions_z[j]
+                for i_tr in range(nTR):
+                    L = float(tr_arr[i_tr])
+                    dz_half = 0.5 * L * math.cos(dip_rad)
                     Tz = z_mid + dz_half
                     cz = z_mid - dz_half
-                    Tx = r_half
-                    cx = -r_half
-                    Ty = 0.0
-                    cy = 0.0
-                    cH = fields_in_freqs(
-                        Tx,
-                        Ty,
-                        Tz,
-                        cx,
-                        cy,
-                        cz,
+                    z_obs_j, rh_j, rv_j = compute_zrho(Tz, cz, n, rho_h, rho_v, esp)
+                    z_obs[i_ang, j] = z_obs_j
+                    rho_h_at_obs[i_ang, j] = rh_j
+                    rho_v_at_obs[i_ang, j] = rv_j
+                    break  # Só preencher uma vez por ângulo
+
+    else:
+        # ── Fallback: dispatcher serial v2.13 (single-combo ou serial) ──
+        for i_tr in range(nTR):
+            L = float(tr_arr[i_tr])
+            for i_ang in range(nAngles):
+                dip_rad = float(dip_rads[i_ang])
+                dz_half = 0.5 * L * math.cos(dip_rad)
+                r_half = 0.5 * L * math.sin(dip_rad)
+                hordist = 2.0 * r_half
+                key = round(hordist, _HORDIST_KEY_DECIMALS)
+                cache_tuple = caches[key]
+
+                # Output slice para este par (iTR, iAng)
+                H_slice = H_tensor[i_tr, i_ang]  # (n_pos, nf, 9)
+                z_slice = z_obs[i_ang]
+                rh_slice = rho_h_at_obs[i_ang]
+                rv_slice = rho_v_at_obs[i_ang]
+
+                # Para (i_ang) já preenchido, use um buffer temporário descartável
+                if z_obs_filled[i_ang]:
+                    z_tmp = np.empty(n_pos, dtype=np.float64)
+                    rh_tmp = np.empty(n_pos, dtype=np.float64)
+                    rv_tmp = np.empty(n_pos, dtype=np.float64)
+                else:
+                    z_tmp = z_slice
+                    rh_tmp = rh_slice
+                    rv_tmp = rv_slice
+                    z_obs_filled[i_ang] = True
+
+                if cfg.parallel and HAS_NUMBA and n_pos > 1:
+                    # Caminho paralelo preferido (Sprint 2.10: prange + cache)
+                    _simulate_positions_njit_cached(
+                        positions_z,
+                        dz_half,
+                        r_half,
                         dip_rad,
                         n,
                         rho_h,
                         rho_v,
                         esp,
+                        h_arr_static,
+                        prof_arr_static,
+                        eta_static,
                         freqs_hz,
                         krJ0J1,
                         wJ0,
                         wJ1,
+                        *cache_tuple,
+                        H_slice,
+                        z_tmp,
+                        rh_tmp,
+                        rv_tmp,
                     )
-                    H_slice[j, :, :] = cH
-                    z_obs_j, rh_j, rv_j = compute_zrho(Tz, cz, n, rho_h, rho_v, esp)
-                    z_tmp[j] = z_obs_j
-                    rh_tmp[j] = rh_j
-                    rv_tmp[j] = rv_j
+                else:
+                    # Caminho serial (debug ou Numba ausente)
+                    for j in range(n_pos):
+                        z_mid = positions_z[j]
+                        # Convenção Fortran (PerfilaAnisoOmp.f08:677-679):
+                        # Transmissor ABAIXO do ponto-médio (+z), Receptor ACIMA (−z).
+                        # Transmissor em +x, Receptor em −x.
+                        Tz = z_mid + dz_half
+                        cz = z_mid - dz_half
+                        Tx = r_half
+                        cx = -r_half
+                        Ty = 0.0
+                        cy = 0.0
+                        cH = fields_in_freqs(
+                            Tx,
+                            Ty,
+                            Tz,
+                            cx,
+                            cy,
+                            cz,
+                            dip_rad,
+                            n,
+                            rho_h,
+                            rho_v,
+                            esp,
+                            freqs_hz,
+                            krJ0J1,
+                            wJ0,
+                            wJ1,
+                        )
+                        H_slice[j, :, :] = cH
+                        z_obs_j, rh_j, rv_j = compute_zrho(Tz, cz, n, rho_h, rho_v, esp)
+                        z_tmp[j] = z_obs_j
+                        rh_tmp[j] = rh_j
+                        rv_tmp[j] = rv_j
 
     # ── Construção do resultado base ───────────────────────────────
     result = MultiSimulationResult(
