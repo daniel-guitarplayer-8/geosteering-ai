@@ -7,6 +7,75 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [2.12] — 2026-04-30
+
+### Workers Nativos no `simulate_multi`
+
+Implementação da Sprint 12 (relatório técnico
+[v2.11_simulador_python_analise_paralelismo_2026-04-30.md](reports/v2.11_simulador_python_analise_paralelismo_2026-04-30.md))
+que migra o suporte a paralelismo inter-modelo da camada UI
+(`tests/sm_workers.py`) para o **core do simulador**
+(`geosteering_ai/simulation/_workers.py`).
+
+### Adicionado
+
+- **Novo módulo `geosteering_ai/simulation/_workers.py`** (~530 LOC)
+  com 4 modos de execução:
+  - **A** (Single, 1w × 1t) — debug/pequeno
+  - **B** (Multi-Thread, 1w × Nt) — 1 simulação grande
+  - **C** (Workers, Mw × 1t) — batch n_pos baixo
+  - **D** (Hybrid, Mw × Kt) — ★ DEFAULT PRODUÇÃO
+- `MultiSimulationResultBatch` (frozen dataclass) em
+  `geosteering_ai.simulation` com campos:
+  `H_stack`, `z_obs`, `elapsed_s`, `throughput_mod_per_h`,
+  `backend`, `n_workers`, `n_threads`, `mode`.
+- `release_pool()` exportado em `geosteering_ai.simulation` para
+  cleanup explícito.
+- 3 novos kwargs em `simulate_multi`:
+  - `models: Optional[List[Dict]]` — batch de modelos
+  - `n_workers: Optional[int]` — número de processos do pool
+  - `threads_per_worker: Optional[int]` — threads Numba por worker
+    (`None` = auto anti-oversubscription)
+- 2 novos campos em `SimulationConfig`:
+  `n_workers`, `threads_per_worker` (defaults `None`).
+- **Anti-oversubscription automático**: quando
+  `threads_per_worker is None`, usa `eff = max(1, cpu // n_workers)`.
+- **Benchmark** `benchmarks/bench_v212_workers.py` com 4 modos
+  comparativos.
+- **17 novos testes** em `tests/test_simulation_workers.py`
+  (paridade A/B/C/D, validação de input, métricas).
+- **9 novos testes** em `tests/test_simulation_config.py` para
+  validação dos novos campos.
+
+### Migração Simulation Manager
+
+- `closeEvent` agora libera tanto `release_numba_pool()` (UI)
+  quanto `release_pool()` (core) — cleanup completo de ambos pools.
+- API nativa **disponível** mas UI mantém pool próprio para
+  preservar Pause/Cancel cooperativo (v2.11) com checkpoints
+  `_wait_if_paused` + `_cancel_requested`.
+
+### Métricas de paridade
+
+- Modo A vs Modo B: **bit-exato** (`assert_allclose rtol=1e-14`).
+- Modo A vs Modo C: **<1e-12** (tolerância FP entre processos).
+- Modo A vs Modo D: **<1e-12** (tolerância FP entre processos).
+
+### Backward-compat
+
+- `simulate_multi(rho_h=..., rho_v=..., esp=..., positions_z=...)`
+  retorna `MultiSimulationResult` (v2.11) — comportamento atual.
+- `simulate_multi(models=[...], n_workers=N)` retorna
+  `MultiSimulationResultBatch` (v2.12) — caminho novo.
+- API existente intocada. **Zero regressão** em pytest
+  (734 simulation tests passing, 0 failed).
+
+### Smoke tests
+
+- 197 → 202 (+5: T24-T28).
+
+---
+
 ## [2.11] — 2026-04-29
 
 ### Análise Causa-Raiz do Freezing GUI

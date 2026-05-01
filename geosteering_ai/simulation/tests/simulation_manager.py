@@ -7282,12 +7282,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self._start_numba_primer()
 
     def closeEvent(self, event: Any) -> None:  # type: ignore[override]
-        """Termina NumbaPrimer e libera pool persistente ao fechar (v2.9/v2.10).
+        """Termina NumbaPrimer e libera pools persistentes ao fechar.
+
+        v2.9/v2.10: NumbaPrimer + pool da UI (`release_numba_pool`).
+        v2.12 (Sprint 12.3): além do pool da UI, libera o pool persistente
+        do core (`release_pool` em `geosteering_ai/simulation/_workers.py`)
+        para garantir cleanup completo quando o usuário usou a API nativa
+        `simulate_multi(models=[...], n_workers=N)` durante a sessão.
 
         Aguarda até 3 s para conclusão limpa do NumbaPrimer; se exceder,
         força quit() para evitar "QThread destroyed while thread is running"
-        no log do Qt. O pool persistente é encerrado sem esperar (workers
-        finalizarão naturalmente após processar a tarefa em andamento).
+        no log do Qt. Os pools persistentes são encerrados sem esperar
+        (workers finalizarão naturalmente após processar a tarefa em
+        andamento).
         """
         primer = getattr(self, "_numba_primer", None)
         if primer is not None and primer.isRunning():
@@ -7297,6 +7304,14 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         release_numba_pool()
+        # v2.12 (Sprint 12.3): libera pool nativo do core. No-op quando o
+        # usuário não usou simulate_multi(models=..., n_workers>1) na sessão.
+        try:
+            from geosteering_ai.simulation import release_pool as _release_core_pool
+
+            _release_core_pool()
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def _setup_keyboard_shortcuts(self) -> None:
@@ -10210,6 +10225,59 @@ def _run_smoke_test() -> int:
         )
     except Exception as exc:
         check(False, f"v2.11 T23: Pause/Cancel ({exc})")
+
+    # ── v2.12 T24-T28: Workers Nativos (Sprint 12.1-12.3) ─────────────────
+    # Validam que a nova API `simulate_multi(models=[...], n_workers=N)` está
+    # disponível no core e que o lifecycle do pool está integrado ao closeEvent.
+    try:
+        from geosteering_ai.simulation import (
+            MultiSimulationResultBatch,
+            release_pool,
+            simulate_multi,
+        )
+
+        # T24: dataclass MultiSimulationResultBatch exportada.
+        check(
+            MultiSimulationResultBatch is not None,
+            "v2.12 T24: MultiSimulationResultBatch exportado em geosteering_ai.simulation",
+        )
+        # T25: SimulationConfig tem campos n_workers + threads_per_worker.
+        from geosteering_ai.simulation import SimulationConfig
+
+        check(
+            hasattr(SimulationConfig, "__dataclass_fields__")
+            and "n_workers" in SimulationConfig.__dataclass_fields__
+            and "threads_per_worker" in SimulationConfig.__dataclass_fields__,
+            "v2.12 T25: SimulationConfig expõe n_workers e threads_per_worker",
+        )
+        # T26: release_pool exportado e callable (usado no closeEvent).
+        check(
+            callable(release_pool),
+            "v2.12 T26: release_pool é callable em geosteering_ai.simulation",
+        )
+        # T27: Helpers internos (anti-oversubscription + detect_mode) presentes.
+        from geosteering_ai.simulation._workers import (
+            _detect_mode,
+            _resolve_effective_threads,
+        )
+
+        check(
+            _resolve_effective_threads(4, None, cpu_count=8) == 2
+            and _detect_mode(4, 2) == "D",
+            "v2.12 T27: anti-oversubscription auto + detect_mode operacional",
+        )
+        # T28: simulate_multi aceita kwargs models/n_workers/threads_per_worker.
+        import inspect
+
+        sig = inspect.signature(simulate_multi)
+        check(
+            "models" in sig.parameters
+            and "n_workers" in sig.parameters
+            and "threads_per_worker" in sig.parameters,
+            "v2.12 T28: simulate_multi aceita models/n_workers/threads_per_worker",
+        )
+    except Exception as exc:
+        check(False, f"v2.12 T24-T28: Workers Nativos ({exc})")
 
     print(f"\n=== Resultado: {len(failures)} falha(s) ===")
     window.close()

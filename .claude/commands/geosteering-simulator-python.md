@@ -1941,3 +1941,130 @@ cooperativo).
 - P-values Per-Slice em `CorrelationAnalysisDialog`
 - Stream incremental de `H_stack` para `.dat` (sem buffer 2.5GB)
 - Pause persistente (salvar estado em disco para retomar após app fechar)
+
+---
+
+## 29 — Simulação Multi-Modelo: Workers Nativos (v2.12, Sprint 12)
+
+**Branch**: `feat/simulation-manager-v2.12` (2026-04-30) ·
+**Relatório**: [`v2.12_workers_nativos_2026-04-30.md`](../docs/reports/v2.12_workers_nativos_2026-04-30.md)
+
+### 29.1 Motivação
+
+Em v2.11 e anteriores, o suporte a paralelismo inter-modelo existia
+**apenas** na camada UI (`tests/sm_workers.py`). Usuários da biblioteca
+(notebooks, scripts CLI, treino offline) precisavam reimplementar
+`ProcessPoolExecutor` manualmente para batch de 30k+ modelos.
+
+A v2.12 migra a infraestrutura de pool para o **core** do simulador
+(`geosteering_ai/simulation/_workers.py`), expondo:
+
+```python
+from geosteering_ai.simulation import simulate_multi
+result = simulate_multi(
+    models=[{"rho_h": ..., "rho_v": ..., "esp": ...} for _ in range(30000)],
+    positions_z=np.linspace(-2, 7, 600),
+    n_workers=4,
+    threads_per_worker=2,  # ou None para auto
+)
+# result.H_stack.shape == (30000, nTR, nAngles, n_pos, nf, 9)
+# result.mode == "D" (Hybrid)
+```
+
+### 29.2 Os 4 modos de execução
+
+| Modo | n_workers | threads_per_worker | Quando usar                        |
+|:----:|:---------:|:------------------:|:------------------------------------|
+|  A   |    1      |        1           | Debug, 1 modelo, n_pos < 50         |
+|  B   |    1      |        N           | 1 simulação grande, n_pos ≥ 100     |
+|  C   |    M      |        1           | Batch grande, n_pos baixo           |
+|  D   |    M      |        K           | ★ DEFAULT PRODUÇÃO (30k modelos)    |
+
+**Anti-oversubscription**: quando `threads_per_worker is None`, o
+módulo aplica `eff = max(1, cpu_count // n_workers)`, garantindo
+`n_workers × eff ≤ cpu_count`.
+
+### 29.3 API pública (3 novos kwargs em `simulate_multi`)
+
+```python
+def simulate_multi(
+    rho_h=None, rho_v=None, esp=None, positions_z=None,
+    *,
+    # ... kwargs existentes (frequencies_hz, tr_spacings_m, dip_degs,
+    #     cfg, hankel_filter, use_compensation, comp_pairs, use_tilted,
+    #     tilted_configs) ...
+    # ── Sprint 12.1 (v2.12) ──
+    models: Optional[List[Dict[str, Any]]] = None,    # NOVO
+    n_workers: Optional[int] = None,                  # NOVO
+    threads_per_worker: Optional[int] = None,         # NOVO
+) -> Union[MultiSimulationResult, MultiSimulationResultBatch]:
+    ...
+```
+
+**Backward-compat total**: quando `models is None` (default), o
+comportamento é idêntico a v2.11 (single-modelo, retorna
+`MultiSimulationResult`). Quando `models` é fornecido, o caminho
+batch é ativado e retorna `MultiSimulationResultBatch` com:
+
+- `H_stack`: shape `(n_models, nTR, nAngles, n_pos, nf, 9)` complex128
+- `z_obs`: shape `(nAngles, n_pos)` float64
+- `elapsed_s`, `throughput_mod_per_h`, `mode`, `n_workers`, `n_threads`,
+  `backend`
+
+### 29.4 Componentes novos
+
+| Arquivo                                              | LOC  | Propósito                                  |
+|:-----------------------------------------------------|:----:|:--------------------------------------------|
+| `geosteering_ai/simulation/_workers.py`              | ~530 | Core de workers (pool, init, dispatcher)   |
+| `tests/test_simulation_workers.py`                   | ~330 | 17 testes paridade A/B/C/D + validação     |
+| `benchmarks/bench_v212_workers.py`                   | ~210 | Benchmark CLI 4 modos (-n, --modes A B C D) |
+| `docs/reports/v2.12_workers_nativos_2026-04-30.md`   | ~600 | Relatório técnico completo                  |
+
+### 29.5 Migração da UI (Simulation Manager)
+
+A migração v2.12 **NÃO** substitui o `sm_workers.py:run_numba_chunk`
+existente. A UI mantém seu pool próprio com Pause/Cancel cooperativo
+(v2.11) — `_wait_if_paused`, `_cancel_requested`. A nova API serve
+para **uso programático** fora da UI (notebooks, scripts).
+
+**Mudança mínima na UI** (Sprint 12.3):
+
+- `closeEvent` agora libera **ambos** os pools:
+  - `release_numba_pool()` (UI, em `sm_workers.py`)
+  - `release_pool()` (core, em `_workers.py`) — NOVO
+
+### 29.6 Helpers expostos para testes
+
+```python
+from geosteering_ai.simulation._workers import (
+    _resolve_effective_threads,  # anti-oversubscription
+    _detect_mode,                # "A"/"B"/"C"/"D"
+    _split_models_uniform,       # dividir batch preservando ordem
+)
+```
+
+### 29.7 Smoke tests v2.12 (T24-T28)
+
+- T24: `MultiSimulationResultBatch` exportado em
+  `geosteering_ai.simulation`
+- T25: `SimulationConfig` expõe `n_workers` e `threads_per_worker`
+- T26: `release_pool` é callable em `geosteering_ai.simulation`
+- T27: anti-oversubscription auto + detect_mode operacional
+- T28: `simulate_multi` aceita `models`/`n_workers`/`threads_per_worker`
+
+### 29.8 Triggers para próximas conversas
+
+- "Workers nativos" / "n_workers" / "threads_per_worker"
+- "MultiSimulationResultBatch" / "release_pool"
+- "modo A/B/C/D" / "anti-oversubscription"
+- "simulate_multi(models=..., n_workers=...)"
+- "feat/simulation-manager-v2.12"
+- "batch multi-modelo" / "30k modelos paralelo"
+
+### 29.9 Pendências v2.13+
+
+- Numba optimizations: vectorize frequencies, prange sobre TR×angle,
+  cross-call cache (relatório §6).
+- JAX GPU Phase 2 (PR #24): completar unified strategy, flip default
+  `vmap_real=True`, validar T4/A100.
+- Streaming `H_stack` para evitar OOM em batch >100k modelos.

@@ -13,7 +13,7 @@
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |
 | **Pacote** | `geosteering_ai/` (pip installable) |
 | **Referencia** | `docs/ARCHITECTURE_v2.md` (documento completo da arquitetura) |
-| **Simulation Manager** | v2.11 (2026-04-29) — async generation + Pause/Cancel cooperativo · 197 smoke tests |
+| **Simulation Manager** | v2.12 (2026-04-30) — Workers Nativos no `simulate_multi` (4 modos A/B/C/D) · 202 smoke tests |
 
 ---
 

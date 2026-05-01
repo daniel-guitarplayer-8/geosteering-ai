@@ -117,7 +117,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -405,10 +405,10 @@ def _validate_multi_inputs(
 # simulate_multi — API pública multi-dimensional
 # ──────────────────────────────────────────────────────────────────────────────
 def simulate_multi(
-    rho_h: np.ndarray,
-    rho_v: np.ndarray,
-    esp: np.ndarray,
-    positions_z: np.ndarray,
+    rho_h: Optional[np.ndarray] = None,
+    rho_v: Optional[np.ndarray] = None,
+    esp: Optional[np.ndarray] = None,
+    positions_z: Optional[np.ndarray] = None,
     *,
     frequencies_hz: Optional[Sequence[float]] = None,
     tr_spacings_m: Optional[Sequence[float]] = None,
@@ -419,13 +419,30 @@ def simulate_multi(
     comp_pairs: Optional[Tuple[Tuple[int, int], ...]] = None,
     use_tilted: bool = False,
     tilted_configs: Optional[Tuple[Tuple[float, float], ...]] = None,
-) -> MultiSimulationResult:
+    # ── Sprint 12.1 (v2.12) — Workers Nativos ───────────────────────────
+    models: Optional[List[Dict[str, Any]]] = None,
+    n_workers: Optional[int] = None,
+    threads_per_worker: Optional[int] = None,
+) -> Union["MultiSimulationResult", "MultiSimulationResultBatch"]:
     """Simulação forward EM 1D TIV com multi-TR, multi-ângulo, multi-freq.
 
     API multi-dimensional **fielmente equivalente** ao Fortran v10.0:
     combina todas as dimensões de parâmetros da ferramenta (nTR × ntheta
     × nf) em uma única chamada, com deduplicação automática de cache
     por hordist e wiring F6/F7 opcional.
+
+    **Sprint 12.1 (v2.12)** — adiciona suporte nativo a batch
+    multi-modelo via 3 kwargs opcionais:
+
+      • ``models``: lista de dicts ``{rho_h, rho_v, esp}`` — quando
+        fornecido, ativa o caminho batch (`_workers.run_batch`).
+      • ``n_workers``: número de workers do `ProcessPoolExecutor`
+        (default = 1, single-process). Requer ``models`` definido.
+      • ``threads_per_worker``: threads Numba por worker. ``None`` ativa
+        anti-oversubscription auto: ``cpu // n_workers``.
+
+    Quando ``models is None`` (default), o comportamento permanece o
+    de v2.11: 1 modelo single-pass. Backward-compat total.
 
     Args:
         rho_h: (n,) Ω·m — resistividades horizontais por camada (inclui
@@ -489,7 +506,93 @@ def simulate_multi(
             (3, 1, 100, 1, 9)
             >>> result.H_comp is not None
             True
+
+        Sprint 12.1 (v2.12) — Batch multi-modelo com 4 workers::
+
+            >>> models = [
+            ...     {"rho_h": np.array([1.0, 10.0+i, 1.0]),
+            ...      "rho_v": np.array([1.0, 10.0+i, 1.0]),
+            ...      "esp": np.array([5.0])} for i in range(8)
+            ... ]
+            >>> result = simulate_multi(
+            ...     models=models,
+            ...     positions_z=np.linspace(-2, 7, 100),
+            ...     n_workers=4, threads_per_worker=2,
+            ... )
+            >>> result.H_stack.shape
+            (8, 1, 1, 100, 1, 9)
+            >>> result.mode
+            'D'
     """
+    # ── Sprint 12.1 (v2.12) — Dispatcher: batch multi-modelo ──────
+    # Quando `models` é fornecido, delega para `_workers.run_batch`
+    # que orquestra o ProcessPoolExecutor (Modos C/D) ou execução
+    # sequencial in-process (Modos A/B). Backward-compat total:
+    # `models is None` mantém o caminho single-modelo abaixo.
+    if models is not None:
+        if rho_h is not None or rho_v is not None or esp is not None:
+            raise ValueError(
+                "simulate_multi(models=[...]) é mutuamente exclusivo com "
+                "rho_h/rho_v/esp. Forneça apenas um dos modos: "
+                "(a) single: rho_h=..., rho_v=..., esp=...; "
+                "(b) batch: models=[...]."
+            )
+        if positions_z is None:
+            raise ValueError("simulate_multi(models=[...]) requer positions_z explícito.")
+        # Import lazy para evitar ciclo na inicialização do módulo.
+        from geosteering_ai.simulation._workers import run_batch
+
+        # Resolve cfg para extrair backend/hankel_filter (passados ao pool).
+        _cfg = cfg if cfg is not None else SimulationConfig()
+        _filter = hankel_filter if hankel_filter is not None else _cfg.hankel_filter
+        # Resolve n_workers/threads (kwargs explícitos vencem cfg).
+        _n_workers = (
+            n_workers
+            if n_workers is not None
+            else (_cfg.n_workers if _cfg.n_workers is not None else 1)
+        )
+        _threads = (
+            threads_per_worker
+            if threads_per_worker is not None
+            else _cfg.threads_per_worker
+        )
+        # Kwargs comuns repassados a `simulate_multi` dentro de cada worker.
+        # Code-review fix P0 #2 (pickling): coerção `list(...)` para
+        # frequencies_hz/tr_spacings_m/dip_degs. `Sequence[float]` aceita
+        # generators/maps que não são picklables — quando o ProcessPool
+        # serializa `sim_kwargs`, falharia silenciosamente em workers C/D.
+        # `list()` converte iteráveis arbitrários em estrutura picklável.
+        sim_kwargs: Dict[str, Any] = {
+            "positions_z": np.asarray(positions_z, dtype=np.float64),
+            "frequencies_hz": (
+                list(frequencies_hz) if frequencies_hz is not None else None
+            ),
+            "tr_spacings_m": (list(tr_spacings_m) if tr_spacings_m is not None else None),
+            "dip_degs": list(dip_degs) if dip_degs is not None else None,
+            "cfg": _cfg,
+            "hankel_filter": hankel_filter,
+            "use_compensation": use_compensation,
+            "comp_pairs": comp_pairs,
+            "use_tilted": use_tilted,
+            "tilted_configs": tilted_configs,
+        }
+        return run_batch(
+            models=models,
+            sim_kwargs=sim_kwargs,
+            n_workers=int(_n_workers),
+            threads_per_worker=_threads,
+            backend=_cfg.backend,
+            hankel_filter=str(_filter),
+        )
+
+    # ── Caminho single-modelo (v2.11 e anteriores) ────────────────
+    # `rho_h`, `rho_v`, `esp`, `positions_z` são obrigatórios aqui.
+    if rho_h is None or rho_v is None or esp is None or positions_z is None:
+        raise ValueError(
+            "simulate_multi single-modelo requer rho_h, rho_v, esp e "
+            "positions_z não-None. Para batch, use models=[...]."
+        )
+
     # ── Config + defaults ──────────────────────────────────────────
     if cfg is None:
         cfg = SimulationConfig()
