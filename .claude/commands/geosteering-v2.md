@@ -1,16 +1,29 @@
 ---
 name: geosteering-v2
 description: |
-  Skill definitiva para o Geosteering AI v2.0 — Inversao 1D de Resistividade via Deep Learning.
-  Cobre TRES dominios: (1) Fisica de geofisica/petrofisica/EM para LWD/geosteering,
-  (2) Codigo v2.0 com PipelineConfig/Factory/DataPipeline (NUNCA globals/print),
-  (3) Deep Learning aplicado a geociencias (44 arquiteturas, 26 losses, 43 noise types).
-  Triggers: "inversao", "resistividade", "geosteering", "EM", "LWD", "tensor magnetico",
-  "anisotropia", "TIV", "skin depth", "decoupling", "Feature View", "geosinal", "Picasso",
-  "DTB", "noise", "curriculum", "arquitetura", "loss", "PipelineConfig", "DataPipeline",
-  "petrofisica", "perfilagem", "porosidade", "permeabilidade", "saturacao", "fator de formacao".
-  v2.0 | TensorFlow/Keras (PyTorch PROIBIDO) | PipelineConfig | Factory Pattern
-  44 arquiteturas (39 standard + 5 geosteering), 26 losses, 43 noise types, 5 perspectivas P1-P5.
+  Skill PRINCIPAL do Geosteering AI v2.0 — Inversão 1D de Resistividade via Deep Learning.
+  Skill de entrada e visão geral do projeto. Para detalhes aprofundados, use as SUB-SKILLS:
+    • geosteering-physics  — física EM, resistividade TIV, FV, geosinais, Archie, Picasso
+    • geosteering-code-v2  — PipelineConfig, Factory, D1-D14, proibições, checklist
+    • geosteering-models   — 48 arquiteturas em 9 famílias, tiers, causal compat, SurrogateNet
+    • geosteering-losses   — 26 losses em 4 categorias, LossFactory, PINNs, guia de seleção
+  Triggers gerais: "geosteering", "inversão", "resistividade", "EM", "LWD", "pipeline",
+  "PipelineConfig", "DataPipeline", "arquitetura", "loss", "noise", "curriculum",
+  "petrofísica", "perfilagem", "Feature View", "geosinal", "DTB", "Picasso", "v2.0".
+  v2.0 | TF/Keras EXCLUSIVO | 48 arquiteturas | 26 losses | 5 perspectivas P1-P5
+  Última atualização: 2026-04-29 | Sub-skills criadas em 2026-04-29
+---
+
+# Mapa de Sub-Skills — Quando Usar Cada Uma
+
+| Sub-skill | Invocar quando... | Tamanho |
+|:----------|:-----------------|:-------:|
+| **geosteering-physics** | Questões de física EM, resistividade, tensor H, skin depth, FV, GS, Archie | ~10 KB |
+| **geosteering-code-v2** | Questões de código: padrões D1-D14, PipelineConfig, Factory, proibições | ~15 KB |
+| **geosteering-models** | Questões de arquiteturas: 48 modelos, tier, causal compat, seleção | ~10 KB |
+| **geosteering-losses** | Questões de losses: 26 funções, LossFactory, PINNs, seleção | ~8 KB |
+| **geosteering-v2** (esta) | Visão geral, contexto do projeto, regras fundamentais, fontes autoritativas | ~46 KB |
+
 ---
 
 # Geosteering AI v2.0 — Skill de Dominio Fisico e Desenvolvimento
