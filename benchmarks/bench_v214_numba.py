@@ -55,11 +55,38 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from typing import Dict, Tuple
 
 import numpy as np
+
+
+def _configure_threads(threads_per_worker: int) -> None:
+    """Configura variáveis de ambiente de threading antes do import Numba.
+
+    Define ``OMP_NUM_THREADS`` e ``NUMBA_NUM_THREADS`` para controlar o
+    paralelismo intra-worker. O total de threads em uso é
+    ``n_workers × threads_per_worker``; ajuste em função do número real de
+    cores físicos para evitar oversubscription.
+
+    Args:
+        threads_per_worker: Threads por worker (1 para Cenário D, 2 default
+            para A/B/C). Range válido: ``[1, 16]``.
+
+    Note:
+        Esta função deve ser chamada ANTES de qualquer ``import numba`` ou
+        ``simulate_multi`` para que Numba leia o env var corretamente. O
+        v2.15 chama isto no topo de ``main()``, antes do worker pool.
+    """
+    if not 1 <= threads_per_worker <= 16:
+        raise ValueError(
+            f"threads_per_worker={threads_per_worker} fora de [1, 16]"
+        )
+    os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
+    os.environ["NUMBA_NUM_THREADS"] = str(threads_per_worker)
+    os.environ["MKL_NUM_THREADS"] = str(threads_per_worker)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Imports
@@ -89,6 +116,15 @@ def _canonical_3layer() -> Dict[str, np.ndarray]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Threads por worker — exposto pelo CLI, propagado a simulate_multi explicitamente
+# ──────────────────────────────────────────────────────────────────────────────
+# Usar variável global lida pelo main() é mais simples que passar args através
+# das 4 funções benchmark_scenario_*. Default 2 (4 workers × 2 = 8 = cores físicos
+# em hardware de 8 cores). Sobrescrita por --threads-per-worker no CLI.
+_THREADS_PER_WORKER: int = 2
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Cenário A — Single-freq, 30k modelos (pool workers)
 # ──────────────────────────────────────────────────────────────────────────────
 def benchmark_scenario_a(n_models: int = 30000, n_workers: int = 4) -> Tuple[float, float]:
@@ -114,6 +150,7 @@ def benchmark_scenario_a(n_models: int = 30000, n_workers: int = 4) -> Tuple[flo
             positions_z=m["positions_z"],
             frequencies_hz=[20000.0],
             tr_spacings_m=[1.0],
+            threads_per_worker=_THREADS_PER_WORKER,
             dip_degs=[0.0],
             n_workers=n_workers,
         )
@@ -160,6 +197,7 @@ def benchmark_scenario_b(
             tr_spacings_m=[1.0],
             dip_degs=[0.0],
             n_workers=n_workers,
+            threads_per_worker=_THREADS_PER_WORKER,
         )
         t1 = time.perf_counter()
         elapsed = t1 - t0
@@ -205,6 +243,7 @@ def benchmark_scenario_c(n_models: int = 5000, n_workers: int = 4) -> Tuple[floa
             tr_spacings_m=tr_spacings,
             dip_degs=dip_degs,
             n_workers=n_workers,
+            threads_per_worker=_THREADS_PER_WORKER,
         )
         t1 = time.perf_counter()
         elapsed = t1 - t0
@@ -289,12 +328,39 @@ def main():
     parser.add_argument(
         "--workers", type=int, default=4, help="Workers pool (Cenários A/B/C)"
     )
+    parser.add_argument(
+        "--threads-per-worker",
+        type=int,
+        default=2,
+        help="Threads intra-worker (default 2). Total = workers × threads-per-worker",
+    )
     args = parser.parse_args()
+
+    # ── Configurar threading ANTES de qualquer trabalho Numba ────────────────
+    # Setar env vars OMP_NUM_THREADS / NUMBA_NUM_THREADS / MKL_NUM_THREADS
+    # antes de instanciar worker pool, garantindo que Numba JIT compile com
+    # o número correto de threads. Sem isto, Numba detecta cpu_count() e
+    # cria oversubscription quando combinado com worker pool.
+    _configure_threads(args.threads_per_worker)
+
+    # ── Propagar para benchmark_scenario_*  ─────────────────────────────────
+    # Os 3 cenários A/B/C passam ``threads_per_worker=_THREADS_PER_WORKER``
+    # explicitamente em ``simulate_multi(...)``, evitando o erro
+    # ``Cannot set NUMBA_NUM_THREADS to a different value once threads have
+    # been launched`` que ocorre quando ``run_batch`` calcula ``eff_threads``
+    # baseado em ``cpu_count`` heurística e diverge do env var.
+    global _THREADS_PER_WORKER
+    _THREADS_PER_WORKER = int(args.threads_per_worker)
 
     print("╔════════════════════════════════════════════════════════════════╗")
     print("║  Benchmark v2.14 — Otimizações Numba JIT (Sprints 13.1-13.4)  ║")
     print("║  Simulador Python — Geosteering AI v2.0                       ║")
     print("╚════════════════════════════════════════════════════════════════╝")
+    print(
+        f"  Threading: workers={args.workers} × threads/worker="
+        f"{args.threads_per_worker} → {args.workers * args.threads_per_worker} "
+        f"threads totais"
+    )
     print()
 
     # Definir quais cenários rodar
