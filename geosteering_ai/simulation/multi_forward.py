@@ -874,11 +874,16 @@ def simulate_multi(
         _simulate_positions_parallel,
     )
 
-    # Sprint 2.10: numero de threads (respeita cfg.num_threads)
+    # Sprint 2.10: numero de threads (respeita cfg.num_threads).
+    # try/except: Numba não permite alterar thread count após threads lançadas
+    # (e.g. worker subprocess do SM GUI já inicializou com N threads distintos).
     if cfg.num_threads > 0 and HAS_NUMBA:
         import numba as _numba
 
-        _numba.set_num_threads(cfg.num_threads)
+        try:
+            _numba.set_num_threads(cfg.num_threads)
+        except RuntimeError:
+            pass  # threads já lançadas — manter contagem atual
 
     # ── Sprint 13.3: Materialização pré-dispatch para prange(nTR*nAngles*n_pos) flat ──
     # Estrutura para despacho adaptativo: usar nova prange quando n_combos >= 2
