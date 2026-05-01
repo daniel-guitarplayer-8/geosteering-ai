@@ -353,6 +353,32 @@ class SimulationConfig:
     seed: int = 42
     parallel: bool = True
 
+    # ─────────────────────────────────────────────────────────────────
+    # SPRINT 12.1 (v2.12) — Workers Nativos no `simulate_multi`
+    # ─────────────────────────────────────────────────────────────────
+    # `n_workers` ativa o caminho batch multi-modelo de
+    # `simulate_multi(models=[...], n_workers=N)`. Quando None ou 1, o
+    # comportamento do simulador permanece o atual (single-process,
+    # paralelismo apenas via `prange` Numba intra-position).
+    #
+    # `threads_per_worker` controla quantas threads Numba cada worker
+    # do pool usa. Quando None, o módulo `_workers.py` aplica
+    # **anti-oversubscription** automático: `eff = max(1, cpu // n_workers)`,
+    # garantindo `n_workers × eff <= cpu_count`.
+    #
+    # Os 4 modos (relatório §3, 2026-04-30):
+    #   • A: n_workers=1, threads_per_worker=1 → debug, 1 modelo
+    #   • B: n_workers=1, threads_per_worker=N → 1 simulação grande
+    #   • C: n_workers=M, threads_per_worker=1 → batch n_pos baixo
+    #   • D: n_workers=M, threads_per_worker=K → ★ default produção (30k modelos)
+    #
+    # Backward-compat: ambos default None → comportamento v2.11 preservado.
+    # Estes campos não são consumidos diretamente pelo dispatcher
+    # `simulate_multi` (que recebe os kwargs explicitamente), mas servem
+    # como atalho para presets e integração com APIs upstream.
+    n_workers: Optional[int] = None
+    threads_per_worker: Optional[int] = None
+
     # ┌───────────────────────────────────────────────────────────────┐
     # │  Grupo 7 — Exportadores Fortran-compatíveis (opt-in)          │
     # └───────────────────────────────────────────────────────────────┘
@@ -608,6 +634,22 @@ class SimulationConfig:
             f"num_threads={self.num_threads} inválido. Use -1 para "
             f"auto-detectar (usa todos os cores) ou um inteiro >= 1."
         )
+
+        # Sprint 12.1 (v2.12) — workers nativos. None = backward-compat
+        # (single-process). Inteiros válidos: n_workers ∈ [1, 1024],
+        # threads_per_worker ∈ [1, 256]. Os limites superiores são
+        # defensivos: nenhum hardware atual sustenta esses valores, mas
+        # evitam erros de tipo (e.g., usuário passando -1).
+        if self.n_workers is not None:
+            assert 1 <= self.n_workers <= 1024, (
+                f"n_workers={self.n_workers} inválido. Deve estar em "
+                f"[1, 1024] ou None (default = single-process)."
+            )
+        if self.threads_per_worker is not None:
+            assert 1 <= self.threads_per_worker <= 256, (
+                f"threads_per_worker={self.threads_per_worker} inválido. "
+                f"Deve estar em [1, 256] ou None (auto-anti-oversubscription)."
+            )
 
         # Sprint 12 (PR #25 / v1.6.0 E4) — chunking de posições.
         # None = desabilitado (monolítico). Valores válidos: 1–10000.

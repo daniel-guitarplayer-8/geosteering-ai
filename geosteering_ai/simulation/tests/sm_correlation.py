@@ -239,19 +239,42 @@ except ImportError:
 if _QT_OK:
 
     class CorrelationAnalysisDialog(QtWidgets.QDialog):
-        """Dialog interativo para matriz de correlação entre componentes EM.
+        """Dialog interativo para matriz de correlação entre componentes EM — v2.8.
 
-        UI:
-          • Top: combo método (pearson/spearman/kendall) + botão "Recomputar"
-          • Center: heatmap matplotlib (imshow + colorbar divergente)
-          • Bottom: tabela com valores numéricos
-          • Click em célula → highlight + valor exibido em label
+        Layout:
+          ┌──────────────────────────────────────────────────────────────────┐
+          │  Painel de Configuração (topo)                                   │
+          │    Método: [pearson▾]  Dados: [Re(H)▾]  Componentes: [Todos▾]   │
+          │    [Recomputar]   Status: OK — pearson 9×9, min/max …            │
+          ├──────────────────────────────────────────────────────────────────┤
+          │  QTabWidget                                                      │
+          │    ├─ Tab 1: "Mapa de Calor"   — heatmap imshow + colorbar       │
+          │    ├─ Tab 2: "Tabela"          — matriz numérica completa         │
+          │    └─ Tab 3: "Pares Principais" — top-N por |r|, com p-values    │
+          ├──────────────────────────────────────────────────────────────────┤
+          │  [Exportar CSV]  [Exportar PNG]                        [Fechar]  │
+          └──────────────────────────────────────────────────────────────────┘
+
+        Muda de comportamento vs v2.6:
+          • Auto-recomputa ao mudar método/dados — sem necessidade de clicar
+            "Recomputar" (este botão existe como fallback explícito).
+          • Tab "Pares Principais" lista os 15 pares mais correlacionados
+            em ordem decrescente de |r|, com p-value e interpretação verbal.
+          • Seleção de componentes ("Todos", "Diagonal", "Principais") filtra
+            quais dos 9 componentes participam da correlação.
 
         Note:
-            Para tensores grandes (n_pos > 5000), Spearman e Kendall podem
-            demorar — o cálculo é feito on-demand quando o usuário clica
-            em "Recomputar" (default Pearson).
+            Spearman e Kendall requerem ``scipy``. Se não instalado, a troca
+            de método exibe mensagem clara orientando instalação.
         """
+
+        _INTERPRET: List[Tuple[float, str]] = [
+            (0.9, "Muito forte"),
+            (0.7, "Forte"),
+            (0.4, "Moderado"),
+            (0.2, "Fraco"),
+            (0.0, "Muito fraco"),
+        ]
 
         def __init__(
             self,
@@ -263,77 +286,248 @@ if _QT_OK:
             super().__init__(parent)
             self.setWindowTitle("Análise — Matriz de Correlação dos Componentes EM")
             self.setModal(False)
-            self.resize(820, 720)
+            self.resize(1000, 760)
             self._H = np.asarray(H_stack)
             self._matrix: Optional[np.ndarray] = None
+            self._pvals: Optional[np.ndarray] = None
             self._labels: List[str] = list(EM_COMPONENT_LABELS)
+            self._comp_indices: List[int] = list(range(9))
 
-            # Top bar: método + recomputar
-            top = QtWidgets.QHBoxLayout()
-            top.addWidget(QtWidgets.QLabel("Método:"))
+            # ── Painel de Configuração ──────────────────────────────────────
+            cfg_frame = QtWidgets.QFrame()
+            cfg_frame.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+            cfg_layout = QtWidgets.QHBoxLayout(cfg_frame)
+            cfg_layout.setContentsMargins(8, 6, 8, 6)
+
+            cfg_layout.addWidget(QtWidgets.QLabel("Método:"))
             self.combo_method = QtWidgets.QComboBox()
             self.combo_method.addItems(["pearson", "spearman", "kendall"])
             self.combo_method.setCurrentText(default_method)
-            top.addWidget(self.combo_method)
-            self.check_real = QtWidgets.QCheckBox("Usar Re(H) (senão |H|)")
-            self.check_real.setChecked(True)
-            top.addWidget(self.check_real)
-            self.btn_recompute = QtWidgets.QPushButton("Recomputar")
-            self.btn_recompute.clicked.connect(self._on_recompute)
-            top.addWidget(self.btn_recompute)
-            top.addStretch(1)
+            self.combo_method.setToolTip(
+                "Pearson: correlação linear (rápido).\n"
+                "Spearman/Kendall: correlação de posto — mais robustos a"
+                " outliers, mais lentos (requerem scipy)."
+            )
+            cfg_layout.addWidget(self.combo_method)
 
-            # Lazy import matplotlib canvas — usa o EMCanvas do projeto
+            cfg_layout.addWidget(QtWidgets.QLabel("Dados:"))
+            self.combo_data = QtWidgets.QComboBox()
+            self.combo_data.addItems(["Re(H)", "|H| (magnitude)"])
+            self.combo_data.setToolTip(
+                "Re(H): parte real do tensor — padrão para análise de fase.\n"
+                "|H|: magnitude complexa — ignora fase, foco em amplitude."
+            )
+            cfg_layout.addWidget(self.combo_data)
+
+            cfg_layout.addWidget(QtWidgets.QLabel("Componentes:"))
+            self.combo_comp_filter = QtWidgets.QComboBox()
+            self.combo_comp_filter.addItems(
+                ["Todos (9)", "Diagonal (Hxx, Hyy, Hzz)", "Cruzados (off-diag)"]
+            )
+            self.combo_comp_filter.setToolTip(
+                "Todos: todos os 9 componentes.\n"
+                "Diagonal: Hxx, Hyy, Hzz (componentes axiais e transversais).\n"
+                "Cruzados: os 6 componentes off-diagonal."
+            )
+            cfg_layout.addWidget(self.combo_comp_filter)
+
+            self.btn_recompute = QtWidgets.QPushButton("↻ Recomputar")
+            self.btn_recompute.setToolTip("Recomputa manualmente (fallback).")
+            self.btn_recompute.clicked.connect(self._on_recompute)
+            cfg_layout.addWidget(self.btn_recompute)
+
+            cfg_layout.addStretch(1)
+
+            self.lbl_status = QtWidgets.QLabel("Computando…")
+            self.lbl_status.setStyleSheet("color:#888888; font-size:11px;")
+            cfg_layout.addWidget(self.lbl_status)
+
+            # ── Tabs ────────────────────────────────────────────────────────
+            self.tabs = QtWidgets.QTabWidget()
+
+            # Tab 1: Mapa de Calor
             try:
                 from .sm_plots import EMCanvas, PlotStyle
 
                 self.canvas = EMCanvas(self, figsize=(7, 5), style=PlotStyle())
             except Exception:
                 self.canvas = QtWidgets.QLabel("Matplotlib indisponível.")
+            tab_heatmap = QtWidgets.QWidget()
+            tab_heatmap_layout = QtWidgets.QVBoxLayout(tab_heatmap)
+            tab_heatmap_layout.setContentsMargins(4, 4, 4, 4)
+            tab_heatmap_layout.addWidget(self.canvas)
+            self.tabs.addTab(tab_heatmap, "Mapa de Calor")
 
-            # Tabela de valores
+            # Tab 2: Tabela Numérica
             self.table = QtWidgets.QTableWidget(0, 0)
-            self.table.setMinimumHeight(180)
             self.table.itemDoubleClicked.connect(self._on_cell_double_clicked)
+            self.table.setAlternatingRowColors(True)
+            self.tabs.addTab(self.table, "Tabela")
 
-            # Status label
-            self.lbl_status = QtWidgets.QLabel("Pronto.")
-            self.lbl_status.setStyleSheet("color:#888888; font-size:11px;")
+            # Tab 3: Pares Principais
+            self.table_pairs = QtWidgets.QTableWidget(0, 5)
+            self.table_pairs.setHorizontalHeaderLabels(
+                ["Par", "r", "p-value", "Interpretação", "Direção"]
+            )
+            self.table_pairs.horizontalHeader().setStretchLastSection(True)
+            self.table_pairs.setAlternatingRowColors(True)
+            self.table_pairs.setEditTriggers(
+                QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+            )
+            self.tabs.addTab(self.table_pairs, "Pares Principais")
 
-            # Layout raiz
-            root = QtWidgets.QVBoxLayout(self)
-            root.addLayout(top)
-            root.addWidget(self.canvas, 1)
-            root.addWidget(self.table)
-            root.addWidget(self.lbl_status)
-
+            # ── Barra inferior (export + fechar) ────────────────────────────
+            btn_bar = QtWidgets.QHBoxLayout()
+            self.btn_export_csv = QtWidgets.QPushButton("Exportar CSV")
+            self.btn_export_csv.clicked.connect(self._on_export_csv)
+            self.btn_export_png = QtWidgets.QPushButton("Exportar PNG")
+            self.btn_export_png.clicked.connect(self._on_export_png)
+            btn_bar.addWidget(self.btn_export_csv)
+            btn_bar.addWidget(self.btn_export_png)
+            btn_bar.addStretch(1)
             close_btn = QtWidgets.QDialogButtonBox(
                 QtWidgets.QDialogButtonBox.StandardButton.Close
             )
             close_btn.rejected.connect(self.reject)
-            root.addWidget(close_btn)
+            btn_bar.addWidget(close_btn)
 
-            # Computa matriz inicial
+            # ── Layout raiz ─────────────────────────────────────────────────
+            root = QtWidgets.QVBoxLayout(self)
+            root.addWidget(cfg_frame)
+            root.addWidget(self.tabs, 1)
+            root.addLayout(btn_bar)
+
+            # Auto-recomputa ao mudar qualquer configuração
+            self.combo_method.currentIndexChanged.connect(self._on_recompute)
+            self.combo_data.currentIndexChanged.connect(self._on_recompute)
+            self.combo_comp_filter.currentIndexChanged.connect(self._on_recompute)
+
+            # Computa matriz inicial (Pearson)
             self._on_recompute()
+
+        # ── Computação ───────────────────────────────────────────────────────
+
+        def _resolve_comp_indices(self) -> Tuple[List[int], List[str]]:
+            """Retorna índices e labels conforme seleção de componentes."""
+            sel = self.combo_comp_filter.currentText()
+            if sel.startswith("Diagonal"):
+                indices = [0, 4, 8]  # Hxx, Hyy, Hzz
+            elif sel.startswith("Cruzados"):
+                indices = [1, 2, 3, 5, 6, 7]  # off-diagonal
+            else:
+                indices = list(range(9))
+            labels = [EM_COMPONENT_LABELS[i] for i in indices]
+            return indices, labels
 
         def _on_recompute(self) -> None:
             method = self.combo_method.currentText()
-            use_real = self.check_real.isChecked()
+            use_real = self.combo_data.currentText().startswith("Re")
+            self._comp_indices, self._labels = self._resolve_comp_indices()
+            self.lbl_status.setText(f"Computando {method}…")
+            QtWidgets.QApplication.processEvents()
             try:
-                self.lbl_status.setText(f"Computando matriz {method}…")
-                QtWidgets.QApplication.processEvents()
-                self._matrix, self._labels = compute_correlation_matrix(
-                    self._H, method=method, use_real_part=use_real
+                self._matrix, _ = compute_correlation_matrix(
+                    self._H,
+                    method=method,
+                    use_real_part=use_real,
+                    component_indices=self._comp_indices,
                 )
+                self._pvals = self._compute_pvalues(method, use_real)
                 self._refresh_heatmap()
                 self._refresh_table()
+                self._refresh_pairs()
+                n = len(self._labels)
+                # Excluir diagonal (=1.0) ao reportar máximo off-diagonal
+                _m_copy = self._matrix.copy()
+                np.fill_diagonal(_m_copy, np.nan)
+                _off_max = float(np.nanmax(np.abs(_m_copy)))
                 self.lbl_status.setText(
-                    f"OK — método: {method}, "
-                    f"shape: {self._matrix.shape}, "
-                    f"min/max: {float(self._matrix.min()):.3f} / {float(self._matrix.max()):.3f}"
+                    f"OK — {method} | {n}×{n} | "
+                    f"min={float(self._matrix.min()):.3f}, "
+                    f"|r| off-diag máx={_off_max:.3f}"
+                )
+            except ImportError as exc:
+                self.lbl_status.setText(
+                    f"scipy não instalado — execute: pip install scipy  ({exc})"
                 )
             except Exception as exc:
                 self.lbl_status.setText(f"Erro: {exc}")
+
+        def _compute_pvalues(self, method: str, use_real: bool) -> Optional[np.ndarray]:
+            """Computa p-values por par (i,j) iterando os mesmos slices de compute_correlation_matrix.
+
+            Itera (itr, iang, ifq) espelhando compute_correlation_matrix para evitar
+            mismatch entre correlações calculadas por slice e p-values calculados em
+            dados agregados. Combina p-values de todos os slices via Fisher's method
+            (scipy.stats.combine_pvalues).
+
+            Args:
+                method: ``"pearson"``, ``"spearman"`` ou ``"kendall"``.
+                use_real: Se True, usa Re(H); senão usa |H|.
+
+            Returns:
+                Matriz (n, n) de p-values combinados em [0,1], ou None se scipy ausente.
+            """
+            try:
+                from scipy.stats import combine_pvalues, kendalltau, pearsonr, spearmanr
+            except ImportError:
+                return None
+            H = np.asarray(self._H)
+            if H.ndim == 6:
+                H = H.mean(axis=0)
+            if H.ndim != 5:
+                return None
+            nTR, nAng, n_pos, nf, _ = H.shape
+            indices = list(self._comp_indices)
+            n = len(indices)
+            if n == 0:
+                return None
+            # Espelha compute_correlation_matrix: Re(H) ou |H| sobre todo o tensor
+            data_full = H.real if use_real else np.abs(H)
+            # Coleta p-values por par por slice (itr, iang, ifq)
+            pair_pvals: dict = {}
+            for itr in range(nTR):
+                for iang in range(nAng):
+                    for ifq in range(nf):
+                        series = data_full[itr, iang, :, ifq, :][:, indices]  # (n_pos, n)
+                        for i in range(n):
+                            for j in range(i + 1, n):
+                                xi, xj = series[:, i], series[:, j]
+                                try:
+                                    if method == "pearson":
+                                        _, p = pearsonr(xi, xj)
+                                    elif method == "spearman":
+                                        _, p = spearmanr(xi, xj)
+                                    else:
+                                        _, p = kendalltau(xi, xj)
+                                    p = float(p) if np.isfinite(p) else 1.0
+                                except Exception:
+                                    p = 1.0
+                                pair_pvals.setdefault((i, j), []).append(p)
+            pmat = np.ones((n, n), dtype=np.float64)
+            for (i, j), pvals in pair_pvals.items():
+                if len(pvals) == 1:
+                    combined = pvals[0]
+                else:
+                    try:
+                        _, combined = combine_pvalues(pvals, method="fisher")
+                        combined = float(combined) if np.isfinite(combined) else 1.0
+                    except Exception:
+                        # Fallback conservador: assume não-significância.
+                        # np.mean(pvals) não é p-value combinado válido.
+                        combined = 1.0
+                pmat[i, j] = combined
+                pmat[j, i] = combined
+            return pmat
+
+        def _interpret(self, r: float) -> str:
+            """Retorna interpretação verbal para |r|."""
+            for threshold, label in self._INTERPRET:
+                if abs(r) >= threshold:
+                    return label
+            return "Muito fraco"
+
+        # ── Refreshes de UI ──────────────────────────────────────────────────
 
         def _refresh_heatmap(self) -> None:
             if self._matrix is None or not hasattr(self.canvas, "figure"):
@@ -348,26 +542,27 @@ if _QT_OK:
                 vmax=1.0,
                 interpolation="nearest",
             )
-            ax.set_xticks(range(len(self._labels)))
-            ax.set_yticks(range(len(self._labels)))
-            ax.set_xticklabels(self._labels, rotation=45, ha="right")
-            ax.set_yticklabels(self._labels)
-            ax.set_title(f"Correlação ({self.combo_method.currentText()})")
-            # Anota valores nas células
-            for i in range(len(self._labels)):
-                for j in range(len(self._labels)):
+            n = len(self._labels)
+            ax.set_xticks(range(n))
+            ax.set_yticks(range(n))
+            ax.set_xticklabels(self._labels, rotation=45, ha="right", fontsize=9)
+            ax.set_yticklabels(self._labels, fontsize=9)
+            method = self.combo_method.currentText()
+            ax.set_title(f"Matriz de Correlação ({method})", fontsize=11)
+            for i in range(n):
+                for j in range(n):
                     val = float(self._matrix[i, j])
-                    color = "white" if abs(val) > 0.5 else "black"
+                    text_color = "white" if abs(val) > 0.5 else "black"
                     ax.text(
                         j,
                         i,
                         f"{val:.2f}",
                         ha="center",
                         va="center",
-                        color=color,
+                        color=text_color,
                         fontsize=8,
                     )
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="r")
             fig.tight_layout()
             try:
                 self.canvas.canvas.draw_idle()
@@ -384,10 +579,117 @@ if _QT_OK:
             self.table.setVerticalHeaderLabels(self._labels)
             for i in range(n):
                 for j in range(n):
-                    item = QtWidgets.QTableWidgetItem(f"{self._matrix[i, j]:+.4f}")
+                    val = float(self._matrix[i, j])
+                    item = QtWidgets.QTableWidgetItem(f"{val:+.4f}")
                     item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                    # Colorir fundo por intensidade: azul negativo, vermelho positivo
+                    if i != j:
+                        intensity = min(int(abs(val) * 200), 200)
+                        if val > 0:
+                            item.setBackground(
+                                QtGui.QColor(255, 255 - intensity, 255 - intensity)
+                            )
+                        else:
+                            item.setBackground(
+                                QtGui.QColor(255 - intensity, 255 - intensity, 255)
+                            )
                     self.table.setItem(i, j, item)
             self.table.resizeColumnsToContents()
+
+        def _refresh_pairs(self) -> None:
+            if self._matrix is None:
+                return
+            n = len(self._labels)
+            # Coletar todos os pares únicos (i < j) ordenados por |r| desc
+            pairs: List[Tuple[float, int, int]] = []
+            for i in range(n):
+                for j in range(i + 1, n):
+                    pairs.append((abs(float(self._matrix[i, j])), i, j))
+            pairs.sort(reverse=True)
+            top = pairs[:15]
+
+            self.table_pairs.setRowCount(len(top))
+            for row, (abs_r, i, j) in enumerate(top):
+                r = float(self._matrix[i, j])
+                label_a = self._labels[i]
+                label_b = self._labels[j]
+                p = float(self._pvals[i, j]) if self._pvals is not None else float("nan")
+                interp = self._interpret(r)
+                direction = "positiva" if r >= 0 else "negativa"
+
+                # Formatar p-value
+                if np.isfinite(p):
+                    p_str = f"{p:.4f}" if p >= 0.001 else f"{p:.2e}"
+                    if p < 0.001:
+                        p_str += " ***"
+                    elif p < 0.01:
+                        p_str += " **"
+                    elif p < 0.05:
+                        p_str += " *"
+                else:
+                    p_str = "N/A"
+
+                for col, text in enumerate(
+                    [f"{label_a} ↔ {label_b}", f"{r:+.4f}", p_str, interp, direction]
+                ):
+                    item = QtWidgets.QTableWidgetItem(text)
+                    item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                    if col == 0:
+                        item.setTextAlignment(
+                            QtCore.Qt.AlignmentFlag.AlignLeft
+                            | QtCore.Qt.AlignmentFlag.AlignVCenter
+                        )
+                    self.table_pairs.setItem(row, col, item)
+
+            self.table_pairs.resizeColumnsToContents()
+
+        # ── Export ───────────────────────────────────────────────────────────
+
+        def _on_export_csv(self) -> None:
+            if self._matrix is None:
+                return
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Salvar Matriz CSV", "correlacao.csv", "CSV (*.csv)"
+            )
+            if not path:
+                return
+            try:
+                # Tenta pandas; fallback para numpy
+                try:
+                    import pandas as pd  # noqa: PLC0415
+
+                    pd.DataFrame(
+                        self._matrix, index=self._labels, columns=self._labels
+                    ).to_csv(path, float_format="%.6f")
+                except ImportError:
+                    header = ",".join(self._labels)
+                    np.savetxt(
+                        path,
+                        self._matrix,
+                        delimiter=",",
+                        header=header,
+                        fmt="%.6f",
+                        comments="",
+                    )
+                self.lbl_status.setText(f"CSV salvo: {path}")
+            except Exception as exc:
+                self.lbl_status.setText(f"Erro ao salvar CSV: {exc}")
+
+        def _on_export_png(self) -> None:
+            if not hasattr(self.canvas, "save"):
+                return
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Salvar Heatmap PNG", "correlacao.png", "PNG (*.png);;PDF (*.pdf)"
+            )
+            if not path:
+                return
+            try:
+                self.canvas.save(path, dpi=150)
+                self.lbl_status.setText(f"PNG salvo: {path}")
+            except Exception as exc:
+                self.lbl_status.setText(f"Erro ao salvar PNG: {exc}")
+
+        # ── Interação com tabela ─────────────────────────────────────────────
 
         def _on_cell_double_clicked(self, item: "QtWidgets.QTableWidgetItem") -> None:
             i = item.row()
@@ -395,8 +697,15 @@ if _QT_OK:
             if self._matrix is None:
                 return
             val = float(self._matrix[i, j])
+            p = (
+                float(self._pvals[i, j])
+                if self._pvals is not None and np.isfinite(self._pvals[i, j])
+                else None
+            )
+            p_str = f", p={p:.4f}" if p is not None else ""
             self.lbl_status.setText(
-                f"({self._labels[i]}, {self._labels[j]}) = {val:+.6f}"
+                f"({self._labels[i]}, {self._labels[j]}) = {val:+.6f}{p_str}"
+                f" — {self._interpret(val)}"
             )
 
     class EnsembleAnalysisDialog(QtWidgets.QDialog):
