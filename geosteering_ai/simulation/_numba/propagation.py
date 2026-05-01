@@ -170,15 +170,21 @@ try:
     HAS_NUMBA: Final[bool] = True
 
     def njit(*args, **kwargs):
-        """Wrapper de `numba.njit` com defaults do Sprint 2.1.
+        """Wrapper de `numba.njit` com defaults do Sprint 2.1 (+ Sprint 13.4 v2.13).
 
-        Aplica `cache=True`, `fastmath=False` e
-        `error_model='numpy'` se o chamador não os especificar. A
-        paridade bit-exata com Fortran `real(dp)` requer aritmética
-        IEEE 754 estrita (sem FMA reordering), por isso fastmath fica
-        desabilitado por default nesta Sprint. Uma variante `_fast`
-        (fastmath=True) pode ser avaliada na Sprint 2.7 junto com o
-        benchmark.
+        Aplica `cache=True`, `fastmath=False`, `error_model='numpy'` e
+        ``nogil=True`` se o chamador não os especificar. A paridade
+        bit-exata com Fortran `real(dp)` requer aritmética IEEE 754
+        estrita (sem FMA reordering), por isso fastmath fica desabilitado
+        por default. Uma variante `_fast` (fastmath=True) pode ser
+        habilitada caso-a-caso em funções onde o erro de FMA é tolerável
+        (ex.: quadratura Hankel — sums escalares).
+
+        Sprint 13.4 (v2.13): ``nogil=True`` é agora default — libera o
+        GIL durante execução nativa, permitindo que ``ThreadPoolExecutor``
+        externo orchestrate múltiplas chamadas concorrentes sem bloqueio.
+        Custo zero em performance; benefício direto em uso multi-thread
+        (notebooks, treino offline, UI responsiva).
         """
         # Se usado como `@njit` (sem parênteses), args[0] é a função.
         if len(args) == 1 and callable(args[0]):
@@ -186,11 +192,13 @@ try:
                 cache=True,
                 fastmath=False,
                 error_model="numpy",
+                nogil=True,
             )(args[0])
         # Uso como `@njit(...)` — aplica os defaults se não sobrescritos.
         kwargs.setdefault("cache", True)
         kwargs.setdefault("fastmath", False)
         kwargs.setdefault("error_model", "numpy")
+        kwargs.setdefault("nogil", True)
         return _numba_njit(*args, **kwargs)
 
 except ImportError:
