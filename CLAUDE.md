@@ -13,7 +13,7 @@
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |
 | **Pacote** | `geosteering_ai/` (pip installable) |
 | **Referencia** | `docs/ARCHITECTURE_v2.md` (documento completo da arquitetura) |
-| **Simulation Manager** | v2.12 (2026-04-30) — Workers Nativos no `simulate_multi` (4 modos A/B/C/D) · 202 smoke tests |
+| **Simulation Manager** | v2.13 (2026-05-01) — Otimizações Numba JIT: prange(nf) + cache cross-call + nogil universal · 152 simulation tests pass · 13 novos testes v2.13 |
 
 ---
 

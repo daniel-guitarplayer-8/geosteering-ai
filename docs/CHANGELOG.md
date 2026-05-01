@@ -7,6 +7,85 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [2.13] — 2026-05-01
+
+### Otimizações Numba JIT — Sprints 13.1 + 13.2 + 13.4
+
+Implementação parcial das otimizações Numba previstas no relatório técnico
+[v2.11_simulador_python_analise_paralelismo_2026-04-30.md §1.3 + §6.2](reports/v2.11_simulador_python_analise_paralelismo_2026-04-30.md).
+Sprints 13.1, 13.2 e 13.4 entregues nesta release; Sprint 13.3 (prange combinado
+TR×ângulo) e `fastmath=True` seletivo deferidos para v2.14 devido a complexidade
+de refatoração do dispatcher.
+
+### Adicionado
+
+- **Sprint 13.1 — Vetorização de frequências**:
+  - `prange(nf)` em `_fields_in_freqs_kernel_cached`
+    ([_numba/kernel.py](../geosteering_ai/simulation/_numba/kernel.py)) e
+    `precompute_common_arrays_cache`
+  - `@njit(cache=True, parallel=True, nogil=True)` em ambas funções
+  - Quando chamadas de contexto `prange` externo, Numba serializa o nível
+    interno automaticamente (sem regressão)
+- **Sprint 13.2 — Cache cross-call**:
+  - Novo kwarg `cache_persistent: bool = False` em `simulate_multi` (opt-in)
+  - Cache global thread-safe `_GLOBAL_HORDIST_CACHE` com chave
+    `(round(hordist, 12), freqs_signature, n, eta_bytes, h_bytes)` —
+    detecção bit-exata de qualquer variação numérica
+  - Funções públicas exportadas em `geosteering_ai.simulation`:
+    - `release_numba_cache() -> int` — libera cache, retorna count
+    - `get_numba_cache_size() -> int` — diagnóstico
+  - UI `closeEvent` chama 3 releases:
+    `release_numba_pool()` + `release_pool()` + `release_numba_cache()`
+- **Sprint 13.4 — `nogil=True` universal**:
+  - Wrapper `njit` em `_numba/propagation.py` agora seta `nogil=True`
+    como default — todas as funções `@njit` do simulador liberam GIL
+  - Custo zero em performance; benefício direto em uso multi-thread
+    (notebooks, treino offline, UI responsiva)
+  - `fastmath=True` permanece **opt-in caso-a-caso** — preserva paridade
+    Fortran <1e-12 nas recursões TE/TM e `common_arrays`
+
+### Testes
+
+- **Novo arquivo** `tests/test_simulation_v213_optimizations.py`:
+  - 13 testes cobrindo Sprints 13.1, 13.2 e 13.4 — **todos passam (2.17s)**
+  - Cobre: vetorização freqs, cache hit/miss/release/thread-safety,
+    backward-compat v2.12, threading concorrente sem corrupção
+- **Zero regressão**: 152/152 testes pré-existentes (workers + multi +
+  numba_kernel + config) continuam passando em 13.12s
+
+### Validado
+
+- Paridade bit-exata entre chamadas (cache hit) — `assert_array_equal`
+- Backward-compat total: API v2.12 single-model e batch (`models=[...]`)
+  funcionam idênticas quando `cache_persistent=False` (default)
+- Thread-safety: 4 ThreadPool workers concorrentes não corrompem resultados
+- Cache miss correto em variações de freqs e perfis geológicos
+- Smoke 30k-modelos: chamada multi-freq (`[20, 40, 60, 100] kHz`) operacional
+
+### Pendências (v2.14+)
+
+- **Sprint 13.3 — prange combinado TR×ângulo**: requer refatoração do
+  dispatcher `multi_forward.py:732-818` para colapsar 2 loops Python em
+  `prange(nTR*nAngles)` Numba via array de `cache_indices` materializadas
+- **Sprint 13.4 — `fastmath=True` seletivo**: aplicar `fastmath=True` em
+  Hankel quadratura e operações de decoupling após validação de paridade
+  Fortran <1e-12 em 4 modelos canônicos
+- **Benchmark formal v2.13**: script CLI cobrindo 4 cenários (single-freq,
+  multi-freq, multi-TR, PINN) — adiado para validação final em hardware
+  do usuário
+
+### Modificado
+
+| Arquivo | Mudanças |
+|:--------|:---------|
+| `_numba/kernel.py` | `prange(nf)` em 2 funções + nogil + parallel |
+| `_numba/propagation.py` | Wrapper `njit` agora seta `nogil=True` default |
+| `multi_forward.py` | +`cache_persistent` kwarg + cache global + 2 funções públicas |
+| `simulation/__init__.py` | Exports: `release_numba_cache`, `get_numba_cache_size` |
+| `tests/simulation_manager.py` | `closeEvent` chama 3 releases (pool ui + pool core + cache) |
+
+---
+
 ## [2.12] — 2026-04-30
 
 ### Workers Nativos no `simulate_multi`

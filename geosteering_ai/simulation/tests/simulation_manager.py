@@ -7282,13 +7282,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._start_numba_primer()
 
     def closeEvent(self, event: Any) -> None:  # type: ignore[override]
-        """Termina NumbaPrimer e libera pools persistentes ao fechar.
+        """Termina NumbaPrimer e libera pools/caches persistentes ao fechar.
 
         v2.9/v2.10: NumbaPrimer + pool da UI (`release_numba_pool`).
         v2.12 (Sprint 12.3): além do pool da UI, libera o pool persistente
         do core (`release_pool` em `geosteering_ai/simulation/_workers.py`)
         para garantir cleanup completo quando o usuário usou a API nativa
         `simulate_multi(models=[...], n_workers=N)` durante a sessão.
+        v2.13 (Sprint 13.2): libera também o cache global de
+        common_arrays (``release_numba_cache``) — relevante quando o
+        usuário ativou ``cache_persistent=True`` em chamadas PINN/inversão.
 
         Aguarda até 3 s para conclusão limpa do NumbaPrimer; se exceder,
         força quit() para evitar "QThread destroyed while thread is running"
@@ -7310,6 +7313,16 @@ class MainWindow(QtWidgets.QMainWindow):
             from geosteering_ai.simulation import release_pool as _release_core_pool
 
             _release_core_pool()
+        except Exception:
+            pass
+        # v2.13 (Sprint 13.2): libera cache global de common_arrays.
+        # No-op quando o usuário não ativou `cache_persistent=True`.
+        try:
+            from geosteering_ai.simulation import (
+                release_numba_cache as _release_numba_cache,
+            )
+
+            _release_numba_cache()
         except Exception:
             pass
         super().closeEvent(event)

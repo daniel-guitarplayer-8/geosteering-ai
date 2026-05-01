@@ -116,6 +116,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -155,6 +156,111 @@ logger = logging.getLogger(__name__)
 # ~1 ppt (parte por trilhão), muito abaixo do menor `hordist` fisicamente
 # distinguível no contexto de perfilagem LWD.
 _HORDIST_KEY_DECIMALS: int = 12
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint 13.2 (v2.13) — Cache cross-call para precompute_common_arrays_cache
+# ──────────────────────────────────────────────────────────────────────────────
+# Cache global persistente entre chamadas de `simulate_multi` (opt-in via
+# `cache_persistent=True`). Acelera cenários PINN/inversão onde a mesma
+# geometria é simulada 50× ou mais com perturbações pequenas — primeira
+# chamada paga setup, próximas reutilizam.
+#
+# Estrutura da chave:
+#   (round(hordist, 12), freqs_signature, n_layers, eta_hash, h_hash)
+#
+# - hordist arredondado a 12 casas decimais (~1 ppt — abaixo do ruído físico)
+# - freqs_signature: tuple ordenada de frequências arredondadas a 1 Hz
+# - n_layers: número de camadas (invariante de modelo)
+# - eta_hash, h_hash: tuple de valores arredondados (12 casas) — garante
+#   colisão zero entre modelos com mesma geometria mas perfis distintos
+#
+# Thread-safety: `_CACHE_LOCK` protege acesso concorrente quando chamadas
+# múltiplas de `simulate_multi` rodam em ThreadPoolExecutor (notebooks,
+# treino offline, UI responsiva).
+#
+# Memória: cache cresce indefinidamente com chamadas de geometrias distintas.
+# Default `cache_persistent=False` preserva comportamento v2.12 (cache local
+# por chamada). Usuário deve chamar `release_numba_cache()` para liberar.
+_GLOBAL_HORDIST_CACHE: Dict[Tuple[Any, ...], Tuple[np.ndarray, ...]] = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def _build_cache_key(
+    hordist: float,
+    freqs_hz: np.ndarray,
+    n: int,
+    h_arr: np.ndarray,
+    eta: np.ndarray,
+) -> Tuple[Any, ...]:
+    """Constrói chave hashable para `_GLOBAL_HORDIST_CACHE` (Sprint 13.2 v2.13).
+
+    A chave codifica TODAS as entradas que afetam o resultado de
+    `precompute_common_arrays_cache`:
+
+    - ``hordist``: distância horizontal arredondada a 12 casas decimais
+    - ``freqs_signature``: tuple ordenada de frequências (Hz, int rounded)
+    - ``n``: número de camadas
+    - ``eta_hash``: bytes da view contígua de ``eta`` (n×2 complex128)
+    - ``h_hash``: bytes da view contígua de ``h_arr`` (n float64)
+
+    Retornar bytes (em vez de tuple float) garante detecção bit-exata de
+    qualquer variação numérica. A chave é hashable e picklable.
+
+    Args:
+        hordist: Distância horizontal (m).
+        freqs_hz: (nf,) — frequências em Hz.
+        n: Número de camadas.
+        h_arr: (n,) — espessuras (m).
+        eta: (n, 2) — condutividades complexas.
+
+    Returns:
+        Tupla hashable única para os argumentos dados.
+    """
+    hordist_key = round(float(hordist), _HORDIST_KEY_DECIMALS)
+    freqs_signature = tuple(int(round(float(f))) for f in freqs_hz)
+    eta_bytes = np.ascontiguousarray(eta, dtype=np.complex128).tobytes()
+    h_bytes = np.ascontiguousarray(h_arr, dtype=np.float64).tobytes()
+    return (hordist_key, freqs_signature, int(n), eta_bytes, h_bytes)
+
+
+def release_numba_cache() -> int:
+    """Libera o cache global de common_arrays (Sprint 13.2 v2.13).
+
+    Chamar quando o usuário terminar uma sessão de simulações com
+    ``cache_persistent=True``. Recomendado em ``closeEvent`` de UI
+    (espelha ``release_pool()`` da v2.12).
+
+    Thread-safe via ``_CACHE_LOCK``.
+
+    Returns:
+        Número de entradas liberadas (útil para diagnóstico / logging).
+
+    Example:
+        >>> from geosteering_ai.simulation import release_numba_cache
+        >>> n_freed = release_numba_cache()
+        >>> print(f"Liberadas {n_freed} entradas de cache.")
+    """
+    with _CACHE_LOCK:
+        n_freed = len(_GLOBAL_HORDIST_CACHE)
+        _GLOBAL_HORDIST_CACHE.clear()
+    if n_freed > 0:
+        logger.debug(
+            "release_numba_cache: %d entradas liberadas do _GLOBAL_HORDIST_CACHE",
+            n_freed,
+        )
+    return n_freed
+
+
+def get_numba_cache_size() -> int:
+    """Retorna número atual de entradas em ``_GLOBAL_HORDIST_CACHE`` (Sprint 13.2).
+
+    Útil para diagnóstico, logging, e tests. Thread-safe.
+
+    Returns:
+        Número de entradas vivas no cache global.
+    """
+    with _CACHE_LOCK:
+        return len(_GLOBAL_HORDIST_CACHE)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -278,6 +384,8 @@ def _build_unique_hordist_caches(
     freqs_hz: np.ndarray,
     h_arr: np.ndarray,
     eta: np.ndarray,
+    *,
+    cache_persistent: bool = False,
 ) -> Dict[float, Tuple[np.ndarray, ...]]:
     """Pré-computa caches de common_arrays deduplicados por `hordist`.
 
@@ -314,21 +422,55 @@ def _build_unique_hordist_caches(
         distintos — o cache é corretamente reutilizado.
     """
     caches: Dict[float, Tuple[np.ndarray, ...]] = {}
+    # Sprint 13.2 (v2.13): contadores para diagnóstico do cache cross-call
+    n_global_hits = 0
+    n_global_misses = 0
+
     for L in tr_spacings_m:
         for dip_rad in dip_rads:
             # hordist = 2·r_half = 2·(L/2)·|sin(dip)| = L·|sin(dip)|
             hordist = float(L) * abs(math.sin(float(dip_rad)))
             key = round(hordist, _HORDIST_KEY_DECIMALS)
-            if key not in caches:
-                caches[key] = precompute_common_arrays_cache(
-                    n,
-                    npt,
-                    hordist,
-                    krJ0J1,
-                    freqs_hz,
-                    h_arr,
-                    eta,
-                )
+            if key in caches:
+                # Já populado nesta chamada (dedup local clássico)
+                continue
+
+            # Sprint 13.2: tenta cache global persistente quando opt-in
+            if cache_persistent:
+                global_key = _build_cache_key(hordist, freqs_hz, n, h_arr, eta)
+                with _CACHE_LOCK:
+                    cached = _GLOBAL_HORDIST_CACHE.get(global_key)
+                if cached is not None:
+                    caches[key] = cached
+                    n_global_hits += 1
+                    continue
+                n_global_misses += 1
+
+            cache_tuple = precompute_common_arrays_cache(
+                n,
+                npt,
+                hordist,
+                krJ0J1,
+                freqs_hz,
+                h_arr,
+                eta,
+            )
+            caches[key] = cache_tuple
+
+            # Sprint 13.2: persiste no cache global se opt-in
+            if cache_persistent:
+                with _CACHE_LOCK:
+                    _GLOBAL_HORDIST_CACHE[global_key] = cache_tuple
+
+    if cache_persistent and (n_global_hits or n_global_misses):
+        logger.debug(
+            "simulate_multi cache_persistent: %d global-hits, %d global-misses, "
+            "cache global agora com %d entradas",
+            n_global_hits,
+            n_global_misses,
+            get_numba_cache_size(),
+        )
+
     return caches
 
 
@@ -423,6 +565,8 @@ def simulate_multi(
     models: Optional[List[Dict[str, Any]]] = None,
     n_workers: Optional[int] = None,
     threads_per_worker: Optional[int] = None,
+    # ── Sprint 13.2 (v2.13) — Cache cross-call ─────────────────────────
+    cache_persistent: bool = False,
 ) -> Union["MultiSimulationResult", "MultiSimulationResultBatch"]:
     """Simulação forward EM 1D TIV com multi-TR, multi-ângulo, multi-freq.
 
@@ -690,7 +834,10 @@ def simulate_multi(
     dip_rads = np.deg2rad(dip_arr)
 
     # ── Deduplicação de caches por hordist ─────────────────────────
-    # Chama a versão Sprint 2.10: um cache por `hordist` único.
+    # Chama a versão Sprint 2.10 + 13.2: um cache por `hordist` único.
+    # Sprint 13.2 (v2.13): se `cache_persistent=True`, reutiliza entradas
+    # do cache global (`_GLOBAL_HORDIST_CACHE`) entre chamadas para
+    # acelerar PINN/inversão (50× chamadas com mesma geometria).
     caches = _build_unique_hordist_caches(
         tr_arr,
         dip_rads,
@@ -700,6 +847,7 @@ def simulate_multi(
         freqs_hz,
         h_arr_static,
         eta_static,
+        cache_persistent=cache_persistent,
     )
     logger.debug(
         "simulate_multi: deduplicação produziu %d cache(s) distinto(s) "

@@ -117,11 +117,20 @@ from geosteering_ai.simulation._numba.geometry import (
     layer_at_depth,
 )
 from geosteering_ai.simulation._numba.propagation import (
+    HAS_NUMBA,
     common_arrays,
     common_factors,
     njit,
 )
 from geosteering_ai.simulation._numba.rotation import rotate_tensor
+
+# Sprint 13.1 (v2.13): import de `prange` para paralelização sobre frequências
+# em `precompute_common_arrays_cache` e `_fields_in_freqs_kernel_cached`.
+# Quando Numba não está disponível, `_prange` cai para `range` puro (no-op).
+if HAS_NUMBA:
+    from numba import prange as _prange  # type: ignore[import-not-found]
+else:
+    _prange = range  # type: ignore[assignment]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Constantes físicas
@@ -569,7 +578,7 @@ def _compute_zrho_kernel(
 # common_arrays domina o custo).
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True, nogil=True)
 def precompute_common_arrays_cache(
     n: int,
     npt: int,
@@ -579,11 +588,18 @@ def precompute_common_arrays_cache(
     h_arr: np.ndarray,
     eta: np.ndarray,
 ) -> tuple:
-    """Pré-computa cache de common_arrays para todas as frequências (Sprint 2.10).
+    """Pré-computa cache de common_arrays para todas as frequências (Sprint 2.10 + 13.1).
 
     Port Python do cache Fase 4 do Fortran (perfilaAnisoOmp.f08). Invoca
     `common_arrays` uma vez por frequência e empilha os 9 resultados em
     arrays (nf, npt, n).
+
+    Sprint 13.1 (v2.13): loop de frequências agora paraleliza com
+    ``prange(nf)`` — cada frequência é independente e escreve em
+    índice exclusivo ``cache[i_f]``. Ganho ≥1.5× em multi-freq quando
+    chamado fora de contexto paralelo externo. Quando chamado de
+    contexto ``prange`` externo (ex.: dentro de ``_simulate_positions``),
+    Numba serializa o nível interno automaticamente.
 
     Args:
         n: Número de camadas.
@@ -602,6 +618,9 @@ def precompute_common_arrays_cache(
     Note:
         Deve ser chamada ANTES do loop de posições, e passada como
         argumento a `_fields_in_freqs_kernel_cached`.
+
+        ``nogil=True`` libera o GIL durante a execução nativa, permitindo
+        que `ThreadPoolExecutor` orchestrate múltiplas chamadas em paralelo.
     """
     nf = freqs_hz.shape[0]
 
@@ -615,7 +634,9 @@ def precompute_common_arrays_cache(
     RTMup_cache = np.empty((nf, npt, n), dtype=np.complex128)
     AdmInt_cache = np.empty((nf, npt, n), dtype=np.complex128)
 
-    for i_f in range(nf):
+    # Sprint 13.1: prange sobre frequências — iterações independentes
+    # (cada i_f escreve em índice exclusivo, sem race condition).
+    for i_f in _prange(nf):
         freq = freqs_hz[i_f]
         omega = 2.0 * math.pi * freq
         zeta = 1j * omega * _MU_0
@@ -646,7 +667,7 @@ def precompute_common_arrays_cache(
     )
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True, nogil=True)
 def _fields_in_freqs_kernel_cached(
     Tx: float,
     Ty: float,
@@ -699,7 +720,11 @@ def _fields_in_freqs_kernel_cached(
 
     cH = np.empty((nf, 9), dtype=np.complex128)
 
-    for i_f in range(nf):
+    # Sprint 13.1 (v2.13): prange sobre frequências — cada freq escreve em
+    # cH[i_f, :] de forma exclusiva (sem race condition). Quando chamado
+    # de contexto prange externo (`_simulate_positions_njit_cached`), Numba
+    # serializa o nível interno automaticamente — sem regressão.
+    for i_f in _prange(nf):
         freq = freqs_hz[i_f]
         omega = 2.0 * math.pi * freq
         zeta = 1j * omega * _MU_0

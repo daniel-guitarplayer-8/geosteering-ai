@@ -147,6 +147,8 @@ from geosteering_ai.simulation.filters import FilterLoader, HankelFilter
 from geosteering_ai.simulation.forward import SimulationResult, simulate
 from geosteering_ai.simulation.multi_forward import (
     MultiSimulationResult,
+    get_numba_cache_size,
+    release_numba_cache,
     simulate_multi,
 )
 
@@ -174,6 +176,8 @@ __all__ = [
     "compute_jacobian",
     "compute_jacobian_fd_numba",
     "compute_jacobian_jax",
+    "get_numba_cache_size",
+    "release_numba_cache",
     "release_pool",
     "simulate",
     "simulate_multi",

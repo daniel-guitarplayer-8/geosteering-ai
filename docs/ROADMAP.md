@@ -19,7 +19,8 @@
 | v2.9    | 2026-04-28 | NumbaPrimer + remoção crosshair + QSettings fix              | 148         | -                                    |
 | v2.10   | 2026-04-28 | Pool persistente Numba + p-value fallback conservador        | 156         | -                                    |
 | v2.11   | 2026-04-29 | Eliminação freezing GUI + Pause/Cancel cooperativo + PhaseTimer | 197         | `feat/simulation-manager-v2.11`      |
-| **v2.12** | **2026-04-30** | **Workers Nativos no `simulate_multi` (4 modos A/B/C/D) + anti-oversubscription** | **202**     | **`feat/simulation-manager-v2.12`** |
+| v2.12   | 2026-04-30 | Workers Nativos no `simulate_multi` (4 modos A/B/C/D) + anti-oversubscription | 202         | `feat/simulation-manager-v2.12`      |
+| **v2.13** | **2026-05-01** | **Otimizações Numba JIT — prange(nf) + cache cross-call + nogil universal (Sprints 13.1+13.2+13.4)** | **165 (152+13 novos)** | **`feat/simulation-manager-v2.13`** |
 
 Documentação detalhada em `docs/reports/v2.{N}_2026-04-{D}.md` e
 `docs/CHANGELOG.md`.
