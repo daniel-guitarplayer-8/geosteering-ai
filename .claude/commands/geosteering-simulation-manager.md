@@ -24,7 +24,9 @@ Para o Simulador Fortran (`Fortran_Gerador/`), use `geosteering-simulator-fortra
 | v2.14 | 2026-05-01 | feat/simulation-manager-v2.14 | Sprint 13.3 prange TR×ang + Sprint 13.4 fastmath hankel.py + benchmark formal | 165+27 |
 | v2.15 | 2026-05-01 | feat/simulation-manager-v2.15 | Hardware validation, JIT cache observability, code review P1, fix CI tatu.x exec format | 165+27+4 |
 | v2.16 | 2026-05-01 | feat/simulation-manager-v2.16 | Fix regressão crítica de threading masking (4–8× em produção GUI) + Cenário E benchmark (600 pts) + I/O `write_dat_from_tensor` vetorizado ≥3× | 165+27+4+7 |
-| **v2.17** | **2026-05-02** | **feat/simulation-manager-v2.17** | **Fix regressão de oversubscrição em CPUs HT/SMT (3× em produção GUI): `detect_cpu_topology()` + `recommend_default_parallelism()` + warning visual GUI + logging diagnóstico. Defaults físicos: 8C/16T HT → (4w × 2t = 8) em vez de (4w × 4t = 16)** | **165+27+4+7+19** |
+| v2.17 | 2026-05-02 | feat/simulation-manager-v2.17 | Fix regressão de oversubscrição em CPUs HT/SMT (3× em produção GUI): `detect_cpu_topology()` + `recommend_default_parallelism()` + warning visual GUI + logging diagnóstico. Defaults físicos: 8C/16T HT → (4w × 2t = 8) em vez de (4w × 4t = 16) | 165+27+4+7+19 |
+| v2.18 | 2026-05-02 | feat/simulation-manager-v2.17 | Fix throughput reportado erroneamente (38k→85k): `t0_sim` definido pós pool-warm (via `_noop` tasks) + `PoolWarmupThread` background pré-aquece pool ao abrir GUI | 165+27+4+7+19+4 |
+| **v2.19** | **2026-05-02** | **feat/simulation-manager-v2.19** | **Fix bug funcional do gerador aleatório (`rng_seed=42` hardcoded em `simulation_manager.py:8088`) + UI control de semente PRNG (default aleatório) + `nogil=True` em `_simulate_positions_njit{,_cached}` + benchmark CLI CPU-aware via `recommend_default_parallelism()` + warning de oversubscrição. Cenário A: 189k→802k mod/h (4×) com defaults `4w×2t`. Auditoria PyQt6 descarta como causa-raiz da regressão histórica.** | **165+27+4+7+19+4+12 (+12 novos: 7 random seed + 5 pool warmup)** |
 
 ---
 
@@ -554,9 +556,154 @@ Label atualizada: amarelo "Aquecendo 4w × 2t... (spawn + JIT)" → verde
 
 ---
 
+## §19 Random Seed UI + nogil Hot Path + Benchmark CPU-aware (v2.19, Sprint 19)
+
+### Causa raiz dos problemas reportados
+
+**Problema 1 — Bug funcional do gerador aleatório**: cada "Iniciar Simulação"
+gerava a **mesma sequência de N modelos** porque [simulation_manager.py:8088](../../geosteering_ai/simulation/tests/simulation_manager.py#L8088)
+tinha `rng_seed=42` hardcoded. Sintoma observável: plots idênticos entre
+execuções → ensembles estatísticos impossíveis.
+
+**Problema 2 — `nogil=True` ausente em decoradores njit**:
+- `_simulate_positions_njit` ([forward.py:133](../../geosteering_ai/simulation/forward.py#L133))
+  → sem `nogil`
+- `_simulate_positions_njit_cached` ([forward.py:233](../../geosteering_ai/simulation/forward.py#L233))
+  → sem `nogil`
+- `_simulate_combined_prange` ([forward.py:351](../../geosteering_ai/simulation/forward.py#L351))
+  → JÁ TINHA `nogil=True` (referência de boa prática)
+- Workers competiam pelo GIL durante `prange(n_pos)` interno.
+
+**Problema 3 — Benchmark CLI sem detecção de oversubscrição**:
+`bench_v214_numba.py` aceitava `--workers 4 --threads-per-worker 4 = 16 threads`
+em CPU 8C/16T sem qualquer aviso → degradação ~4× em Cenário A
+(189k mod/h em vez de 802k mod/h com defaults `4w × 2t`).
+
+**Problema 4 — Premissa PyQt5→PyQt6** (descartada): migração `645ecaa` (27-Apr)
+foi limpa; regressão real ocorreu em commits Numba threading subsequentes.
+
+### Fix Sprint 19.1 — UI Control de Semente PRNG
+
+**Função utilitária**:
+```python
+# sm_model_gen.py:75
+def _resolve_rng_seed(rng_seed: Optional[int]) -> int:
+    if rng_seed is None:
+        return int(secrets.randbits(63))  # 63 bits int64-safe
+    return int(rng_seed)
+```
+
+**API atualizada**:
+```python
+# generate_models: default mudou de 42 para None
+generate_models(cfg, n_models, rng_seed=None, return_seed=True) → (models, actual_seed)
+
+# ModelGenerationThread: novo Signal seed_used
+class ModelGenerationThread(QThread):
+    seed_used = Signal(int)  # NOVO v2.19
+    def __init__(self, cfg, n_models, rng_seed=None, ...): ...
+    def run(self):
+        self._actual_seed = _resolve_rng_seed(self._rng_seed)
+        self.seed_used.emit(self._actual_seed)
+        ...
+```
+
+**UI em `ParametersPage`**:
+```python
+self.chk_random_seed = QtWidgets.QCheckBox("Semente aleatória (recomendado)")
+self.chk_random_seed.setChecked(True)
+self.spn_fixed_seed = QtWidgets.QSpinBox()  # range 0..2**31-1, default 42
+self.spn_fixed_seed.setEnabled(False)
+self.chk_random_seed.toggled.connect(
+    lambda checked: self.spn_fixed_seed.setEnabled(not checked)
+)
+
+def get_rng_seed(self) -> Optional[int]:
+    if self.chk_random_seed.isChecked():
+        return None  # aleatório
+    return int(self.spn_fixed_seed.value())  # fixo
+```
+
+**Uso em `_start_simulation`**:
+```python
+rng_seed = params.get_rng_seed()  # None ou int
+self._gen_thread = ModelGenerationThread(gen_cfg, n_models, rng_seed=rng_seed)
+self._gen_thread.seed_used.connect(
+    lambda s, _sim=sim: _sim.append_log(f"  Semente PRNG efetiva: {s}")
+)
+```
+
+### Fix Sprint 19.2 — `nogil=True` Universal + Benchmark CPU-aware
+
+```diff
+# forward.py:133, 233
+- @njit(parallel=True, cache=True)
++ @njit(parallel=True, cache=True, nogil=True)
+```
+
+**Benchmark CLI atualizado**:
+```python
+# bench_v214_numba.py
+from geosteering_ai.simulation import (
+    detect_cpu_topology, recommend_default_parallelism,
+)
+_default_workers, _default_threads = recommend_default_parallelism()
+_, _physical_cores, _has_ht = detect_cpu_topology()
+
+parser.add_argument("--workers", default=_default_workers, ...)
+parser.add_argument("--threads-per-worker", default=_default_threads, ...)
+
+# Warning de oversubscrição
+if args.workers * args.threads_per_worker > _physical_cores:
+    print(f"  ATENCAO: ... oversubscricao em {_physical_cores} cores fisicos. "
+          f"Recomendado: {_default_workers}w x {_default_threads}t.")
+```
+
+### Métricas Pré/Pós (Mac 8C/16T HT)
+
+| Cenário | v2.18 4w×4t (oversub) | v2.19 4w×2t (auto) | Ganho |
+|:-------:|:---------------------:|:------------------:|:-----:|
+| **A** (30 pts, 1 freq) | 189 796 mod/h | **802 114 mod/h** | **4.24×** |
+| **B** (30 pts, 10 freq) | 409 465 mod/h | 375 676 mod/h | 0.92× |
+| **E** (600 pts, 1 freq) | ~40 074 mod/h | ~34 828 mod/h | 0.87× (memory-bound) |
+| Paridade Fortran | <1e-12 | **<1e-12** | preservada |
+
+> Cenário A se beneficia massivamente de defaults corretos (cache amortization).
+> Cenário B perde levemente porque `prange(nf)` interno aproveita threads adicionais.
+> Cenário E é cache/memory-bound — gargalo pendente para v2.20+ (tile/block, Hankel
+> pre-compute, SIMD).
+
+### Smoke Tests v2.19
+
+| ID | Verificação |
+|:---|:------------|
+| `test_random_seed_produces_different_models` | rng_seed=None gera distintos |
+| `test_fixed_seed_reproduces_models` | semente fixa reproduz bit-a-bit |
+| `test_return_seed_yields_actual_seed` | tupla (models, seed) retornada |
+| `test_legacy_seed_42_still_works` | smoke compat preservada |
+| `test_resolve_rng_seed_with_none_returns_random_int` | 63 bits aleatórios |
+| `test_resolve_rng_seed_with_int_passes_through` | int passa direto |
+| `test_model_generation_thread_seed_used_signal_present` | Signal exposto |
+| `test_pool_warmup_thread_has_signals` | warmup_done + warmup_error |
+| `test_pool_warmup_thread_accepts_config_args` | __init__(n_w, n_t, hf) |
+| `test_simulator_page_has_warmup_attributes` | lbl_warmup_status + _warmup_thread |
+| `test_simulation_thread_uses_t0_sim_pattern` | fix v2.18 preservado |
+| `test_parameters_page_has_seed_widgets` | UI seed v2.19 expostos |
+
+### Próximos Passos (Roadmap pós-v2.19)
+
+| Versão | Otimização | Ganho esperado | Risco |
+|:-------|:-----------|:--------------:|:-----:|
+| v2.20 | Tile/block em `_simulate_positions_njit_cached` | 15-25% | Baixo |
+| v2.21 | Pré-compute Hankel kernels TE/TM | 10-15% | Médio |
+| v2.22 | SIMD ufuncs NumPy (convoluções) | 20-40% | Alto |
+| v2.23 | Auditoria PyQt6 ConnectionType (explicit) | <2% | Muito baixo |
+
+---
+
 ## §13 Referências
 
-- `docs/CHANGELOG.md` — versões v2.10 a v2.18
+- `docs/CHANGELOG.md` — versões v2.10 a v2.19
 - `docs/reports/v2.{N}_*.md` — relatórios técnicos por versão
 - `docs/ROADMAP.md` — tabela de versões SM
 - `docs/reports/v2.15_fastmath_dipoles_analysis_2026-05-01.md` — análise técnica fastmath
@@ -565,6 +712,7 @@ Label atualizada: amarelo "Aquecendo 4w × 2t... (spawn + JIT)" → verde
 - `docs/reports/v2.16_n_positions_scaling_analysis_2026-05-01.md` — análise n_positions
 - `docs/reports/v2.17_2026-05-02.md` — relatório principal v2.17 (oversubscrição HT/SMT)
 - `docs/reports/v2.18_2026-05-02.md` — relatório principal v2.18 (throughput medição + pool warmup)
+- `docs/reports/v2.19_2026-05-02.md` — relatório principal v2.19 (random seed + nogil + bench CPU-aware)
 - `tests/_fortran_helpers.py` — helpers paridade Fortran
 - `tests/test_simulation_v213_optimizations.py` — 13 testes v2.13
 - `tests/test_simulation_v214_prange_combined.py` — 8 testes v2.14

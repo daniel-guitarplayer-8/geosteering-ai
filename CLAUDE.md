@@ -13,7 +13,7 @@
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |
 | **Pacote** | `geosteering_ai/` (pip installable) |
 | **Referencia** | `docs/ARCHITECTURE_v2.md` (documento completo da arquitetura) |
-| **Simulation Manager** | v2.18 (2026-05-02) — Fix throughput reportado erroneamente (38k→85k): `t0_sim` pós-pool-warm + `PoolWarmupThread` pré-aquece pool em background. v2.17: fix oversubscrição HT/SMT, detect_cpu_topology + recommend_default_parallelism. Paridade Fortran <1e-12 · 13+14+4+7+19 (v2.13–v2.17) + 4 (v2.18) novos testes pass |
+| **Simulation Manager** | v2.19 (2026-05-02) — Fix bug funcional gerador aleatório (`rng_seed=42` hardcoded) + UI control de semente (default aleatório) + `nogil=True` universal no hot path Numba + benchmark CLI CPU-aware. Cenário A: 189k→802k mod/h (4× com defaults 4w×2t corretos). v2.18: t0_sim + PoolWarmupThread. v2.17: fix HT/SMT oversubscrição. Paridade Fortran <1e-12 · 13+14+4+7+19+4+12 (v2.13–v2.19) novos testes pass |
 
 ---
 

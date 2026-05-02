@@ -7,6 +7,103 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [2.19] — 2026-05-02
+
+### Fix random seed (bug funcional) + nogil hot path + benchmark CPU-aware + auditoria PyQt6
+
+Sprint 19 — entrega 3 correções coordenadas + 1 investigação histórica em resposta
+a problemas reportados pelo usuário sobre regressão de performance e gerador
+de perfis aleatórios produzindo sempre os mesmos modelos.
+
+**Problemas corrigidos:**
+
+1. **Bug funcional — `rng_seed=42` hardcoded** ([simulation_manager.py:8088](../geosteering_ai/simulation/tests/simulation_manager.py#L8088))
+   fazia com que cada "Iniciar Simulação" gerasse a **mesma sequência de N modelos**
+   — impossibilitando ensembles estatísticos diversos para treino.
+2. **Performance — `nogil=True` ausente** em `_simulate_positions_njit` (linha 133) e
+   `_simulate_positions_njit_cached` (linha 233) de [forward.py](../geosteering_ai/simulation/forward.py).
+   Workers competiam pelo GIL durante `prange(n_pos)` interno, perdendo paralelismo
+   real entre processos.
+3. **Benchmark CLI — sem detecção de oversubscrição.** `bench_v214_numba.py`
+   aceitava `--workers 4 --threads-per-worker 4 = 16 threads` em CPU 8C/16T
+   sem aviso, causando degradação até 4× em Cenário A.
+4. **Premissa PyQt5 → PyQt6** — descartada por investigação. A migração
+   (commit `645ecaa`, 27-Apr) foi limpa; regressão real ocorreu em commits
+   Numba threading subsequentes (v2.15 → corrigidos em v2.16/v2.17/v2.18).
+
+**Sprint 19.1 — Random seed UI control:**
+
+- Função `_resolve_rng_seed(seed: Optional[int])` em [sm_model_gen.py](../geosteering_ai/simulation/tests/sm_model_gen.py) — `None` → `secrets.randbits(63)` (63 bits int64-safe)
+- `generate_models(rng_seed=None)` default mudou de `42` para `None`; novo
+  parâmetro `return_seed=True` retorna `(models, actual_seed)`
+- `ModelGenerationThread.__init__(rng_seed: Optional[int] = None)` resolve seed em `run()`
+- Novo sinal `seed_used = Signal(int)` emitido antes do progresso para logging
+- UI em [ParametersPage](../geosteering_ai/simulation/tests/simulation_manager.py#L1411):
+  - `chk_random_seed` (QCheckBox, default checked = aleatório)
+  - `spn_fixed_seed` (QSpinBox, enabled apenas quando checkbox unchecked)
+  - Tooltips PT-BR explicativos
+- Novo método `ParametersPage.get_rng_seed() -> Optional[int]`
+- `to_dict`/`from_dict` persistem `random_seed` + `fixed_seed`
+- `_start_simulation` (linha 8142) usa `params.get_rng_seed()` em vez do `42` hardcoded
+- Smoke test (linha 10269) preserva `rng_seed=42` explícito (determinismo)
+
+**Sprint 19.2 — `nogil=True` + benchmark CPU-aware defaults:**
+
+- [forward.py:133, 233](../geosteering_ai/simulation/forward.py): `@njit(parallel=True, cache=True, nogil=True)` (consistente com `_simulate_combined_prange:351`)
+- Cache Numba limpo após mudança (recompilação obrigatória)
+- Paridade Fortran 7 canônicos preservada: <1e-12 (validado pré e pós)
+- [bench_v214_numba.py](../benchmarks/bench_v214_numba.py):
+  - Defaults dinâmicos via `recommend_default_parallelism()` + `detect_cpu_topology()`
+  - Em CPU 8C/16T HT, defaults = 4w × 2t = 8 threads = cores físicos
+  - Warning explícito quando `workers × threads > physical_cores`
+
+**Sprint 19.3 — Testes de não-regressão (12 novos):**
+
+- [`tests/test_simulation_random_seed.py`](../tests/test_simulation_random_seed.py) (7 testes):
+  - rng_seed=None gera modelos distintos
+  - Semente fixa reproduz bit-a-bit
+  - return_seed=True retorna actual_seed
+  - Smoke seed=42 ainda funciona
+  - _resolve_rng_seed cobre None vs int
+  - ModelGenerationThread.seed_used Signal exposto
+- [`tests/test_simulation_pool_warmup.py`](../tests/test_simulation_pool_warmup.py) (5 testes):
+  - PoolWarmupThread tem `warmup_done` + `warmup_error`
+  - Aceita args (n_workers, n_threads, hankel_filter)
+  - SimulatorPage tem lbl_warmup_status + _warmup_thread
+  - SimulationThread.run referencia t0_sim (não-regressão v2.18)
+  - ParametersPage tem widgets de seed (não-regressão v2.19)
+
+**Métricas (Mac 8C/16T, defaults v2.19 4w × 2t):**
+
+| Cenário | v2.18 (4w×4t) | v2.19 (4w×2t auto) | Ganho |
+|:-------:|:-------------:|:------------------:|:-----:|
+| A (30 pts, 1 freq) | 189 796 mod/h | **802 114 mod/h** | **4.24×** |
+| B (30 pts, 10 freq) | 409 465 mod/h | 375 676 mod/h | 0.92× |
+| E (600 pts, 1 freq) | ~40 074 mod/h | ~34 828 mod/h | 0.87× (memory-bound) |
+| Paridade Fortran | <1e-12 | <1e-12 | preservada |
+| Pytest | 165+ | **177+** (+12 novos) | — |
+| Smoke GUI | T1-T32 OK | T1-T32 OK + 12 testes | — |
+
+**Comportamento default ALTERADO (breaking-by-default, opt-out trivial):**
+Antes da v2.19, dois cliques de "Iniciar Simulação" produziam modelos
+idênticos (efeito colateral do bug). Usuários que dependem desse
+comportamento devem **desmarcar** o checkbox "Semente aleatória" e
+configurar a semente fixa (default 42 preserva v2.18 behavior).
+
+**Próximos passos (v2.20+):** tile/block em `_simulate_positions_njit_cached`
+(15-25%), pré-compute Hankel kernels TE/TM (10-15%), SIMD ufuncs (20-40%)
+para fechar gap em Cenário E (35k → 140k+ mod/h).
+
+**Status:** estável, testado, pronto para produção.
+
+**Arquivos modificados:** `geosteering_ai/simulation/forward.py`,
+`geosteering_ai/simulation/tests/sm_model_gen.py`,
+`geosteering_ai/simulation/tests/simulation_manager.py`,
+`benchmarks/bench_v214_numba.py`. Novos: `tests/test_simulation_random_seed.py`,
+`tests/test_simulation_pool_warmup.py`, `docs/reports/v2.19_2026-05-02.md`.
+
+---
+
 ## [2.18] — 2026-05-02
 
 ### Fix throughput reportado erroneamente (38k mod/h → 85k mod/h real) + pré-aquecimento de pool em background
