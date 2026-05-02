@@ -374,9 +374,28 @@ def benchmark_scenario_e(
 # Main
 # ──────────────────────────────────────────────────────────────────────────────
 def main():
-    """CLI runner para benchmarks v2.14."""
+    """CLI runner para benchmarks v2.14+ (Sprint 19.2 — defaults CPU-aware)."""
+    # Sprint 19.2 (v2.19): defaults automáticos via topologia de CPU.
+    # Em CPU 8C/16T HT, recomenda 4w × 2t = 8 threads (cores físicos),
+    # alinhado com a GUI v2.17 e evitando oversubscrição em hot paths
+    # com saturação de ALU (típico para Numba @njit numérico).
+    try:
+        from geosteering_ai.simulation import (
+            detect_cpu_topology,
+            recommend_default_parallelism,
+        )
+
+        _default_workers, _default_threads = recommend_default_parallelism()
+        _, _physical_cores, _has_ht = detect_cpu_topology()
+    except Exception:
+        # Fallback conservador caso a função ainda não esteja exposta.
+        _default_workers = 4
+        _default_threads = 2
+        _physical_cores = os.cpu_count() or 8
+        _has_ht = False
+
     parser = argparse.ArgumentParser(
-        description="Benchmark formal v2.14 — 4 cenários Numba (Sprints 13.1-13.4)"
+        description="Benchmark formal v2.14+ — 5 cenários Numba (Sprints 13.1-13.4 + 19.2)"
     )
     parser.add_argument(
         "--scenario",
@@ -397,13 +416,19 @@ def main():
         "--freqs", type=int, default=10, help="Número de frequências (Cenário B)"
     )
     parser.add_argument(
-        "--workers", type=int, default=4, help="Workers pool (Cenários A/B/C/E)"
+        "--workers",
+        type=int,
+        default=_default_workers,
+        help=f"Workers pool (default auto={_default_workers}; "
+        f"baseado em {_physical_cores} cores físicos)",
     )
     parser.add_argument(
         "--threads-per-worker",
         type=int,
-        default=2,
-        help="Threads intra-worker (default 2). Total = workers × threads-per-worker",
+        default=_default_threads,
+        help=f"Threads intra-worker (default auto={_default_threads}). "
+        f"Total = workers × threads-per-worker. Recomendação CPU-aware "
+        f"(Sprint 19.2 v2.19) evita oversubscrição em CPUs com HT/SMT.",
     )
     parser.add_argument(
         "--n-positions",
@@ -413,6 +438,24 @@ def main():
         "Aplicável a Cenários A/B/C/D. Cenário E sempre usa 600 (override).",
     )
     args = parser.parse_args()
+
+    # Sprint 19.2 (v2.19): warning de oversubscrição.
+    # Quando workers × threads > cores_físicos, threads competem pelas mesmas
+    # ALUs e o throughput cai (até 2-3× em loops numéricos pesados como
+    # _simulate_positions_njit). Em CPUs com HT/SMT (M1/M2, Ryzen, Core i),
+    # logical_cores é o dobro de physical_cores mas hyperthreads não ajudam
+    # cargas saturadas em ALU como Numba njit numérico denso.
+    _total_threads = args.workers * args.threads_per_worker
+    if _total_threads > _physical_cores:
+        ht_label = " (HT/SMT ativo)" if _has_ht else ""
+        print(
+            f"  ATENCAO: {args.workers}w x {args.threads_per_worker}t = "
+            f"{_total_threads} threads em {_physical_cores} cores fisicos"
+            f"{ht_label}. Oversubscricao pode degradar performance em "
+            f"2-3x. Recomendado: {_default_workers}w x {_default_threads}t "
+            f"= {_default_workers * _default_threads} threads."
+        )
+        print()
 
     # ── Configurar threading ANTES de qualquer trabalho Numba ────────────────
     # Setar env vars OMP_NUM_THREADS / NUMBA_NUM_THREADS / MKL_NUM_THREADS
