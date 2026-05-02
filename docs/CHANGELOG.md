@@ -7,6 +7,87 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [2.18] — 2026-05-02
+
+### Fix throughput reportado erroneamente (38k mod/h → 85k mod/h real) + pré-aquecimento de pool em background
+
+Sprint 18 — investigação revela que o throughput de **38k mod/h** reportado
+consistentemente na GUI não é um bug de performance, mas um **artefato de medição**:
+o timer `t0` era iniciado *antes* de `_acquire_numba_pool()`, incluindo
+~10–12 s de overhead de pool cold-start (spawn de 4 workers + import do pacote
++ 2× warmup JIT Numba) no denominador do cálculo. Com pool warm (segunda
+simulação da mesma sessão), o throughput já era ~85k mod/h — idêntico ao
+benchmark. O benchmark Cenário E media 85k porque herdava pool warm de
+cenários anteriores ou de disco cache JIT.
+
+**Causa raiz**: `t0 = perf_counter()` na linha 766 de `sm_workers.py`,
+**antes** de `_acquire_numba_pool()` na linha 830. O overhead de spawn +
+init de 4 workers (~10–12 s frio; ~0 ms warm) ficava incluído no cálculo
+`n_total / (perf_counter() - t0) × 3600`.
+
+**Dois fixes implementados:**
+1. `t0_sim` definido após todos os workers confirmarem init via `_noop` tasks
+2. `PoolWarmupThread` inicia pool em background quando a GUI abre (~500 ms delay)
+
+### Adicionado
+
+- **Sprint 18.1 — `PoolWarmupThread(QThread)`** ([sm_workers.py:1091-1151](../geosteering_ai/simulation/tests/sm_workers.py)):
+  - Thread Qt de background que cria/reusa `_PERSISTENT_POOL` e aguarda
+    todos os workers completarem `_numba_init_worker` via `_noop` tasks
+  - Signals: `warmup_done(elapsed_s, n_workers, n_threads)` + `warmup_error(msg)`
+  - Não-fatal: falha no warmup não impede simulação (pool criado no momento)
+  - `hankel_filter="werthmuller_201pt"` padrão (cobre 95%+ dos casos de uso)
+
+- **Sprint 18.2 — Pré-aquecimento em `SimulationPage`** ([simulation_manager.py](../geosteering_ai/simulation/tests/simulation_manager.py)):
+  - `QTimer.singleShot(500, self._start_background_warmup)` em `__init__`
+  - Label `lbl_warmup_status`: amarelo "Aquecendo Xw × Yt... (spawn + JIT Numba)"
+    → verde "Workers prontos: Xw × Yt (12.3s warmup)" após init completar
+  - `_on_backend_changed_warmup`: oculta label se backend mudar para Fortran
+  - Métodos: `_start_background_warmup()`, `_on_warmup_done()`, `_on_warmup_error()`
+
+### Corrigido
+
+- **`t0_sim` pós-init-workers** ([sm_workers.py](../geosteering_ai/simulation/tests/sm_workers.py)):
+  - Após `_acquire_numba_pool()`, submete `_noop` a todos os `n_workers` e
+    aguarda conclusão (confirma que `_numba_init_worker` completou em cada worker)
+  - `t0_sim = perf_counter()` definido somente após confirmação
+  - Todos os cálculos de throughput no branch Numba usam `t0_sim or t0`:
+    `progress_update.emit` (tempo real), `finished_all["throughput_mod_h"]`
+  - `elapsed_total` (para display "Tempo de execução: X horas") continua usando
+    `t0` original (inclui warmup no tempo total reportado — correto)
+
+### Testes
+
+| Teste | Tipo | Verificação |
+|:------|:-----|:------------|
+| T29: PoolWarmupThread instanciável | Smoke | `isinstance(wt, PoolWarmupThread)` |
+| T30: signals warmup_done + warmup_error | Smoke | `hasattr(wt, "warmup_done")` |
+| T31: SimulationPage tem lbl_warmup_status | Smoke | `hasattr(sim_page, "lbl_warmup_status")` |
+| T32: SimulationPage tem _warmup_thread | Smoke | `hasattr(sim_page, "_warmup_thread")` |
+
+**19 testes existentes (test_simulation_cpu_topology.py) + 0 falhas smoke** — zero regressão.
+
+### Métricas pós-fix (Hardware Intel 8C/16T HT, macOS)
+
+| Configuração | Throughput reportado | Throughput real | Gap |
+|:-------------|:--------------------:|:---------------:|:---:|
+| v2.17 (cold pool, timer inclui warmup) | 38k mod/h | 85k mod/h | 2.24× erro medição |
+| **v2.18 (t0_sim pós-warmup)** | **85k mod/h** | **85k mod/h** | **1.0× correto** |
+| v2.18 (pool pré-aquecido pelo warmup bg) | 85k mod/h | 85k mod/h | — primeira exec |
+
+### Arquivos modificados
+
+| Arquivo | Mudanças |
+|:--------|:---------|
+| `geosteering_ai/simulation/tests/sm_workers.py` | +`PoolWarmupThread`, `t0_sim` pós-noop, `Signal` fix, throughput 4× |
+| `geosteering_ai/simulation/tests/simulation_manager.py` | +`PoolWarmupThread` import, `lbl_warmup_status`, `_start_background_warmup()`, handlers, 4 smoke tests |
+| `docs/CHANGELOG.md` | Esta entrada |
+| `docs/ROADMAP.md` | v2.18 adicionada |
+| `CLAUDE.md` | Linha 16 atualizada |
+| `.claude/commands/geosteering-simulation-manager.md` | §18 adicionada |
+
+---
+
 ## [2.17] — 2026-05-02
 
 ### Fix regressão de oversubscrição em CPUs Hyperthreading/SMT (3× em produção GUI)

@@ -13,7 +13,7 @@
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |
 | **Pacote** | `geosteering_ai/` (pip installable) |
 | **Referencia** | `docs/ARCHITECTURE_v2.md` (documento completo da arquitetura) |
-| **Simulation Manager** | v2.17 (2026-05-02) — Fix regressão de oversubscrição em CPUs Hyperthreading/SMT (3× em produção GUI): `detect_cpu_topology()` + `recommend_default_parallelism()` + warning visual GUI + logging diagnóstico. Defaults baseados em cores físicos (não lógicos): 8C/16T HT → (4w × 2t = 8) em vez de (4w × 4t = 16). Paridade Fortran <1e-12 preservada · 13 (v2.13) + 14 (v2.14) + 4 (v2.15) + 7 (v2.16) + 19 (v2.17) novos testes pass |
+| **Simulation Manager** | v2.18 (2026-05-02) — Fix throughput reportado erroneamente (38k→85k): `t0_sim` pós-pool-warm + `PoolWarmupThread` pré-aquece pool em background. v2.17: fix oversubscrição HT/SMT, detect_cpu_topology + recommend_default_parallelism. Paridade Fortran <1e-12 · 13+14+4+7+19 (v2.13–v2.17) + 4 (v2.18) novos testes pass |
 
 ---
 

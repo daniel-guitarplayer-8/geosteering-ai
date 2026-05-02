@@ -764,6 +764,11 @@ class SimulationThread(QThread):
         use_progress_q = n_workers == 1
 
         t0 = time.perf_counter()
+        # t0_sim: redefinido no branch Numba APÓS todos os workers completarem
+        # _numba_init_worker (spawn + JIT). Throughput usa t0_sim para excluir
+        # overhead de pool creation (~10–12 s no cold start).
+        # t0 permanece como referência de tempo total (pool + simulação).
+        t0_sim: Optional[float] = None
         done = 0
         throughput = 0.0
         H_parts: Dict[int, np.ndarray] = {}
@@ -828,6 +833,27 @@ class SimulationThread(QThread):
                 # (pool initializer). Spawn/import/JIT só ocorrem na PRIMEIRA
                 # simulação ou quando n_workers/n_threads/hankel_filter mudam.
                 pool = _acquire_numba_pool(n_workers, req.n_threads, req.hankel_filter)
+                # ── Sprint 18.1 (v2.18): aguarda init dos workers, define t0_sim ──
+                # _noop só executa após _numba_init_worker completar no worker.
+                # Pool warm (2.ª simulação mesma sessão) → retorna em ~0 ms.
+                # Pool frio (primeira abertura da GUI) → bloqueia até spawn +
+                # import geosteering_ai + 2× simulate_multi JIT warmup (~10–12 s
+                # em hardware 8C). t0_sim excluí esse overhead: throughput_mod_h
+                # passa a refletir a velocidade real de simulação (≈ 85k mod/h em
+                # 8C com 4 workers × 2 threads) em vez de ~38k que incluía setup.
+                _init_futs = [pool.submit(_noop) for _ in range(n_workers)]
+                for _if in _init_futs:
+                    try:
+                        _if.result(timeout=120)
+                    except Exception:
+                        pass
+                t0_sim = time.perf_counter()
+                _warmup_s = t0_sim - t0
+                if _warmup_s > 0.5:
+                    self.log.emit(
+                        f"  Pool aquecido em {_warmup_s:.1f}s (spawn + JIT). "
+                        "Throughput mede apenas simulação daqui em diante."
+                    )
                 futures = {
                     pool.submit(
                         run_numba_chunk,
@@ -870,7 +896,7 @@ class SimulationThread(QThread):
                             continue
                         if evt.get("event") == "block":
                             self._emit_block_log(evt)
-                            dt = max(time.perf_counter() - t0, 1e-6)
+                            dt = max(time.perf_counter() - (t0_sim or t0), 1e-6)
                             throughput = float(evt["done"]) / dt * 3600.0
                             self.progress_update.emit(
                                 int(evt["done"]), n_total, throughput
@@ -880,7 +906,7 @@ class SimulationThread(QThread):
                     if z_obs_ref is None and z_obs.size > 0:
                         z_obs_ref = z_obs
                     done = H_stack.shape[0]
-                    dt = max(time.perf_counter() - t0, 1e-6)
+                    dt = max(time.perf_counter() - (t0_sim or t0), 1e-6)
                     throughput = done / dt * 3600.0
                     self.progress_update.emit(done, n_total, throughput)
                     self.log.emit(
@@ -898,7 +924,7 @@ class SimulationThread(QThread):
                         if z_obs_ref is None and z_obs.size > 0:
                             z_obs_ref = z_obs
                         done += H_stack.shape[0]
-                        dt = max(time.perf_counter() - t0, 1e-6)
+                        dt = max(time.perf_counter() - (t0_sim or t0), 1e-6)
                         throughput = done / dt * 3600.0
                         self.progress_update.emit(done, n_total, throughput)
                         self.log.emit(
@@ -923,6 +949,9 @@ class SimulationThread(QThread):
                 else:
                     H_full = np.empty((0,), dtype=np.complex128)
                 elapsed_total = time.perf_counter() - t0
+                # sim_elapsed: apenas tempo de simulação (exclui warmup de pool).
+                # t0_sim é definido após os _noop confirmarem init dos workers.
+                sim_elapsed = time.perf_counter() - (t0_sim or t0)
                 # Linha-resumo de finalização com 89 traços (mesmo padrão de
                 # fifthBuildTIVModels.py:1294).
                 self.log.emit("─" * 89)
@@ -936,7 +965,7 @@ class SimulationThread(QThread):
                         "H_stack": H_full,
                         "z_obs": z_obs_ref,
                         "elapsed": elapsed_total,
-                        "throughput_mod_h": n_total / max(elapsed_total, 1e-6) * 3600.0,
+                        "throughput_mod_h": n_total / max(sim_elapsed, 1e-6) * 3600.0,
                         "n_models": n_total,
                     }
                 )
@@ -1052,6 +1081,73 @@ class SimulationThread(QThread):
                     mp_manager.shutdown()
                 except Exception:
                     pass
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# QThread para pré-aquecimento do pool Numba em background (v2.18)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class PoolWarmupThread(QThread):
+    """Pré-aquece o pool Numba persistente em background para eliminar cold-start.
+
+    Quando ``SimulationPage`` é aberta, esta thread cria/reusa o pool com os
+    defaults recomendados e aguarda todos os workers completarem
+    ``_numba_init_worker`` (spawn + import + 2× JIT warmup ≈ 10–12 s no
+    primeiro uso). Na primeira simulação real, o pool já está pronto:
+
+    ┌──────────────────────────────────────────────────────────────────────┐
+    │  Sem pre-warm (v2.17):                                              │
+    │    Usuário clica "Simular" → cold pool → 10–12 s overhead incluído  │
+    │    no throughput → 38k mod/h reportado (vs. 85k real)               │
+    │                                                                      │
+    │  Com pre-warm (v2.18):                                              │
+    │    GUI abre → PoolWarmupThread inicia (bg) → pool aquecido em ~12 s │
+    │    Usuário clica "Simular" → pool já pronto → t0_sim ≈ imediato     │
+    │    → throughput = 85k mod/h (velocidade real de simulação)          │
+    └──────────────────────────────────────────────────────────────────────┘
+
+    Signals:
+        warmup_done(elapsed_s, n_workers, n_threads): Pool pronto.
+        warmup_error(msg): Falha não-fatal (pool será criado na simulação).
+
+    Note:
+        Usa ``hankel_filter="werthmuller_201pt"`` (padrão) para pre-warm.
+        Se o filtro real for diferente, o pool é recriado na simulação
+        (custo único). Para a configuração padrão, o warm hit é garantido.
+    """
+
+    warmup_done = Signal(float, int, int)  # elapsed_s, n_workers, n_threads
+    warmup_error = Signal(str)
+
+    def __init__(
+        self,
+        n_workers: int,
+        n_threads: int,
+        hankel_filter: str = "werthmuller_201pt",
+        parent: Optional["QObject"] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._n_workers = n_workers
+        self._n_threads = n_threads
+        self._hankel_filter = hankel_filter
+
+    def run(self) -> None:
+        """Adquire o pool e aguarda init de todos os workers via _noop."""
+        t0 = time.perf_counter()
+        try:
+            pool = _acquire_numba_pool(
+                self._n_workers, self._n_threads, self._hankel_filter
+            )
+            # _noop só executa após _numba_init_worker completar no worker.
+            futs = [pool.submit(_noop) for _ in range(self._n_workers)]
+            for f in futs:
+                f.result(timeout=120)
+            self.warmup_done.emit(
+                time.perf_counter() - t0, self._n_workers, self._n_threads
+            )
+        except Exception as exc:
+            self.warmup_error.emit(str(exc))
 
 
 # ──────────────────────────────────────────────────────────────────────────

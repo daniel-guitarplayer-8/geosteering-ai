@@ -479,9 +479,84 @@ frequências, ou n_pos > 1000) e em CPUs com HT mais agressivo (Linux Xeon
 
 ---
 
+## §18 Fix Throughput Reportado Erroneamente + Pool Warmup Background (v2.18, Sprint 18)
+
+### Causa raiz do 38k mod/h persistente
+
+O timer `t0 = perf_counter()` em `sm_workers.py:766` era iniciado **antes** de
+`_acquire_numba_pool()` em `sm_workers.py:830`. O overhead de cold-start do pool
+(spawn de 4 workers + `_numba_init_worker`: import do pacote + 2× warmup JIT ≈
+**10–12 s**) ficava incluído no denominador de `n_total / (perf_counter() - t0) × 3600`.
+
+```
+Benchmark (85k):  pool herdado warm → t0 → 8.47s → 200/8.47×3600 = 85k ✓
+GUI v2.17 (38k):  t0 → pool cold (~12s) → sim (8.47s) → 200/20.47×3600 = 35k ≈ 38k ✗
+GUI v2.18 (85k):  pool cold → noops wait → t0_sim → sim (8.47s) → 200/8.47×3600 = 85k ✓
+```
+
+Com pool warm (2ª simulação mesma sessão), a GUI v2.17 já reportava ~85k — idêntico
+ao benchmark. O problema era SEMPRE visível no first-run (cold start).
+
+### Fix v2.18 (Sprint 18.1 + 18.2)
+
+**Sprint 18.1 — `t0_sim` pós-warmup** (`sm_workers.py`):
+
+```python
+pool = _acquire_numba_pool(n_workers, req.n_threads, req.hankel_filter)
+# Aguarda todos os workers completarem _numba_init_worker via _noop tasks.
+_init_futs = [pool.submit(_noop) for _ in range(n_workers)]
+for _if in _init_futs:
+    _if.result(timeout=120)
+t0_sim = time.perf_counter()  # ← apenas simulação, sem overhead de pool
+# ... throughput usa (t0_sim or t0) em vez de t0
+```
+
+**Sprint 18.2 — `PoolWarmupThread`** (`sm_workers.py:1091-1151`, `simulation_manager.py`):
+
+```python
+class PoolWarmupThread(QThread):
+    warmup_done = Signal(float, int, int)   # elapsed_s, n_workers, n_threads
+    warmup_error = Signal(str)
+    def run(self):
+        pool = _acquire_numba_pool(self._n_workers, self._n_threads, ...)
+        futs = [pool.submit(_noop) for _ in range(self._n_workers)]
+        for f in futs: f.result(timeout=120)
+        self.warmup_done.emit(elapsed, n_workers, n_threads)
+```
+
+Em `SimulationPage.__init__()`:
+```python
+self.lbl_warmup_status = QLabel("Pool Numba: aguardando início...")
+self._warmup_thread: Optional[PoolWarmupThread] = None
+QTimer.singleShot(500, self._start_background_warmup)
+```
+
+Label atualizada: amarelo "Aquecendo 4w × 2t... (spawn + JIT)" → verde
+"Workers prontos: 4w × 2t (12.3s warmup)" quando pool inicializado.
+
+### Métricas v2.18
+
+| Situação | Throughput reportado | Real | Observação |
+|:---------|:--------------------:|:----:|:-----------|
+| v2.17 cold start | 38k mod/h | 85k mod/h | artefato de medição |
+| v2.17 warm pool (2ª exec) | ~85k mod/h | 85k mod/h | correto |
+| **v2.18 cold start** | **85k mod/h** | **85k mod/h** | **t0_sim correto** |
+| **v2.18 com pre-warm bg** | **85k mod/h** | **85k mod/h** | **pool já warm** |
+
+### Smoke Tests v2.18
+
+| ID | Verificação |
+|:---|:------------|
+| T29 | `PoolWarmupThread` instanciável |
+| T30 | Signals `warmup_done` e `warmup_error` presentes |
+| T31 | `SimulationPage.lbl_warmup_status` existe |
+| T32 | `SimulationPage._warmup_thread` existe |
+
+---
+
 ## §13 Referências
 
-- `docs/CHANGELOG.md` — versões v2.10 a v2.17
+- `docs/CHANGELOG.md` — versões v2.10 a v2.18
 - `docs/reports/v2.{N}_*.md` — relatórios técnicos por versão
 - `docs/ROADMAP.md` — tabela de versões SM
 - `docs/reports/v2.15_fastmath_dipoles_analysis_2026-05-01.md` — análise técnica fastmath
@@ -489,6 +564,7 @@ frequências, ou n_pos > 1000) e em CPUs com HT mais agressivo (Linux Xeon
 - `docs/reports/v2.16_2026-05-01.md` — relatório principal v2.16 (threading masking + Cenário E)
 - `docs/reports/v2.16_n_positions_scaling_analysis_2026-05-01.md` — análise n_positions
 - `docs/reports/v2.17_2026-05-02.md` — relatório principal v2.17 (oversubscrição HT/SMT)
+- `docs/reports/v2.18_2026-05-02.md` — relatório principal v2.18 (throughput medição + pool warmup)
 - `tests/_fortran_helpers.py` — helpers paridade Fortran
 - `tests/test_simulation_v213_optimizations.py` — 13 testes v2.13
 - `tests/test_simulation_v214_prange_combined.py` — 8 testes v2.14
@@ -500,4 +576,4 @@ frequências, ou n_pos > 1000) e em CPUs com HT mais agressivo (Linux Xeon
 
 ---
 
-**Sub-skill criada em 2026-05-01 (v2.15). Última atualização: 2026-05-02 (v2.17).**
+**Sub-skill criada em 2026-05-01 (v2.15). Última atualização: 2026-05-02 (v2.18).**

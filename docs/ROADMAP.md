@@ -24,7 +24,8 @@
 | v2.14   | 2026-05-01 | prange combinado TR×ângulo (Sprint 13.3) + fastmath seletivo hankel.py (Sprint 13.4) + benchmark formal CLI 4 cenários | 27 novos (8+6+13) | PR #33 (mergeado) |
 | v2.15   | 2026-05-01 | Hardware validation 4 cenários, JIT cache observability (`get_jit_cache_info`), code review P1, fix CI tatu.x exec format Linux | 31 novos (4 JIT + 27 v2.14) | `feat/simulation-manager-v2.15` |
 | v2.16 | 2026-05-01 | Fix regressão crítica de threading masking (4–8× em produção GUI) + Cenário E benchmark production scale (600 pts) + I/O `write_dat_from_tensor` vetorizado ≥3× | 7 novos (3 threading + 4 I/O) | `feat/simulation-manager-v2.16` |
-| **v2.17** | **2026-05-02** | **Fix regressão de oversubscrição em CPUs Hyperthreading/SMT (3× em produção GUI): `detect_cpu_topology()` + `recommend_default_parallelism()` + warning visual GUI + logging diagnóstico. Defaults baseados em cores físicos (não lógicos): 8C/16T HT → (4w × 2t = 8) em vez de (4w × 4t = 16)** | **19 novos (5 detection + 6 recommendation + 6 simulated hardware + 2 no-regression)** | **`feat/simulation-manager-v2.17`** |
+| v2.17 | 2026-05-02 | Fix regressão de oversubscrição em CPUs Hyperthreading/SMT (3× em produção GUI): `detect_cpu_topology()` + `recommend_default_parallelism()` + warning visual GUI + logging diagnóstico. Defaults baseados em cores físicos (não lógicos): 8C/16T HT → (4w × 2t = 8) em vez de (4w × 4t = 16) | 19 novos (5 detection + 6 recommendation + 6 simulated hardware + 2 no-regression) | `feat/simulation-manager-v2.17` |
+| **v2.18** | **2026-05-02** | **Fix throughput reportado erroneamente (38k→85k): `t0_sim` definido após pool warm (via `_noop` tasks pós-`_acquire_numba_pool`) + `PoolWarmupThread` pré-aquece pool em background ao abrir GUI → primeira simulação sem cold-start overhead** | **4 novos smoke (T29–T32)** | **`feat/simulation-manager-v2.17`** |
 
 Documentação detalhada em `docs/reports/v2.{N}_2026-04-{D}.md` e
 `docs/CHANGELOG.md`.

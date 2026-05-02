@@ -111,6 +111,7 @@ if QT_AVAILABLE:
     from .sm_snapshot_persist import SnapshotPersistThread
     from .sm_workers import (
         NumbaPrimer,
+        PoolWarmupThread,
         SaveArtifactsThread,
         SimRequest,
         SimulationThread,
@@ -2374,10 +2375,29 @@ class SimulatorPage(QtWidgets.QWidget):
         self.spin_threads.valueChanged.connect(_update_parallel_warning)
         _update_parallel_warning()  # checa estado inicial
 
+        # ── Sprint 18.2 (v2.18): status de pre-warm do pool Numba ───────
+        # PoolWarmupThread inicia ao abrir a página (QTimer.singleShot abaixo).
+        # Exibe "Aquecendo workers..." enquanto spawn + JIT rodam em background.
+        # Quando pronto: "Workers prontos: 4w × 2t (12.3s)" em verde.
+        # Na primeira simulação, pool já está warm → throughput = 85k mod/h.
+        self.lbl_warmup_status = QtWidgets.QLabel("Pool Numba: aguardando início...")
+        self.lbl_warmup_status.setStyleSheet("color:#a5a5a5; font-size:10px;")
+        _tooltip(
+            self.lbl_warmup_status,
+            (
+                "<b>Status do pool Numba (v2.18)</b><br/>"
+                "Pré-aquecimento em background: spawn de workers + compilação JIT "
+                "Numba (~10–12 s no primeiro uso). Quando 'Workers prontos', a "
+                "primeira simulação inicia sem overhead e reporta o throughput real."
+            ),
+        )
+        self._warmup_thread: Optional[PoolWarmupThread] = None
+
         par_form.addRow("Nº de workers sandbox:", self.spin_workers)
         par_form.addRow("Nº de threads por worker:", self.spin_threads)
         par_form.addRow("", self.lbl_ncpu)
         par_form.addRow("", self.lbl_parallel_warn)
+        par_form.addRow("", self.lbl_warmup_status)
 
         grp_out = QtWidgets.QGroupBox("Saída")
         out_form = QtWidgets.QFormLayout(grp_out)
@@ -2646,6 +2666,13 @@ class SimulatorPage(QtWidgets.QWidget):
         # Log view sempre permanece nesta coluna (meio):
         root.addWidget(self.log_view, 1)
 
+        # ── Sprint 18.2 (v2.18): pré-aquecer pool Numba em background ───
+        # Dispara 500 ms após __init__ (QTimer.singleShot não bloqueia o
+        # paint inicial da janela). Se o usuário mudar para backend Fortran,
+        # _on_backend_changed_warmup oculta o status e cancela a thread.
+        self.combo_backend.currentTextChanged.connect(self._on_backend_changed_warmup)
+        QtCore.QTimer.singleShot(500, self._start_background_warmup)
+
     # ── v2.4b: API para SimulatorTab reparentar o grupo de hist\u00f3rico ──
     def take_history_group(self) -> QtWidgets.QGroupBox:
         """Retorna o ``grp_history`` (remove do layout atual se estiver).
@@ -2697,6 +2724,51 @@ class SimulatorPage(QtWidgets.QWidget):
                 continue
             haystack = (item.text() + "\n" + (item.toolTip() or "")).lower()
             item.setHidden(needle not in haystack)
+
+    # ── Sprint 18.2 (v2.18): pré-aquecimento do pool Numba ──────────────
+
+    def _start_background_warmup(self) -> None:
+        """Inicia PoolWarmupThread com a config atual dos spinboxes.
+
+        Chamado por QTimer.singleShot(500) no __init__ e por
+        _on_backend_changed_warmup quando o usuário volta para numba.
+        Ignorado se backend for Fortran ou se thread já estiver rodando.
+        """
+        if self.combo_backend.currentText() != "numba":
+            self.lbl_warmup_status.setVisible(False)
+            return
+        if self._warmup_thread is not None and self._warmup_thread.isRunning():
+            return
+        n_w = self.spin_workers.value()
+        n_t = self.spin_threads.value()
+        self.lbl_warmup_status.setText(
+            f"Aquecendo {n_w}w × {n_t}t... (spawn + JIT Numba)"
+        )
+        self.lbl_warmup_status.setStyleSheet("color:#f0ad4e; font-size:10px;")
+        self.lbl_warmup_status.setVisible(True)
+        self._warmup_thread = PoolWarmupThread(n_w, n_t, parent=self)
+        self._warmup_thread.warmup_done.connect(self._on_warmup_done)
+        self._warmup_thread.warmup_error.connect(self._on_warmup_error)
+        self._warmup_thread.start()
+
+    def _on_warmup_done(self, elapsed: float, n_w: int, n_t: int) -> None:
+        """Pool aquecido — atualiza label para verde."""
+        self.lbl_warmup_status.setText(
+            f"Workers prontos: {n_w}w × {n_t}t ({elapsed:.1f}s warmup)"
+        )
+        self.lbl_warmup_status.setStyleSheet("color:#4ec9b0; font-size:10px;")
+
+    def _on_warmup_error(self, msg: str) -> None:
+        """Warmup falhou — mostra aviso amarelo (não-fatal: pool cria na simulação)."""
+        self.lbl_warmup_status.setText(f"Warmup falhou: {msg[:60]}")
+        self.lbl_warmup_status.setStyleSheet("color:#f0ad4e; font-size:10px;")
+
+    def _on_backend_changed_warmup(self, backend: str) -> None:
+        """Oculta status de warmup quando backend não for numba."""
+        if backend != "numba":
+            self.lbl_warmup_status.setVisible(False)
+        else:
+            self._start_background_warmup()
 
     def add_history_entry(
         self,
@@ -10389,6 +10461,32 @@ def _run_smoke_test() -> int:
         )
     except Exception as exc:
         check(False, f"v2.12 T24-T28: Workers Nativos ({exc})")
+
+    # ── v2.18 T29-T32: PoolWarmupThread + t0_sim (Sprint 18.1-18.2) ──────────
+    try:
+        from .sm_workers import PoolWarmupThread
+
+        sim_page = window.page_sim
+        # T29: PoolWarmupThread importável e instanciável
+        wt = PoolWarmupThread(1, 1, parent=None)
+        check(
+            isinstance(wt, PoolWarmupThread), "v2.18 T29: PoolWarmupThread instanciável"
+        )
+        check(
+            hasattr(wt, "warmup_done") and hasattr(wt, "warmup_error"),
+            "v2.18 T30: PoolWarmupThread tem signals warmup_done e warmup_error",
+        )
+        # T31: SimulationPage tem lbl_warmup_status e _warmup_thread
+        check(
+            hasattr(sim_page, "lbl_warmup_status"),
+            "v2.18 T31: SimulationPage tem lbl_warmup_status",
+        )
+        check(
+            hasattr(sim_page, "_warmup_thread"),
+            "v2.18 T32: SimulationPage tem _warmup_thread",
+        )
+    except Exception as exc:
+        check(False, f"v2.18 T29-T32: PoolWarmupThread ({exc})")
 
     print(f"\n=== Resultado: {len(failures)} falha(s) ===")
     window.close()
