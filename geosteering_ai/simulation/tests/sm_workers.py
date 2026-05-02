@@ -793,6 +793,33 @@ class SimulationThread(QThread):
 
         try:
             if req.backend == "numba":
+                # ── Sprint 17.1 (v2.17): diagnóstico de paralelismo ──────
+                # Loga topologia da CPU e detecta oversubscrição (workers
+                # × threads > cores físicos), que causa perda 30-50% em
+                # CPUs com Hyperthreading/SMT. Esta era a CAUSA RAIZ da
+                # regressão remanescente em produção GUI (38k mod/h):
+                # defaults v2.16 produziam 4w × 4t = 16 threads em 8 cores
+                # físicos = 2× oversubscrição.
+                try:
+                    from geosteering_ai.simulation import detect_cpu_topology
+
+                    _logical, _phys, _has_ht = detect_cpu_topology()
+                    _total_threads = n_workers * int(req.n_threads)
+                    _ht_tag = " (HT/SMT)" if _has_ht else ""
+                    self.log.emit(
+                        f"CPU: {_phys} cores físicos · {_logical} threads "
+                        f"lógicas{_ht_tag} · alvo paralelo: {_total_threads} threads"
+                    )
+                    if _total_threads > _phys:
+                        factor = _total_threads / max(1, _phys)
+                        self.log.emit(
+                            f"  ⚠ AVISO: oversubscrição {factor:.2f}× "
+                            f"({_total_threads} threads > {_phys} cores físicos). "
+                            f"Performance pode degradar 30-50%. Recomendado: "
+                            f"reduzir workers ou threads para {_phys} threads totais."
+                        )
+                except Exception:
+                    pass
                 self.log.emit(
                     f"Numba — {n_workers} workers × {req.n_threads} threads "
                     f"({n_total} modelos)."

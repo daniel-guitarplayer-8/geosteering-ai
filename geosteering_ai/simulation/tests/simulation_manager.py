@@ -2238,7 +2238,6 @@ class SimulatorPage(QtWidgets.QWidget):
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
-        ncpu = os.cpu_count() or 8
 
         grp_backend = QtWidgets.QGroupBox("Backend")
         form_bk = QtWidgets.QFormLayout(grp_backend)
@@ -2285,38 +2284,100 @@ class SimulatorPage(QtWidgets.QWidget):
         )
         par_form = QtWidgets.QFormLayout(grp_par)
         par_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.spin_workers = _spin_int(max(1, ncpu // 4), 1, 256)
-        self.spin_threads = _spin_int(max(2, ncpu // max(1, ncpu // 4)), 1, 256)
+        # ── Sprint 17.1 (v2.17): defaults baseados em CORES FÍSICOS ──────
+        # `recommend_default_parallelism()` detecta cores físicos vs
+        # lógicos (Hyperthreading/SMT) e recomenda configuração ótima
+        # ``n_workers × threads_per_worker = phys_cores``. Em hardware
+        # 8C/16T HT o default é (4, 2) — não mais (4, 4) que causava
+        # oversubscrição 2× e regressão de 3× em produção (commit
+        # bf5324b da v2.16 estabilizou threading masking, mas defaults
+        # eram errados para CPUs com HT/SMT).
+        from geosteering_ai.simulation import (
+            detect_cpu_topology,
+            recommend_default_parallelism,
+        )
+
+        _logical, _phys, _has_ht = detect_cpu_topology()
+        _rec_w, _rec_t = recommend_default_parallelism()
+        self.spin_workers = _spin_int(_rec_w, 1, 256)
+        self.spin_threads = _spin_int(_rec_t, 1, 256)
         _tooltip(
             self.spin_workers,
             (
                 "<b>Nº de workers sandbox</b><br/>"
                 "Processos isolados executados em paralelo (ProcessPoolExecutor). Cada worker "
-                "tem seu próprio warmup JIT (Numba) ou cópia do tatu.x (Fortran)."
+                "tem seu próprio warmup JIT (Numba) ou cópia do tatu.x (Fortran).<br/><br/>"
+                "<b>Recomendação v2.17:</b> Workers × Threads ≤ <i>cores físicos</i> "
+                "(não threads lógicas). Ultrapassar causa <i>oversubscrição</i> e "
+                "perda de 30–50% por contenção em Hyperthreading/SMT."
             ),
         )
         _tooltip(
             self.spin_threads,
             (
                 "<b>Nº de threads por worker</b><br/>"
-                "Define NUMBA_NUM_THREADS/OMP_NUM_THREADS dentro do subprocesso. "
-                "Workers × Threads ≤ nº de CPU lógicas recomendado."
+                "Define NUMBA_NUM_THREADS/OMP_NUM_THREADS dentro do subprocesso.<br/><br/>"
+                "<b>Recomendação v2.17:</b> Em CPU com Hyperthreading/SMT, prefira "
+                "<i>2 threads/worker</i> (1 por core físico) em vez de 4. Ex.: 8C/16T → "
+                "<code>4 workers × 2 threads = 8 = cores físicos</code> ✓"
             ),
         )
+        # Label informativa expandida (v2.17): mostra lógicas E físicas.
+        ht_label = " (HT/SMT ativo)" if _has_ht else ""
         self.lbl_ncpu = QtWidgets.QLabel(
-            f"CPU cores disponíveis: {ncpu}   |   Sistema: {platform.system()} {platform.release()}"
+            f"CPU: {_phys} cores físicos · {_logical} threads lógicas{ht_label}   |   "
+            f"Sistema: {platform.system()} {platform.release()}"
         )
         _tooltip(
             self.lbl_ncpu,
             (
-                "<b>Recursos do sistema</b><br/>"
-                "CPUs lógicas detectadas via <code>os.cpu_count()</code> + sistema operacional. "
-                "Use como referência para dimensionar Workers × Threads."
+                "<b>Recursos do sistema (v2.17)</b><br/>"
+                "Detecção de topologia em camadas (psutil → sysctl → /proc/cpuinfo → "
+                "wmic → heurística). Em CPU com HT/SMT, <i>cores físicos</i> é o "
+                "limite ideal de paralelismo CPU-bound. Threads lógicas só ajudam "
+                "em workloads I/O-bound."
             ),
         )
+        # Warning de oversubscrição (v2.17): label que muda cor quando
+        # workers × threads > cores físicos. Conectado abaixo via
+        # `valueChanged` de ambos os spinboxes.
+        self.lbl_parallel_warn = QtWidgets.QLabel("")
+        self.lbl_parallel_warn.setWordWrap(True)
+        self.lbl_parallel_warn.setStyleSheet(
+            "QLabel { color: #b00020; font-weight: 600; }"
+        )
+        self.lbl_parallel_warn.setVisible(False)
+        self._phys_cores_cached = _phys  # usado pelo callback de warning
+
+        def _update_parallel_warning() -> None:
+            """Atualiza visibilidade/texto do alerta de oversubscrição."""
+            try:
+                w = int(self.spin_workers.value())
+                t = int(self.spin_threads.value())
+                total = w * t
+                phys = int(self._phys_cores_cached)
+                if total > phys:
+                    factor = total / max(1, phys)
+                    self.lbl_parallel_warn.setText(
+                        f"⚠ Oversubscrição: {w} × {t} = {total} threads em {phys} "
+                        f"cores físicos ({factor:.2f}× sobrecarga). Performance "
+                        f"esperada: −30 a −50% por contenção. Recomendado: "
+                        f"workers × threads ≤ {phys}."
+                    )
+                    self.lbl_parallel_warn.setVisible(True)
+                else:
+                    self.lbl_parallel_warn.setVisible(False)
+            except Exception:
+                self.lbl_parallel_warn.setVisible(False)
+
+        self.spin_workers.valueChanged.connect(_update_parallel_warning)
+        self.spin_threads.valueChanged.connect(_update_parallel_warning)
+        _update_parallel_warning()  # checa estado inicial
+
         par_form.addRow("Nº de workers sandbox:", self.spin_workers)
         par_form.addRow("Nº de threads por worker:", self.spin_threads)
         par_form.addRow("", self.lbl_ncpu)
+        par_form.addRow("", self.lbl_parallel_warn)
 
         grp_out = QtWidgets.QGroupBox("Saída")
         out_form = QtWidgets.QFormLayout(grp_out)
@@ -3112,7 +3173,6 @@ class BenchmarkPage(QtWidgets.QWidget):
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
-        ncpu = os.cpu_count() or 8
         # Estado interno da Config D (persistido mesmo com diálogo fechado)
         self._config_d_models: List[str] = []
         self._config_d_overrides: Dict[str, Dict[str, Any]] = {}
@@ -3267,25 +3327,63 @@ class BenchmarkPage(QtWidgets.QWidget):
         bk_layout.addStretch(1)
 
         # ── Paralelismo ─────────────────────────────────────────────────
+        # Sprint 17.1 (v2.17): defaults baseados em CORES FÍSICOS
+        # (recommend_default_parallelism). Em hardware 8C/16T HT,
+        # default Numba = (4 workers, 2 threads) = 8 = phys_cores ✓
+        # (eliminação da oversubscrição que causava 3× regressão).
+        from geosteering_ai.simulation import (
+            detect_cpu_topology,
+            recommend_default_parallelism,
+        )
+
+        _bk_logical, _bk_phys, _bk_has_ht = detect_cpu_topology()
+        _bk_rec_w, _bk_rec_t = recommend_default_parallelism()
+        # Fortran usa OpenMP (não Numba) — pode usar mais workers leves
+        # com 2 threads cada. Mantemos workers ≈ phys // 2 também.
+        _fort_workers = max(1, _bk_phys // 2)
+        _fort_threads = 2
+
         grp_par = QtWidgets.QGroupBox("Paralelismo")
         par_form = QtWidgets.QFormLayout(grp_par)
         par_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.spin_workers_numba = _spin_int(max(1, ncpu // 4), 1, 256)
-        self.spin_threads_numba = _spin_int(4, 1, 256)
-        self.spin_workers_fortran = _spin_int(max(1, ncpu // 2), 1, 256)
-        self.spin_threads_fortran = _spin_int(2, 1, 256)
+        self.spin_workers_numba = _spin_int(_bk_rec_w, 1, 256)
+        self.spin_threads_numba = _spin_int(_bk_rec_t, 1, 256)
+        self.spin_workers_fortran = _spin_int(_fort_workers, 1, 256)
+        self.spin_threads_fortran = _spin_int(_fort_threads, 1, 256)
         self.spin_n_iter = _spin_int(3, 1, 100)
         self.spin_fort_subset = _spin_int(300, 1, 30000)
         _tooltip(
-            self.spin_workers_numba, "Nº de processos-sandbox Numba rodando em paralelo."
+            self.spin_workers_numba,
+            (
+                "<b>Nº de workers Numba</b><br/>"
+                "Processos-sandbox rodando em paralelo. <b>Recomendação v2.17:</b> "
+                f"workers × threads ≤ <i>{_bk_phys} cores físicos</i> "
+                "(não threads lógicas — evita oversubscrição em HT/SMT)."
+            ),
         )
         _tooltip(
-            self.spin_threads_numba, "NUMBA_NUM_THREADS dentro de cada subprocesso Numba."
+            self.spin_threads_numba,
+            (
+                "<b>Nº de threads por worker Numba</b><br/>"
+                "NUMBA_NUM_THREADS dentro de cada subprocesso. Em HT/SMT, "
+                "<i>2 threads/worker</i> é típicamente ótimo (1 por core físico)."
+            ),
         )
         _tooltip(
-            self.spin_workers_fortran, "Nº de cópias independentes de tatu.x em paralelo."
+            self.spin_workers_fortran,
+            (
+                "<b>Nº de workers Fortran</b><br/>"
+                "Cópias independentes de tatu.x em paralelo. Fortran usa OpenMP "
+                "interno por instância — workers × threads ≤ cores físicos."
+            ),
         )
-        _tooltip(self.spin_threads_fortran, "OMP_NUM_THREADS por invocação de tatu.x.")
+        _tooltip(
+            self.spin_threads_fortran,
+            (
+                "<b>Nº de threads por worker Fortran</b><br/>"
+                "OMP_NUM_THREADS por invocação de tatu.x."
+            ),
+        )
         _tooltip(
             self.spin_n_iter,
             (
