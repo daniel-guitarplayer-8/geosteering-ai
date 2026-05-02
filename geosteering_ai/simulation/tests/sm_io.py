@@ -90,9 +90,17 @@ def write_dat_from_tensor(
         model_id_start: ID do primeiro modelo (1-based).
 
     Note:
-        Ordem de escrita Fortran: para cada ``(itr, kt, fi, jm)`` escreve 1
-        registro (i int32 + 21 float64). Compatível com o leitor
+        Ordem de escrita Fortran: para cada ``(m, itr, kt, fi, jm)`` escreve
+        1 registro (i int32 + 21 float64). Compatível com o leitor
         ``binary_dat_multi.read_dat``.
+
+        Sprint 15.4 (v2.16): implementação vetorizada com ``np.broadcast_to``
+        + ``np.transpose``. A versão anterior tinha 5 loops Python aninhados
+        (~1.8M iterações para 600 modelos × 600 pos × 1 freq) que dominava
+        o tempo total da simulação na GUI (~15–60 s para 3000 modelos).
+        A versão atual escreve o buffer em ~0.5–2 s, ganhando 5–30× em I/O
+        sem alterar o formato bit-a-bit do .dat (validado por teste de
+        bit-exatness em ``tests/test_sm_workers_io.py``).
     """
     H = np.asarray(H_stack)
     if H.ndim != 6:
@@ -103,42 +111,51 @@ def write_dat_from_tensor(
     if n_comp != 9:
         raise ValueError(f"H_stack última dim deve ser 9; got {n_comp}")
 
-    # dtype do registro 22-col
+    # dtype do registro 22-col (1 int32 + 21 float64 = 4 + 168 = 172 bytes/rec)
     fields = [("col0", np.int32)] + [(f"col{i}", np.float64) for i in range(1, 22)]
     rec_dtype = np.dtype(fields)
 
     total_records = n_models * nTR * nAng * nf * n_pos
     buf = np.zeros(total_records, dtype=rec_dtype)
 
-    idx = 0
-    for m in range(n_models):
-        model_id = model_id_start + m
-        for itr in range(nTR):
-            for kt in range(nAng):
-                for fi in range(nf):
-                    for jm in range(n_pos):
-                        rec = buf[idx]
-                        rec["col0"] = model_id
-                        # z_obs: aceitamos (nAng,n_pos) ou (n_pos,)
-                        if z_obs.ndim == 2:
-                            rec["col1"] = float(z_obs[kt, jm])
-                        else:
-                            rec["col1"] = float(z_obs[jm])
-                        rec["col2"] = (
-                            float(rho_h_at_obs[m, kt, jm])
-                            if rho_h_at_obs is not None
-                            else 0.0
-                        )
-                        rec["col3"] = (
-                            float(rho_v_at_obs[m, kt, jm])
-                            if rho_v_at_obs is not None
-                            else 0.0
-                        )
-                        for ic in range(9):
-                            val = H[m, itr, kt, jm, fi, ic]
-                            rec[f"col{4 + 2 * ic}"] = float(val.real)
-                            rec[f"col{5 + 2 * ic}"] = float(val.imag)
-                        idx += 1
+    # ── Permutação para ordem Fortran (m, itr, kt, fi, jm, ic) ───────────
+    # H_stack vem como (m, itr, kt, jm, fi, 9). Fortran espera fi antes de
+    # jm na ordem do registro. ``np.transpose`` retorna view (zero-copy) se
+    # o resultado for contíguo; aqui forçamos cópia via ``.copy()`` para
+    # garantir layout C contíguo necessário pelo broadcast/reshape final.
+    H_perm = np.ascontiguousarray(np.transpose(H, (0, 1, 2, 4, 3, 5)))
+    H_flat = H_perm.reshape(total_records, 9)
+
+    # ── col0: model_id ────────────────────────────────────────────────────
+    model_ids = np.arange(model_id_start, model_id_start + n_models, dtype=np.int32)
+    buf["col0"] = np.broadcast_to(
+        model_ids[:, None, None, None, None],
+        (n_models, nTR, nAng, nf, n_pos),
+    ).ravel()
+
+    # ── col1: z_obs (aceita (nAng,n_pos) ou (n_pos,)) ────────────────────
+    if z_obs.ndim == 2:
+        z_view = z_obs[None, None, :, None, :]  # (1,1,nAng,1,n_pos)
+    else:
+        z_view = z_obs[None, None, None, None, :]  # (1,1,1,1,n_pos)
+    buf["col1"] = np.broadcast_to(z_view, (n_models, nTR, nAng, nf, n_pos)).ravel()
+
+    # ── col2/col3: rho_h_at_obs / rho_v_at_obs (None → zeros) ─────────────
+    if rho_h_at_obs is not None:
+        buf["col2"] = np.broadcast_to(
+            rho_h_at_obs[:, None, :, None, :],
+            (n_models, nTR, nAng, nf, n_pos),
+        ).ravel()
+    if rho_v_at_obs is not None:
+        buf["col3"] = np.broadcast_to(
+            rho_v_at_obs[:, None, :, None, :],
+            (n_models, nTR, nAng, nf, n_pos),
+        ).ravel()
+
+    # ── col4-21: 9 componentes complexos → (Re, Im) intercalados ─────────
+    for ic in range(9):
+        buf[f"col{4 + 2 * ic}"] = H_flat[:, ic].real
+        buf[f"col{5 + 2 * ic}"] = H_flat[:, ic].imag
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     buf.tofile(path)
