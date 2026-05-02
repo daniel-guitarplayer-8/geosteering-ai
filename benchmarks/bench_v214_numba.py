@@ -105,13 +105,29 @@ except ImportError as e:
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuração Canonical
 # ──────────────────────────────────────────────────────────────────────────────
-def _canonical_3layer() -> Dict[str, np.ndarray]:
-    """Modelo 3 camadas para todos os cenários."""
+# Número de pontos de medição (n_positions) — exposto pelo CLI via
+# ``--n-positions``. Default 30 (microbenchmark rápido para CI). Em produção
+# (GUI do Simulation Manager), o valor típico é 600 (sequência LWD), e o
+# Cenário E permite reproduzir esse caso real.
+_N_POSITIONS: int = 30
+
+
+def _canonical_3layer(n_positions: int | None = None) -> Dict[str, np.ndarray]:
+    """Modelo 3 camadas para todos os cenários.
+
+    Args:
+        n_positions: Sobrescreve ``_N_POSITIONS`` se informado. Default
+            ``None`` (usa valor global setado pelo CLI).
+
+    Returns:
+        Dict com `rho_h`, `rho_v`, `esp`, `positions_z`.
+    """
+    npos = int(n_positions) if n_positions is not None else _N_POSITIONS
     return dict(
         rho_h=np.array([10.0, 1.0, 10.0]),
         rho_v=np.array([10.0, 1.0, 10.0]),
         esp=np.array([5.0]),
-        positions_z=np.linspace(-2.0, 7.0, 30),
+        positions_z=np.linspace(-2.0, 7.0, npos),
     )
 
 
@@ -304,6 +320,57 @@ def benchmark_scenario_d(n_iterations: int = 50) -> Tuple[float, float]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Cenário E — Production scale (n_positions=600, single-freq)
+# ──────────────────────────────────────────────────────────────────────────────
+def benchmark_scenario_e(
+    n_models: int = 300, n_workers: int = 4, n_positions: int = 600
+) -> Tuple[float, float]:
+    """Cenário E: production scale, n_positions=600 (típico LWD).
+
+    Reproduz a configuração real da GUI do Simulation Manager (sequência
+    LWD com ~600 pontos por modelo) para detectar regressões que não
+    aparecem no microbenchmark Cenário A (30 pts).
+
+    Histórico v2.16: adicionado para validar fix da regressão de threading
+    masking (commits 0f92035 + e1c8864 da v2.15) que reduziu produção da
+    GUI de 200k mod/h → 25–38k mod/h. Pós-fix esperado: ≥150k mod/h.
+
+    Args:
+        n_models: Número de modelos. Default 300 (20× menos que Cenário A
+            porque cada modelo é 20× mais lento com 600 pts).
+        n_workers: Workers pool. Default 4.
+        n_positions: Pontos de medição por modelo. Default 600 (production).
+
+    Returns:
+        Tupla (elapsed_s, throughput_mod_per_h).
+    """
+    m = _canonical_3layer(n_positions=n_positions)
+
+    # Gera N modelos idênticos
+    models = [m.copy() for _ in range(n_models)]
+
+    t0 = time.perf_counter()
+    try:
+        result = simulate_multi(
+            models=models,
+            positions_z=m["positions_z"],
+            frequencies_hz=[20000.0],
+            tr_spacings_m=[1.0],
+            threads_per_worker=_THREADS_PER_WORKER,
+            dip_degs=[0.0],
+            n_workers=n_workers,
+        )
+        t1 = time.perf_counter()
+        elapsed = t1 - t0
+
+        throughput = n_models / elapsed * 3600  # modelos/hora
+        return elapsed, throughput
+    finally:
+        release_pool()
+        release_numba_cache()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────────────
 def main():
@@ -313,26 +380,37 @@ def main():
     )
     parser.add_argument(
         "--scenario",
-        choices=["A", "B", "C", "D"],
-        help="Cenário específico (A/B/C/D) ou --all",
+        choices=["A", "B", "C", "D", "E"],
+        help="Cenário específico (A/B/C/D/E) ou --all",
     )
     parser.add_argument(
-        "--all", action="store_true", help="Rodar todos os 4 cenários"
+        "--all", action="store_true", help="Rodar todos os 5 cenários (A–E)"
     )
     parser.add_argument(
-        "--models", type=int, default=30000, help="Número de modelos (Cenários A/B/C)"
+        "--models",
+        type=int,
+        default=30000,
+        help="Número de modelos (Cenários A/B/C/E). Cenário E usa min(--models, 300) "
+        "por padrão para manter tempo razoável com 600 pts.",
     )
     parser.add_argument(
         "--freqs", type=int, default=10, help="Número de frequências (Cenário B)"
     )
     parser.add_argument(
-        "--workers", type=int, default=4, help="Workers pool (Cenários A/B/C)"
+        "--workers", type=int, default=4, help="Workers pool (Cenários A/B/C/E)"
     )
     parser.add_argument(
         "--threads-per-worker",
         type=int,
         default=2,
         help="Threads intra-worker (default 2). Total = workers × threads-per-worker",
+    )
+    parser.add_argument(
+        "--n-positions",
+        type=int,
+        default=30,
+        help="Pontos de medição por modelo (default 30 microbench, 600 production). "
+        "Aplicável a Cenários A/B/C/D. Cenário E sempre usa 600 (override).",
     )
     args = parser.parse_args()
 
@@ -349,8 +427,9 @@ def main():
     # ``Cannot set NUMBA_NUM_THREADS to a different value once threads have
     # been launched`` que ocorre quando ``run_batch`` calcula ``eff_threads``
     # baseado em ``cpu_count`` heurística e diverge do env var.
-    global _THREADS_PER_WORKER
+    global _THREADS_PER_WORKER, _N_POSITIONS
     _THREADS_PER_WORKER = int(args.threads_per_worker)
+    _N_POSITIONS = int(args.n_positions)
 
     print("╔════════════════════════════════════════════════════════════════╗")
     print("║  Benchmark v2.14 — Otimizações Numba JIT (Sprints 13.1-13.4)  ║")
@@ -366,7 +445,7 @@ def main():
     # Definir quais cenários rodar
     scenarios = []
     if args.all:
-        scenarios = ["A", "B", "C", "D"]
+        scenarios = ["A", "B", "C", "D", "E"]
     elif args.scenario:
         scenarios = [args.scenario]
     else:
@@ -418,6 +497,21 @@ def main():
             print(
                 f"D         1            1        1          "
                 f"{elapsed:<12.2f} {ms_per_call:<20.2f} ms/call"
+            )
+
+        if "E" in scenarios:
+            # Cenário E: production scale (600 pts). Usa min(args.models, 300)
+            # para manter tempo razoável; pode ser sobrescrito via --models.
+            n_models_e = min(args.models, 300) if args.all else args.models
+            n_pos_e = 600  # override fixo do Cenário E
+            print(f"Cenário E (production 600 pts)... ", end="", flush=True)
+            elapsed, throughput = benchmark_scenario_e(
+                n_models=n_models_e, n_workers=args.workers, n_positions=n_pos_e
+            )
+            print(
+                f"E         {n_models_e:<12} 1        {args.workers:<10} "
+                f"{elapsed:<12.2f} {throughput:<20.1f} mod/h "
+                f"({n_pos_e} pts)"
             )
 
         print("-" * 82)
