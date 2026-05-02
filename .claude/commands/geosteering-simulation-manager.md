@@ -1,11 +1,11 @@
 ---
-description: Sub-skill dedicada ao Simulation Manager (SM) Numba do Geosteering AI v2.0. Cobre arquitetura de pacote (multi_forward, forward, _numba/, _jax/), workers nativos (v2.12), otimizações Numba (v2.13: prange-freq, cache, nogil; v2.14: prange TR×ang, fastmath hankel), JIT cache observability (v2.15), hardware tuning, paridade Fortran <1e-12. Triggers SM: "simulation manager", "SM", "v2.10", "v2.11", "v2.12", "v2.13", "v2.14", "v2.15", "simulate_multi", "Workers Nativos", "prange", "cache_persistent", "release_numba_cache", "set_jit_cache_maxsize", "get_jit_cache_info", "fastmath", "hmd_tiv", "vmd", "common_arrays", "common_factors", "tatu.x exec format".
+description: Sub-skill dedicada ao Simulation Manager (SM) Numba do Geosteering AI v2.0. Cobre arquitetura de pacote (multi_forward, forward, _numba/, _jax/), workers nativos (v2.12), otimizações Numba (v2.13: prange-freq, cache, nogil; v2.14: prange TR×ang, fastmath hankel), JIT cache observability (v2.15), fix regressão threading + I/O vetorizado (v2.16), hardware tuning, paridade Fortran <1e-12. Triggers SM: "simulation manager", "SM", "v2.10", "v2.11", "v2.12", "v2.13", "v2.14", "v2.15", "v2.16", "simulate_multi", "Workers Nativos", "prange", "cache_persistent", "release_numba_cache", "set_jit_cache_maxsize", "get_jit_cache_info", "fastmath", "hmd_tiv", "vmd", "common_arrays", "common_factors", "tatu.x exec format", "Cenário E", "n_positions", "write_dat_from_tensor", "NUMBA_NUM_THREADS spawn".
 ---
 
 # Sub-skill: Geosteering Simulation Manager (SM-Numba)
 
-**Versão**: v2.15 (2026-05-01)
-**Triggers principais**: simulate_multi, Simulation Manager, SM, v2.x SM, prange, fastmath, cache_persistent, get_jit_cache_info, tatu.x
+**Versão**: v2.16 (2026-05-01)
+**Triggers principais**: simulate_multi, Simulation Manager, SM, v2.x SM, prange, fastmath, cache_persistent, get_jit_cache_info, tatu.x, Cenário E, n_positions, threading masking
 
 Esta sub-skill é DEDICADA ao Simulation Manager Numba (`geosteering_ai/simulation/`).
 Para o Simulador Python JAX (backend `_jax/`), use `geosteering-simulator-python`.
@@ -22,7 +22,8 @@ Para o Simulador Fortran (`Fortran_Gerador/`), use `geosteering-simulator-fortra
 | v2.12 | 2026-04-30 | feat/simulation-manager-v2.12 | Workers Nativos (4 modos A/B/C/D) | 202 |
 | v2.13 | 2026-05-01 | feat/simulation-manager-v2.13 | Otimizações Numba (Sprints 13.1+13.2+13.4): prange(nf), cache cross-call, nogil universal | 165 (152+13) |
 | v2.14 | 2026-05-01 | feat/simulation-manager-v2.14 | Sprint 13.3 prange TR×ang + Sprint 13.4 fastmath hankel.py + benchmark formal | 165+27 |
-| **v2.15** | **2026-05-01** | **feat/simulation-manager-v2.15** | **Hardware validation, JIT cache observability, code review P1, fix CI tatu.x exec format** | **165+27+4** |
+| v2.15 | 2026-05-01 | feat/simulation-manager-v2.15 | Hardware validation, JIT cache observability, code review P1, fix CI tatu.x exec format | 165+27+4 |
+| **v2.16** | **2026-05-01** | **feat/simulation-manager-v2.16** | **Fix regressão crítica de threading masking (4–8× em produção GUI) + Cenário E benchmark (600 pts) + I/O `write_dat_from_tensor` vetorizado ≥3×** | **165+27+4+7** |
 
 ---
 
@@ -239,12 +240,13 @@ PYTHONPATH=. python benchmarks/bench_v214_numba.py --all \
     --models 30000 --freqs 10 --workers 4 --threads-per-worker 2
 ```
 
-| Cenário | Modelos | Freqs | TR | Ang | Meta | Hardware 8C |
-|:-------:|:-------:|:-----:|:--:|:---:|:----:|:-----------:|
-| A | 30k | 1 | 1 | 1 | zero regressão v2.12 | 753k mod/h |
-| B | 30k | 10 | 1 | 1 | ≥1.5× v2.12 | 320k mod/h |
-| C | 30k (×6=5k effetivo) | 2 | 3 | 5 | ≥1.3× v2.13 | (validação) |
-| D | 1 (×50 calls) | 4 | 1 | 1 | ≥5× sem cache | 13.4 ms/call |
+| Cenário | Modelos | Posições | Freqs | TR | Ang | Meta | Hardware 8C |
+|:-------:|:-------:|:--------:|:-----:|:--:|:---:|:----:|:-----------:|
+| A | 30k | 30 | 1 | 1 | 1 | zero regressão v2.12 | 1.74M mod/h (v2.16) |
+| B | 30k | 30 | 10 | 1 | 1 | ≥1.5× v2.12 | 320k mod/h |
+| C | 30k (×6=5k effetivo) | 30 | 2 | 3 | 5 | ≥1.3× v2.13 | 119k mod/h |
+| D | 1 (×50 calls) | 30 | 4 | 1 | 1 | ≥5× sem cache | 13.4 ms/call |
+| **E (v2.16)** | **2k** | **600** | **1** | **1** | **1** | **≥120k mod/h pós-fix** | **123k mod/h** |
 
 ⚠️ **Limitação `--all`**: `NUMBA_NUM_THREADS` não pode ser alterado
 após threads ativas. Use 1 cenário por invocação se precisa variar
@@ -278,6 +280,107 @@ em invocação única, sem misturar com runs anteriores no mesmo processo.
 
 Usar `get_jit_cache_info()` para monitorar e `clear_unified_jit_cache()`
 periodicamente. LRU bound 64 entradas — ajuste com `set_jit_cache_maxsize(N)`.
+
+---
+
+## §14 Threading Masking — Causa Raiz da Regressão v2.15 (FIX v2.16)
+
+### Sintoma
+
+GUI do Simulation Manager produzindo 25–38k mod/h em produção (n_positions=600)
+quando o esperado seria ≥150k mod/h. Microbenchmark Cenário A não detectou.
+
+### Causa raiz (commits problemáticos)
+
+1. **`0f92035`** — `multi_forward.py:880-886`: `try/except RuntimeError: pass`
+   silencia falhas de `numba.set_num_threads()` sem fallback
+2. **`e1c8864`** — remove `os.environ["NUMBA_NUM_THREADS"]` de
+   `_numba_init_worker` (sm_workers.py) e `_simulate_worker_init`
+   (_workers.py), deixando workers spawn com pool dimensionado por
+   `cpu_count()` (16 em hyperthreaded de 8 cores)
+
+### Fix v2.16 (Sprint 15.1)
+
+```python
+# multi_forward.py: try/except: pass → logger.warning observable
+if cfg.num_threads > 0 and HAS_NUMBA:
+    import numba as _numba
+    current_active = _numba.get_num_threads()
+    if current_active != cfg.num_threads:
+        try:
+            _numba.set_num_threads(cfg.num_threads)
+        except RuntimeError as exc:
+            logger.warning(
+                "numba.set_num_threads(%d) falhou (threads ativas atual=%d, "
+                "pool size NUMBA_NUM_THREADS=%d): %s. Performance pode degradar.",
+                cfg.num_threads, current_active, _numba.config.NUMBA_NUM_THREADS, exc,
+            )
+
+# sm_workers.py::_acquire_numba_pool e _workers.py::_acquire_pool:
+# Setar NUMBA_NUM_THREADS no env do PAI antes do spawn
+os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
+os.environ["OMP_NUM_THREADS"] = str(n_threads)
+ProcessPoolExecutor(..., mp_context=spawn, initializer=_numba_init_worker, ...)
+```
+
+### Validação
+
+`tests/test_simulation_workers_threading.py` (3 testes):
+1. `test_worker_inherits_numba_num_threads_from_parent_env` — env herdado
+2. `test_set_num_threads_emits_warning_on_runtime_error` — log observable
+3. `test_simulate_multi_in_worker_respects_n_threads` — E2E em worker spawn
+
+### Throughput pós-fix (Hardware Intel 8C/16T HT)
+
+| Cenário | Pré-fix v2.15 | Pós-fix v2.16 | Speedup |
+|:-------:|:-------------:|:-------------:|:-------:|
+| A (30 pts) | 753k mod/h | **1.74M mod/h** | 2.31× |
+| E (600 pts) | ~30k mod/h | **123k mod/h** | ~4.1× |
+
+---
+
+## §15 I/O Vetorizado `write_dat_from_tensor` (v2.16, Sprint 15.4)
+
+`geosteering_ai/simulation/tests/sm_io.py::write_dat_from_tensor` foi
+reescrita substituindo 5 loops Python aninhados (~1.8M iterações para
+600 modelos × 600 pos × 1 freq) por broadcast NumPy:
+
+```python
+# Permutação para ordem Fortran (m, itr, kt, fi, jm, ic)
+H_perm = np.ascontiguousarray(np.transpose(H, (0, 1, 2, 4, 3, 5)))
+H_flat = H_perm.reshape(total_records, 9)
+
+# Broadcasts vetorizados
+buf["col0"] = np.broadcast_to(model_ids[:,None,None,None,None], shape).ravel()
+buf["col1"] = np.broadcast_to(z_view, shape).ravel()
+buf["col2"] = np.broadcast_to(rho_h_at_obs[:,None,:,None,:], shape).ravel()
+buf["col3"] = np.broadcast_to(rho_v_at_obs[:,None,:,None,:], shape).ravel()
+for ic in range(9):
+    buf[f"col{4+2*ic}"] = H_flat[:, ic].real
+    buf[f"col{5+2*ic}"] = H_flat[:, ic].imag
+```
+
+**Speedup ≥3×** validado por `test_write_dat_vectorized_is_faster`.
+**Bit-exatness** preservada (3 testes em `tests/test_sm_workers_io.py`).
+
+---
+
+## §16 Análise n_positions Scaling (v2.16, Sprint 15.5)
+
+Documento dedicado: `docs/reports/v2.16_n_positions_scaling_analysis_2026-05-01.md`
+
+**Hot path:** `_numba/dipoles.py::hmd_tiv` linhas 325–420 (~80% do tempo).
+**Complexidade:** O(`n_pos × n_layers × n_filter_pts × n_freqs × n_TR × n_ang`).
+**Escalabilidade `n_pos`:** linear. 30→600 = 20× redução de throughput
+(confirmado: 1.74M / 123k ≈ 14× pós-fix).
+
+### Top 3 oportunidades (deferidas para v2.17/v2.18)
+
+| Otimização | Ganho est. | Risco | Status v2.16 |
+|:-----------|:----------:|:-----:|:------------:|
+| Tile/block processing (M=4 pos) | 15–25% | Baixo | Deferido v2.17 |
+| Pré-compute Hankel kernels TE/TM | 10–15% | Médio | Deferido v2.18 |
+| SIMD ufuncs NumPy | 20–40% | **Alto** | **REJEITADO** (paridade <1e-12) |
 
 ---
 

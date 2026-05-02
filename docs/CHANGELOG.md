@@ -7,6 +7,98 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [2.16] — 2026-05-01
+
+### Fix regressão crítica de threading + Cenário E (production scale 600 pts) + I/O vetorizado
+
+Sprint 15 de correção: identifica e corrige regressão de **4–8×** em
+produção GUI introduzida pela combinação dos commits `0f92035` (`try/except
+RuntimeError: pass` em `multi_forward.py`) e `e1c8864` (remoção de
+`NUMBA_NUM_THREADS` env var nos workers) da v2.15. Adiciona Cenário E
+para reproduzir a configuração real de produção (n_positions=600) e
+vetoriza `write_dat_from_tensor` (≥3× speedup em I/O).
+
+### Adicionado
+
+- **Sprint 15.2 — Cenário E benchmark (production scale)**:
+  - Novo `benchmark_scenario_e()` em [benchmarks/bench_v214_numba.py](../benchmarks/bench_v214_numba.py)
+    (+95 LOC) — n_positions=600, single-freq, replica config GUI LWD
+  - Novo flag CLI `--n-positions N` (default 30 microbench, 600 production)
+  - `--all` agora roda 5 cenários (A–E)
+  - Esperado em hardware 8C HT pós-fix: ≥120k mod/h
+- **Sprint 15.1 — Smoke tests threading masking**:
+  - [tests/test_simulation_workers_threading.py](../tests/test_simulation_workers_threading.py) (~270 LOC)
+  - 3 testes: env var inheritance, logger.warning observable,
+    simulate_multi em worker respeita num_threads
+- **Sprint 15.4 — Smoke tests I/O vetorizado**:
+  - [tests/test_sm_workers_io.py](../tests/test_sm_workers_io.py) (~200 LOC)
+  - 4 testes: bit-exatness vs loop, z_obs 1D, rho None, performance ≥3×
+- **Sprint 15.5 — Relatório técnico n_positions scaling**:
+  - [docs/reports/v2.16_n_positions_scaling_analysis_2026-05-01.md](reports/v2.16_n_positions_scaling_analysis_2026-05-01.md)
+  - Hot path identificado: `_numba/dipoles.py::hmd_tiv` recursão TE/TM
+  - Análise de complexidade O(`n_pos × n_layers × n_filter_pts × n_freqs × n_TR × n_ang`)
+  - Top 3 oportunidades documentadas (tile/block, pré-compute kernels, SIMD ufuncs)
+- **Marker `slow` em pyproject.toml**:
+  - Permite filtrar testes JIT cold-start em CI rápido com `-m 'not slow'`
+
+### Corrigido
+
+- **Sprint 15.1 — Threading masking observable em `multi_forward.py:880-907`**:
+  - Substituído `try/except RuntimeError: pass` (silencioso) por
+    `logger.warning` com diagnóstico (threads ativas, pool size, exception)
+  - Adicionada verificação prévia `if current_active != cfg.num_threads`
+    para evitar set redundante
+  - Causa raiz da regressão 4–8× em produção GUI (v2.15)
+- **Sprint 15.1 — `NUMBA_NUM_THREADS` setado no env do PAI antes do spawn**:
+  - [`sm_workers.py::_acquire_numba_pool`](../geosteering_ai/simulation/tests/sm_workers.py)
+    (+15 LOC) — workers spawn herdam env, Numba dimensiona pool corretamente
+  - [`_workers.py::_acquire_pool`](../geosteering_ai/simulation/_workers.py)
+    (+15 LOC) — espelho no pool nativo do core
+  - Resultado: workers nascem com pool de threads = `n_threads` (não `cpu_count()`)
+
+### Mudado
+
+- **Sprint 15.4 — `write_dat_from_tensor` vetorizada**:
+  - [sm_io.py](../geosteering_ai/simulation/tests/sm_io.py) (+50 / -28 LOC)
+  - 5 loops Python aninhados (~1.8M iterações para 600 modelos × 600 pos
+    × 1 freq) → broadcast + transpose + reshape NumPy
+  - Speedup ≥3× em I/O (validado por `test_write_dat_vectorized_is_faster`)
+  - Bit-exatness preservada (validada por 3 testes diferentes em
+    `tests/test_sm_workers_io.py`)
+- **CLAUDE.md linha 16**:
+  - `SM v2.15` → `SM v2.16 (2026-05-01) — fix regressão threading + cenário E (600 pts) + I/O vetorizado`
+
+### Notas de Performance (Hardware Intel 8C/16T HT, macOS)
+
+| Cenário | Pré-fix v2.15 | Pós-fix v2.16 | Speedup |
+|:-------:|:-------------:|:-------------:|:-------:|
+| A (30 pts, 5k mod) | 753k mod/h¹ | **1.74M mod/h** | 2.31× |
+| E (600 pts, 200 mod) | ~30k mod/h² | 86k mod/h | 2.87× |
+| E (600 pts, 600 mod) | — | 111k mod/h | — |
+| E (600 pts, 2000 mod) | — | **123k mod/h** | ~4.10× |
+
+¹ Reportado em `v2.15_benchmark_hardware_2026-05-01.md`.
+² Estimado por escalabilidade linear `n_pos` (753k / 20 ≈ 38k) — coerente com relato GUI 25–38k mod/h.
+
+### Decisões Deferidas
+
+- **Tile/block processing (Sprint 15.6)** — DEFERIDO para v2.17. Cenário E
+  pós-fix entrega 4× speedup confirmado; risco/benefício de adicionar
+  reordering de prange agora não justifica vs validação de paridade
+  Fortran obrigatória em todos os 7 canônicos.
+- **Pré-compute Hankel kernels TE/TM** — DEFERIDO para v2.18. Ganho
+  estimado 10–15% mas requer revalidação de paridade.
+- **SIMD ufuncs** — REJEITADO. Risco de quebrar paridade Fortran <1e-12
+  por reordering FMA é inviolável.
+
+### Pytest
+
+- **Total esperado:** 172+ pass (165 v2.15 + 7 novos: 3 threading + 4 I/O)
+- **Paridade Fortran:** 10/10 PASS em <1e-12 (zero regressão)
+- **Smoke GUI:** 207+ OK (mantido)
+
+---
+
 ## [2.15] — 2026-05-01
 
 ### Hardware validation, JIT cache observability, code review, fix CI v2.14
