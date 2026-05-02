@@ -1410,6 +1410,19 @@ class ParametersPage(QtWidgets.QWidget):
         self.spin_nlayers_max = _spin_int(31, 3, 200)
         self.spin_nlayers_fixed = _spin_int(0, 0, 200)
 
+        # ── Sprint 19.1 (v2.19): controle de semente PRNG ─────────────
+        # Default: semente aleatória (cada execução gera modelos distintos).
+        # Pode ser desligado para reprodutibilidade científica.
+        self.chk_random_seed = QtWidgets.QCheckBox("Semente aleatória (recomendado)")
+        self.chk_random_seed.setChecked(True)
+        self.spn_fixed_seed = QtWidgets.QSpinBox()
+        self.spn_fixed_seed.setRange(0, 2**31 - 1)
+        self.spn_fixed_seed.setValue(42)
+        self.spn_fixed_seed.setEnabled(False)
+        self.chk_random_seed.toggled.connect(
+            lambda checked: self.spn_fixed_seed.setEnabled(not checked)
+        )
+
         _tooltip(
             self.spin_nmodels,
             (
@@ -1510,6 +1523,26 @@ class ParametersPage(QtWidgets.QWidget):
                 "Se 0, sorteia uniformemente em [min, max]."
             ),
         )
+        _tooltip(
+            self.chk_random_seed,
+            (
+                "<b>Semente PRNG aleatória (v2.19)</b><br/>"
+                "Quando ativo (default), cada execução de 'Iniciar Simulação' "
+                "gera uma sequência de modelos diferente — ideal para "
+                "ensembles estatísticos diversos.<br/>"
+                "Desmarque para usar a 'Semente fixa' abaixo e obter "
+                "reprodutibilidade bit-a-bit entre execuções."
+            ),
+        )
+        _tooltip(
+            self.spn_fixed_seed,
+            (
+                "<b>Semente PRNG fixa</b><br/>"
+                "Inteiro reprodutível (somente quando 'Semente aleatória' "
+                "estiver desmarcada). Mesma semente + mesmos parâmetros = "
+                "mesma sequência de modelos."
+            ),
+        )
 
         form_gen.addRow("Quantidade de modelos:", self.spin_nmodels)
         form_gen.addRow("Gerador aleatório:", self.combo_generator)
@@ -1523,6 +1556,9 @@ class ParametersPage(QtWidgets.QWidget):
         form_gen.addRow("Nº camadas mínimo:", self.spin_nlayers_min)
         form_gen.addRow("Nº camadas máximo:", self.spin_nlayers_max)
         form_gen.addRow("Nº camadas fixo:", self.spin_nlayers_fixed)
+        # v2.19: semente PRNG (aleatória por default, fixa opcional).
+        form_gen.addRow("Aleatoriedade:", self.chk_random_seed)
+        form_gen.addRow("Semente fixa:", self.spn_fixed_seed)
 
         layout_gen = QtWidgets.QVBoxLayout(grp_gen)
         layout_gen.addLayout(row_mode)
@@ -1545,6 +1581,9 @@ class ParametersPage(QtWidgets.QWidget):
             self.spin_nlayers_min,
             self.spin_nlayers_max,
             self.spin_nlayers_fixed,
+            # v2.19: widgets de semente PRNG (em modo aleatório/manual idênticos).
+            self.chk_random_seed,
+            self.spn_fixed_seed,
         ]
 
         # ═══ Grupo 3 — Filtro Hankel ═════════════════════════════════════
@@ -2157,6 +2196,23 @@ class ParametersPage(QtWidgets.QWidget):
             generator=self.combo_generator.currentText(),
         )
 
+    def get_rng_seed(self) -> Optional[int]:
+        """Retorna a semente PRNG escolhida pelo usuário (Sprint 19.1).
+
+        Returns:
+            ``None`` quando o checkbox "Semente aleatória" está marcado
+            (default v2.19) — :class:`ModelGenerationThread` resolverá
+            uma semente aleatória a cada execução. Retorna inteiro fixo
+            quando o usuário desmarcou e configurou ``spn_fixed_seed``.
+
+        Note:
+            Antes da v2.19 a semente era hardcoded em 42, gerando sempre
+            os mesmos modelos — bug funcional corrigido nesta versão.
+        """
+        if self.chk_random_seed.isChecked():
+            return None
+        return int(self.spn_fixed_seed.value())
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "nf": self.spin_nf.value(),
@@ -2183,6 +2239,9 @@ class ParametersPage(QtWidgets.QWidget):
             "nlayers_max": self.spin_nlayers_max.value(),
             "nlayers_fixed": self.spin_nlayers_fixed.value(),
             "filter": self.combo_filter.currentText(),
+            # Sprint 19.1 (v2.19): preferência de aleatoriedade do PRNG.
+            "random_seed": self.chk_random_seed.isChecked(),
+            "fixed_seed": int(self.spn_fixed_seed.value()),
         }
 
     def from_dict(self, d: Dict[str, Any]) -> None:
@@ -2215,6 +2274,9 @@ class ParametersPage(QtWidgets.QWidget):
             self.spin_nlayers_max.setValue(int(d.get("nlayers_max", 31)))
             self.spin_nlayers_fixed.setValue(int(d.get("nlayers_fixed", 0)))
             self.combo_filter.setCurrentText(d.get("filter", "werthmuller_201pt"))
+            # v2.19: restaura preferência de seed (default = aleatória).
+            self.chk_random_seed.setChecked(bool(d.get("random_seed", True)))
+            self.spn_fixed_seed.setValue(int(d.get("fixed_seed", 42)))
         except Exception:
             pass
 
@@ -8078,19 +8140,31 @@ class MainWindow(QtWidgets.QMainWindow):
             # QThread separada, deixando a main thread livre para processar
             # o event loop Qt (mouse, paint, scroll, etc.) durante a geração.
             gen_cfg = params.build_gen_config()
-            sim.append_log(f"Gerando {n_models} modelos (generator={gen_cfg.generator})…")
+            # Sprint 19.1 (v2.19): semente PRNG vem da UI (None = aleatória,
+            # int = fixa). Antes era hardcoded em 42, gerando sempre os mesmos
+            # modelos a cada execução — bug funcional corrigido nesta versão.
+            rng_seed = params.get_rng_seed()
+            seed_label = "aleatória" if rng_seed is None else f"fixa={rng_seed}"
+            sim.append_log(
+                f"Gerando {n_models} modelos (generator={gen_cfg.generator}, "
+                f"semente={seed_label})…"
+            )
             sim.set_running(True)
             sim.progress.setValue(0)
             # Snapshot do estado pendente — recuperado em _on_models_ready.
             self._stochastic_models_in_progress = (req, sim)
             # Cria a thread; ela fica viva até finished_models/error/cancelled.
             self._gen_thread = ModelGenerationThread(
-                gen_cfg, n_models=n_models, rng_seed=42, parent=self
+                gen_cfg, n_models=n_models, rng_seed=rng_seed, parent=self
             )
             self._gen_thread.progress.connect(self._on_gen_progress)
             self._gen_thread.finished_models.connect(self._on_models_ready)
             self._gen_thread.error.connect(self._on_gen_error)
             self._gen_thread.cancelled.connect(self._on_gen_cancelled)
+            # v2.19: loga a semente PRNG efetivamente usada para reprodutibilidade.
+            self._gen_thread.seed_used.connect(
+                lambda s, _sim=sim: _sim.append_log(f"  Semente PRNG efetiva: {s}")
+            )
             self._phase_timer.begin("generation")
             self._gen_thread.start()
         except Exception as exc:

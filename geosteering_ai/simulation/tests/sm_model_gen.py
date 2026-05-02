@@ -61,11 +61,39 @@ Example:
 """
 from __future__ import annotations
 
+import logging
 import math
+import secrets
 from dataclasses import dataclass
 from typing import List, Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_rng_seed(rng_seed: Optional[int]) -> int:
+    """Resolve ``rng_seed=None`` para uma semente aleatória de 63 bits.
+
+    Quando o chamador passa ``None`` (default v2.19), gera uma semente
+    aleatória criptograficamente segura via :func:`secrets.randbits` para
+    garantir que cada execução produza modelos distintos. Quando passa
+    um inteiro, esse valor é usado diretamente (modo reprodutível).
+
+    Args:
+        rng_seed: ``None`` (aleatório) ou inteiro (semente fixa).
+
+    Returns:
+        Inteiro de 63 bits compatível com :func:`numpy.random.default_rng`.
+
+    Note:
+        Usa 63 bits (não 64) para evitar overflow ao converter para
+        ``int64`` em pipelines downstream que assumem signed integer.
+    """
+    if rng_seed is None:
+        return int(secrets.randbits(63))
+    return int(rng_seed)
+
 
 # SciPy QMC é opcional — se não disponível, degradamos para np.random.
 try:
@@ -381,32 +409,52 @@ def _build_n_layer_choices(cfg: GenConfig) -> np.ndarray:
     return np.array([cfg.n_layers_fixed], dtype=np.int64)
 
 
-def generate_models(cfg: GenConfig, n_models: int, rng_seed: int = 42) -> List[dict]:
+def generate_models(
+    cfg: GenConfig,
+    n_models: int,
+    rng_seed: Optional[int] = None,
+    return_seed: bool = False,
+):
     """Gera lista de perfis geológicos estocásticos (versão síncrona).
 
-    Esta API mantém compatibilidade total com chamadores antigos. Para
-    geração não-bloqueante na GUI (Simulation Manager v2.11+), use
+    Esta API mantém compatibilidade com chamadores antigos. Para geração
+    não-bloqueante na GUI (Simulation Manager v2.11+), use
     :class:`ModelGenerationThread`.
+
+    A partir da v2.19, o default de ``rng_seed`` mudou de ``42`` para
+    ``None`` (semente aleatória a cada chamada). Chamadores que precisam
+    de reprodutibilidade devem passar um inteiro explícito.
 
     Args:
         cfg: Configuração paramétrica de geração.
         n_models: Número total de perfis a gerar.
-        rng_seed: Seed reprodutível para o PRNG mestre.
+        rng_seed: ``None`` (default v2.19) gera semente aleatória de
+            63 bits via :func:`secrets.randbits`. Passe inteiro fixo
+            para reprodutibilidade.
+        return_seed: Se ``True``, retorna ``(models, actual_seed)``
+            tupla — útil para logs/reprodutibilidade. Default ``False``
+            para preservar a assinatura legada.
 
     Returns:
-        Lista de dicionários no formato ``MODEL_KEYS``.
+        Quando ``return_seed=False`` (default): lista de dicts no formato
+        ``MODEL_KEYS``. Quando ``return_seed=True``: tupla
+        ``(models, actual_seed)`` com a semente realmente usada.
 
     Note:
         Para N grande (>5k) na main thread Qt, esta função BLOQUEIA o
         event loop. Use :class:`ModelGenerationThread` na GUI.
     """
     cfg.validate()
-    rng = np.random.default_rng(rng_seed)
+    actual_seed = _resolve_rng_seed(rng_seed)
+    rng = np.random.default_rng(actual_seed)
     n_layer_choices = _build_n_layer_choices(cfg)
-    return [
-        _generate_one_model(cfg, rng, n_layer_choices, i, rng_seed)
+    models = [
+        _generate_one_model(cfg, rng, n_layer_choices, i, actual_seed)
         for i in range(n_models)
     ]
+    if return_seed:
+        return models, actual_seed
+    return models
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -465,17 +513,26 @@ class ModelGenerationThread(QThread):  # type: ignore[misc, valid-type]
             ou cancelamento. Argumento: mensagem.
         cancelled: Sinal Qt ``Signal()`` — emitido após cancelamento
             cooperativo (post `request_cancel`).
+        seed_used: Sinal Qt ``Signal(int)`` (v2.19) — emitido no início
+            do ``run()`` com a semente PRNG efetivamente usada.
+            Permite à GUI logar a semente para reprodutibilidade,
+            mesmo quando o usuário escolhe modo aleatório.
 
     Example:
         Uso típico em ``MainWindow._start_simulation``::
 
+            >>> # Modo aleatório (v2.19 default) — modelos distintos a cada exec
             >>> self._gen_thread = ModelGenerationThread(
-            ...     gen_cfg, n_models=30000, rng_seed=42
+            ...     gen_cfg, n_models=30000, rng_seed=None
             ... )
             >>> self._gen_thread.progress.connect(self._on_gen_progress)
             >>> self._gen_thread.finished_models.connect(self._on_models_ready)
             >>> self._gen_thread.error.connect(self._on_gen_error)
+            >>> self._gen_thread.seed_used.connect(self._log_seed)
             >>> self._gen_thread.start()
+
+            >>> # Modo reprodutível — semente fixa
+            >>> ModelGenerationThread(gen_cfg, n_models=30000, rng_seed=42)
 
     Note:
         O cancelamento é **cooperativo** — verifica ``_cancelled`` apenas
@@ -489,12 +546,15 @@ class ModelGenerationThread(QThread):  # type: ignore[misc, valid-type]
     finished_models = Signal(list)
     error = Signal(str)
     cancelled = Signal()
+    # v2.19: emite a semente realmente usada (resolvida em run()) para
+    # logging/reprodutibilidade — útil quando rng_seed=None (aleatória).
+    seed_used = Signal(int)
 
     def __init__(
         self,
         cfg: GenConfig,
         n_models: int,
-        rng_seed: int = 42,
+        rng_seed: Optional[int] = None,
         chunk_size: int = DEFAULT_GEN_CHUNK_SIZE,
         parent: Optional[object] = None,
     ) -> None:
@@ -504,7 +564,8 @@ class ModelGenerationThread(QThread):  # type: ignore[misc, valid-type]
             cfg: Configuração de geração — copiada por referência;
                 imutabilidade é responsabilidade do chamador.
             n_models: Total de modelos a gerar.
-            rng_seed: Semente reprodutível.
+            rng_seed: ``None`` (default v2.19) gera semente aleatória
+                a cada execução. Passe inteiro fixo para reprodutibilidade.
             chunk_size: Modelos por chunk antes de emitir ``progress``.
                 Default 500 (equilíbrio overhead × granularidade).
             parent: Qt parent opcional (default ``None``).
@@ -516,11 +577,19 @@ class ModelGenerationThread(QThread):  # type: ignore[misc, valid-type]
         super().__init__(parent)
         self._cfg = cfg
         self._n_models = max(1, int(n_models))
-        self._rng_seed = int(rng_seed)
+        # v2.19: preserva None (resolve em run()) para que cada start()
+        # gere modelos distintos quando o usuário escolhe modo aleatório.
+        self._rng_seed: Optional[int] = None if rng_seed is None else int(rng_seed)
+        self._actual_seed: Optional[int] = None  # resolvido em run()
         self._chunk_size = max(1, int(chunk_size))
         # Flag de cancelamento cooperativo — set pelo `request_cancel()`,
         # checado entre chunks. Acesso atômico em CPython (GIL).
         self._cancelled: bool = False
+
+    @property
+    def actual_seed(self) -> Optional[int]:
+        """Semente PRNG realmente usada em ``run()`` (None antes do start)."""
+        return self._actual_seed
 
     def request_cancel(self) -> None:
         """Solicita cancelamento cooperativo (verificado entre chunks).
@@ -544,7 +613,21 @@ class ModelGenerationThread(QThread):  # type: ignore[misc, valid-type]
         try:
             # Validação no início — qualquer erro aqui é exception, não silent.
             self._cfg.validate()
-            rng = np.random.default_rng(self._rng_seed)
+            # v2.19: resolve a semente uma única vez no início da run().
+            # Quando self._rng_seed é None, cada start() gera uma semente
+            # aleatória distinta — comportamento físico esperado para
+            # ensembles estatísticos diversos.
+            self._actual_seed = _resolve_rng_seed(self._rng_seed)
+            seed_mode = "aleatória" if self._rng_seed is None else "fixa"
+            logger.info(
+                "ModelGenerationThread: seed=%d (%s), n_models=%d",
+                self._actual_seed,
+                seed_mode,
+                self._n_models,
+            )
+            # Emite a semente para a GUI logar antes do progresso começar.
+            self.seed_used.emit(int(self._actual_seed))
+            rng = np.random.default_rng(self._actual_seed)
             n_layer_choices = _build_n_layer_choices(self._cfg)
 
             models: List[dict] = []
@@ -563,7 +646,7 @@ class ModelGenerationThread(QThread):  # type: ignore[misc, valid-type]
                 for i in range(chunk_start, chunk_end):
                     models.append(
                         _generate_one_model(
-                            self._cfg, rng, n_layer_choices, i, self._rng_seed
+                            self._cfg, rng, n_layer_choices, i, self._actual_seed
                         )
                     )
                 # Emite progresso para a UI atualizar barra/label.
@@ -582,5 +665,6 @@ __all__ = [
     "GenConfig",
     "MODEL_KEYS",
     "ModelGenerationThread",
+    "_resolve_rng_seed",
     "generate_models",
 ]
