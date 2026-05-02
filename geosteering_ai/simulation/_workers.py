@@ -144,6 +144,214 @@ _WORKER_INITIALIZED: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Detecção de topologia de CPU (v2.17, Sprint 17.1)
+# ──────────────────────────────────────────────────────────────────────────────
+# Em CPUs com Hyperthreading (HT) ou SMT, ``os.cpu_count()`` retorna o número
+# de threads lógicas (cores físicos × 2 em HT/SMT). Calcular paralelismo com
+# base em threads lógicas resulta em **oversubscription** quando
+# ``n_workers × threads_per_worker = cpu_count()``: cada worker tenta usar
+# todas as threads lógicas disponíveis, gerando contenção severa por:
+#
+#   1. Cache L1/L2 compartilhado entre hyperthreads do mesmo core físico;
+#   2. FPU/ALU compartilhada entre hyperthreads;
+#   3. Context switch overhead em scheduler do SO;
+#   4. Numba TBB/OMP × N processos = 64+ threads competindo por 8 cores.
+#
+# Em workloads CPU-bound puros (como Numba JIT prange), ter 1 thread por
+# core físico é tipicamente **30-50% mais rápido** que 1 thread por hyperthread.
+# Portanto a recomendação correta é ``n_workers × threads_per_worker ≤
+# physical_cores``, não ``≤ logical_cores``.
+
+# Cache para evitar invocações repetidas do subprocess (lento em alguns SOs).
+_CPU_TOPOLOGY_CACHE: Optional[Tuple[int, int, bool]] = None
+
+
+def detect_cpu_topology() -> Tuple[int, int, bool]:
+    """Detecta a topologia da CPU (lógicas × físicas × hyperthreading).
+
+    Estratégia em camadas (primeira que funcionar):
+      1. ``psutil.cpu_count(logical=False)`` — método portável e preciso
+         se psutil estiver instalado (não é dependência obrigatória).
+      2. macOS: ``sysctl -n hw.physicalcpu``
+      3. Linux: contagem de ``physical id``/``core id`` únicos em
+         ``/proc/cpuinfo``
+      4. Windows: ``wmic cpu get NumberOfCores``
+      5. Fallback heurístico: assume HT/SMT se ``cpu_count() >= 4`` →
+         ``physical = logical // 2``. Em hardware sem HT/SMT (ex.: Apple
+         Silicon performance cores, alguns Xeon Cascade Lake) este
+         fallback subestima — o usuário pode override via spinbox.
+
+    O resultado é cacheado em ``_CPU_TOPOLOGY_CACHE`` (módulo-global) já
+    que a topologia da CPU não muda durante a execução do processo.
+
+    Returns:
+        Tupla ``(logical_cores, physical_cores, has_hyperthreading)``:
+          - ``logical_cores``: ``os.cpu_count()`` (threads visíveis ao SO)
+          - ``physical_cores``: cores físicos efetivos (>= 1)
+          - ``has_hyperthreading``: ``True`` se ``logical > physical``
+
+    Example:
+        Em Mac Intel 8C/16T (Hyperthreading ativo)::
+
+            >>> logical, phys, ht = detect_cpu_topology()
+            >>> (logical, phys, ht)
+            (16, 8, True)
+
+        Em Apple Silicon M1 8-core (sem HT)::
+
+            >>> detect_cpu_topology()
+            (8, 8, False)
+
+    Note:
+        Esta função NUNCA falha — em caso de erro em todas as estratégias,
+        retorna ``(logical, logical, False)`` (assume sem HT, mais
+        conservador para evitar oversubscription assumida indevidamente).
+    """
+    global _CPU_TOPOLOGY_CACHE
+    if _CPU_TOPOLOGY_CACHE is not None:
+        return _CPU_TOPOLOGY_CACHE
+
+    import platform
+    import subprocess
+
+    logical = os.cpu_count() or 1
+    physical: Optional[int] = None
+
+    # Estratégia 1: psutil (portável, preciso)
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        phys = psutil.cpu_count(logical=False)
+        if phys is not None and phys > 0:
+            physical = int(phys)
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Estratégia 2: macOS sysctl
+    if physical is None and platform.system() == "Darwin":
+        try:
+            out = subprocess.check_output(
+                ["sysctl", "-n", "hw.physicalcpu"],
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+            )
+            phys_int = int(out.decode("utf-8").strip())
+            if phys_int > 0:
+                physical = phys_int
+        except Exception:
+            pass
+
+    # Estratégia 3: Linux /proc/cpuinfo
+    if physical is None and platform.system() == "Linux":
+        try:
+            with open("/proc/cpuinfo", "r", encoding="utf-8") as fh:
+                cores: set = set()
+                phys_id = core_id = None
+                for line in fh:
+                    if line.startswith("physical id"):
+                        phys_id = line.split(":")[1].strip()
+                    elif line.startswith("core id"):
+                        core_id = line.split(":")[1].strip()
+                    elif line.strip() == "" and phys_id is not None:
+                        cores.add((phys_id, core_id))
+                        phys_id = core_id = None
+                if cores:
+                    physical = len(cores)
+        except Exception:
+            pass
+
+    # Estratégia 4: Windows wmic
+    if physical is None and platform.system() == "Windows":
+        try:
+            out = subprocess.check_output(
+                ["wmic", "cpu", "get", "NumberOfCores"],
+                stderr=subprocess.DEVNULL,
+                timeout=3.0,
+            )
+            for line in out.decode("utf-8", errors="ignore").splitlines():
+                line = line.strip()
+                if line.isdigit() and int(line) > 0:
+                    physical = (physical or 0) + int(line)
+        except Exception:
+            pass
+
+    # Estratégia 5: Heurística fallback
+    if physical is None or physical < 1:
+        # Se logical >= 4, é provável que haja HT/SMT — assume metade.
+        # Para logical < 4, provavelmente sem HT (CPUs antigas/ARM single-thread).
+        physical = max(1, logical // 2) if logical >= 4 else logical
+
+    physical = min(physical, logical)  # Sanidade: physical nunca > logical
+    has_ht = logical > physical
+    _CPU_TOPOLOGY_CACHE = (logical, physical, has_ht)
+    return _CPU_TOPOLOGY_CACHE
+
+
+def recommend_default_parallelism(
+    n_models_hint: Optional[int] = None,
+) -> Tuple[int, int]:
+    """Recomenda ``(n_workers, threads_per_worker)`` ótimos para o hardware.
+
+    Estratégia (v2.17 Sprint 17.1):
+      • Para batch grande (``n_models_hint >= 10`` ou ``None``): preferir
+        múltiplos workers com 2 threads cada (Modo D híbrido). Isso
+        amortiza spawn overhead e maximiza throughput em CPU 8C+.
+      • Para single/poucos modelos (``n_models_hint < 10``): preferir
+        1 worker com N threads (Modo B multi-thread). Spawn de pool
+        seria desperdício para 1-9 modelos.
+      • Em ambos os casos: ``n_workers × threads_per_worker ≤ physical_cores``
+        — nunca oversubscriba sobre cores físicos para workloads CPU-bound.
+
+    Args:
+        n_models_hint: Estimativa do número de modelos a simular. Quando
+            ``None`` (default), assume batch grande.
+
+    Returns:
+        Tupla ``(n_workers, threads_per_worker)`` recomendada.
+
+    Example:
+        Em Mac 8C/16T HT, batch grande (default GUI)::
+
+            >>> recommend_default_parallelism()
+            (4, 2)  # 4 workers × 2 threads = 8 = phys_cores ✓
+
+        Em Mac 8C/16T HT, single model::
+
+            >>> recommend_default_parallelism(n_models_hint=1)
+            (1, 8)  # 1 worker × 8 threads = phys_cores ✓
+
+        Em Linux 32C/64T HT, batch grande::
+
+            >>> recommend_default_parallelism()
+            (16, 2)  # 16 workers × 2 threads = 32 = phys_cores ✓
+
+        Em Apple Silicon M1 8-core (sem HT)::
+
+            >>> recommend_default_parallelism()
+            (4, 2)  # 4 × 2 = 8 = cores ✓
+
+    Note:
+        Esta função é o ponto único de verdade para defaults da GUI e
+        do benchmark. Mudanças aqui propagam automaticamente para
+        ``simulation_manager.py:spin_workers/spin_threads`` (v2.17).
+    """
+    _, phys, _ = detect_cpu_topology()
+    if n_models_hint is not None and n_models_hint < 10:
+        # Single/poucos modelos: 1 worker com N threads (Modo B)
+        return (1, max(1, phys))
+    # Batch grande: workers = phys // 2, threads = 2 (Modo D)
+    # Para phys=2: workers=1, threads=2 (cai em Modo B)
+    # Para phys=4: workers=2, threads=2
+    # Para phys=8: workers=4, threads=2
+    # Para phys=16: workers=8, threads=2
+    n_workers = max(1, phys // 2)
+    threads_per_worker = max(1, phys // n_workers)
+    return (n_workers, threads_per_worker)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Anti-oversubscription + detecção de modo
 # ──────────────────────────────────────────────────────────────────────────────
 def _resolve_effective_threads(
@@ -772,6 +980,8 @@ __all__ = [
     # Container público
     "MultiSimulationResultBatch",
     # API pública
+    "detect_cpu_topology",
+    "recommend_default_parallelism",
     "release_pool",
     "run_batch",
     # Helpers expostos para testes
