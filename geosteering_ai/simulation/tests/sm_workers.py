@@ -152,6 +152,25 @@ def _acquire_numba_pool(
 
     Se o pool existente tiver configuração diferente, o antigo é encerrado
     sem esperar antes de criar o novo.
+
+    Note (v2.16):
+        Sprint 15.1 — antes do spawn dos workers, setamos
+        ``NUMBA_NUM_THREADS = n_threads`` no env do processo pai. Os workers
+        spawn herdam este env, e Numba lê o valor durante a primeira
+        ``import numba`` no worker (que é disparada pelo unpickle do próprio
+        ``_numba_init_worker``). Resultado: o pool de threads do Numba dentro
+        de cada worker nasce dimensionado em ``n_threads``, e
+        ``numba.set_num_threads(n_threads)`` em ``simulate_multi`` apenas
+        confirma esse mascaramento (sem RuntimeError).
+
+        Em v2.15 (commits 0f92035 + e1c8864), este passo foi removido sob a
+        teoria de que ``set_num_threads`` resolveria sozinho. Mas como o
+        pool nasce com ``cpu_count()`` (16 em hyperthreaded), e
+        ``set_num_threads`` falha silenciosamente em chamadas posteriores
+        em alguns estados internos, workers acabavam rodando com threads
+        ativas em estado indefinido — provocando regressão 4–8×.
+
+        Mantemos ``OMP_NUM_THREADS = n_threads`` para BLAS/MKL.
     """
     global _PERSISTENT_POOL, _PERSISTENT_POOL_CONFIG
     cfg_key = (n_workers, n_threads, hankel_filter)
@@ -163,6 +182,14 @@ def _acquire_numba_pool(
                 _PERSISTENT_POOL.shutdown(wait=False)
             except Exception:
                 pass
+        # ── FIX v2.16: dimensionar pool de threads do Numba no spawn ─────
+        # Setado no PAI antes do spawn — herdado pelos workers. Numba lê
+        # NUMBA_NUM_THREADS na primeira import (durante o spawn dos workers).
+        os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
+        os.environ["OMP_NUM_THREADS"] = str(n_threads)
+        os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
+        os.environ.setdefault("KMP_WARNINGS", "FALSE")
+        # ────────────────────────────────────────────────────────────────
         _PERSISTENT_POOL = ProcessPoolExecutor(
             max_workers=n_workers,
             mp_context=_mp.get_context("spawn"),

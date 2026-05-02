@@ -874,16 +874,42 @@ def simulate_multi(
         _simulate_positions_parallel,
     )
 
-    # Sprint 2.10: numero de threads (respeita cfg.num_threads).
-    # try/except: Numba não permite alterar thread count após threads lançadas
-    # (e.g. worker subprocess do SM GUI já inicializou com N threads distintos).
+    # ── Sprint 15.1 (v2.16): mascaramento de threads observável ──────────────
+    # Numba não permite alterar `NUMBA_NUM_THREADS` (tamanho do pool) após
+    # threads lançadas, mas `set_num_threads(n)` mascara o número de threads
+    # ATIVAS (n ≤ NUMBA_NUM_THREADS). Em workers subprocess (SM GUI), Numba
+    # é importado durante o spawn com `NUMBA_NUM_THREADS = cpu_count()`
+    # (default), e `set_num_threads(cfg.num_threads)` mascara para n.
+    #
+    # Pré-condição crítica: `NUMBA_NUM_THREADS ≥ cfg.num_threads`. Se o pai
+    # do subprocess setar `NUMBA_NUM_THREADS` ANTES do spawn (ver
+    # `_acquire_numba_pool` em sm_workers.py), o pool nasce com tamanho
+    # adequado e este bloco apenas mascara para o valor desejado.
+    #
+    # Histórico v2.15 (commits 0f92035 + e1c8864): este bloco era envolvido
+    # em `try/except RuntimeError: pass`, silenciando falhas e provocando
+    # regressão de 4–8× em produção (workers acabavam com threads ativas
+    # em estado indefinido). v2.16 substitui por `logger.warning` para
+    # tornar a falha observável sem interromper a execução.
     if cfg.num_threads > 0 and HAS_NUMBA:
         import numba as _numba
 
-        try:
-            _numba.set_num_threads(cfg.num_threads)
-        except RuntimeError:
-            pass  # threads já lançadas — manter contagem atual
+        current_active = _numba.get_num_threads()
+        if current_active != cfg.num_threads:
+            try:
+                _numba.set_num_threads(cfg.num_threads)
+            except RuntimeError as exc:
+                pool_size = _numba.config.NUMBA_NUM_THREADS
+                logger.warning(
+                    "numba.set_num_threads(%d) falhou (threads ativas atual=%d, "
+                    "pool size NUMBA_NUM_THREADS=%d): %s. Performance pode "
+                    "degradar significativamente; verifique se o env var "
+                    "NUMBA_NUM_THREADS foi setado antes do spawn dos workers.",
+                    cfg.num_threads,
+                    current_active,
+                    pool_size,
+                    exc,
+                )
 
     # ── Sprint 13.3: Materialização pré-dispatch para prange(nTR*nAngles*n_pos) flat ──
     # Estrutura para despacho adaptativo: usar nova prange quando n_combos >= 2

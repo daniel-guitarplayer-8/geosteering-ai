@@ -336,6 +336,25 @@ def _acquire_pool(
     with _LOCK:
         if _PERSISTENT_POOL is None or _PERSISTENT_POOL_CONFIG != cfg_key:
             _release_pool_unlocked()
+            # ── FIX v2.16 (Sprint 15.1): dimensionar pool de threads Numba ──
+            # Sete `NUMBA_NUM_THREADS` no env do PAI ANTES do spawn dos
+            # workers. Os workers spawn herdam o env, e Numba lê o valor
+            # durante a primeira import (que ocorre dentro do
+            # `_simulate_worker_init`). Resultado: cada worker nasce com
+            # pool Numba dimensionado em `n_threads`, evitando o RuntimeError
+            # de `set_num_threads` em chamadas posteriores.
+            #
+            # Histórico v2.15: este passo foi removido (commit e1c8864) sob
+            # a premissa de que `numba.set_num_threads()` em `simulate_multi`
+            # bastaria. Mas o pool nascia com `cpu_count()` (16 hyperthreaded)
+            # e `set_num_threads` falhava silenciosamente em estados
+            # internos específicos (try/except: pass em multi_forward.py:880),
+            # provocando regressão de 4–8× em produção.
+            os.environ["NUMBA_NUM_THREADS"] = str(cfg_key[1])
+            os.environ["OMP_NUM_THREADS"] = str(cfg_key[1])
+            os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
+            os.environ.setdefault("KMP_WARNINGS", "FALSE")
+            # ──────────────────────────────────────────────────────────────
             _PERSISTENT_POOL = ProcessPoolExecutor(
                 max_workers=cfg_key[0],
                 mp_context=_mp.get_context("spawn"),
