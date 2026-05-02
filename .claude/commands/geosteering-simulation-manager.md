@@ -27,7 +27,8 @@ Para o Simulador Fortran (`Fortran_Gerador/`), use `geosteering-simulator-fortra
 | v2.17 | 2026-05-02 | feat/simulation-manager-v2.17 | Fix regressão de oversubscrição em CPUs HT/SMT (3× em produção GUI): `detect_cpu_topology()` + `recommend_default_parallelism()` + warning visual GUI + logging diagnóstico. Defaults físicos: 8C/16T HT → (4w × 2t = 8) em vez de (4w × 4t = 16) | 165+27+4+7+19 |
 | v2.18 | 2026-05-02 | feat/simulation-manager-v2.17 | Fix throughput reportado erroneamente (38k→85k): `t0_sim` definido pós pool-warm (via `_noop` tasks) + `PoolWarmupThread` background pré-aquece pool ao abrir GUI | 165+27+4+7+19+4 |
 | v2.19 | 2026-05-02 | feat/simulation-manager-v2.19 | Fix bug funcional do gerador aleatório (`rng_seed=42` hardcoded) + UI control de semente PRNG + `nogil=True` em `_simulate_positions_njit{,_cached}` + benchmark CLI CPU-aware. Cenário A: 189k→802k mod/h (4×) | 165+27+4+7+19+4+12 |
-| **v2.20** | **2026-05-02** | **feat/simulation-manager-v2.20** | **Investigação empírica rigorosa (5 runs × 2 configs em Cenário E): `4w × 2t` (8 threads = phys) entrega mediana 46k mod/h vs `4w × 4t` (16 threads = HT) mediana 38k mod/h (-25%). Confirma estratégia v2.17 (phys_cores). Documentação expandida + warning empírico no benchmark CLI. Cenário A com defaults v2.20: 1 185 489 mod/h (6× acima do histórico 150-190k relatado).** | **165+27+4+7+19+4+12+1 (+1 novo: M2/M3 Pro 10-core)** |
+| v2.20 | 2026-05-02 | feat/simulation-manager-v2.20 | Investigação empírica rigorosa (5 runs × 2 configs em Cenário E) confirma estratégia v2.17 (phys_cores). 4w × 2t mediana 46k mod/h vs 4w × 4t mediana 38k mod/h (-25%) | 165+27+4+7+19+4+12+1 (+1 M2/M3 Pro) |
+| **v2.21** | **2026-05-02** | **feat/simulation-manager-v2.21** | **CAUSA-RAIZ DA REGRESSÃO HISTÓRICA via análise `old_geosteering_ai/`: Sprint 13.1 (v2.13) introduziu `@njit(parallel=True, nogil=True)` + `prange(nf)` em `_fields_in_freqs_kernel_cached`, função chamada milhões de vezes de dentro de `_simulate_positions_njit_cached` com prange outer. Numba serializa nested prange mas paga overhead de setup do parallel scheduler em cada chamada. Fix Sprint 21.1: remove `parallel=True`, troca `_prange` por `range` serial. Mantém `nogil=True`. Cenário E: 46k → 121 957 mod/h (2.65× ganho), atinge meta histórica >120k. Cenário A: 1.18M → 1.39M (1.17×). Cenário B: 376k → 303k (-19% aceito; recuperação em v2.22 via FLAT prange). Paridade Fortran <1e-12 preservada nos 7 modelos canônicos.** | **0 novos (fix arquitetural; 68/68 testes existentes PASS, 7/7 Fortran <1e-12)** |
 
 ---
 
@@ -806,6 +807,130 @@ um **equívoco**:
 Para **150-200k em E**, todas as 4 otimizações combinadas + paralelismo
 de 2 níveis (workers + nested prange) serão necessárias. Tempo
 estimado: **4-6 sprints**.
+
+---
+
+## §21 Causa-Raiz da Regressão Histórica — Análise old_geosteering_ai (v2.21, Sprint 21)
+
+### Origem da investigação
+
+Em resposta ao usuário ("antes obtinha mais de 120k mod/h em configurações
+padrão"), foi conduzida análise comparativa direta entre:
+- `old_geosteering_ai/simulation/_numba/kernel.py` (versão antiga conhecida
+  como boa, ~120k mod/h em E)
+- `geosteering_ai/simulation/_numba/kernel.py` (versão atual com regressão)
+
+### Descoberta
+
+**Diferença crítica em `_fields_in_freqs_kernel_cached`:**
+
+```python
+# OLD (old_geosteering_ai/, ~120k mod/h em E)
+@njit(cache=True)
+def _fields_in_freqs_kernel_cached(...):
+    ...
+    for i_f in range(nf):     # serial
+        ...
+
+# NEW pré-v2.21 (~46k mod/h em E)
+@njit(cache=True, parallel=True, nogil=True)  # ← Sprint 13.1
+def _fields_in_freqs_kernel_cached(...):
+    ...
+    for i_f in _prange(nf):   # ← prange interno
+        ...
+```
+
+### Análise técnica
+
+Esta função é chamada **milhões de vezes por simulação** (n_pos × n_models)
+de dentro de `_simulate_positions_njit_cached` (que JÁ tem `parallel=True`
++ `prange(n_pos)` outer).
+
+**Numba não suporta nested parallelism**:
+- Outer prange roda em N threads
+- Inner prange é detectado e SERIALIZADO em cada thread
+- **MAS** o overhead de setup do parallel scheduler é pago em cada chamada
+
+**Quantificação em Cenário E (300 modelos × 600 pts × 75 chunks):**
+- 13.5M chamadas inner kernel
+- ~50ns overhead/chamada × 13.5M = **~0.675s overhead direto**
+- Distribuído em 8 threads = ~85ms efetivo/thread
+- Mais efeitos secundários (cache flushes, scheduler contention)
+- **Total observado**: ~14s de overhead em simulação de 300 modelos
+
+### Fix Sprint 21.1 (cirúrgico, 1 linha de código)
+
+```diff
+- @njit(cache=True, parallel=True, nogil=True)
++ @njit(cache=True, nogil=True)
+  def _fields_in_freqs_kernel_cached(...):
+      ...
+-     for i_f in _prange(nf):
++     for i_f in range(nf):
+```
+
+**`precompute_common_arrays_cache` mantém `parallel=True`** porque é
+chamada APENAS uma vez por (TR×Angle) de contexto serial Python — não
+paga overhead aninhado, ganha paralelização real de nf.
+
+### Métricas (Mac 8C/16T HT, 4w × 2t auto)
+
+#### Cenário E — 5 runs consecutivos
+
+```
+Run 1: 9.50s → 113 692 mod/h
+Run 2: 8.85s → 121 971 mod/h
+Run 3: 8.71s → 124 044 mod/h
+Run 4: 8.86s → 121 957 mod/h
+Run 5: 9.26s → 116 628 mod/h
+
+Mediana: 121 957 mod/h ✓ supera meta histórica >120k
+Média:   119 658 mod/h
+Desvio:  ~4 000 mod/h (estável)
+```
+
+#### Tabela consolidada Antes/Depois
+
+| Cenário | v2.20 (4w × 2t) | v2.21 (4w × 2t) | Ganho |
+|:-------:|:---------------:|:---------------:|:-----:|
+| A (30 pts, 1 freq) | 1 185 489 mod/h | **1 392 371 mod/h** | **1.17×** |
+| B (30 pts, 10 freq) | 376 000 mod/h | 303 452 mod/h | 0.81× ⚠️ |
+| E (600 pts, 1 freq) | 46 104 mod/h | **121 957 mod/h** | **2.65×** ✓ |
+| Paridade Fortran 7 canônicos | <1e-12 | **<1e-12** | preservada |
+
+### Tradeoff em Cenário B
+
+Cenário B regrediu 19% (376k → 303k) porque o `parallel=True` antigo
+ESTAVA paralelizando nf=10 efetivamente quando outer prange(n_pos=30)
+não saturava 8 threads. Tradeoff aceito porque:
+
+1. Cenário E é **configuração de produção real** (LWD 600 pts)
+2. Cenário B é multi-freq sintético, pouco usado
+3. Caminho v2.22 mapeado: FLAT `prange(n_pos × nf)` recupera B sem
+   reintroduzir overhead aninhado em E
+
+### Lição arquitetural
+
+> **Paralelismo aninhado em Numba NÃO funciona como esperado.** Quando
+> uma função inner é chamada de prange outer, adicionar `parallel=True`
+> na inner causa **overhead puro sem benefício** (Numba serializa nested
+> prange, mas paga setup). A regra é: paralelizar **UMA ÚNICA VEZ** no
+> nível mais externo em produção.
+
+Documentado em docstring expandida (+25 linhas) de
+`_fields_in_freqs_kernel_cached` para evitar tentativas futuras de
+re-introduzir `parallel=True`.
+
+### Caminho para 200k+ mod/h em Cenário E
+
+| Versão | Otimização | Ganho em E |
+|:------:|:-----------|:----------:|
+| v2.22 | FLAT prange(n_pos × nf) | recupera B; E neutro |
+| v2.23 | Tile/block | +15-25% |
+| v2.24 | Pré-compute Hankel TE/TM | +10-15% |
+| v2.25 | fastmath SAFE | +20% |
+
+Projeção composta v2.25: **~200k mod/h em E** (4 sprints).
 
 ---
 

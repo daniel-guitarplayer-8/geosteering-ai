@@ -7,6 +7,92 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [2.21] — 2026-05-02
+
+### Causa-raiz da regressão histórica encontrada via análise old_geosteering_ai/
+
+Sprint 21 — análise comparativa direta entre `old_geosteering_ai/` (versão
+pré-Sprint 13, conhecida como boa com ~120k mod/h em Cenário E) e o
+código atual revelou o **Sprint 13.1 (v2.13) como causa da regressão**:
+adicionou `@njit(parallel=True, nogil=True)` + `prange(nf)` em
+`_fields_in_freqs_kernel_cached`, função chamada **milhões de vezes**
+de dentro de `_simulate_positions_njit_cached` (que JÁ tem prange outer).
+
+**Por que isso degrada performance:**
+
+Numba não suporta nested parallelism. O `prange(nf)` interno era
+serializado (como deveria), MAS o overhead de setup do parallel
+scheduler era pago em cada chamada — em Cenário E (300 modelos × 600
+pts × 75 chunks = 13.5M chamadas), isso totalizava ~14s de overhead puro.
+
+**Fix Sprint 21.1 (1 linha de código + docstring expandida):**
+
+```diff
+- @njit(cache=True, parallel=True, nogil=True)
++ @njit(cache=True, nogil=True)
+  def _fields_in_freqs_kernel_cached(...):
+      ...
+-     for i_f in _prange(nf):
++     for i_f in range(nf):
+```
+
+`precompute_common_arrays_cache` mantém `parallel=True` (é chamada de
+contexto SERIAL Python, paraleliza nf efetivamente sem overhead aninhado).
+
+**Métricas (Mac 8C/16T HT, 4w × 2t auto v2.20):**
+
+| Cenário | v2.20 | v2.21 | Ganho |
+|:-------:|:-----:|:-----:|:-----:|
+| **A** (30 pts, 1 freq) | 1 185 489 mod/h | **1 392 371 mod/h** | **1.17×** |
+| **B** (30 pts, 10 freq) | 376 000 mod/h | 303 452 mod/h | 0.81× ⚠️ |
+| **E** (600 pts, 1 freq) | 46 104 mod/h (mediana) | **121 957 mod/h** | **2.65×** ✓ |
+| Paridade Fortran 7 canônicos | <1e-12 | <1e-12 | preservada |
+
+**Cenário E atinge 121 957 mod/h** — confirma a meta histórica do
+usuário ("mais de 120k em configurações padrão"). **3.04× total** vs
+v2.18 (40k → 122k).
+
+**Tradeoff em Cenário B**: regressão de 19% aceita porque:
+- E é configuração de produção real (600 pts LWD)
+- B é multi-freq sintético, pouco usado em produção
+- v2.22 (FLAT prange n_pos × nf) recuperará B sem reintroduzir overhead em E
+
+**Mudanças em arquivos:**
+
+- `geosteering_ai/simulation/_numba/kernel.py`: `_fields_in_freqs_kernel_cached`
+  decorador simplificado + range serial + docstring expandida com
+  investigação histórica (+25 linhas)
+- `docs/reports/v2.21_2026-05-02.md` (novo, ~330 linhas): relatório
+  técnico completo com análise comparativa old vs new
+
+**Validação:**
+
+- Paridade Fortran 7 modelos canônicos: PASS (<1e-12)
+- Pytest suite focada: 68/68 PASS
+- 5 runs consecutivos Cenário E: mediana 122k, desvio ~4k (estável)
+
+**Lição arquitetural documentada para evitar tentativas futuras:**
+
+> Paralelismo aninhado em Numba NÃO funciona como esperado. Quando uma
+> função inner é chamada de prange outer, adicionar `parallel=True` na
+> inner causa overhead puro sem benefício (Numba serializa nested
+> prange). A regra é: paralelizar UMA ÚNICA VEZ no nível mais externo
+> em produção.
+
+**Roadmap atualizado para 200k+ em Cenário E:**
+
+| Versão | Otimização | Ganho em E |
+|:------:|:-----------|:----------:|
+| v2.22 | FLAT prange(n_pos × nf) | recupera B; E neutro |
+| v2.23 | Tile/block | +15-25% |
+| v2.24 | Pré-compute Hankel TE/TM | +10-15% |
+| v2.25 | fastmath SAFE | +20% |
+
+**Status:** estável, validado, pronto para produção. Meta histórica
+de >120k mod/h em Cenário E **alcançada**.
+
+---
+
 ## [2.20] — 2026-05-02
 
 ### Confirmação empírica + investigação rigorosa: phys_cores é a estratégia correta

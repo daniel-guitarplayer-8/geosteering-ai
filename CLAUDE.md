@@ -13,7 +13,7 @@
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |
 | **Pacote** | `geosteering_ai/` (pip installable) |
 | **Referencia** | `docs/ARCHITECTURE_v2.md` (documento completo da arquitetura) |
-| **Simulation Manager** | v2.20 (2026-05-02) — Investigação empírica rigorosa (5 runs × 2 configs) confirma estratégia v2.17 (phys_cores). 4w × 2t mediana 46k mod/h em E vs 4w × 4t mediana 38k mod/h (-25%). Cenário A 1.18M mod/h (6× acima histórico). v2.19: random seed UI + nogil. v2.18: t0_sim + PoolWarmupThread. v2.17: HT/SMT oversub fix. Paridade Fortran <1e-12 · 13+14+4+7+19+4+12+1 (v2.13–v2.20) testes pass |
+| **Simulation Manager** | v2.21 (2026-05-02) — **CAUSA-RAIZ DA REGRESSÃO HISTÓRICA**: análise comparativa com `old_geosteering_ai/` revelou que Sprint 13.1 (v2.13) introduziu `@njit(parallel=True)` em `_fields_in_freqs_kernel_cached` causando overhead de paralelismo aninhado em milhões de chamadas. Fix: remove `parallel=True`. Cenário E: 46k → 122k mod/h (2.65×, atinge meta histórica >120k). v2.20: investigação empírica HT/SMT. v2.19: random seed UI + nogil. v2.18: t0_sim + PoolWarmupThread. Paridade Fortran <1e-12 · 13+14+4+7+19+4+12+1 testes pass |
 
 ---
 
