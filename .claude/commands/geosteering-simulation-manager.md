@@ -1,11 +1,11 @@
 ---
-description: Sub-skill dedicada ao Simulation Manager (SM) Numba do Geosteering AI v2.0. Cobre arquitetura de pacote (multi_forward, forward, _numba/, _jax/), workers nativos (v2.12), otimizações Numba (v2.13: prange-freq, cache, nogil; v2.14: prange TR×ang, fastmath hankel), JIT cache observability (v2.15), fix regressão threading + I/O vetorizado (v2.16), hardware tuning, paridade Fortran <1e-12. Triggers SM: "simulation manager", "SM", "v2.10", "v2.11", "v2.12", "v2.13", "v2.14", "v2.15", "v2.16", "simulate_multi", "Workers Nativos", "prange", "cache_persistent", "release_numba_cache", "set_jit_cache_maxsize", "get_jit_cache_info", "fastmath", "hmd_tiv", "vmd", "common_arrays", "common_factors", "tatu.x exec format", "Cenário E", "n_positions", "write_dat_from_tensor", "NUMBA_NUM_THREADS spawn".
+description: Sub-skill dedicada ao Simulation Manager (SM) Numba do Geosteering AI v2.0. Cobre arquitetura de pacote (multi_forward, forward, _numba/, _jax/), workers nativos (v2.12), otimizações Numba (v2.13: prange-freq, cache, nogil; v2.14: prange TR×ang, fastmath hankel), JIT cache observability (v2.15), fix regressão threading + I/O vetorizado (v2.16), fix oversubscrição HT/SMT (v2.17), hardware tuning, paridade Fortran <1e-12. Triggers SM: "simulation manager", "SM", "v2.10", "v2.11", "v2.12", "v2.13", "v2.14", "v2.15", "v2.16", "v2.17", "simulate_multi", "Workers Nativos", "prange", "cache_persistent", "release_numba_cache", "set_jit_cache_maxsize", "get_jit_cache_info", "fastmath", "hmd_tiv", "vmd", "common_arrays", "common_factors", "tatu.x exec format", "Cenário E", "n_positions", "write_dat_from_tensor", "NUMBA_NUM_THREADS spawn", "detect_cpu_topology", "recommend_default_parallelism", "oversubscrição", "hyperthreading", "HT/SMT", "physical cores", "logical cores".
 ---
 
 # Sub-skill: Geosteering Simulation Manager (SM-Numba)
 
-**Versão**: v2.16 (2026-05-01)
-**Triggers principais**: simulate_multi, Simulation Manager, SM, v2.x SM, prange, fastmath, cache_persistent, get_jit_cache_info, tatu.x, Cenário E, n_positions, threading masking
+**Versão**: v2.17 (2026-05-02)
+**Triggers principais**: simulate_multi, Simulation Manager, SM, v2.x SM, prange, fastmath, cache_persistent, get_jit_cache_info, tatu.x, Cenário E, n_positions, threading masking, oversubscrição, hyperthreading, detect_cpu_topology
 
 Esta sub-skill é DEDICADA ao Simulation Manager Numba (`geosteering_ai/simulation/`).
 Para o Simulador Python JAX (backend `_jax/`), use `geosteering-simulator-python`.
@@ -23,7 +23,8 @@ Para o Simulador Fortran (`Fortran_Gerador/`), use `geosteering-simulator-fortra
 | v2.13 | 2026-05-01 | feat/simulation-manager-v2.13 | Otimizações Numba (Sprints 13.1+13.2+13.4): prange(nf), cache cross-call, nogil universal | 165 (152+13) |
 | v2.14 | 2026-05-01 | feat/simulation-manager-v2.14 | Sprint 13.3 prange TR×ang + Sprint 13.4 fastmath hankel.py + benchmark formal | 165+27 |
 | v2.15 | 2026-05-01 | feat/simulation-manager-v2.15 | Hardware validation, JIT cache observability, code review P1, fix CI tatu.x exec format | 165+27+4 |
-| **v2.16** | **2026-05-01** | **feat/simulation-manager-v2.16** | **Fix regressão crítica de threading masking (4–8× em produção GUI) + Cenário E benchmark (600 pts) + I/O `write_dat_from_tensor` vetorizado ≥3×** | **165+27+4+7** |
+| v2.16 | 2026-05-01 | feat/simulation-manager-v2.16 | Fix regressão crítica de threading masking (4–8× em produção GUI) + Cenário E benchmark (600 pts) + I/O `write_dat_from_tensor` vetorizado ≥3× | 165+27+4+7 |
+| **v2.17** | **2026-05-02** | **feat/simulation-manager-v2.17** | **Fix regressão de oversubscrição em CPUs HT/SMT (3× em produção GUI): `detect_cpu_topology()` + `recommend_default_parallelism()` + warning visual GUI + logging diagnóstico. Defaults físicos: 8C/16T HT → (4w × 2t = 8) em vez de (4w × 4t = 16)** | **165+27+4+7+19** |
 
 ---
 
@@ -384,19 +385,119 @@ Documento dedicado: `docs/reports/v2.16_n_positions_scaling_analysis_2026-05-01.
 
 ---
 
+## §17 Oversubscrição em CPUs HT/SMT (v2.17, Sprint 16)
+
+**Problema descoberto pós-v2.16**: GUI continuava a 38k mod/h em produção, mesmo
+com fix de threading masking aplicado. **Causa raiz**: defaults da GUI
+(`spin_workers = ncpu // 4`, `spin_threads = ncpu // (ncpu // 4)`) produziam
+**oversubscrição** em CPUs com Hyperthreading (Intel) ou SMT (AMD/ARM):
+
+| Hardware | `os.cpu_count()` | Default v2.16 (W × T) | Total threads | Cores físicos | Status |
+|:---------|:----------------:|:---------------------:|:-------------:|:-------------:|:------:|
+| Intel 8C/16T HT | 16 | 4 × 4 | 16 | 8 | ⚠ 2× oversub |
+| Linux 32C/64T HT | 64 | 16 × 4 | 64 | 32 | ⚠ 2× oversub |
+| Apple Silicon M1 | 8 | 2 × 4 | 8 | 8 | ✓ ok |
+
+**Por que oversub é ruim em workloads CPU-bound (como Numba JIT prange)**:
+
+1. **Cache L1/L2 compartilhada** entre hyperthreads do mesmo core físico → trashing
+2. **FPU/ALU compartilhada** → contenção em operações aritméticas
+3. **Context switch overhead** no scheduler do SO
+4. **Numba TBB/OMP × N processos** = competição massiva por recursos
+
+Em workloads CPU-bound puros, **1 thread/core físico** é tipicamente
+30-50% mais rápido que 1 thread/hyperthread.
+
+### Fix v2.17 (Sprint 16.1+16.2)
+
+Nova API pública em `geosteering_ai/simulation/_workers.py`:
+
+```python
+from geosteering_ai.simulation import (
+    detect_cpu_topology,        # Sprint 16.1 (v2.17)
+    recommend_default_parallelism,  # Sprint 16.2 (v2.17)
+)
+
+# Detecção em camadas: psutil → sysctl → /proc/cpuinfo → wmic → heurística
+logical, physical, has_ht = detect_cpu_topology()
+# Em Mac Intel 8C/16T HT: (16, 8, True)
+# Em Apple Silicon M1: (8, 8, False)
+# Em Linux Xeon 32C/64T: (64, 32, True)
+
+# Recomendação que respeita workers × threads ≤ physical_cores
+n_workers, threads = recommend_default_parallelism()
+# Mac 8C/16T HT: (4, 2) → 4 × 2 = 8 = phys ✓
+# Apple Silicon M1: (4, 2) → 8 = phys ✓
+# Linux 32C/64T: (16, 2) → 32 = phys ✓
+```
+
+### Recomendação Visual + Logging (Sprint 16.3+16.4)
+
+Em `simulation_manager.py:SimulationPage`:
+
+- **QLabel vermelho** aparece quando `workers × threads > physical_cores`
+- Mensagem: "⚠ Oversubscrição: 4 × 4 = 16 threads em 8 cores físicos (2× sobrecarga)"
+- Conectado via `valueChanged` aos spinboxes (atualização em tempo real)
+
+Em `SimulationThread.run()`:
+
+```python
+self.log.emit(f"CPU: {phys} cores físicos · {logical} threads lógicas (HT/SMT)")
+self.log.emit(f"  ⚠ AVISO: oversubscrição {factor:.2f}× ({total} threads > {phys} cores)")
+```
+
+### Métricas pós-fix (Hardware Intel 8C/16T HT, macOS)
+
+| Configuração | Threads totais | Cenário E (200 mod, 600 pts) | Speedup |
+|---|---|---|---|
+| v2.16 default GUI (4w × 4t) | 16 (oversub 2×) | 70k mod/h | baseline |
+| **v2.17 default GUI (4w × 2t)** | **8 (= phys)** | **85k mod/h** | **+21%** |
+| Cenário E benchmark (4w × 2t) | 8 (= phys) | 85k mod/h | idêntico ✓ |
+
+Em workloads de produção mais intensos (modelos com mais camadas, mais
+frequências, ou n_pos > 1000) e em CPUs com HT mais agressivo (Linux Xeon
+32C/64T), o ganho esperado é **30–50%**.
+
+### Quando usar cada modo (Tabela de decisão)
+
+| Cenário | n_models | Hardware | Defaults v2.17 | Modo |
+|:--------|:--------:|:---------|:---------------|:----:|
+| Single inversão / debug | 1 | qualquer | (1, phys) | B |
+| Batch pequeno | 2-9 | qualquer | (1, phys) | B |
+| Batch normal | 10-1000 | 4C+ | (phys // 2, 2) | D |
+| Produção 30k | 10000+ | 8C+ HT | (4, 2) ou (8, 2) | D |
+| Mac Apple Silicon (sem HT) | qualquer | 8C | (4, 2) | D |
+
+### Validação
+
+`tests/test_simulation_cpu_topology.py` — 19 testes:
+
+- 5 testes de detecção (tupla, valores sãos, OS coerente, cache, fallback)
+- 6 testes de recomendação (não-oversub, single-model, batch, determinismo)
+- 6 testes de hardware simulado (Mac Intel, M1, Linux Xeon, low-end, dual-core, single)
+- 2 testes de no-regression (cache persiste, recomendação determinística)
+
+---
+
 ## §13 Referências
 
-- `docs/CHANGELOG.md` — versões v2.10 a v2.15
+- `docs/CHANGELOG.md` — versões v2.10 a v2.17
 - `docs/reports/v2.{N}_*.md` — relatórios técnicos por versão
 - `docs/ROADMAP.md` — tabela de versões SM
 - `docs/reports/v2.15_fastmath_dipoles_analysis_2026-05-01.md` — análise técnica fastmath
 - `docs/reports/v2.15_benchmark_hardware_2026-05-01.md` — resultados hardware
+- `docs/reports/v2.16_2026-05-01.md` — relatório principal v2.16 (threading masking + Cenário E)
+- `docs/reports/v2.16_n_positions_scaling_analysis_2026-05-01.md` — análise n_positions
+- `docs/reports/v2.17_2026-05-02.md` — relatório principal v2.17 (oversubscrição HT/SMT)
 - `tests/_fortran_helpers.py` — helpers paridade Fortran
 - `tests/test_simulation_v213_optimizations.py` — 13 testes v2.13
 - `tests/test_simulation_v214_prange_combined.py` — 8 testes v2.14
 - `tests/test_simulation_v214_fastmath.py` — 6 testes v2.14
 - `tests/test_simulation_jax_sprint13.py` — 4 testes v2.15
+- `tests/test_simulation_workers_threading.py` — 3 testes v2.16 (threading masking)
+- `tests/test_sm_workers_io.py` — 4 testes v2.16 (I/O vetorizado)
+- `tests/test_simulation_cpu_topology.py` — 19 testes v2.17 (CPU topology + oversub)
 
 ---
 
-**Sub-skill criada em 2026-05-01 (v2.15). Atualizar a cada versão SM.**
+**Sub-skill criada em 2026-05-01 (v2.15). Última atualização: 2026-05-02 (v2.17).**

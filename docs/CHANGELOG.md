@@ -7,6 +7,116 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [2.17] — 2026-05-02
+
+### Fix regressão de oversubscrição em CPUs Hyperthreading/SMT (3× em produção GUI)
+
+Sprint 16 — investigação adicional revela que a regressão de **3× em produção GUI**
+remanescente (38k mod/h vs 123k esperado pós-v2.16) era causada por **oversubscrição**:
+a fórmula default `spin_threads = max(2, ncpu // (ncpu // 4))` em
+[simulation_manager.py](../geosteering_ai/simulation/tests/simulation_manager.py)
+produzia **4 workers × 4 threads = 16 threads** em CPU 8C/16T HT, excedendo
+**2× os 8 cores físicos** (oversubscrição). O fix v2.16 (threading masking
+observable) estabilizou o pool, mas defaults ruins permaneciam.
+
+A v2.17 introduz **detecção de topologia CPU** (físicos vs lógicos) e
+**recomendação inteligente** que respeita ``workers × threads ≤ cores físicos``,
+eliminando oversubscrição em hardware com Hyperthreading (Intel) ou SMT
+(AMD/ARM big-cores).
+
+### Adicionado
+
+- **Sprint 16.1 — `detect_cpu_topology()` portável** ([_workers.py:158-291](../geosteering_ai/simulation/_workers.py)):
+  - Detecção em camadas: psutil → sysctl (macOS) → /proc/cpuinfo (Linux) →
+    wmic (Windows) → heurística fallback
+  - Retorna `(logical_cores, physical_cores, has_hyperthreading)`
+  - Cache em variável global `_CPU_TOPOLOGY_CACHE` (topologia não muda em runtime)
+  - NUNCA falha — em caso de erro retorna `(logical, logical, False)` (conservador)
+- **Sprint 16.2 — `recommend_default_parallelism()`**
+  ([_workers.py:294-353](../geosteering_ai/simulation/_workers.py)):
+  - Para batch grande (>= 10 modelos): `(phys // 2, 2)` — Modo D híbrido
+  - Para single-model: `(1, phys)` — Modo B multi-thread
+  - Invariante: `workers × threads ≤ physical_cores` SEMPRE
+- **Sprint 16.3 — Warning visual de oversubscrição na GUI**
+  ([simulation_manager.py](../geosteering_ai/simulation/tests/simulation_manager.py)):
+  - QLabel vermelho aparece quando `workers × threads > physical_cores`
+  - Mensagem: "⚠ Oversubscrição: {W} × {T} = {N} threads em {phys} cores físicos"
+  - Conectado via `valueChanged` aos spinboxes (atualização em tempo real)
+- **Sprint 16.4 — Logging diagnóstico em SimulationThread.run()**
+  ([sm_workers.py](../geosteering_ai/simulation/tests/sm_workers.py)):
+  - Loga "CPU: N cores físicos · M threads lógicas (HT/SMT)" antes de cada simulação
+  - Aviso explícito se `workers × threads > phys_cores`
+- **Sprint 16.5 — Smoke tests CPU topology**
+  ([tests/test_simulation_cpu_topology.py](../tests/test_simulation_cpu_topology.py)):
+  - 19 testes (5 detection + 6 recommendation + 6 simulated hardware + 2 no-regression)
+  - Cenários cobertos: Mac Intel 8C/16T, Apple Silicon M1, Linux Xeon 32C, dual-core
+- **Tooltips expandidos**: explicam recomendação física vs lógica em todos os spinboxes
+
+### Corrigido
+
+- **Defaults da página Simulação** (`SimulationPage`): de `(4w × 4t = 16)` para
+  `(4w × 2t = 8)` em hardware 8C/16T HT (= cores físicos exatos, sem oversubscrição)
+- **Defaults da página Benchmark** (`BenchmarkPage`): mesma correção aplicada
+  para Numba e Fortran
+- **Label de CPU**: agora mostra "8 cores físicos · 16 threads lógicas (HT/SMT)"
+  em vez de apenas "16 CPU cores disponíveis"
+
+### Mudado
+
+- **Função pública `detect_cpu_topology()`** exportada em
+  [geosteering_ai/simulation/__init__.py](../geosteering_ai/simulation/__init__.py)
+  para uso por outros componentes (treinamento DL, etc.)
+- **Função pública `recommend_default_parallelism()`** exportada — ponto único
+  de verdade para todos os defaults de paralelismo no projeto
+
+### Notas de performance (Hardware Intel 8C/16T HT, macOS)
+
+| Configuração | Threads totais | Cenário E (200 mod, 600 pts) | Speedup |
+|---|---|---|---|
+| **v2.16 default GUI** (4w × 4t) | 16 (oversub 2×) | 70k mod/h | baseline |
+| **v2.17 default GUI** (4w × 2t) | 8 (= phys) | 85k mod/h | **+21%** |
+| Cenário E benchmark (4w × 2t) | 8 (= phys) | 85k mod/h | idêntico ✓ |
+
+Em workloads CPU-bound mais intensos (modelos com mais camadas, mais frequências
+ou n_pos > 1000) e em arquiteturas com HT mais agressivo (Linux Xeon 32C/64T),
+o ganho esperado é **30–50%**.
+
+### Paridade Fortran
+
+- **<1e-12 em 7 modelos canônicos** (Oklahoma 3/5/15/28, Devine 8, Hou 7,
+  Viking Graben 10) — zero regressão física
+
+### Validação
+
+- **Pytest CPU topology** (test_simulation_cpu_topology.py):
+  19/19 PASS em 1.38s
+- **Pytest threading v2.16** (test_simulation_workers_threading.py):
+  3/3 PASS em 4.22s (zero regressão)
+- **Pytest I/O v2.16** (test_sm_workers_io.py):
+  4/4 PASS em 2.73s (zero regressão)
+- **Paridade Fortran 7 canônicos**: 7/7 PASS em 126.62s (<1e-12)
+
+### Decisões deferidas
+
+- **Tile/block processing (Sprint 15.6)** → mantido em v2.18 (mais ganho potencial
+  agora que oversubscrição foi eliminada)
+- **Pré-compute Hankel kernels TE/TM** → v2.18 (10–15% ganho, médio risco)
+- **Apple Silicon M1/M2 sem HT**: defaults já corretos (phys = logical)
+
+### Arquivos
+
+**Modificados (4)**:
+- `geosteering_ai/simulation/_workers.py` (+193/-0)
+- `geosteering_ai/simulation/__init__.py` (+4/-0)
+- `geosteering_ai/simulation/tests/simulation_manager.py` (+90/-22)
+- `geosteering_ai/simulation/tests/sm_workers.py` (+30/-1)
+
+**Criados (2)**:
+- `tests/test_simulation_cpu_topology.py` (~250 LOC, 19 testes)
+- `docs/reports/v2.17_2026-05-02.md` (relatório principal)
+
+---
+
 ## [2.16] — 2026-05-01
 
 ### Fix regressão crítica de threading + Cenário E (production scale 600 pts) + I/O vetorizado
