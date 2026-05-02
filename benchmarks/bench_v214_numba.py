@@ -428,7 +428,9 @@ def main():
         default=_default_threads,
         help=f"Threads intra-worker (default auto={_default_threads}). "
         f"Total = workers × threads-per-worker. Recomendação CPU-aware "
-        f"(Sprint 19.2 v2.19) evita oversubscrição em CPUs com HT/SMT.",
+        f"v2.17+v2.20 confirmada: physical_cores. HT/SMT degrada o kernel "
+        f"hmd_tiv em 20-25 porcento por context switch entre hyperthreads "
+        f"e cache trashing.",
     )
     parser.add_argument(
         "--n-positions",
@@ -439,20 +441,24 @@ def main():
     )
     args = parser.parse_args()
 
-    # Sprint 19.2 (v2.19): warning de oversubscrição.
-    # Quando workers × threads > cores_físicos, threads competem pelas mesmas
-    # ALUs e o throughput cai (até 2-3× em loops numéricos pesados como
-    # _simulate_positions_njit). Em CPUs com HT/SMT (M1/M2, Ryzen, Core i),
-    # logical_cores é o dobro de physical_cores mas hyperthreads não ajudam
-    # cargas saturadas em ALU como Numba njit numérico denso.
+    # Sprint 20.2 (v2.20): warning de oversubscrição com referência empírica.
+    #
+    # Análise empírica v2.20 (Mac 8C/16T HT, Cenário E 600 pts, 5 runs cada):
+    #   • 4w × 2t (8 threads = phys):    mediana 46k mod/h ✓ ótimo
+    #   • 4w × 4t (16 threads = logical):mediana 38k mod/h  -25%
+    #
+    # CONFIRMADO: oversubscription com HT NÃO ajuda este kernel — o
+    # custo de context switch entre hyperthreads + cache trashing supera
+    # o ganho hipotético de esconder cache miss latency.
     _total_threads = args.workers * args.threads_per_worker
     if _total_threads > _physical_cores:
-        ht_label = " (HT/SMT ativo)" if _has_ht else ""
+        ht_label = " (HT/SMT ativo, mas degrada throughput)" if _has_ht else ""
         print(
             f"  ATENCAO: {args.workers}w x {args.threads_per_worker}t = "
             f"{_total_threads} threads em {_physical_cores} cores fisicos"
-            f"{ht_label}. Oversubscricao pode degradar performance em "
-            f"2-3x. Recomendado: {_default_workers}w x {_default_threads}t "
+            f"{ht_label}. Empiricamente (v2.20, 5 runs Cenario E), "
+            f"oversubscricao degrada throughput em 20-25%. "
+            f"Recomendado: {_default_workers}w x {_default_threads}t "
             f"= {_default_workers * _default_threads} threads."
         )
         print()

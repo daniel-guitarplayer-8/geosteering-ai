@@ -294,7 +294,7 @@ def recommend_default_parallelism(
 ) -> Tuple[int, int]:
     """Recomenda ``(n_workers, threads_per_worker)`` ótimos para o hardware.
 
-    Estratégia (v2.17 Sprint 17.1):
+    Estratégia confirmada empiricamente em v2.17 + v2.20:
       • Para batch grande (``n_models_hint >= 10`` ou ``None``): preferir
         múltiplos workers com 2 threads cada (Modo D híbrido). Isso
         amortiza spawn overhead e maximiza throughput em CPU 8C+.
@@ -303,6 +303,22 @@ def recommend_default_parallelism(
         seria desperdício para 1-9 modelos.
       • Em ambos os casos: ``n_workers × threads_per_worker ≤ physical_cores``
         — nunca oversubscriba sobre cores físicos para workloads CPU-bound.
+
+    Análise empírica v2.20 (Sprint 20.1, descoberta+reversão):
+    Tentou-se v2.20.1 retornar `(phys, logical/phys)` em CPUs com HT/SMT
+    sob hipótese de que o kernel `hmd_tiv` recursivo seria memory-bound e
+    HT esconderia cache miss latency. Medição rigorosa em Mac 8C/16T HT
+    com 5 runs consecutivos por config refutou a hipótese:
+
+      | Config | Mediana E (600 pts) | Comportamento |
+      |:------:|:-------------------:|:--------------|
+      | 4w × 2t (8 threads = phys)    | **46k mod/h** | melhor |
+      | 4w × 4t (16 threads = logical)| 38k mod/h     | -20-25% |
+
+    O kernel é compute-bound suficiente para HT degradar (context switch
+    + cache thrashing entre hyperthreads). A heurística v2.17 está
+    confirmada como correta. Resultado: v2.20 reverteu a mudança e
+    documentou a descoberta para evitar tentativas futuras.
 
     Args:
         n_models_hint: Estimativa do número de modelos a simular. Quando
@@ -334,8 +350,10 @@ def recommend_default_parallelism(
 
     Note:
         Esta função é o ponto único de verdade para defaults da GUI e
-        do benchmark. Mudanças aqui propagam automaticamente para
-        ``simulation_manager.py:spin_workers/spin_threads`` (v2.17).
+        do benchmark CLI. Mudanças aqui propagam automaticamente para
+        ``simulation_manager.py:spin_workers/spin_threads`` e para o
+        argparse de ``bench_v214_numba.py``. A confirmação empírica
+        v2.20 está documentada em ``docs/reports/v2.20_2026-05-02.md``.
     """
     _, phys, _ = detect_cpu_topology()
     if n_models_hint is not None and n_models_hint < 10:

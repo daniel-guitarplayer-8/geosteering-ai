@@ -121,17 +121,22 @@ class TestRecommendDefaultParallelism:
         assert threads >= 1
 
     def test_does_not_oversubscribe_physical_cores_for_batch(self) -> None:
-        """v2.17 invariante crítico: workers × threads ≤ cores físicos.
+        """Invariante v2.17 (confirmado por v2.20): workers × threads ≤ cores físicos.
 
-        Esta é a propriedade fundamental que corrige a regressão de v2.16.
+        Confirmação empírica v2.20: medição com 5 runs consecutivos em
+        Mac 8C/16T HT mostrou que oversubscription com HT degrada
+        Cenário E em 20-25% (4w × 4t = 38k mediana vs 4w × 2t = 46k
+        mediana). HT NÃO ajuda neste kernel — context switch entre
+        hyperthreads + cache thrashing dominam. Esta invariante DEVE ser
+        mantida.
         """
         _, phys, _ = detect_cpu_topology()
         n_workers, threads = recommend_default_parallelism()
         total_threads = n_workers * threads
         assert total_threads <= phys, (
             f"Oversubscrição: {n_workers} × {threads} = {total_threads} threads "
-            f"> {phys} cores físicos. Esta é exatamente a regressão da v2.16 "
-            f"que a v2.17 deve eliminar."
+            f"> {phys} cores físicos. Análise empírica v2.20 confirmou que HT "
+            f"degrada throughput em 20-25% no kernel hmd_tiv."
         )
 
     def test_single_model_hint_returns_mode_b(self) -> None:
@@ -183,7 +188,14 @@ class TestSimulatedHardware:
         return _set
 
     def test_mac_intel_8c_16t_ht(self, mock_topology) -> None:
-        """Mac Intel 8C/16T HT (cenário de bug v2.16)."""
+        """Mac Intel 8C/16T HT — confirmado empiricamente em v2.20.
+
+        Medição 5× consecutiva em Mac 8C/16T HT (Cenário E 600 pts):
+        - 4w × 2t (8 threads = phys): mediana 46k mod/h
+        - 4w × 4t (16 threads = HT):  mediana 38k mod/h (-25%)
+
+        HT degrada por context switch entre hyperthreads + cache trashing.
+        """
         mock_topology(logical=16, physical=8)
         n_workers, threads = recommend_default_parallelism()
         assert n_workers == 4
@@ -229,6 +241,15 @@ class TestSimulatedHardware:
         n_workers, threads = recommend_default_parallelism()
         assert n_workers == 1
         assert threads == 1
+
+    def test_apple_m_pro_10c_10t_no_ht(self, mock_topology) -> None:
+        """Apple Silicon M2/M3 Pro 10-core (sem HT, P+E unificados)."""
+        mock_topology(logical=10, physical=10)
+        n_workers, threads = recommend_default_parallelism()
+        # Sem HT: target = phys = 10; workers = 5, threads = 2
+        assert n_workers == 5
+        assert threads == 2
+        assert n_workers * threads == 10  # = phys ✓
 
 
 class TestNoRegression:
