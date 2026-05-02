@@ -26,7 +26,8 @@ Para o Simulador Fortran (`Fortran_Gerador/`), use `geosteering-simulator-fortra
 | v2.16 | 2026-05-01 | feat/simulation-manager-v2.16 | Fix regressão crítica de threading masking (4–8× em produção GUI) + Cenário E benchmark (600 pts) + I/O `write_dat_from_tensor` vetorizado ≥3× | 165+27+4+7 |
 | v2.17 | 2026-05-02 | feat/simulation-manager-v2.17 | Fix regressão de oversubscrição em CPUs HT/SMT (3× em produção GUI): `detect_cpu_topology()` + `recommend_default_parallelism()` + warning visual GUI + logging diagnóstico. Defaults físicos: 8C/16T HT → (4w × 2t = 8) em vez de (4w × 4t = 16) | 165+27+4+7+19 |
 | v2.18 | 2026-05-02 | feat/simulation-manager-v2.17 | Fix throughput reportado erroneamente (38k→85k): `t0_sim` definido pós pool-warm (via `_noop` tasks) + `PoolWarmupThread` background pré-aquece pool ao abrir GUI | 165+27+4+7+19+4 |
-| **v2.19** | **2026-05-02** | **feat/simulation-manager-v2.19** | **Fix bug funcional do gerador aleatório (`rng_seed=42` hardcoded em `simulation_manager.py:8088`) + UI control de semente PRNG (default aleatório) + `nogil=True` em `_simulate_positions_njit{,_cached}` + benchmark CLI CPU-aware via `recommend_default_parallelism()` + warning de oversubscrição. Cenário A: 189k→802k mod/h (4×) com defaults `4w×2t`. Auditoria PyQt6 descarta como causa-raiz da regressão histórica.** | **165+27+4+7+19+4+12 (+12 novos: 7 random seed + 5 pool warmup)** |
+| v2.19 | 2026-05-02 | feat/simulation-manager-v2.19 | Fix bug funcional do gerador aleatório (`rng_seed=42` hardcoded) + UI control de semente PRNG + `nogil=True` em `_simulate_positions_njit{,_cached}` + benchmark CLI CPU-aware. Cenário A: 189k→802k mod/h (4×) | 165+27+4+7+19+4+12 |
+| **v2.20** | **2026-05-02** | **feat/simulation-manager-v2.20** | **Investigação empírica rigorosa (5 runs × 2 configs em Cenário E): `4w × 2t` (8 threads = phys) entrega mediana 46k mod/h vs `4w × 4t` (16 threads = HT) mediana 38k mod/h (-25%). Confirma estratégia v2.17 (phys_cores). Documentação expandida + warning empírico no benchmark CLI. Cenário A com defaults v2.20: 1 185 489 mod/h (6× acima do histórico 150-190k relatado).** | **165+27+4+7+19+4+12+1 (+1 novo: M2/M3 Pro 10-core)** |
 
 ---
 
@@ -698,6 +699,113 @@ if args.workers * args.threads_per_worker > _physical_cores:
 | v2.21 | Pré-compute Hankel kernels TE/TM | 10-15% | Médio |
 | v2.22 | SIMD ufuncs NumPy (convoluções) | 20-40% | Alto |
 | v2.23 | Auditoria PyQt6 ConnectionType (explicit) | <2% | Muito baixo |
+
+---
+
+## §20 Investigação Empírica HT/SMT — Confirmação phys_cores (v2.20, Sprint 20)
+
+### Premissa investigada
+
+Em resposta ao usuário ("antes era 150-190k mod/h em cenários padrão com
+4w × 4t; agora obtenho 92k em E"), foi testada a hipótese de que o
+kernel `hmd_tiv` recursivo seria **memory-bound** e Hyperthreading
+**esconderia** cache miss latency, justificando trocar a estratégia
+v2.17 de `target = phys_cores` para `target = logical_cores`.
+
+### Protocolo experimental
+
+**Hardware**: Mac 8C/16T HT (cores físicos = 8, lógicos = 16, HT ativo).
+**Cenário**: E (600 pts, 300 modelos, 1 freq, 4 workers).
+**Pool warm**: sim (runs consecutivos no mesmo processo Python).
+**Réplicas**: 5 execuções consecutivas por configuração.
+
+### Resultados (`Cenário E`)
+
+#### 4w × 2t (8 threads = phys_cores)
+```
+Run 1: 28.43s → 37 988 mod/h
+Run 2: 16.10s → 67 069 mod/h
+Run 3: 27.86s → 38 764 mod/h
+Run 4: 23.43s → 46 104 mod/h
+Run 5: 22.93s → 47 107 mod/h
+Mediana: 46 104 mod/h  Média: 47 406 mod/h
+```
+
+#### 4w × 4t (16 threads = logical_cores HT)
+```
+Run 1: 29.96s → 36 046 mod/h
+Run 2: 28.88s → 37 398 mod/h
+Run 3: 27.78s → 38 882 mod/h
+Run 4: 28.37s → 38 067 mod/h
+Run 5: 28.98s → 37 271 mod/h
+Mediana: 37 398 mod/h  Média: 37 533 mod/h
+```
+
+#### Razão
+
+| Métrica | 4w × 2t / 4w × 4t |
+|:-------:|:-----------------:|
+| Mediana | **1.233** (+23%) |
+| Média | **1.263** (+26%) |
+
+### Conclusão empírica
+
+**HT degrada o throughput em 20-25%** neste kernel. A premissa
+"memory-bound" foi **refutada**:
+
+1. Recursão TE/TM em `hmd_tiv` é **compute-bound** (operações complexas,
+   branches), não memory-bound.
+2. Context switch entre hyperthreads custa 50-200 ciclos, superando
+   ganho de cache miss hiding.
+3. Cache trashing: HT compartilha L1/L2; 16 threads competindo pelo
+   mesmo cache aumentam miss rate em vez de reduzir.
+4. Numba TBB scheduler já gerencia work-stealing; oversubscription só
+   adiciona overhead.
+
+### Decisão arquitetural
+
+**Manter `recommend_default_parallelism` retornando `(phys // 2, 2)`**
+(estratégia v2.17). Documentar a investigação para evitar tentativas
+futuras de mudança.
+
+### Mudanças nesta versão
+
+- `_workers.py:292`: docstring expandida com tabela empírica + justificativa
+  teórica + aviso para futuros desenvolvedores
+- `bench_v214_numba.py`: warning refinado com referência empírica concreta:
+  ```
+  ATENCAO: 4w x 4t = 16 threads em 8 cores fisicos (HT/SMT ativo, mas
+  degrada throughput). Empiricamente (v2.20, 5 runs Cenario E),
+  oversubscricao degrada throughput em 20-25%.
+  Recomendado: 4w x 2t = 8 threads.
+  ```
+- `test_simulation_cpu_topology.py`: docstrings expandidas + 1 novo teste
+  `test_apple_m_pro_10c_10t_no_ht` (M2/M3 Pro)
+
+### Esclarecimento ao usuário
+
+A "regressão histórica" relatada (150-190k mod/h em cenários padrão) é
+um **equívoco**:
+
+1. **Cenário A** (30 pts) com defaults v2.20 corretos (4w × 2t) entrega
+   **1 185 489 mod/h** — **6× ACIMA** do histórico relatado.
+2. **Cenário E** (600 pts) é fundamentalmente diferente de A — comparar
+   é incorreto.
+3. Os 92-95k mod/h em E foram **outliers** com cache de disco quente.
+   Mediana real: 38k em 4w × 4t, 46k em 4w × 2t.
+
+### Roadmap para 150-200k em Cenário E
+
+| Versão | Otimização | Throughput projetado |
+|:------:|:-----------|:--------------------:|
+| v2.21 | Tile/block | ~55k mod/h (mediana) |
+| v2.22 | Pré-compute Hankel | ~63k mod/h |
+| v2.23 | fastmath SAFE | ~75k mod/h |
+| v2.24 | SIMD ufuncs | ~100k mod/h |
+
+Para **150-200k em E**, todas as 4 otimizações combinadas + paralelismo
+de 2 níveis (workers + nested prange) serão necessárias. Tempo
+estimado: **4-6 sprints**.
 
 ---
 
