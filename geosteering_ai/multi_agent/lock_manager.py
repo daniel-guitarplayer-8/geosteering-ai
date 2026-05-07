@@ -187,8 +187,11 @@ class LockManager:
     def _read_lock(self, lock_file: Path) -> Optional[LockInfo]:
         try:
             data = json.loads(lock_file.read_text(encoding="utf-8"))
-            return LockInfo(**data)
-        except (FileNotFoundError, json.JSONDecodeError, TypeError):
+            info = LockInfo(**data)
+            # Smoke-test acquired_at parseável; corrupção retorna None
+            info.age_seconds()
+            return info
+        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError, OSError):
             return None
 
     # ── API pública ─────────────────────────────────────────────────────────
@@ -216,21 +219,6 @@ class LockManager:
                 outro ``agent_id``.
         """
         lock_file = self._lock_file(file_path)
-
-        if lock_file.exists() and not force:
-            existing = self._read_lock(lock_file)
-            if existing is not None and not existing.is_stale():
-                # Lock fresco — só permite re-acquire pelo mesmo agente
-                if existing.agent_id != agent_id:
-                    raise AgentConflictError(
-                        file_path=file_path,
-                        owner=existing.agent_id,
-                        age_sec=existing.age_seconds(),
-                        ttl_sec=existing.ttl_sec,
-                    )
-                # Same agent re-acquiring — ok, atualiza timestamp/ttl
-
-        # Adquire (escreve novo lock-file)
         info = LockInfo(
             agent_id=agent_id,
             acquired_at=datetime.now(timezone.utc)
@@ -240,7 +228,59 @@ class LockManager:
             pid=os.getpid(),
             file_path=str(Path(file_path).resolve()),
         )
-        lock_file.write_text(json.dumps(asdict(info), indent=2), encoding="utf-8")
+        payload = json.dumps(asdict(info), indent=2)
+
+        if force:
+            # Sobrescreve sem checar conflict (uso interno apenas)
+            lock_file.write_text(payload, encoding="utf-8")
+            return True
+
+        # ── Tentativa atômica via O_CREAT|O_EXCL (POSIX) ─────────────────────
+        # Este syscall falha (FileExistsError) se o lock-file já existe,
+        # eliminando a race TOCTOU entre check e write.
+        try:
+            fd = os.open(
+                str(lock_file),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+            return True
+        except FileExistsError:
+            pass  # Outro processo criou primeiro — investiga abaixo
+
+        # ── Lock-file existe; verificar se é stale ou conflict ───────────────
+        existing = self._read_lock(lock_file)
+        if existing is None:
+            # JSON inválido ou file deletado mid-flight: trata como stale
+            try:
+                lock_file.unlink()
+            except FileNotFoundError:
+                pass
+            return self.acquire(file_path, agent_id, ttl=ttl, force=False)
+
+        if existing.is_stale():
+            # Stale: remove e tenta novamente (recursão limitada por O_EXCL)
+            try:
+                lock_file.unlink()
+            except FileNotFoundError:
+                pass
+            return self.acquire(file_path, agent_id, ttl=ttl, force=False)
+
+        if existing.agent_id != agent_id:
+            raise AgentConflictError(
+                file_path=file_path,
+                owner=existing.agent_id,
+                age_sec=existing.age_seconds(),
+                ttl_sec=existing.ttl_sec,
+            )
+
+        # Same agent re-acquiring — sobrescreve atomicamente via temp + rename
+        # (rename é atômico em POSIX dentro do mesmo filesystem)
+        tmp = lock_file.with_suffix(f".lock.{os.getpid()}.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(lock_file)  # Path.replace = os.replace = atomic rename
         return True
 
     def release(self, file_path: str) -> bool:

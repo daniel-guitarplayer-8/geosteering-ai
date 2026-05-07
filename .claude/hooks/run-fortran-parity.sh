@@ -26,7 +26,7 @@ case "$FILE_PATH" in
         ;;
 esac
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-/Users/daniel/Geosteering_AI}"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || echo "/Users/daniel/Geosteering_AI")}"
 cd "$PROJECT_DIR"
 
 # Ativar venv (silencioso se não existir)

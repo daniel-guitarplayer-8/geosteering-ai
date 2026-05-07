@@ -25,7 +25,7 @@ case "$FILE_PATH" in
         ;;
 esac
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-/Users/daniel/Geosteering_AI}"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || echo "/Users/daniel/Geosteering_AI")}"
 BACKUP_DIR="$PROJECT_DIR/.backups/$(date +%Y-%m-%d)"
 mkdir -p "$BACKUP_DIR"
 

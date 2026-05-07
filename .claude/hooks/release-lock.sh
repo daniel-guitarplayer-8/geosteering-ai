@@ -13,7 +13,7 @@
 # ╚══════════════════════════════════════════════════════════════════════╝
 set -euo pipefail
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-/Users/daniel/Geosteering_AI}"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || echo "/Users/daniel/Geosteering_AI")}"
 AGENT_ID="${CLAUDE_AGENT_ID:-orchestrator}"
 
 if [ -x "$HOME/Geosteering_AI_venv/bin/python" ]; then
@@ -35,9 +35,15 @@ INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 [ -z "$FILE_PATH" ] && exit 0
 
-# Filtro: só desbloqueia se foi arquivo crítico (mesmo glob do acquire)
+# Filtro: mesmo conjunto restrito do acquire-lock.sh (evita test files)
 case "$FILE_PATH" in
-    *_numba/* | *_jax/* | *forward.py | *multi_forward.py | *config.py | *kernel.py)
+    */geosteering_ai/simulation/_numba/* | */geosteering_ai/simulation/_jax/*)
+        "$PYTHON" -m geosteering_ai.multi_agent.lock_manager release "$FILE_PATH" 2>/dev/null || true
+        ;;
+    */geosteering_ai/simulation/forward.py | */geosteering_ai/simulation/multi_forward.py)
+        "$PYTHON" -m geosteering_ai.multi_agent.lock_manager release "$FILE_PATH" 2>/dev/null || true
+        ;;
+    */geosteering_ai/config.py | */geosteering_ai/simulation/config.py)
         "$PYTHON" -m geosteering_ai.multi_agent.lock_manager release "$FILE_PATH" 2>/dev/null || true
         ;;
 esac

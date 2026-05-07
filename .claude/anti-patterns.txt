@@ -17,7 +17,7 @@ KB-018	rng_seed\s*=\s*42	BLOCK	*simulation_manager.py
 KB-019	threads_per_worker\s*=\s*4.*workers\s*=\s*4	BLOCK	*sm_workers.py
 KB-002	epoch\s*/\s*total_epochs(?!\s*\+)	WARN	*noise/curriculum.py
 KB-PYT	import\s+torch\b	BLOCK	*.py
-KB-PRT	^\s*print\s*\(	WARN	*geosteering_ai/*.py
+KB-PRT	(^|\n)\s*print\s*\(	WARN	*geosteering_ai/*.py
 KB-GLB	globals\(\)\.get\(	BLOCK	*geosteering_ai/*.py
 KB-LOG	TARGET_SCALING\s*=\s*["']log["']	BLOCK	*.py
 KB-INF	INPUT_FEATURES\s*=\s*\[0,\s*3,\s*4,\s*7,\s*8\]	BLOCK	*.py

@@ -24,15 +24,21 @@ FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 [ -z "$FILE_PATH" ] && exit 0
 
 # Filtro: apenas arquivos críticos ao kernel JIT/forward
+# IMPORTANTE: globs são intencionalmente específicos para evitar capturar
+# arquivos de teste (test_simulation_config.py, test_kernel.py, etc.).
 case "$FILE_PATH" in
-    *_numba/* | *_jax/* | *forward.py | *multi_forward.py | *config.py | *kernel.py)
+    */geosteering_ai/simulation/_numba/* | */geosteering_ai/simulation/_jax/*)
+        ;;
+    */geosteering_ai/simulation/forward.py | */geosteering_ai/simulation/multi_forward.py)
+        ;;
+    */geosteering_ai/config.py | */geosteering_ai/simulation/config.py)
         ;;
     *)
         exit 0  # arquivos não críticos não precisam de lock
         ;;
 esac
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-/Users/daniel/Geosteering_AI}"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || echo "/Users/daniel/Geosteering_AI")}"
 AGENT_ID="${CLAUDE_AGENT_ID:-orchestrator}"
 TTL="${LOCK_TTL_SEC:-300}"
 

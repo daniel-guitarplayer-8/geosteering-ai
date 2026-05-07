@@ -28,7 +28,7 @@ NEW=$(echo "$INPUT" | jq -r '.tool_input.new_string // .tool_input.content // em
 [ -z "$FILE_PATH" ] && exit 0
 [ -z "$NEW" ] && exit 0
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-/Users/daniel/Geosteering_AI}"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || echo "/Users/daniel/Geosteering_AI")}"
 PATTERNS_FILE="$PROJECT_DIR/.claude/anti-patterns.txt"
 [ ! -f "$PATTERNS_FILE" ] && exit 0
 
