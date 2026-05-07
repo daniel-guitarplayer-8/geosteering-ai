@@ -37,11 +37,15 @@ fi
 
 echo "[fortran-parity] verificando paridade <1e-12 em modelos canônicos…" >&2
 
+# PYTHONPATH=. necessário para imports relativos (tests/_fortran_helpers)
+export PYTHONPATH="$PROJECT_DIR:${PYTHONPATH:-}"
+
 # Rodar paridade Fortran (modelos canônicos críticos)
+# Nota: --timeout removido (pytest-timeout não é dep obrigatória).
+# Hook timeout de 120s no settings.json é suficiente.
 if pytest tests/test_simulation_compare_fortran.py \
          -k fortran_python_numba \
          --tb=short \
-         --timeout=60 \
          -q 2>&1 | tail -10 >&2; then
     echo "[fortran-parity] OK — paridade preservada (<1e-12)" >&2
     exit 0
