@@ -1,0 +1,27 @@
+# Anti-patterns catalog — Quality Mesh L2 + L5
+# Formato TSV: <KB-ID>\t<regex_extended>\t<severity>\t<path_glob>
+#
+# Severity:
+#   BLOCK — exit 1, edição BLOQUEADA pelo hook check-anti-patterns.sh
+#   WARN  — exit 0 com mensagem de alerta no stderr
+#
+# Lido por:
+#   .claude/hooks/check-anti-patterns.sh        (PreToolUse Edit|Write)
+#   .claude/hooks/check-anti-patterns-precommit.sh  (pre-commit framework)
+#
+# Manutenção: ao adicionar novo padrão, atualizar TAMBÉM:
+#   - docs/known_bugs.md (entrada KB-XXX)
+#   - tests/test_known_bugs.py (test_kbXXX_*)
+KB-013	@njit\([^)]*parallel=True	BLOCK	*_numba/kernel.py
+KB-018	rng_seed\s*=\s*42	BLOCK	*simulation_manager.py
+KB-019	threads_per_worker\s*=\s*4.*workers\s*=\s*4	BLOCK	*sm_workers.py
+KB-002	epoch\s*/\s*total_epochs(?!\s*\+)	WARN	*noise/curriculum.py
+KB-PYT	import\s+torch\b	BLOCK	*.py
+KB-PRT	^\s*print\s*\(	WARN	*geosteering_ai/*.py
+KB-GLB	globals\(\)\.get\(	BLOCK	*geosteering_ai/*.py
+KB-LOG	TARGET_SCALING\s*=\s*["']log["']	BLOCK	*.py
+KB-INF	INPUT_FEATURES\s*=\s*\[0,\s*3,\s*4,\s*7,\s*8\]	BLOCK	*.py
+KB-OTG	OUTPUT_TARGETS\s*=\s*\[1,\s*2\]	BLOCK	*.py
+KB-FRQ	FREQUENCY_HZ\s*=\s*2\.0[^0-9]	BLOCK	*.py
+KB-SPC	SPACING_METERS\s*=\s*1000\.0	BLOCK	*.py
+KB-EPS	eps_tf\s*=\s*1e-30	BLOCK	*.py

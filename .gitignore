@@ -75,3 +75,21 @@ benchmarks/reports/
 
 # ── Tooling local (harness Claude Code) ──────────────────────────────────────
 .agents/
+
+# ── Etapa 0 / 1 — Quality Mesh & Multi-Agent Hardening ───────────────────────
+# Backups locais (preservados via .claude/hooks/backup-pre-edit.sh)
+.backups/
+# Lock-files de agentes paralelos (efêmeros, gerenciados por LockManager)
+.claude/locks/
+# Estado runtime do orquestrador (registro de agentes ativos)
+.claude/active_agents.json
+.claude/state.json
+# File-watcher daemon log (Quality Mesh L7)
+.claude/watcher.log
+# Telemetria CSV histórica (sumário em CHANGELOG; CSVs locais)
+.claude/telemetry/*.csv
+
+# ── Relatórios e backups grandes (não versionar) ─────────────────────────────
+Resultados_Relatorio_2026/
+old_geosteering_ai/
+latex-document-skill-main.zip
