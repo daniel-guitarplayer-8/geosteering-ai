@@ -1,0 +1,24 @@
+{
+  "$schema": "https://geosteering.ai/schemas/state-v1.json",
+  "_comment": "Template do state runtime do orquestrador. Copie para .claude/state.json (gitignored) ao iniciar sessão multi-agente. Mantido por LockManager + sprint-orchestrator.",
+  "version": "1.0",
+  "session_started": "ISO-8601-timestamp",
+  "agents": [],
+  "locks": [],
+  "telemetry": {
+    "started": "ISO-8601-timestamp",
+    "total_locks_acquired": 0,
+    "total_locks_released": 0,
+    "total_conflicts_avoided": 0,
+    "total_stale_cleanups": 0,
+    "agents_spawned": 0,
+    "agents_completed": 0
+  },
+  "limits": {
+    "max_sonnet_concurrent": 4,
+    "max_haiku_concurrent": 2,
+    "max_opus_concurrent": 1,
+    "max_depth": 2,
+    "max_total_simultaneous": 5
+  }
+}
