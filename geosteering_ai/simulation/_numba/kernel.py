@@ -104,6 +104,7 @@ Note:
     Esta é a API **interna** da Sprint 2.4. A API pública de alto nível
     `simulate(cfg)` será criada na Sprint 2.5 em `forward.py`.
 """
+
 from __future__ import annotations
 
 import math
@@ -863,10 +864,188 @@ def _fields_in_freqs_kernel_cached(
     return cH
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# _fields_at_single_freq — Sprint v2.22 (FLAT prange)
+# ──────────────────────────────────────────────────────────────────────────────
+# Calcula o tensor `tH` rotacionado para UMA ÚNICA frequência (extraído do
+# corpo do `for i_f in range(nf)` em `_fields_in_freqs_kernel_cached`).
+#
+# Esta refatoração permite que `_simulate_combined_prange_flat` (em
+# `forward.py`) paralelize a dimensão `nf` no nível do prange OUTER, em vez
+# de iterar serialmente nf dentro de cada tarefa paralela. O caller
+# fornece slices 2D dos caches (shape `[npt, n]`) já indexados por `i_f`,
+# eliminando uma camada de indexação na hot path.
+#
+# Garantias de paridade bit-exata:
+#   • Mesmas chamadas físicas (common_factors → hmd_tiv → vmd → rotate_tensor)
+#   • Mesma ordem de operações por (i_f) — apenas o LOOP outer foi colapsado
+#   • find_layers_tr(Tz, cz) é responsabilidade do caller (1× por posição)
+#
+# Decorador `@njit(cache=True, nogil=True)`: NÃO `parallel=True` (é função
+# folha chamada de prange outer). nogil=True libera GIL durante execução.
+@njit(cache=True, nogil=True)
+def _fields_at_single_freq(
+    Tx: float,
+    Ty: float,
+    Tz: float,
+    cx: float,
+    cy: float,
+    cz: float,
+    dip_rad: float,
+    n: int,
+    h_arr: np.ndarray,
+    prof_arr: np.ndarray,
+    eta: np.ndarray,
+    freq_hz: float,
+    krJ0J1: np.ndarray,
+    wJ0: np.ndarray,
+    wJ1: np.ndarray,
+    # Slices 2D dos caches já indexados por i_f, shape [npt, n]
+    u: np.ndarray,
+    s: np.ndarray,
+    uh: np.ndarray,
+    sh: np.ndarray,
+    RTEdw: np.ndarray,
+    RTEup: np.ndarray,
+    RTMdw: np.ndarray,
+    RTMup: np.ndarray,
+    AdmInt: np.ndarray,
+    # Camadas pré-calculadas pelo caller (find_layers_tr 1× por posição)
+    camad_t: int,
+    camad_r: int,
+) -> np.ndarray:
+    """Computa tensor H rotacionado (9 componentes) para UMA frequência.
+
+    Args:
+        Tx, Ty, Tz, cx, cy, cz, dip_rad: coordenadas TX/RX e dip.
+        n: número de camadas.
+        h_arr, prof_arr, eta: geometria + condutividade (pré-calculados).
+        freq_hz: frequência única em Hz.
+        krJ0J1, wJ0, wJ1: filtro Hankel (npt pontos).
+        u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, AdmInt: slices 2D do
+            cache (shape [npt, n]) já indexados por i_f pelo caller.
+        camad_t, camad_r: índices de camada do TX/RX (pré-calculados).
+
+    Returns:
+        Array (9,) complex128 — tensor H rotacionado (Hxx, Hxy, ..., Hzz).
+
+    Note:
+        Bit-exato com o corpo do loop em
+        :func:`_fields_in_freqs_kernel_cached`. Sprint v2.22 (Caminho A
+        do roadmap multiagente §22.2.1.1).
+    """
+    npt = krJ0J1.shape[0]
+    omega = 2.0 * math.pi * freq_hz
+    zeta = 1j * omega * _MU_0
+
+    # common_factors depende de Tz/camad_t — NÃO cacheável
+    Mxdw, Mxup, Eudw, Euup, FEdwz, FEupz = common_factors(
+        n,
+        npt,
+        Tz,
+        h_arr,
+        prof_arr,
+        camad_t,
+        u,
+        s,
+        uh,
+        sh,
+        RTEdw,
+        RTEup,
+        RTMdw,
+        RTMup,
+    )
+
+    # Dipolos magnéticos (mesma assinatura de _fields_in_freqs_kernel_cached)
+    Hx_hmd, Hy_hmd, Hz_hmd = hmd_tiv(
+        Tx,
+        Ty,
+        Tz,
+        n,
+        camad_r,
+        camad_t,
+        npt,
+        krJ0J1,
+        wJ0,
+        wJ1,
+        h_arr,
+        prof_arr,
+        zeta,
+        eta,
+        cx,
+        cy,
+        cz,
+        u,
+        s,
+        uh,
+        sh,
+        RTEdw,
+        RTEup,
+        RTMdw,
+        RTMup,
+        Mxdw,
+        Mxup,
+        Eudw,
+        Euup,
+    )
+    Hx_vmd, Hy_vmd, Hz_vmd = vmd(
+        Tx,
+        Ty,
+        Tz,
+        n,
+        camad_r,
+        camad_t,
+        npt,
+        krJ0J1,
+        wJ0,
+        wJ1,
+        h_arr,
+        prof_arr,
+        zeta,
+        cx,
+        cy,
+        cz,
+        u,
+        uh,
+        AdmInt,
+        RTEdw,
+        RTEup,
+        FEdwz,
+        FEupz,
+    )
+
+    # Montagem matH 3×3 e rotação (idêntico a kernel.py:840-861)
+    matH = np.empty((3, 3), dtype=np.complex128)
+    matH[0, 0] = Hx_hmd[0]
+    matH[0, 1] = Hy_hmd[0]
+    matH[0, 2] = Hz_hmd[0]
+    matH[1, 0] = Hx_hmd[1]
+    matH[1, 1] = Hy_hmd[1]
+    matH[1, 2] = Hz_hmd[1]
+    matH[2, 0] = Hx_vmd
+    matH[2, 1] = Hy_vmd
+    matH[2, 2] = Hz_vmd
+
+    tH = rotate_tensor(dip_rad, 0.0, 0.0, matH)
+
+    out = np.empty(9, dtype=np.complex128)
+    out[0] = tH[0, 0]
+    out[1] = tH[0, 1]
+    out[2] = tH[0, 2]
+    out[3] = tH[1, 0]
+    out[4] = tH[1, 1]
+    out[5] = tH[1, 2]
+    out[6] = tH[2, 0]
+    out[7] = tH[2, 1]
+    out[8] = tH[2, 2]
+    return out
+
+
 __all__ = [
     "fields_in_freqs",
     "_fields_in_freqs_kernel",
     "_fields_in_freqs_kernel_cached",
+    "_fields_at_single_freq",
     "precompute_common_arrays_cache",
     "compute_zrho",
     "_compute_zrho_kernel",
