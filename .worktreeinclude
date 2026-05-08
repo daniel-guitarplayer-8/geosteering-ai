@@ -1,0 +1,47 @@
+# .worktreeinclude — pastas e arquivos rastreados por isolation worktree
+#
+# Usado por agentes Claude Code com isolation:"worktree" para criar cópia
+# isolada do repositório. Pastas listadas aqui SÃO copiadas; o restante
+# é excluído (pesados Relatorio_*, Resultados_*, .backups/, old_*).
+#
+# Sintaxe: um path por linha (relativo à raiz do projeto).
+# Comentários começam com '#'. Padrões glob seguem semântica do git.
+
+# Código-fonte principal
+geosteering_ai/
+tests/
+benchmarks/
+notebooks/
+configs/
+
+# Simuladores
+Fortran_Gerador/
+Modelos/
+Modelos_Gerados/
+
+# Documentação técnica (necessária para validações)
+docs/
+CLAUDE.md
+README.md
+LICENSE
+
+# Configuração de build/dev
+.claude/
+.github/
+pyproject.toml
+setup.py
+setup.cfg
+requirements.txt
+requirements-dev.txt
+pytest.ini
+.gitignore
+
+# Excluir explicitamente (não copiar para worktree)
+# Diretórios pesados — usar caminho absoluto via env var, não copiar
+# !.backups/
+# !Relatorio_2025/
+# !Relatorio_2026/
+# !Resultados_Relatorio_2026/
+# !old_geosteering_ai/
+# !latex-document-skill-main.zip
+# !Prompts_Geosteering_AI/

@@ -53,6 +53,10 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "mypy>=1.0",
+    # Multi-agent infrastructure (Etapa 1 Quality Mesh)
+    "watchdog>=3.0",     # tools/file_watcher_daemon.py
+    "psutil>=5.9",       # LockManager PID checks (opt-in)
+    "pre-commit>=3.0",   # .pre-commit-config.yaml
 ]
 
 [tool.setuptools.packages.find]

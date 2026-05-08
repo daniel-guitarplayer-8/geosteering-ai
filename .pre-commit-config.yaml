@@ -1,0 +1,70 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Pre-commit hooks — Geosteering AI v2.0
+# Quality Mesh Layer 2 (Static Analysis)
+#
+# Instalar:    pip install pre-commit && pre-commit install
+# Atualizar:   pre-commit autoupdate
+# Rodar todos: pre-commit run --all-files
+# ════════════════════════════════════════════════════════════════════════════
+
+repos:
+  # ── Hooks padrão (whitespace, eof, json/yaml validity) ─────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^(\.backups/|Fortran_Gerador/.*\.(dat|out)$)
+      - id: end-of-file-fixer
+        exclude: ^(\.backups/|.*\.bak$)
+      - id: check-json
+        exclude: ^\.claude/state\.json$  # template com placeholders
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  # ── Lint Python (ruff substitui flake8 + isort) ────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.0
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]
+        files: ^(geosteering_ai|tests)/.*\.py$
+      - id: ruff-format
+        files: ^(geosteering_ai|tests)/.*\.py$
+
+  # ── Type checking (mypy) ───────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.10.0
+    hooks:
+      - id: mypy
+        files: ^geosteering_ai/.*\.py$
+        additional_dependencies: ["numpy", "types-PyYAML"]
+        args: ["--ignore-missing-imports", "--follow-imports=silent"]
+        exclude: ^geosteering_ai/simulation/tests/
+
+  # ── Hooks locais — anti-patterns Quality Mesh L5 ───────────────────────────
+  - repo: local
+    hooks:
+      - id: check-anti-patterns
+        name: Anti-patterns (KB-013, KB-018, KB-019, ...)
+        entry: bash .claude/hooks/check-anti-patterns-precommit.sh
+        language: system
+        files: \.(py|sh|f08|yaml)$
+        pass_filenames: true
+
+      - id: validate-physics-constants
+        name: Errata fisica (FREQUENCY_HZ, eps_tf, ...)
+        entry: bash .claude/hooks/validate-physics.sh
+        language: system
+        files: ^(geosteering_ai/config\.py|configs/.*\.yaml)$
+        pass_filenames: true
+
+      - id: fortran-parity-full
+        name: Paridade Fortran <1e-12 (suite completa — 7 modelos)
+        entry: env FORTRAN_PARITY_MODE=full bash .claude/hooks/run-fortran-parity.sh
+        language: system
+        files: ^geosteering_ai/simulation/(_numba/|forward\.py|multi_forward\.py)
+        pass_filenames: false
+        stages: [pre-commit]
