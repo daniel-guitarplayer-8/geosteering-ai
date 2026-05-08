@@ -64,6 +64,7 @@ include = ["geosteering_ai*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+pythonpath = ["."]
 addopts = "-v --tb=short"
 markers = [
     "slow: marca testes lentos (>30s) — pulados em CI rápido com -m 'not slow'",
