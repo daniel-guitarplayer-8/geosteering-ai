@@ -7,6 +7,28 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [Quality Mesh 1.5] — 2026-05-08
+
+### Polishing & Estabilização (Etapa 1.5)
+
+- **A.1 Fortran-Parity Smart**: hook `run-fortran-parity.sh` reescrito com dois modos
+  (`quick` oklahoma_3 ~2s em PostToolUse; `full` 7 modelos ~146s em pre-commit).
+  Controles: `FORTRAN_PARITY_MODE`, `CLAUDE_BYPASS_FORTRAN_PARITY=1`.
+- **A.2 Backup Cleanup**: `tools/cleanup_backups.sh` com política 24h/7d/∞ + `--dry-run`.
+- **A.3 Thread Safety**: `conflict_matrix.py` com double-checked locking (`threading.Lock`).
+- **A.4 Merges**: `feat/simulation-manager-v2.21` + `feat/quality-mesh-foundation` → `main`.
+  KB-013/018/019 fixes integrados. `test_known_bugs.py`: 10/10 PASS (era 8+2 XFAIL).
+- **A.5 Bypass override**: `CLAUDE_BYPASS_ANTI_PATTERNS=1` adicionado a ambos os hooks
+  de anti-patterns.
+- **Bugs pré-execução corrigidos**: `is_expired()` off-by-one (`>` → `>=`), detector
+  level-0 para nested defs em KB-018, `pythonpath=["."]` restaurado no `pyproject.toml`,
+  encoding unicode fix em `run-fortran-parity.sh`, `tensorflow` removido de mypy deps.
+- **Code review 4 findings**: guard path traversal em `backup-pre-edit.sh`, fallback
+  `pwd` em `release-lock.sh`, boundary `>=` em `cleanup_backups.sh`, `grep --` separator.
+- **Resultado final**: 19/19 PASS, 0 XFAIL, 0 SKIP.
+
+---
+
 ## [2.21] — 2026-05-02
 
 ### Causa-raiz da regressão histórica encontrada via análise old_geosteering_ai/
