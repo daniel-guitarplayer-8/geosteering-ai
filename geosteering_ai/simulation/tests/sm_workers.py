@@ -73,14 +73,35 @@ _PERSISTENT_POOL_CONFIG: Optional[Tuple[int, int, str]] = None
 def _numba_init_worker(n_threads: int, hankel_filter: str) -> None:
     """Inicializador do pool — roda UMA vez por worker ao spawnar.
 
-    Configura variáveis de ambiente, importa o simulador e aquece o cache
-    JIT Numba com um modelo trivial. Após este ponto, ``run_numba_chunk``
-    pula a fase de warmup graças ao flag ``_WORKER_INITIALIZED``.
+    Aquece o cache JIT Numba com modelos triviais (single-combo e multi-combo).
+    Após este ponto, ``run_numba_chunk`` pula a fase de warmup.
+
+    Note:
+        NÃO setamos ``NUMBA_NUM_THREADS`` aqui. Quando este inicializador
+        é chamado, ``geosteering_ai.simulation`` já foi importado como
+        efeito colateral do unpickle do próprio worker (Python importa o
+        pacote pai ``geosteering_ai.simulation.__init__`` para resolver o
+        módulo onde esta função está definida). Nesse ponto Numba já foi
+        inicializado com ``NUMBA_NUM_THREADS = os.cpu_count()`` (valor
+        padrão quando a env var não está presente no ambiente herdado).
+
+        Mudar ``os.environ["NUMBA_NUM_THREADS"]`` APÓS o import de Numba
+        faz com que ``reload_config()`` (chamado internamente pelo compilador
+        JIT durante a primeira compilação de funções ``prange``) detecte uma
+        discrepância entre a env var ("4") e o valor em
+        ``numba.config.NUMBA_NUM_THREADS`` (cpu_count) e lance
+        ``RuntimeError: Cannot set NUMBA_NUM_THREADS to a different value``.
+
+        A contagem ATIVA de threads é controlada exclusivamente via
+        ``numba.set_num_threads(n_threads)`` dentro de ``simulate_multi``
+        (através de ``SimulationConfig.num_threads``). Esse mecanismo
+        *mascara* threads (pool completo lançado, mas só n_threads ativas)
+        sem alterar o env var nem causar o erro de reconfiguração.
     """
     global _WORKER_INITIALIZED
     if _WORKER_INITIALIZED:
         return
-    os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
+    # OMP_NUM_THREADS controla BLAS/MKL — seguro setar após import de Numba.
     os.environ["OMP_NUM_THREADS"] = str(n_threads)
     os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
     os.environ.setdefault("KMP_WARNINGS", "FALSE")
@@ -92,13 +113,26 @@ def _numba_init_worker(n_threads: int, hankel_filter: str) -> None:
         _cfg = SimulationConfig(
             backend="numba", num_threads=n_threads, hankel_filter=hankel_filter
         )
+        # Warmup 1: single-combo → compila _simulate_positions_njit_cached
         simulate_multi(
             rho_h=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
             rho_v=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
             esp=_np.array([5.0, 5.0], dtype=_np.float64),
-            positions_z=_np.array([0.0], dtype=_np.float64),
+            positions_z=_np.array([0.0, 5.0], dtype=_np.float64),
             frequencies_hz=[20000.0],
             tr_spacings_m=[1.0],
+            dip_degs=[0.0],
+            cfg=_cfg,
+        )
+        # Warmup 2: multi-combo → pré-compila _simulate_combined_prange para
+        # evitar JIT cold-start na primeira simulação real multi-TR/multi-ângulo.
+        simulate_multi(
+            rho_h=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
+            rho_v=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
+            esp=_np.array([5.0, 5.0], dtype=_np.float64),
+            positions_z=_np.array([0.0, 5.0], dtype=_np.float64),
+            frequencies_hz=[20000.0, 40000.0],
+            tr_spacings_m=[1.0, 2.0],
             dip_degs=[0.0],
             cfg=_cfg,
         )
@@ -118,6 +152,25 @@ def _acquire_numba_pool(
 
     Se o pool existente tiver configuração diferente, o antigo é encerrado
     sem esperar antes de criar o novo.
+
+    Note (v2.16):
+        Sprint 15.1 — antes do spawn dos workers, setamos
+        ``NUMBA_NUM_THREADS = n_threads`` no env do processo pai. Os workers
+        spawn herdam este env, e Numba lê o valor durante a primeira
+        ``import numba`` no worker (que é disparada pelo unpickle do próprio
+        ``_numba_init_worker``). Resultado: o pool de threads do Numba dentro
+        de cada worker nasce dimensionado em ``n_threads``, e
+        ``numba.set_num_threads(n_threads)`` em ``simulate_multi`` apenas
+        confirma esse mascaramento (sem RuntimeError).
+
+        Em v2.15 (commits 0f92035 + e1c8864), este passo foi removido sob a
+        teoria de que ``set_num_threads`` resolveria sozinho. Mas como o
+        pool nasce com ``cpu_count()`` (16 em hyperthreaded), e
+        ``set_num_threads`` falha silenciosamente em chamadas posteriores
+        em alguns estados internos, workers acabavam rodando com threads
+        ativas em estado indefinido — provocando regressão 4–8×.
+
+        Mantemos ``OMP_NUM_THREADS = n_threads`` para BLAS/MKL.
     """
     global _PERSISTENT_POOL, _PERSISTENT_POOL_CONFIG
     cfg_key = (n_workers, n_threads, hankel_filter)
@@ -129,6 +182,14 @@ def _acquire_numba_pool(
                 _PERSISTENT_POOL.shutdown(wait=False)
             except Exception:
                 pass
+        # ── FIX v2.16: dimensionar pool de threads do Numba no spawn ─────
+        # Setado no PAI antes do spawn — herdado pelos workers. Numba lê
+        # NUMBA_NUM_THREADS na primeira import (durante o spawn dos workers).
+        os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
+        os.environ["OMP_NUM_THREADS"] = str(n_threads)
+        os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
+        os.environ.setdefault("KMP_WARNINGS", "FALSE")
+        # ────────────────────────────────────────────────────────────────
         _PERSISTENT_POOL = ProcessPoolExecutor(
             max_workers=n_workers,
             mp_context=_mp.get_context("spawn"),
@@ -218,9 +279,11 @@ def run_numba_chunk(
 ) -> Tuple[int, np.ndarray, np.ndarray, float]:
     """Executa ``simulate_multi`` num chunk de modelos dentro de um worker.
 
-    O ambiente ``NUMBA_NUM_THREADS`` é definido ANTES do import de numba,
-    garantindo que o thread pool do subprocesso respeite o valor solicitado.
-    A primeira chamada é descartada (warmup JIT).
+    O número ativo de threads Numba é controlado via ``cfg.num_threads``
+    (mascaramento interno com ``numba.set_num_threads``). Não alteramos
+    ``NUMBA_NUM_THREADS`` em env var — ver nota em ``_numba_init_worker``.
+    A primeira chamada é descartada (warmup JIT) quando o pool initializer
+    não a executou.
 
     Args:
         progress_q: ``multiprocessing.Queue`` opcional. Quando fornecido, o
@@ -236,10 +299,9 @@ def run_numba_chunk(
         Tupla ``(worker_id, H_stack, z_obs, elapsed_sec)`` onde
         ``H_stack`` tem shape ``(n_chunk, nTR, nAng, n_pos, nf, 9)``.
     """
-    os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
+    # OMP_NUM_THREADS: limita BLAS/MKL por worker (seguro setar após import Numba).
+    # NUMBA_NUM_THREADS NÃO é setado aqui — ver docstring de _numba_init_worker.
     os.environ["OMP_NUM_THREADS"] = str(n_threads)
-    # Suprimir aviso "omp_set_nested deprecated" do libomp (LLVM OMP usado pelo Numba).
-    # OMP_MAX_ACTIVE_LEVELS=2 substitui OMP_NESTED e deve ser definido antes do import.
     os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
     os.environ.setdefault("KMP_WARNINGS", "FALSE")
 
@@ -702,6 +764,11 @@ class SimulationThread(QThread):
         use_progress_q = n_workers == 1
 
         t0 = time.perf_counter()
+        # t0_sim: redefinido no branch Numba APÓS todos os workers completarem
+        # _numba_init_worker (spawn + JIT). Throughput usa t0_sim para excluir
+        # overhead de pool creation (~10–12 s no cold start).
+        # t0 permanece como referência de tempo total (pool + simulação).
+        t0_sim: Optional[float] = None
         done = 0
         throughput = 0.0
         H_parts: Dict[int, np.ndarray] = {}
@@ -731,6 +798,33 @@ class SimulationThread(QThread):
 
         try:
             if req.backend == "numba":
+                # ── Sprint 17.1 (v2.17): diagnóstico de paralelismo ──────
+                # Loga topologia da CPU e detecta oversubscrição (workers
+                # × threads > cores físicos), que causa perda 30-50% em
+                # CPUs com Hyperthreading/SMT. Esta era a CAUSA RAIZ da
+                # regressão remanescente em produção GUI (38k mod/h):
+                # defaults v2.16 produziam 4w × 4t = 16 threads em 8 cores
+                # físicos = 2× oversubscrição.
+                try:
+                    from geosteering_ai.simulation import detect_cpu_topology
+
+                    _logical, _phys, _has_ht = detect_cpu_topology()
+                    _total_threads = n_workers * int(req.n_threads)
+                    _ht_tag = " (HT/SMT)" if _has_ht else ""
+                    self.log.emit(
+                        f"CPU: {_phys} cores físicos · {_logical} threads "
+                        f"lógicas{_ht_tag} · alvo paralelo: {_total_threads} threads"
+                    )
+                    if _total_threads > _phys:
+                        factor = _total_threads / max(1, _phys)
+                        self.log.emit(
+                            f"  ⚠ AVISO: oversubscrição {factor:.2f}× "
+                            f"({_total_threads} threads > {_phys} cores físicos). "
+                            f"Performance pode degradar 30-50%. Recomendado: "
+                            f"reduzir workers ou threads para {_phys} threads totais."
+                        )
+                except Exception:
+                    pass
                 self.log.emit(
                     f"Numba — {n_workers} workers × {req.n_threads} threads "
                     f"({n_total} modelos)."
@@ -739,6 +833,27 @@ class SimulationThread(QThread):
                 # (pool initializer). Spawn/import/JIT só ocorrem na PRIMEIRA
                 # simulação ou quando n_workers/n_threads/hankel_filter mudam.
                 pool = _acquire_numba_pool(n_workers, req.n_threads, req.hankel_filter)
+                # ── Sprint 18.1 (v2.18): aguarda init dos workers, define t0_sim ──
+                # _noop só executa após _numba_init_worker completar no worker.
+                # Pool warm (2.ª simulação mesma sessão) → retorna em ~0 ms.
+                # Pool frio (primeira abertura da GUI) → bloqueia até spawn +
+                # import geosteering_ai + 2× simulate_multi JIT warmup (~10–12 s
+                # em hardware 8C). t0_sim excluí esse overhead: throughput_mod_h
+                # passa a refletir a velocidade real de simulação (≈ 85k mod/h em
+                # 8C com 4 workers × 2 threads) em vez de ~38k que incluía setup.
+                _init_futs = [pool.submit(_noop) for _ in range(n_workers)]
+                for _if in _init_futs:
+                    try:
+                        _if.result(timeout=120)
+                    except Exception:
+                        pass
+                t0_sim = time.perf_counter()
+                _warmup_s = t0_sim - t0
+                if _warmup_s > 0.5:
+                    self.log.emit(
+                        f"  Pool aquecido em {_warmup_s:.1f}s (spawn + JIT). "
+                        "Throughput mede apenas simulação daqui em diante."
+                    )
                 futures = {
                     pool.submit(
                         run_numba_chunk,
@@ -781,7 +896,7 @@ class SimulationThread(QThread):
                             continue
                         if evt.get("event") == "block":
                             self._emit_block_log(evt)
-                            dt = max(time.perf_counter() - t0, 1e-6)
+                            dt = max(time.perf_counter() - (t0_sim or t0), 1e-6)
                             throughput = float(evt["done"]) / dt * 3600.0
                             self.progress_update.emit(
                                 int(evt["done"]), n_total, throughput
@@ -791,7 +906,7 @@ class SimulationThread(QThread):
                     if z_obs_ref is None and z_obs.size > 0:
                         z_obs_ref = z_obs
                     done = H_stack.shape[0]
-                    dt = max(time.perf_counter() - t0, 1e-6)
+                    dt = max(time.perf_counter() - (t0_sim or t0), 1e-6)
                     throughput = done / dt * 3600.0
                     self.progress_update.emit(done, n_total, throughput)
                     self.log.emit(
@@ -809,7 +924,7 @@ class SimulationThread(QThread):
                         if z_obs_ref is None and z_obs.size > 0:
                             z_obs_ref = z_obs
                         done += H_stack.shape[0]
-                        dt = max(time.perf_counter() - t0, 1e-6)
+                        dt = max(time.perf_counter() - (t0_sim or t0), 1e-6)
                         throughput = done / dt * 3600.0
                         self.progress_update.emit(done, n_total, throughput)
                         self.log.emit(
@@ -834,6 +949,9 @@ class SimulationThread(QThread):
                 else:
                     H_full = np.empty((0,), dtype=np.complex128)
                 elapsed_total = time.perf_counter() - t0
+                # sim_elapsed: apenas tempo de simulação (exclui warmup de pool).
+                # t0_sim é definido após os _noop confirmarem init dos workers.
+                sim_elapsed = time.perf_counter() - (t0_sim or t0)
                 # Linha-resumo de finalização com 89 traços (mesmo padrão de
                 # fifthBuildTIVModels.py:1294).
                 self.log.emit("─" * 89)
@@ -847,7 +965,7 @@ class SimulationThread(QThread):
                         "H_stack": H_full,
                         "z_obs": z_obs_ref,
                         "elapsed": elapsed_total,
-                        "throughput_mod_h": n_total / max(elapsed_total, 1e-6) * 3600.0,
+                        "throughput_mod_h": n_total / max(sim_elapsed, 1e-6) * 3600.0,
                         "n_models": n_total,
                     }
                 )
@@ -963,6 +1081,73 @@ class SimulationThread(QThread):
                     mp_manager.shutdown()
                 except Exception:
                     pass
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# QThread para pré-aquecimento do pool Numba em background (v2.18)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class PoolWarmupThread(QThread):
+    """Pré-aquece o pool Numba persistente em background para eliminar cold-start.
+
+    Quando ``SimulationPage`` é aberta, esta thread cria/reusa o pool com os
+    defaults recomendados e aguarda todos os workers completarem
+    ``_numba_init_worker`` (spawn + import + 2× JIT warmup ≈ 10–12 s no
+    primeiro uso). Na primeira simulação real, o pool já está pronto:
+
+    ┌──────────────────────────────────────────────────────────────────────┐
+    │  Sem pre-warm (v2.17):                                              │
+    │    Usuário clica "Simular" → cold pool → 10–12 s overhead incluído  │
+    │    no throughput → 38k mod/h reportado (vs. 85k real)               │
+    │                                                                      │
+    │  Com pre-warm (v2.18):                                              │
+    │    GUI abre → PoolWarmupThread inicia (bg) → pool aquecido em ~12 s │
+    │    Usuário clica "Simular" → pool já pronto → t0_sim ≈ imediato     │
+    │    → throughput = 85k mod/h (velocidade real de simulação)          │
+    └──────────────────────────────────────────────────────────────────────┘
+
+    Signals:
+        warmup_done(elapsed_s, n_workers, n_threads): Pool pronto.
+        warmup_error(msg): Falha não-fatal (pool será criado na simulação).
+
+    Note:
+        Usa ``hankel_filter="werthmuller_201pt"`` (padrão) para pre-warm.
+        Se o filtro real for diferente, o pool é recriado na simulação
+        (custo único). Para a configuração padrão, o warm hit é garantido.
+    """
+
+    warmup_done = Signal(float, int, int)  # elapsed_s, n_workers, n_threads
+    warmup_error = Signal(str)
+
+    def __init__(
+        self,
+        n_workers: int,
+        n_threads: int,
+        hankel_filter: str = "werthmuller_201pt",
+        parent: Optional["QObject"] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._n_workers = n_workers
+        self._n_threads = n_threads
+        self._hankel_filter = hankel_filter
+
+    def run(self) -> None:
+        """Adquire o pool e aguarda init de todos os workers via _noop."""
+        t0 = time.perf_counter()
+        try:
+            pool = _acquire_numba_pool(
+                self._n_workers, self._n_threads, self._hankel_filter
+            )
+            # _noop só executa após _numba_init_worker completar no worker.
+            futs = [pool.submit(_noop) for _ in range(self._n_workers)]
+            for f in futs:
+                f.result(timeout=120)
+            self.warmup_done.emit(
+                time.perf_counter() - t0, self._n_workers, self._n_threads
+            )
+        except Exception as exc:
+            self.warmup_error.emit(str(exc))
 
 
 # ──────────────────────────────────────────────────────────────────────────

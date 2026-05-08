@@ -865,21 +865,51 @@ def simulate_multi(
     z_obs_filled = np.zeros(nAngles, dtype=bool)
 
     # ── Loop principal: iTR × iAng (serial-outer, paralelo-inner) ──
-    # Import tardio para evitar import circular via forward.py no teste
+    # Import tardio para evitar import circular via forward.py no teste.
+    # v2.15 P1: bloco único (eliminado import duplicado de _simulate_combined_prange).
+    # _simulate_combined_prange é o dispatcher Sprint 13.3 (prange flat TR×ang).
     from geosteering_ai.simulation.forward import (
-        _simulate_combined_prange,  # Sprint 13.3: prange flat TR×ang
-    )
-    from geosteering_ai.simulation.forward import (
-        _simulate_combined_prange,  # Sprint 13.3: prange flat TR*ang
+        _simulate_combined_prange,
         _simulate_positions_njit_cached,
         _simulate_positions_parallel,
     )
 
-    # Sprint 2.10: numero de threads (respeita cfg.num_threads)
+    # ── Sprint 15.1 (v2.16): mascaramento de threads observável ──────────────
+    # Numba não permite alterar `NUMBA_NUM_THREADS` (tamanho do pool) após
+    # threads lançadas, mas `set_num_threads(n)` mascara o número de threads
+    # ATIVAS (n ≤ NUMBA_NUM_THREADS). Em workers subprocess (SM GUI), Numba
+    # é importado durante o spawn com `NUMBA_NUM_THREADS = cpu_count()`
+    # (default), e `set_num_threads(cfg.num_threads)` mascara para n.
+    #
+    # Pré-condição crítica: `NUMBA_NUM_THREADS ≥ cfg.num_threads`. Se o pai
+    # do subprocess setar `NUMBA_NUM_THREADS` ANTES do spawn (ver
+    # `_acquire_numba_pool` em sm_workers.py), o pool nasce com tamanho
+    # adequado e este bloco apenas mascara para o valor desejado.
+    #
+    # Histórico v2.15 (commits 0f92035 + e1c8864): este bloco era envolvido
+    # em `try/except RuntimeError: pass`, silenciando falhas e provocando
+    # regressão de 4–8× em produção (workers acabavam com threads ativas
+    # em estado indefinido). v2.16 substitui por `logger.warning` para
+    # tornar a falha observável sem interromper a execução.
     if cfg.num_threads > 0 and HAS_NUMBA:
         import numba as _numba
 
-        _numba.set_num_threads(cfg.num_threads)
+        current_active = _numba.get_num_threads()
+        if current_active != cfg.num_threads:
+            try:
+                _numba.set_num_threads(cfg.num_threads)
+            except RuntimeError as exc:
+                pool_size = _numba.config.NUMBA_NUM_THREADS
+                logger.warning(
+                    "numba.set_num_threads(%d) falhou (threads ativas atual=%d, "
+                    "pool size NUMBA_NUM_THREADS=%d): %s. Performance pode "
+                    "degradar significativamente; verifique se o env var "
+                    "NUMBA_NUM_THREADS foi setado antes do spawn dos workers.",
+                    cfg.num_threads,
+                    current_active,
+                    pool_size,
+                    exc,
+                )
 
     # ── Sprint 13.3: Materialização pré-dispatch para prange(nTR*nAngles*n_pos) flat ──
     # Estrutura para despacho adaptativo: usar nova prange quando n_combos >= 2
@@ -900,14 +930,19 @@ def simulate_multi(
                 dip_rads_flat[k] = dip_rad
 
         # ── Passo 2: Deduplicação (cache_indices + key_to_idx) ─────────
-        unique_keys = list(dict.fromkeys(
-            round(2.0 * r_halfs[k], _HORDIST_KEY_DECIMALS) for k in range(n_combos)
-        ))
+        unique_keys = list(
+            dict.fromkeys(
+                round(2.0 * r_halfs[k], _HORDIST_KEY_DECIMALS) for k in range(n_combos)
+            )
+        )
         key_to_idx = {key: idx for idx, key in enumerate(unique_keys)}
-        cache_indices = np.array([
-            key_to_idx[round(2.0 * r_halfs[k], _HORDIST_KEY_DECIMALS)]
-            for k in range(n_combos)
-        ], dtype=np.int64)
+        cache_indices = np.array(
+            [
+                key_to_idx[round(2.0 * r_halfs[k], _HORDIST_KEY_DECIMALS)]
+                for k in range(n_combos)
+            ],
+            dtype=np.int64,
+        )
 
         # ── Passo 3: Stack de caches únicos [n_unique, nf, npt, n] ─────
         unique_tuples = [caches[key] for key in unique_keys]
@@ -952,20 +987,23 @@ def simulate_multi(
         )
 
         # ── Passo 5: z_obs em Python (não hot-path) ───────────────────
+        # v2.15 P1 (code review): preserva semântica v2.14 (z_obs amostrado
+        # apenas pelo primeiro TR para cada ângulo) eliminando o loop
+        # interior O(nTR) seguido de ``break`` imediato. O resultado
+        # bit-exato é o mesmo, com complexidade O(nAngles × n_pos) em vez
+        # de O(nTR × nAngles × n_pos).
+        L0 = float(tr_arr[0])  # primeiro TR — semântica v2.14 preservada
         for i_ang in range(nAngles):
             dip_rad = float(dip_rads[i_ang])
+            dz_half = 0.5 * L0 * math.cos(dip_rad)
             for j in range(n_pos):
                 z_mid = positions_z[j]
-                for i_tr in range(nTR):
-                    L = float(tr_arr[i_tr])
-                    dz_half = 0.5 * L * math.cos(dip_rad)
-                    Tz = z_mid + dz_half
-                    cz = z_mid - dz_half
-                    z_obs_j, rh_j, rv_j = compute_zrho(Tz, cz, n, rho_h, rho_v, esp)
-                    z_obs[i_ang, j] = z_obs_j
-                    rho_h_at_obs[i_ang, j] = rh_j
-                    rho_v_at_obs[i_ang, j] = rv_j
-                    break  # Só preencher uma vez por ângulo
+                Tz = z_mid + dz_half
+                cz = z_mid - dz_half
+                z_obs_j, rh_j, rv_j = compute_zrho(Tz, cz, n, rho_h, rho_v, esp)
+                z_obs[i_ang, j] = z_obs_j
+                rho_h_at_obs[i_ang, j] = rh_j
+                rho_v_at_obs[i_ang, j] = rv_j
 
     else:
         # ── Fallback: dispatcher serial v2.13 (single-combo ou serial) ──

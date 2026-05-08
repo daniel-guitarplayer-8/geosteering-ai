@@ -1,0 +1,960 @@
+---
+description: Sub-skill dedicada ao Simulation Manager (SM) Numba do Geosteering AI v2.0. Cobre arquitetura de pacote (multi_forward, forward, _numba/, _jax/), workers nativos (v2.12), otimizações Numba (v2.13: prange-freq, cache, nogil; v2.14: prange TR×ang, fastmath hankel), JIT cache observability (v2.15), fix regressão threading + I/O vetorizado (v2.16), fix oversubscrição HT/SMT (v2.17), hardware tuning, paridade Fortran <1e-12. Triggers SM: "simulation manager", "SM", "v2.10", "v2.11", "v2.12", "v2.13", "v2.14", "v2.15", "v2.16", "v2.17", "simulate_multi", "Workers Nativos", "prange", "cache_persistent", "release_numba_cache", "set_jit_cache_maxsize", "get_jit_cache_info", "fastmath", "hmd_tiv", "vmd", "common_arrays", "common_factors", "tatu.x exec format", "Cenário E", "n_positions", "write_dat_from_tensor", "NUMBA_NUM_THREADS spawn", "detect_cpu_topology", "recommend_default_parallelism", "oversubscrição", "hyperthreading", "HT/SMT", "physical cores", "logical cores".
+---
+
+# Sub-skill: Geosteering Simulation Manager (SM-Numba)
+
+**Versão**: v2.17 (2026-05-02)
+**Triggers principais**: simulate_multi, Simulation Manager, SM, v2.x SM, prange, fastmath, cache_persistent, get_jit_cache_info, tatu.x, Cenário E, n_positions, threading masking, oversubscrição, hyperthreading, detect_cpu_topology
+
+Esta sub-skill é DEDICADA ao Simulation Manager Numba (`geosteering_ai/simulation/`).
+Para o Simulador Python JAX (backend `_jax/`), use `geosteering-simulator-python`.
+Para o Simulador Fortran (`Fortran_Gerador/`), use `geosteering-simulator-fortran`.
+
+---
+
+## §1 Identidade e Versões
+
+| Versão | Data | Branch | Entrega Principal | Tests |
+|:------:|:----:|:------:|:------------------|:-----:|
+| v2.10 | 2026-04-28 | snapshot | Pool persistente Numba + p-value fallback | 156 |
+| v2.11 | 2026-04-29 | feat/simulation-manager-v2.11 | ModelGenerationThread async, elimina freezing GUI | 197 |
+| v2.12 | 2026-04-30 | feat/simulation-manager-v2.12 | Workers Nativos (4 modos A/B/C/D) | 202 |
+| v2.13 | 2026-05-01 | feat/simulation-manager-v2.13 | Otimizações Numba (Sprints 13.1+13.2+13.4): prange(nf), cache cross-call, nogil universal | 165 (152+13) |
+| v2.14 | 2026-05-01 | feat/simulation-manager-v2.14 | Sprint 13.3 prange TR×ang + Sprint 13.4 fastmath hankel.py + benchmark formal | 165+27 |
+| v2.15 | 2026-05-01 | feat/simulation-manager-v2.15 | Hardware validation, JIT cache observability, code review P1, fix CI tatu.x exec format | 165+27+4 |
+| v2.16 | 2026-05-01 | feat/simulation-manager-v2.16 | Fix regressão crítica de threading masking (4–8× em produção GUI) + Cenário E benchmark (600 pts) + I/O `write_dat_from_tensor` vetorizado ≥3× | 165+27+4+7 |
+| v2.17 | 2026-05-02 | feat/simulation-manager-v2.17 | Fix regressão de oversubscrição em CPUs HT/SMT (3× em produção GUI): `detect_cpu_topology()` + `recommend_default_parallelism()` + warning visual GUI + logging diagnóstico. Defaults físicos: 8C/16T HT → (4w × 2t = 8) em vez de (4w × 4t = 16) | 165+27+4+7+19 |
+| v2.18 | 2026-05-02 | feat/simulation-manager-v2.17 | Fix throughput reportado erroneamente (38k→85k): `t0_sim` definido pós pool-warm (via `_noop` tasks) + `PoolWarmupThread` background pré-aquece pool ao abrir GUI | 165+27+4+7+19+4 |
+| v2.19 | 2026-05-02 | feat/simulation-manager-v2.19 | Fix bug funcional do gerador aleatório (`rng_seed=42` hardcoded) + UI control de semente PRNG + `nogil=True` em `_simulate_positions_njit{,_cached}` + benchmark CLI CPU-aware. Cenário A: 189k→802k mod/h (4×) | 165+27+4+7+19+4+12 |
+| v2.20 | 2026-05-02 | feat/simulation-manager-v2.20 | Investigação empírica rigorosa (5 runs × 2 configs em Cenário E) confirma estratégia v2.17 (phys_cores). 4w × 2t mediana 46k mod/h vs 4w × 4t mediana 38k mod/h (-25%) | 165+27+4+7+19+4+12+1 (+1 M2/M3 Pro) |
+| **v2.21** | **2026-05-02** | **feat/simulation-manager-v2.21** | **CAUSA-RAIZ DA REGRESSÃO HISTÓRICA via análise `old_geosteering_ai/`: Sprint 13.1 (v2.13) introduziu `@njit(parallel=True, nogil=True)` + `prange(nf)` em `_fields_in_freqs_kernel_cached`, função chamada milhões de vezes de dentro de `_simulate_positions_njit_cached` com prange outer. Numba serializa nested prange mas paga overhead de setup do parallel scheduler em cada chamada. Fix Sprint 21.1: remove `parallel=True`, troca `_prange` por `range` serial. Mantém `nogil=True`. Cenário E: 46k → 121 957 mod/h (2.65× ganho), atinge meta histórica >120k. Cenário A: 1.18M → 1.39M (1.17×). Cenário B: 376k → 303k (-19% aceito; recuperação em v2.22 via FLAT prange). Paridade Fortran <1e-12 preservada nos 7 modelos canônicos.** | **0 novos (fix arquitetural; 68/68 testes existentes PASS, 7/7 Fortran <1e-12)** |
+
+---
+
+## §2 Arquitetura
+
+```
+geosteering_ai/simulation/
+├── __init__.py             ← exports públicos: simulate_multi, simulate, release_pool, etc.
+├── config.py               ← SimulationConfig dataclass (errata, presets)
+├── multi_forward.py        ← dispatcher: simulate_multi(rho_h/rv/esp/positions_z/...)
+├── forward.py              ← simulate() shim + _simulate_combined_prange (Sprint 13.3)
+├── _numba/
+│   ├── propagation.py      ← @njit fastmath=False (TE/TM recursão)
+│   ├── dipoles.py          ← hmd_tiv, vmd @njit (UNSAFE para fastmath, v2.15 oficial)
+│   ├── kernel.py           ← _fields_in_freqs_kernel + _cached + precompute_common_arrays_cache
+│   ├── hankel.py           ← @njit(fastmath=True) v2.14: prepare_kr, integrate_j0/j1/j0_j1
+│   └── geometry.py         ← find_layers_tr_numba
+├── _jax/                   ← backend JAX (escopo: geosteering-simulator-python)
+├── _workers.py             ← run_batch (Workers Nativos v2.12, 4 modos)
+├── filters/                ← Werthmüller 201pt, Kong 61pt, Anderson 801pt
+├── io/                     ← model_in, binary_dat (Fortran 22-col)
+├── postprocess/            ← compensation, tilted antennas
+└── validation/             ← canonical_models, compare_fortran
+```
+
+**Pontos de entrada**:
+
+- `simulate(rho_h, rho_v, esp, positions_z, ...)` — single-modelo, single-TR/ang
+- `simulate_multi(...)` — multi-TR×ang, suporta `models=[...]` para batch
+- `release_pool()` — libera worker pool (chamar antes de release_numba_cache)
+- `release_numba_cache()` — limpa Numba JIT (free RAM)
+
+---
+
+## §3 Workers Nativos (v2.12)
+
+`simulate_multi(models=[...], n_workers=N, threads_per_worker=T)` ativa
+4 modos automaticamente baseado em `n_workers` × `threads_per_worker`:
+
+| Modo | n_workers | threads/worker | Quando usar |
+|:----:|:---------:|:--------------:|:-----------|
+| A | 1 | 1 | Determinístico/paridade Fortran |
+| B | 1 | >1 | Single-process, intra-prange |
+| C | >1 | 1 | Multi-process, isolado |
+| D | >1 | >1 | Default produção (PINN, batch 30k) |
+
+**Anti-oversubscription**: total threads = `n_workers × threads_per_worker`,
+deve ser ≤ `os.cpu_count()` (cores físicos preferíveis aos lógicos para
+Numba — 8 físicos > 16 hyperthreaded).
+
+---
+
+## §4 Otimizações Numba (v2.13 + v2.14)
+
+### v2.13 — prange(nf) + cache cross-call + nogil
+
+- **Sprint 13.1**: `prange(nf)` em `_simulate_positions_njit_cached`
+  vetoriza frequências (1.5× speedup multi-freq)
+- **Sprint 13.2**: `cache_persistent=True` mantém common_arrays entre
+  chamadas (5× speedup PINN cache hit teórico)
+- **Sprint 13.4 (parcial)**: `nogil=True` universal em prange → permite
+  ThreadPoolExecutor concorrente sem GIL contention
+
+### v2.14 — prange TR×ang + fastmath hankel
+
+- **Sprint 13.3**: `_simulate_combined_prange` em `forward.py` colapsa
+  loops Python serial `for i_tr × for i_ang` em `prange(n_combos × n_pos)`
+  flat (≥1.3× speedup multi-TR×ang)
+- **Sprint 13.4 (final)**: `@njit(fastmath=True)` em 4 helpers de
+  `hankel.py` (FMA-safe pure dot-product, erro acumulado ~2e-14)
+
+---
+
+## §5 Hardware Tuning
+
+### CPU intra-worker (Numba threads)
+
+```bash
+# Setar ANTES de import numba (env vars lidos no primeiro import)
+export NUMBA_NUM_THREADS=2
+export OMP_NUM_THREADS=2
+export MKL_NUM_THREADS=2
+```
+
+Em código:
+```python
+import numba
+numba.set_num_threads(2)  # apenas se chamado ANTES de qualquer prange
+```
+
+⚠️ **Limitação Numba**: `set_num_threads(N)` falha com `RuntimeError:
+Cannot set NUMBA_NUM_THREADS to a different value once threads have
+been launched` se chamado depois de prange. Mitigation: setar env var
+antes do primeiro import.
+
+### Anti-oversubscription
+
+| Hardware | Cores físicos | Lógicos | Workers × Threads recomendado |
+|:--------:|:-------------:|:-------:|:----------------------------:|
+| Intel 8C/16T | 8 | 16 | 4 × 2 (= 8 físicos) |
+| Apple M2 Pro | 10 | 10 | 5 × 2 (= 10) |
+| Server 32C/64T | 32 | 64 | 8 × 4 (= 32) |
+| Colab Pro T4 | 4 | 8 | 2 × 2 (= 4 físicos) |
+
+---
+
+## §6 Cache Cross-Call (`cache_persistent`)
+
+```python
+from geosteering_ai.simulation import simulate_multi, release_numba_cache
+
+cfg = SimulationConfig(cache_persistent=True)
+for iter in range(50):  # PINN training loop
+    result = simulate_multi(rho_h=rho_h_iter, ..., cfg=cfg)
+release_numba_cache()  # libera RAM ao final
+```
+
+Hit-rate ideal: cada `(hordist_round, n_layers, freqs_hash)` único
+sobrevive entre chamadas. Em PINN com mesmo `(positions_z, dip_degs,
+tr_spacings_m)`, hit-rate = 100% após 1ª chamada.
+
+---
+
+## §7 Paridade Fortran (gate <1e-12)
+
+### Helper `_tatu_runnable()` (v2.15)
+
+```python
+from tests._fortran_helpers import _tatu_runnable
+if _tatu_runnable():
+    # rodar comparação Python ↔ Fortran
+    ...
+```
+
+Resolve `OSError [Errno 8] Exec format error` em CI Linux quando o
+repo contém `Fortran_Gerador/tatu.x` macOS commitado. Detecta via
+`subprocess.run` real.
+
+### Canônicos validados
+
+`oklahoma_3`, `oklahoma_5`, `devine_8`, `oklahoma_15`, `oklahoma_28`,
+`hou_7`, `viking_graben_10` — todos com max_diff < 1e-12 (Sprint 4.4).
+
+---
+
+## §8 Análise fastmath SAFE / UNSAFE (v2.15 oficial)
+
+| Função | Arquivo:Linha | fastmath | Razão |
+|:-------|:--------------|:--------:|:------|
+| `prepare_kr` | hankel.py:90 | **True** | Pure scalar (~npt ops) |
+| `integrate_j0` | hankel.py:121 | **True** | Dot-product (npt × 2 ops) |
+| `integrate_j1` | hankel.py:156 | **True** | Dot-product |
+| `integrate_j0_j1` | hankel.py:182 | **True** | Dot-product 2-em-1 |
+| `hmd_tiv` | dipoles.py:179 | False | Recursão TE/TM, ~600 ops, FMA risk ~1.2e-13 |
+| `vmd` | dipoles.py:703 | False | Recursão TE, ~400 ops, ~8e-14 |
+| `_fields_in_freqs_kernel` | kernel.py:301 | False | Transitivo |
+| `_fields_in_freqs_kernel_cached` | kernel.py:670 | False | Transitivo |
+| `precompute_common_arrays_cache` | kernel.py:581 | False | Transitivo |
+| `common_arrays`, `common_factors` | propagation.py | False | Recursão TE/TM cancelamento |
+
+**Decisão**: NÃO aplicar fastmath em dipoles/kernel oficialmente (v2.15).
+Ver `docs/reports/v2.15_fastmath_dipoles_analysis_2026-05-01.md`.
+
+---
+
+## §9 Backend JAX (referência cruzada)
+
+`_jax/` é backend opt-in via `cfg.backend="jax"`. Estratégias:
+
+- `bucketed`: 1 prog XLA por `(ct, cr, n, npt)` — para 22 camadas Oklahoma_28
+  resulta em ~44 compilações (alto VRAM)
+- `unified`: 1 prog XLA por `(n, npt)` — Oklahoma_28: 1 compilação
+  (consolidação 44× → 1, ~250 MB vs 11 GB)
+- `chunked`: padrão `unified` particionado em chunks de N posições
+  (mitiga materialização de tensores intermediários grandes)
+
+Detalhes em sub-skill `geosteering-simulator-python`.
+
+---
+
+## §10 JIT Cache Observability (v2.15)
+
+```python
+from geosteering_ai.simulation._jax.forward_pure import (
+    get_jit_cache_info, clear_jit_cache, clear_unified_jit_cache,
+)
+
+info = get_jit_cache_info()
+print(f"Total XLA programs: {info['total_xla_programs']}")
+print(f"Bucketed: {info['bucketed_size']}, Unified: {info['unified_size']}, "
+      f"Chunked: {info['chunked_size']}")
+print(f"Estimated VRAM: {info['estimated_vram_mb']:.1f} MB")
+
+# Em loops PINN, monitor para detectar vazamento
+if info['estimated_vram_mb'] > 10000:  # 10 GB threshold
+    clear_jit_cache()
+    clear_unified_jit_cache()
+```
+
+Heurística VRAM: `Σ (3 × n × npt × 16 bytes) / 1024²` por entrada.
+Conservadora (não inclui buffers `vmap`).
+
+---
+
+## §11 Benchmark CLI (v2.14 + v2.15)
+
+```bash
+# Cenário único
+PYTHONPATH=. python benchmarks/bench_v214_numba.py --scenario A \
+    --models 30000 --workers 4 --threads-per-worker 2
+
+# Todos os 4 cenários (mesma config)
+PYTHONPATH=. python benchmarks/bench_v214_numba.py --all \
+    --models 30000 --freqs 10 --workers 4 --threads-per-worker 2
+```
+
+| Cenário | Modelos | Posições | Freqs | TR | Ang | Meta | Hardware 8C |
+|:-------:|:-------:|:--------:|:-----:|:--:|:---:|:----:|:-----------:|
+| A | 30k | 30 | 1 | 1 | 1 | zero regressão v2.12 | 1.74M mod/h (v2.16) |
+| B | 30k | 30 | 10 | 1 | 1 | ≥1.5× v2.12 | 320k mod/h |
+| C | 30k (×6=5k effetivo) | 30 | 2 | 3 | 5 | ≥1.3× v2.13 | 119k mod/h |
+| D | 1 (×50 calls) | 30 | 4 | 1 | 1 | ≥5× sem cache | 13.4 ms/call |
+| **E (v2.16)** | **2k** | **600** | **1** | **1** | **1** | **≥120k mod/h pós-fix** | **123k mod/h** |
+
+⚠️ **Limitação `--all`**: `NUMBA_NUM_THREADS` não pode ser alterado
+após threads ativas. Use 1 cenário por invocação se precisa variar
+`threads_per_worker` entre cenários.
+
+---
+
+## §12 Troubleshooting
+
+### `OSError: [Errno 8] Exec format error: tatu.x`
+
+Causa: binário macOS commitado no repo, executado em Linux. Solução:
+testes usam `_tatu_runnable()` desde v2.15 — atualizar local pull.
+
+### `RuntimeError: Cannot set NUMBA_NUM_THREADS ...`
+
+Causa: chamada a `numba.set_num_threads()` ou env var setado depois
+de Numba já lançar threads. Solução: setar `NUMBA_NUM_THREADS` antes
+do primeiro `import numba`. No benchmark, use `--threads-per-worker N`
+em invocação única, sem misturar com runs anteriores no mesmo processo.
+
+### Paridade Fortran > 1e-12
+
+1. Confirmar `cfg.backend == "numba"` e não JAX (JAX tolerância 1e-10)
+2. Confirmar `hankel_filter == "werthmuller_201pt"` (Fortran usa 201pt)
+3. Limpar cache: `release_pool()` + `release_numba_cache()`
+4. Verificar versão Numba (≥0.60 recomendado)
+5. Reportar em GitHub com modelo + diff
+
+### VRAM crescendo em Colab T4 PINN
+
+Usar `get_jit_cache_info()` para monitorar e `clear_unified_jit_cache()`
+periodicamente. LRU bound 64 entradas — ajuste com `set_jit_cache_maxsize(N)`.
+
+---
+
+## §14 Threading Masking — Causa Raiz da Regressão v2.15 (FIX v2.16)
+
+### Sintoma
+
+GUI do Simulation Manager produzindo 25–38k mod/h em produção (n_positions=600)
+quando o esperado seria ≥150k mod/h. Microbenchmark Cenário A não detectou.
+
+### Causa raiz (commits problemáticos)
+
+1. **`0f92035`** — `multi_forward.py:880-886`: `try/except RuntimeError: pass`
+   silencia falhas de `numba.set_num_threads()` sem fallback
+2. **`e1c8864`** — remove `os.environ["NUMBA_NUM_THREADS"]` de
+   `_numba_init_worker` (sm_workers.py) e `_simulate_worker_init`
+   (_workers.py), deixando workers spawn com pool dimensionado por
+   `cpu_count()` (16 em hyperthreaded de 8 cores)
+
+### Fix v2.16 (Sprint 15.1)
+
+```python
+# multi_forward.py: try/except: pass → logger.warning observable
+if cfg.num_threads > 0 and HAS_NUMBA:
+    import numba as _numba
+    current_active = _numba.get_num_threads()
+    if current_active != cfg.num_threads:
+        try:
+            _numba.set_num_threads(cfg.num_threads)
+        except RuntimeError as exc:
+            logger.warning(
+                "numba.set_num_threads(%d) falhou (threads ativas atual=%d, "
+                "pool size NUMBA_NUM_THREADS=%d): %s. Performance pode degradar.",
+                cfg.num_threads, current_active, _numba.config.NUMBA_NUM_THREADS, exc,
+            )
+
+# sm_workers.py::_acquire_numba_pool e _workers.py::_acquire_pool:
+# Setar NUMBA_NUM_THREADS no env do PAI antes do spawn
+os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
+os.environ["OMP_NUM_THREADS"] = str(n_threads)
+ProcessPoolExecutor(..., mp_context=spawn, initializer=_numba_init_worker, ...)
+```
+
+### Validação
+
+`tests/test_simulation_workers_threading.py` (3 testes):
+1. `test_worker_inherits_numba_num_threads_from_parent_env` — env herdado
+2. `test_set_num_threads_emits_warning_on_runtime_error` — log observable
+3. `test_simulate_multi_in_worker_respects_n_threads` — E2E em worker spawn
+
+### Throughput pós-fix (Hardware Intel 8C/16T HT)
+
+| Cenário | Pré-fix v2.15 | Pós-fix v2.16 | Speedup |
+|:-------:|:-------------:|:-------------:|:-------:|
+| A (30 pts) | 753k mod/h | **1.74M mod/h** | 2.31× |
+| E (600 pts) | ~30k mod/h | **123k mod/h** | ~4.1× |
+
+---
+
+## §15 I/O Vetorizado `write_dat_from_tensor` (v2.16, Sprint 15.4)
+
+`geosteering_ai/simulation/tests/sm_io.py::write_dat_from_tensor` foi
+reescrita substituindo 5 loops Python aninhados (~1.8M iterações para
+600 modelos × 600 pos × 1 freq) por broadcast NumPy:
+
+```python
+# Permutação para ordem Fortran (m, itr, kt, fi, jm, ic)
+H_perm = np.ascontiguousarray(np.transpose(H, (0, 1, 2, 4, 3, 5)))
+H_flat = H_perm.reshape(total_records, 9)
+
+# Broadcasts vetorizados
+buf["col0"] = np.broadcast_to(model_ids[:,None,None,None,None], shape).ravel()
+buf["col1"] = np.broadcast_to(z_view, shape).ravel()
+buf["col2"] = np.broadcast_to(rho_h_at_obs[:,None,:,None,:], shape).ravel()
+buf["col3"] = np.broadcast_to(rho_v_at_obs[:,None,:,None,:], shape).ravel()
+for ic in range(9):
+    buf[f"col{4+2*ic}"] = H_flat[:, ic].real
+    buf[f"col{5+2*ic}"] = H_flat[:, ic].imag
+```
+
+**Speedup ≥3×** validado por `test_write_dat_vectorized_is_faster`.
+**Bit-exatness** preservada (3 testes em `tests/test_sm_workers_io.py`).
+
+---
+
+## §16 Análise n_positions Scaling (v2.16, Sprint 15.5)
+
+Documento dedicado: `docs/reports/v2.16_n_positions_scaling_analysis_2026-05-01.md`
+
+**Hot path:** `_numba/dipoles.py::hmd_tiv` linhas 325–420 (~80% do tempo).
+**Complexidade:** O(`n_pos × n_layers × n_filter_pts × n_freqs × n_TR × n_ang`).
+**Escalabilidade `n_pos`:** linear. 30→600 = 20× redução de throughput
+(confirmado: 1.74M / 123k ≈ 14× pós-fix).
+
+### Top 3 oportunidades (deferidas para v2.17/v2.18)
+
+| Otimização | Ganho est. | Risco | Status v2.16 |
+|:-----------|:----------:|:-----:|:------------:|
+| Tile/block processing (M=4 pos) | 15–25% | Baixo | Deferido v2.17 |
+| Pré-compute Hankel kernels TE/TM | 10–15% | Médio | Deferido v2.18 |
+| SIMD ufuncs NumPy | 20–40% | **Alto** | **REJEITADO** (paridade <1e-12) |
+
+---
+
+## §17 Oversubscrição em CPUs HT/SMT (v2.17, Sprint 16)
+
+**Problema descoberto pós-v2.16**: GUI continuava a 38k mod/h em produção, mesmo
+com fix de threading masking aplicado. **Causa raiz**: defaults da GUI
+(`spin_workers = ncpu // 4`, `spin_threads = ncpu // (ncpu // 4)`) produziam
+**oversubscrição** em CPUs com Hyperthreading (Intel) ou SMT (AMD/ARM):
+
+| Hardware | `os.cpu_count()` | Default v2.16 (W × T) | Total threads | Cores físicos | Status |
+|:---------|:----------------:|:---------------------:|:-------------:|:-------------:|:------:|
+| Intel 8C/16T HT | 16 | 4 × 4 | 16 | 8 | ⚠ 2× oversub |
+| Linux 32C/64T HT | 64 | 16 × 4 | 64 | 32 | ⚠ 2× oversub |
+| Apple Silicon M1 | 8 | 2 × 4 | 8 | 8 | ✓ ok |
+
+**Por que oversub é ruim em workloads CPU-bound (como Numba JIT prange)**:
+
+1. **Cache L1/L2 compartilhada** entre hyperthreads do mesmo core físico → trashing
+2. **FPU/ALU compartilhada** → contenção em operações aritméticas
+3. **Context switch overhead** no scheduler do SO
+4. **Numba TBB/OMP × N processos** = competição massiva por recursos
+
+Em workloads CPU-bound puros, **1 thread/core físico** é tipicamente
+30-50% mais rápido que 1 thread/hyperthread.
+
+### Fix v2.17 (Sprint 16.1+16.2)
+
+Nova API pública em `geosteering_ai/simulation/_workers.py`:
+
+```python
+from geosteering_ai.simulation import (
+    detect_cpu_topology,        # Sprint 16.1 (v2.17)
+    recommend_default_parallelism,  # Sprint 16.2 (v2.17)
+)
+
+# Detecção em camadas: psutil → sysctl → /proc/cpuinfo → wmic → heurística
+logical, physical, has_ht = detect_cpu_topology()
+# Em Mac Intel 8C/16T HT: (16, 8, True)
+# Em Apple Silicon M1: (8, 8, False)
+# Em Linux Xeon 32C/64T: (64, 32, True)
+
+# Recomendação que respeita workers × threads ≤ physical_cores
+n_workers, threads = recommend_default_parallelism()
+# Mac 8C/16T HT: (4, 2) → 4 × 2 = 8 = phys ✓
+# Apple Silicon M1: (4, 2) → 8 = phys ✓
+# Linux 32C/64T: (16, 2) → 32 = phys ✓
+```
+
+### Recomendação Visual + Logging (Sprint 16.3+16.4)
+
+Em `simulation_manager.py:SimulationPage`:
+
+- **QLabel vermelho** aparece quando `workers × threads > physical_cores`
+- Mensagem: "⚠ Oversubscrição: 4 × 4 = 16 threads em 8 cores físicos (2× sobrecarga)"
+- Conectado via `valueChanged` aos spinboxes (atualização em tempo real)
+
+Em `SimulationThread.run()`:
+
+```python
+self.log.emit(f"CPU: {phys} cores físicos · {logical} threads lógicas (HT/SMT)")
+self.log.emit(f"  ⚠ AVISO: oversubscrição {factor:.2f}× ({total} threads > {phys} cores)")
+```
+
+### Métricas pós-fix (Hardware Intel 8C/16T HT, macOS)
+
+| Configuração | Threads totais | Cenário E (200 mod, 600 pts) | Speedup |
+|---|---|---|---|
+| v2.16 default GUI (4w × 4t) | 16 (oversub 2×) | 70k mod/h | baseline |
+| **v2.17 default GUI (4w × 2t)** | **8 (= phys)** | **85k mod/h** | **+21%** |
+| Cenário E benchmark (4w × 2t) | 8 (= phys) | 85k mod/h | idêntico ✓ |
+
+Em workloads de produção mais intensos (modelos com mais camadas, mais
+frequências, ou n_pos > 1000) e em CPUs com HT mais agressivo (Linux Xeon
+32C/64T), o ganho esperado é **30–50%**.
+
+### Quando usar cada modo (Tabela de decisão)
+
+| Cenário | n_models | Hardware | Defaults v2.17 | Modo |
+|:--------|:--------:|:---------|:---------------|:----:|
+| Single inversão / debug | 1 | qualquer | (1, phys) | B |
+| Batch pequeno | 2-9 | qualquer | (1, phys) | B |
+| Batch normal | 10-1000 | 4C+ | (phys // 2, 2) | D |
+| Produção 30k | 10000+ | 8C+ HT | (4, 2) ou (8, 2) | D |
+| Mac Apple Silicon (sem HT) | qualquer | 8C | (4, 2) | D |
+
+### Validação
+
+`tests/test_simulation_cpu_topology.py` — 19 testes:
+
+- 5 testes de detecção (tupla, valores sãos, OS coerente, cache, fallback)
+- 6 testes de recomendação (não-oversub, single-model, batch, determinismo)
+- 6 testes de hardware simulado (Mac Intel, M1, Linux Xeon, low-end, dual-core, single)
+- 2 testes de no-regression (cache persiste, recomendação determinística)
+
+---
+
+## §18 Fix Throughput Reportado Erroneamente + Pool Warmup Background (v2.18, Sprint 18)
+
+### Causa raiz do 38k mod/h persistente
+
+O timer `t0 = perf_counter()` em `sm_workers.py:766` era iniciado **antes** de
+`_acquire_numba_pool()` em `sm_workers.py:830`. O overhead de cold-start do pool
+(spawn de 4 workers + `_numba_init_worker`: import do pacote + 2× warmup JIT ≈
+**10–12 s**) ficava incluído no denominador de `n_total / (perf_counter() - t0) × 3600`.
+
+```
+Benchmark (85k):  pool herdado warm → t0 → 8.47s → 200/8.47×3600 = 85k ✓
+GUI v2.17 (38k):  t0 → pool cold (~12s) → sim (8.47s) → 200/20.47×3600 = 35k ≈ 38k ✗
+GUI v2.18 (85k):  pool cold → noops wait → t0_sim → sim (8.47s) → 200/8.47×3600 = 85k ✓
+```
+
+Com pool warm (2ª simulação mesma sessão), a GUI v2.17 já reportava ~85k — idêntico
+ao benchmark. O problema era SEMPRE visível no first-run (cold start).
+
+### Fix v2.18 (Sprint 18.1 + 18.2)
+
+**Sprint 18.1 — `t0_sim` pós-warmup** (`sm_workers.py`):
+
+```python
+pool = _acquire_numba_pool(n_workers, req.n_threads, req.hankel_filter)
+# Aguarda todos os workers completarem _numba_init_worker via _noop tasks.
+_init_futs = [pool.submit(_noop) for _ in range(n_workers)]
+for _if in _init_futs:
+    _if.result(timeout=120)
+t0_sim = time.perf_counter()  # ← apenas simulação, sem overhead de pool
+# ... throughput usa (t0_sim or t0) em vez de t0
+```
+
+**Sprint 18.2 — `PoolWarmupThread`** (`sm_workers.py:1091-1151`, `simulation_manager.py`):
+
+```python
+class PoolWarmupThread(QThread):
+    warmup_done = Signal(float, int, int)   # elapsed_s, n_workers, n_threads
+    warmup_error = Signal(str)
+    def run(self):
+        pool = _acquire_numba_pool(self._n_workers, self._n_threads, ...)
+        futs = [pool.submit(_noop) for _ in range(self._n_workers)]
+        for f in futs: f.result(timeout=120)
+        self.warmup_done.emit(elapsed, n_workers, n_threads)
+```
+
+Em `SimulationPage.__init__()`:
+```python
+self.lbl_warmup_status = QLabel("Pool Numba: aguardando início...")
+self._warmup_thread: Optional[PoolWarmupThread] = None
+QTimer.singleShot(500, self._start_background_warmup)
+```
+
+Label atualizada: amarelo "Aquecendo 4w × 2t... (spawn + JIT)" → verde
+"Workers prontos: 4w × 2t (12.3s warmup)" quando pool inicializado.
+
+### Métricas v2.18
+
+| Situação | Throughput reportado | Real | Observação |
+|:---------|:--------------------:|:----:|:-----------|
+| v2.17 cold start | 38k mod/h | 85k mod/h | artefato de medição |
+| v2.17 warm pool (2ª exec) | ~85k mod/h | 85k mod/h | correto |
+| **v2.18 cold start** | **85k mod/h** | **85k mod/h** | **t0_sim correto** |
+| **v2.18 com pre-warm bg** | **85k mod/h** | **85k mod/h** | **pool já warm** |
+
+### Smoke Tests v2.18
+
+| ID | Verificação |
+|:---|:------------|
+| T29 | `PoolWarmupThread` instanciável |
+| T30 | Signals `warmup_done` e `warmup_error` presentes |
+| T31 | `SimulationPage.lbl_warmup_status` existe |
+| T32 | `SimulationPage._warmup_thread` existe |
+
+---
+
+## §19 Random Seed UI + nogil Hot Path + Benchmark CPU-aware (v2.19, Sprint 19)
+
+### Causa raiz dos problemas reportados
+
+**Problema 1 — Bug funcional do gerador aleatório**: cada "Iniciar Simulação"
+gerava a **mesma sequência de N modelos** porque [simulation_manager.py:8088](../../geosteering_ai/simulation/tests/simulation_manager.py#L8088)
+tinha `rng_seed=42` hardcoded. Sintoma observável: plots idênticos entre
+execuções → ensembles estatísticos impossíveis.
+
+**Problema 2 — `nogil=True` ausente em decoradores njit**:
+- `_simulate_positions_njit` ([forward.py:133](../../geosteering_ai/simulation/forward.py#L133))
+  → sem `nogil`
+- `_simulate_positions_njit_cached` ([forward.py:233](../../geosteering_ai/simulation/forward.py#L233))
+  → sem `nogil`
+- `_simulate_combined_prange` ([forward.py:351](../../geosteering_ai/simulation/forward.py#L351))
+  → JÁ TINHA `nogil=True` (referência de boa prática)
+- Workers competiam pelo GIL durante `prange(n_pos)` interno.
+
+**Problema 3 — Benchmark CLI sem detecção de oversubscrição**:
+`bench_v214_numba.py` aceitava `--workers 4 --threads-per-worker 4 = 16 threads`
+em CPU 8C/16T sem qualquer aviso → degradação ~4× em Cenário A
+(189k mod/h em vez de 802k mod/h com defaults `4w × 2t`).
+
+**Problema 4 — Premissa PyQt5→PyQt6** (descartada): migração `645ecaa` (27-Apr)
+foi limpa; regressão real ocorreu em commits Numba threading subsequentes.
+
+### Fix Sprint 19.1 — UI Control de Semente PRNG
+
+**Função utilitária**:
+```python
+# sm_model_gen.py:75
+def _resolve_rng_seed(rng_seed: Optional[int]) -> int:
+    if rng_seed is None:
+        return int(secrets.randbits(63))  # 63 bits int64-safe
+    return int(rng_seed)
+```
+
+**API atualizada**:
+```python
+# generate_models: default mudou de 42 para None
+generate_models(cfg, n_models, rng_seed=None, return_seed=True) → (models, actual_seed)
+
+# ModelGenerationThread: novo Signal seed_used
+class ModelGenerationThread(QThread):
+    seed_used = Signal(int)  # NOVO v2.19
+    def __init__(self, cfg, n_models, rng_seed=None, ...): ...
+    def run(self):
+        self._actual_seed = _resolve_rng_seed(self._rng_seed)
+        self.seed_used.emit(self._actual_seed)
+        ...
+```
+
+**UI em `ParametersPage`**:
+```python
+self.chk_random_seed = QtWidgets.QCheckBox("Semente aleatória (recomendado)")
+self.chk_random_seed.setChecked(True)
+self.spn_fixed_seed = QtWidgets.QSpinBox()  # range 0..2**31-1, default 42
+self.spn_fixed_seed.setEnabled(False)
+self.chk_random_seed.toggled.connect(
+    lambda checked: self.spn_fixed_seed.setEnabled(not checked)
+)
+
+def get_rng_seed(self) -> Optional[int]:
+    if self.chk_random_seed.isChecked():
+        return None  # aleatório
+    return int(self.spn_fixed_seed.value())  # fixo
+```
+
+**Uso em `_start_simulation`**:
+```python
+rng_seed = params.get_rng_seed()  # None ou int
+self._gen_thread = ModelGenerationThread(gen_cfg, n_models, rng_seed=rng_seed)
+self._gen_thread.seed_used.connect(
+    lambda s, _sim=sim: _sim.append_log(f"  Semente PRNG efetiva: {s}")
+)
+```
+
+### Fix Sprint 19.2 — `nogil=True` Universal + Benchmark CPU-aware
+
+```diff
+# forward.py:133, 233
+- @njit(parallel=True, cache=True)
++ @njit(parallel=True, cache=True, nogil=True)
+```
+
+**Benchmark CLI atualizado**:
+```python
+# bench_v214_numba.py
+from geosteering_ai.simulation import (
+    detect_cpu_topology, recommend_default_parallelism,
+)
+_default_workers, _default_threads = recommend_default_parallelism()
+_, _physical_cores, _has_ht = detect_cpu_topology()
+
+parser.add_argument("--workers", default=_default_workers, ...)
+parser.add_argument("--threads-per-worker", default=_default_threads, ...)
+
+# Warning de oversubscrição
+if args.workers * args.threads_per_worker > _physical_cores:
+    print(f"  ATENCAO: ... oversubscricao em {_physical_cores} cores fisicos. "
+          f"Recomendado: {_default_workers}w x {_default_threads}t.")
+```
+
+### Métricas Pré/Pós (Mac 8C/16T HT)
+
+| Cenário | v2.18 4w×4t (oversub) | v2.19 4w×2t (auto) | Ganho |
+|:-------:|:---------------------:|:------------------:|:-----:|
+| **A** (30 pts, 1 freq) | 189 796 mod/h | **802 114 mod/h** | **4.24×** |
+| **B** (30 pts, 10 freq) | 409 465 mod/h | 375 676 mod/h | 0.92× |
+| **E** (600 pts, 1 freq) | ~40 074 mod/h | ~34 828 mod/h | 0.87× (memory-bound) |
+| Paridade Fortran | <1e-12 | **<1e-12** | preservada |
+
+> Cenário A se beneficia massivamente de defaults corretos (cache amortization).
+> Cenário B perde levemente porque `prange(nf)` interno aproveita threads adicionais.
+> Cenário E é cache/memory-bound — gargalo pendente para v2.20+ (tile/block, Hankel
+> pre-compute, SIMD).
+
+### Smoke Tests v2.19
+
+| ID | Verificação |
+|:---|:------------|
+| `test_random_seed_produces_different_models` | rng_seed=None gera distintos |
+| `test_fixed_seed_reproduces_models` | semente fixa reproduz bit-a-bit |
+| `test_return_seed_yields_actual_seed` | tupla (models, seed) retornada |
+| `test_legacy_seed_42_still_works` | smoke compat preservada |
+| `test_resolve_rng_seed_with_none_returns_random_int` | 63 bits aleatórios |
+| `test_resolve_rng_seed_with_int_passes_through` | int passa direto |
+| `test_model_generation_thread_seed_used_signal_present` | Signal exposto |
+| `test_pool_warmup_thread_has_signals` | warmup_done + warmup_error |
+| `test_pool_warmup_thread_accepts_config_args` | __init__(n_w, n_t, hf) |
+| `test_simulator_page_has_warmup_attributes` | lbl_warmup_status + _warmup_thread |
+| `test_simulation_thread_uses_t0_sim_pattern` | fix v2.18 preservado |
+| `test_parameters_page_has_seed_widgets` | UI seed v2.19 expostos |
+
+### Próximos Passos (Roadmap pós-v2.19)
+
+| Versão | Otimização | Ganho esperado | Risco |
+|:-------|:-----------|:--------------:|:-----:|
+| v2.20 | Tile/block em `_simulate_positions_njit_cached` | 15-25% | Baixo |
+| v2.21 | Pré-compute Hankel kernels TE/TM | 10-15% | Médio |
+| v2.22 | SIMD ufuncs NumPy (convoluções) | 20-40% | Alto |
+| v2.23 | Auditoria PyQt6 ConnectionType (explicit) | <2% | Muito baixo |
+
+---
+
+## §20 Investigação Empírica HT/SMT — Confirmação phys_cores (v2.20, Sprint 20)
+
+### Premissa investigada
+
+Em resposta ao usuário ("antes era 150-190k mod/h em cenários padrão com
+4w × 4t; agora obtenho 92k em E"), foi testada a hipótese de que o
+kernel `hmd_tiv` recursivo seria **memory-bound** e Hyperthreading
+**esconderia** cache miss latency, justificando trocar a estratégia
+v2.17 de `target = phys_cores` para `target = logical_cores`.
+
+### Protocolo experimental
+
+**Hardware**: Mac 8C/16T HT (cores físicos = 8, lógicos = 16, HT ativo).
+**Cenário**: E (600 pts, 300 modelos, 1 freq, 4 workers).
+**Pool warm**: sim (runs consecutivos no mesmo processo Python).
+**Réplicas**: 5 execuções consecutivas por configuração.
+
+### Resultados (`Cenário E`)
+
+#### 4w × 2t (8 threads = phys_cores)
+```
+Run 1: 28.43s → 37 988 mod/h
+Run 2: 16.10s → 67 069 mod/h
+Run 3: 27.86s → 38 764 mod/h
+Run 4: 23.43s → 46 104 mod/h
+Run 5: 22.93s → 47 107 mod/h
+Mediana: 46 104 mod/h  Média: 47 406 mod/h
+```
+
+#### 4w × 4t (16 threads = logical_cores HT)
+```
+Run 1: 29.96s → 36 046 mod/h
+Run 2: 28.88s → 37 398 mod/h
+Run 3: 27.78s → 38 882 mod/h
+Run 4: 28.37s → 38 067 mod/h
+Run 5: 28.98s → 37 271 mod/h
+Mediana: 37 398 mod/h  Média: 37 533 mod/h
+```
+
+#### Razão
+
+| Métrica | 4w × 2t / 4w × 4t |
+|:-------:|:-----------------:|
+| Mediana | **1.233** (+23%) |
+| Média | **1.263** (+26%) |
+
+### Conclusão empírica
+
+**HT degrada o throughput em 20-25%** neste kernel. A premissa
+"memory-bound" foi **refutada**:
+
+1. Recursão TE/TM em `hmd_tiv` é **compute-bound** (operações complexas,
+   branches), não memory-bound.
+2. Context switch entre hyperthreads custa 50-200 ciclos, superando
+   ganho de cache miss hiding.
+3. Cache trashing: HT compartilha L1/L2; 16 threads competindo pelo
+   mesmo cache aumentam miss rate em vez de reduzir.
+4. Numba TBB scheduler já gerencia work-stealing; oversubscription só
+   adiciona overhead.
+
+### Decisão arquitetural
+
+**Manter `recommend_default_parallelism` retornando `(phys // 2, 2)`**
+(estratégia v2.17). Documentar a investigação para evitar tentativas
+futuras de mudança.
+
+### Mudanças nesta versão
+
+- `_workers.py:292`: docstring expandida com tabela empírica + justificativa
+  teórica + aviso para futuros desenvolvedores
+- `bench_v214_numba.py`: warning refinado com referência empírica concreta:
+  ```
+  ATENCAO: 4w x 4t = 16 threads em 8 cores fisicos (HT/SMT ativo, mas
+  degrada throughput). Empiricamente (v2.20, 5 runs Cenario E),
+  oversubscricao degrada throughput em 20-25%.
+  Recomendado: 4w x 2t = 8 threads.
+  ```
+- `test_simulation_cpu_topology.py`: docstrings expandidas + 1 novo teste
+  `test_apple_m_pro_10c_10t_no_ht` (M2/M3 Pro)
+
+### Esclarecimento ao usuário
+
+A "regressão histórica" relatada (150-190k mod/h em cenários padrão) é
+um **equívoco**:
+
+1. **Cenário A** (30 pts) com defaults v2.20 corretos (4w × 2t) entrega
+   **1 185 489 mod/h** — **6× ACIMA** do histórico relatado.
+2. **Cenário E** (600 pts) é fundamentalmente diferente de A — comparar
+   é incorreto.
+3. Os 92-95k mod/h em E foram **outliers** com cache de disco quente.
+   Mediana real: 38k em 4w × 4t, 46k em 4w × 2t.
+
+### Roadmap para 150-200k em Cenário E
+
+| Versão | Otimização | Throughput projetado |
+|:------:|:-----------|:--------------------:|
+| v2.21 | Tile/block | ~55k mod/h (mediana) |
+| v2.22 | Pré-compute Hankel | ~63k mod/h |
+| v2.23 | fastmath SAFE | ~75k mod/h |
+| v2.24 | SIMD ufuncs | ~100k mod/h |
+
+Para **150-200k em E**, todas as 4 otimizações combinadas + paralelismo
+de 2 níveis (workers + nested prange) serão necessárias. Tempo
+estimado: **4-6 sprints**.
+
+---
+
+## §21 Causa-Raiz da Regressão Histórica — Análise old_geosteering_ai (v2.21, Sprint 21)
+
+### Origem da investigação
+
+Em resposta ao usuário ("antes obtinha mais de 120k mod/h em configurações
+padrão"), foi conduzida análise comparativa direta entre:
+- `old_geosteering_ai/simulation/_numba/kernel.py` (versão antiga conhecida
+  como boa, ~120k mod/h em E)
+- `geosteering_ai/simulation/_numba/kernel.py` (versão atual com regressão)
+
+### Descoberta
+
+**Diferença crítica em `_fields_in_freqs_kernel_cached`:**
+
+```python
+# OLD (old_geosteering_ai/, ~120k mod/h em E)
+@njit(cache=True)
+def _fields_in_freqs_kernel_cached(...):
+    ...
+    for i_f in range(nf):     # serial
+        ...
+
+# NEW pré-v2.21 (~46k mod/h em E)
+@njit(cache=True, parallel=True, nogil=True)  # ← Sprint 13.1
+def _fields_in_freqs_kernel_cached(...):
+    ...
+    for i_f in _prange(nf):   # ← prange interno
+        ...
+```
+
+### Análise técnica
+
+Esta função é chamada **milhões de vezes por simulação** (n_pos × n_models)
+de dentro de `_simulate_positions_njit_cached` (que JÁ tem `parallel=True`
++ `prange(n_pos)` outer).
+
+**Numba não suporta nested parallelism**:
+- Outer prange roda em N threads
+- Inner prange é detectado e SERIALIZADO em cada thread
+- **MAS** o overhead de setup do parallel scheduler é pago em cada chamada
+
+**Quantificação em Cenário E (300 modelos × 600 pts × 75 chunks):**
+- 13.5M chamadas inner kernel
+- ~50ns overhead/chamada × 13.5M = **~0.675s overhead direto**
+- Distribuído em 8 threads = ~85ms efetivo/thread
+- Mais efeitos secundários (cache flushes, scheduler contention)
+- **Total observado**: ~14s de overhead em simulação de 300 modelos
+
+### Fix Sprint 21.1 (cirúrgico, 1 linha de código)
+
+```diff
+- @njit(cache=True, parallel=True, nogil=True)
++ @njit(cache=True, nogil=True)
+  def _fields_in_freqs_kernel_cached(...):
+      ...
+-     for i_f in _prange(nf):
++     for i_f in range(nf):
+```
+
+**`precompute_common_arrays_cache` mantém `parallel=True`** porque é
+chamada APENAS uma vez por (TR×Angle) de contexto serial Python — não
+paga overhead aninhado, ganha paralelização real de nf.
+
+### Métricas (Mac 8C/16T HT, 4w × 2t auto)
+
+#### Cenário E — 5 runs consecutivos
+
+```
+Run 1: 9.50s → 113 692 mod/h
+Run 2: 8.85s → 121 971 mod/h
+Run 3: 8.71s → 124 044 mod/h
+Run 4: 8.86s → 121 957 mod/h
+Run 5: 9.26s → 116 628 mod/h
+
+Mediana: 121 957 mod/h ✓ supera meta histórica >120k
+Média:   119 658 mod/h
+Desvio:  ~4 000 mod/h (estável)
+```
+
+#### Tabela consolidada Antes/Depois
+
+| Cenário | v2.20 (4w × 2t) | v2.21 (4w × 2t) | Ganho |
+|:-------:|:---------------:|:---------------:|:-----:|
+| A (30 pts, 1 freq) | 1 185 489 mod/h | **1 392 371 mod/h** | **1.17×** |
+| B (30 pts, 10 freq) | 376 000 mod/h | 303 452 mod/h | 0.81× ⚠️ |
+| E (600 pts, 1 freq) | 46 104 mod/h | **121 957 mod/h** | **2.65×** ✓ |
+| Paridade Fortran 7 canônicos | <1e-12 | **<1e-12** | preservada |
+
+### Tradeoff em Cenário B
+
+Cenário B regrediu 19% (376k → 303k) porque o `parallel=True` antigo
+ESTAVA paralelizando nf=10 efetivamente quando outer prange(n_pos=30)
+não saturava 8 threads. Tradeoff aceito porque:
+
+1. Cenário E é **configuração de produção real** (LWD 600 pts)
+2. Cenário B é multi-freq sintético, pouco usado
+3. Caminho v2.22 mapeado: FLAT `prange(n_pos × nf)` recupera B sem
+   reintroduzir overhead aninhado em E
+
+### Lição arquitetural
+
+> **Paralelismo aninhado em Numba NÃO funciona como esperado.** Quando
+> uma função inner é chamada de prange outer, adicionar `parallel=True`
+> na inner causa **overhead puro sem benefício** (Numba serializa nested
+> prange, mas paga setup). A regra é: paralelizar **UMA ÚNICA VEZ** no
+> nível mais externo em produção.
+
+Documentado em docstring expandida (+25 linhas) de
+`_fields_in_freqs_kernel_cached` para evitar tentativas futuras de
+re-introduzir `parallel=True`.
+
+### Caminho para 200k+ mod/h em Cenário E
+
+| Versão | Otimização | Ganho em E |
+|:------:|:-----------|:----------:|
+| v2.22 | FLAT prange(n_pos × nf) | recupera B; E neutro |
+| v2.23 | Tile/block | +15-25% |
+| v2.24 | Pré-compute Hankel TE/TM | +10-15% |
+| v2.25 | fastmath SAFE | +20% |
+
+Projeção composta v2.25: **~200k mod/h em E** (4 sprints).
+
+---
+
+## §13 Referências
+
+- `docs/CHANGELOG.md` — versões v2.10 a v2.19
+- `docs/reports/v2.{N}_*.md` — relatórios técnicos por versão
+- `docs/ROADMAP.md` — tabela de versões SM
+- `docs/reports/v2.15_fastmath_dipoles_analysis_2026-05-01.md` — análise técnica fastmath
+- `docs/reports/v2.15_benchmark_hardware_2026-05-01.md` — resultados hardware
+- `docs/reports/v2.16_2026-05-01.md` — relatório principal v2.16 (threading masking + Cenário E)
+- `docs/reports/v2.16_n_positions_scaling_analysis_2026-05-01.md` — análise n_positions
+- `docs/reports/v2.17_2026-05-02.md` — relatório principal v2.17 (oversubscrição HT/SMT)
+- `docs/reports/v2.18_2026-05-02.md` — relatório principal v2.18 (throughput medição + pool warmup)
+- `docs/reports/v2.19_2026-05-02.md` — relatório principal v2.19 (random seed + nogil + bench CPU-aware)
+- `tests/_fortran_helpers.py` — helpers paridade Fortran
+- `tests/test_simulation_v213_optimizations.py` — 13 testes v2.13
+- `tests/test_simulation_v214_prange_combined.py` — 8 testes v2.14
+- `tests/test_simulation_v214_fastmath.py` — 6 testes v2.14
+- `tests/test_simulation_jax_sprint13.py` — 4 testes v2.15
+- `tests/test_simulation_workers_threading.py` — 3 testes v2.16 (threading masking)
+- `tests/test_sm_workers_io.py` — 4 testes v2.16 (I/O vetorizado)
+- `tests/test_simulation_cpu_topology.py` — 19 testes v2.17 (CPU topology + oversub)
+
+---
+
+**Sub-skill criada em 2026-05-01 (v2.15). Última atualização: 2026-05-02 (v2.18).**

@@ -667,7 +667,7 @@ def precompute_common_arrays_cache(
     )
 
 
-@njit(cache=True, parallel=True, nogil=True)
+@njit(cache=True, nogil=True)
 def _fields_in_freqs_kernel_cached(
     Tx: float,
     Ty: float,
@@ -696,11 +696,31 @@ def _fields_in_freqs_kernel_cached(
     RTMup_cache: np.ndarray,
     AdmInt_cache: np.ndarray,
 ) -> np.ndarray:
-    """Kernel @njit com cache de common_arrays (Sprint 2.10).
+    """Kernel @njit com cache de common_arrays (Sprint 2.10 + 21.1).
 
     Variante de `_fields_in_freqs_kernel` que NÃO recomputa common_arrays
     — consome os arrays pré-calculados passados como parâmetros. Usa a
     mesma lógica para common_factors + dipolos + rotação.
+
+    **Sprint 21.1 (v2.21) — Remoção de paralelismo aninhado**:
+    `parallel=True` foi removido nesta função (revertendo Sprint 13.1).
+    Análise pós-v2.20: este kernel é chamado MILHÕES de vezes por
+    simulação (n_pos × n_models) de dentro de `_simulate_positions_njit_cached`
+    que JÁ tem `parallel=True` + `prange(n_pos)` outer. Como Numba NÃO
+    suporta nested parallelism, o `prange(nf)` interno era serializado,
+    mas ainda pagava o overhead de detecção/setup do parallel scheduler
+    em cada chamada — gargalo crítico em Cenário E (600 pts).
+
+    Comparando com versão antiga (`old_geosteering_ai`, decorador
+    simples ``@njit(cache=True)``), confirma-se que `parallel=True`
+    aqui era responsável por degradação de 3-4× em Cenário E single-freq.
+    Em multi-freq (Cenário B, nf=10) o ganho do `prange(nf)` interno
+    nunca se materializava — quando chamado de prange outer, Numba
+    serializa.
+
+    `nogil=True` é mantido — libera GIL durante execução, permitindo
+    que outer `_simulate_positions_njit_cached` orchestrate threads
+    cross-process eficientemente.
 
     Args:
         Tx, Ty, Tz, cx, cy, cz, dip_rad: posição TX/RX + dip.
@@ -720,11 +740,11 @@ def _fields_in_freqs_kernel_cached(
 
     cH = np.empty((nf, 9), dtype=np.complex128)
 
-    # Sprint 13.1 (v2.13): prange sobre frequências — cada freq escreve em
-    # cH[i_f, :] de forma exclusiva (sem race condition). Quando chamado
-    # de contexto prange externo (`_simulate_positions_njit_cached`), Numba
-    # serializa o nível interno automaticamente — sem regressão.
-    for i_f in _prange(nf):
+    # Sprint 21.1 (v2.21): range serial — paralelização sobre frequências
+    # acontece no nível outer (prange em n_pos × n_models nos workers).
+    # Tentativa de prange interno aqui (Sprint 13.1) introduzia overhead
+    # de paralelismo aninhado em milhões de chamadas.
+    for i_f in range(nf):
         freq = freqs_hz[i_f]
         omega = 2.0 * math.pi * freq
         zeta = 1j * omega * _MU_0

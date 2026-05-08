@@ -130,7 +130,7 @@ logger = logging.getLogger(__name__)
 # mutuamente exclusiva, sem data race.
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=True, cache=True, nogil=True)
 def _simulate_positions_njit(
     positions_z: np.ndarray,
     dz_half: float,
@@ -230,7 +230,7 @@ def _simulate_positions_njit(
 # (dip=0° ferramenta vertical, ou qualquer dip fixo com n_positions > 1).
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=True, cache=True, nogil=True)
 def _simulate_positions_njit_cached(
     positions_z: np.ndarray,
     dz_half: float,

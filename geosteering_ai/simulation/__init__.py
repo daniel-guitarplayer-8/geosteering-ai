@@ -140,6 +140,8 @@ from geosteering_ai.simulation._jacobian import (
 )
 from geosteering_ai.simulation._workers import (
     MultiSimulationResultBatch,
+    detect_cpu_topology,
+    recommend_default_parallelism,
     release_pool,
 )
 from geosteering_ai.simulation.config import SimulationConfig
@@ -176,7 +178,9 @@ __all__ = [
     "compute_jacobian",
     "compute_jacobian_fd_numba",
     "compute_jacobian_jax",
+    "detect_cpu_topology",
     "get_numba_cache_size",
+    "recommend_default_parallelism",
     "release_numba_cache",
     "release_pool",
     "simulate",

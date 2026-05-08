@@ -126,12 +126,37 @@ class TestSprint134FastmathSelective:
         )
 
     def test_fastmath_propagation_remains_false(self):
-        """Validação: propagation.py mantém fastmath=False (TE/TM recursão)."""
-        # Este teste valida que APENAS hankel.py recebeu fastmath=True
-        # e que propagation.py (common_arrays, common_factors) permanece
-        # com fastmath=False para preservar paridade Fortran exata.
+        """Validação: propagation.py mantém fastmath=False via introspecção."""
+        # v2.15 P1 (code review): em vez de smoke test (apenas finitude),
+        # esta versão inspeciona via Numba dispatcher se common_arrays e
+        # common_factors mantêm flags={"fastmath": False}. Isso detecta
+        # regressão acidental se um futuro PR aplicar fastmath=True
+        # indevidamente em propagation.py (que é UNSAFE: cancelamento
+        # catastrófico em recursão TE/TM, ver docs/reports/v2.15_*).
+        from geosteering_ai.simulation._numba.propagation import (
+            common_arrays,
+            common_factors,
+        )
 
-        # Chamar com modelo que enfatiza propagação (TIV forte)
+        # Numba >= 0.60 expõe targetoptions/flags via __wrapped__ ou .targetoptions
+        # Testamos pela presença de fastmath=False no objeto dispatcher.
+        for fn, name in [
+            (common_arrays, "common_arrays"),
+            (common_factors, "common_factors"),
+        ]:
+            opts = getattr(fn, "targetoptions", {}) or getattr(
+                getattr(fn, "py_func", fn), "targetoptions", {}
+            )
+            fastmath_flag = (
+                opts.get("fastmath", False) if isinstance(opts, dict) else False
+            )
+            assert fastmath_flag is False, (
+                f"REGRESSÃO: {name} foi compilada com fastmath={fastmath_flag} "
+                "(deveria permanecer False — recursão TE/TM é UNSAFE)."
+            )
+
+        # Smoke adicional: o forward com TIV forte produz tensor finito
+        # (paridade exata é validada nos canônicos via test_simulation_compare_fortran).
         m = _canonical_anisotropic_strong_tiv()
         result = simulate_multi(
             **m,
@@ -139,10 +164,6 @@ class TestSprint134FastmathSelective:
             tr_spacings_m=[1.0],
             dip_degs=[0.0],
         )
-
-        # Se propagation.py tivesse fastmath=True indevidamente,
-        # a paridade Fortran seria quebrada.
-        # Validamos finitude e shape como smoke test.
         assert result.H_tensor.shape == (1, 1, 30, 1, 9)
         assert np.all(np.isfinite(result.H_tensor))
 

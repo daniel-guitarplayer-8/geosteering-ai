@@ -111,6 +111,7 @@ if QT_AVAILABLE:
     from .sm_snapshot_persist import SnapshotPersistThread
     from .sm_workers import (
         NumbaPrimer,
+        PoolWarmupThread,
         SaveArtifactsThread,
         SimRequest,
         SimulationThread,
@@ -1409,6 +1410,19 @@ class ParametersPage(QtWidgets.QWidget):
         self.spin_nlayers_max = _spin_int(31, 3, 200)
         self.spin_nlayers_fixed = _spin_int(0, 0, 200)
 
+        # ── Sprint 19.1 (v2.19): controle de semente PRNG ─────────────
+        # Default: semente aleatória (cada execução gera modelos distintos).
+        # Pode ser desligado para reprodutibilidade científica.
+        self.chk_random_seed = QtWidgets.QCheckBox("Semente aleatória (recomendado)")
+        self.chk_random_seed.setChecked(True)
+        self.spn_fixed_seed = QtWidgets.QSpinBox()
+        self.spn_fixed_seed.setRange(0, 2**31 - 1)
+        self.spn_fixed_seed.setValue(42)
+        self.spn_fixed_seed.setEnabled(False)
+        self.chk_random_seed.toggled.connect(
+            lambda checked: self.spn_fixed_seed.setEnabled(not checked)
+        )
+
         _tooltip(
             self.spin_nmodels,
             (
@@ -1509,6 +1523,26 @@ class ParametersPage(QtWidgets.QWidget):
                 "Se 0, sorteia uniformemente em [min, max]."
             ),
         )
+        _tooltip(
+            self.chk_random_seed,
+            (
+                "<b>Semente PRNG aleatória (v2.19)</b><br/>"
+                "Quando ativo (default), cada execução de 'Iniciar Simulação' "
+                "gera uma sequência de modelos diferente — ideal para "
+                "ensembles estatísticos diversos.<br/>"
+                "Desmarque para usar a 'Semente fixa' abaixo e obter "
+                "reprodutibilidade bit-a-bit entre execuções."
+            ),
+        )
+        _tooltip(
+            self.spn_fixed_seed,
+            (
+                "<b>Semente PRNG fixa</b><br/>"
+                "Inteiro reprodutível (somente quando 'Semente aleatória' "
+                "estiver desmarcada). Mesma semente + mesmos parâmetros = "
+                "mesma sequência de modelos."
+            ),
+        )
 
         form_gen.addRow("Quantidade de modelos:", self.spin_nmodels)
         form_gen.addRow("Gerador aleatório:", self.combo_generator)
@@ -1522,6 +1556,9 @@ class ParametersPage(QtWidgets.QWidget):
         form_gen.addRow("Nº camadas mínimo:", self.spin_nlayers_min)
         form_gen.addRow("Nº camadas máximo:", self.spin_nlayers_max)
         form_gen.addRow("Nº camadas fixo:", self.spin_nlayers_fixed)
+        # v2.19: semente PRNG (aleatória por default, fixa opcional).
+        form_gen.addRow("Aleatoriedade:", self.chk_random_seed)
+        form_gen.addRow("Semente fixa:", self.spn_fixed_seed)
 
         layout_gen = QtWidgets.QVBoxLayout(grp_gen)
         layout_gen.addLayout(row_mode)
@@ -1544,6 +1581,9 @@ class ParametersPage(QtWidgets.QWidget):
             self.spin_nlayers_min,
             self.spin_nlayers_max,
             self.spin_nlayers_fixed,
+            # v2.19: widgets de semente PRNG (em modo aleatório/manual idênticos).
+            self.chk_random_seed,
+            self.spn_fixed_seed,
         ]
 
         # ═══ Grupo 3 — Filtro Hankel ═════════════════════════════════════
@@ -2156,6 +2196,23 @@ class ParametersPage(QtWidgets.QWidget):
             generator=self.combo_generator.currentText(),
         )
 
+    def get_rng_seed(self) -> Optional[int]:
+        """Retorna a semente PRNG escolhida pelo usuário (Sprint 19.1).
+
+        Returns:
+            ``None`` quando o checkbox "Semente aleatória" está marcado
+            (default v2.19) — :class:`ModelGenerationThread` resolverá
+            uma semente aleatória a cada execução. Retorna inteiro fixo
+            quando o usuário desmarcou e configurou ``spn_fixed_seed``.
+
+        Note:
+            Antes da v2.19 a semente era hardcoded em 42, gerando sempre
+            os mesmos modelos — bug funcional corrigido nesta versão.
+        """
+        if self.chk_random_seed.isChecked():
+            return None
+        return int(self.spn_fixed_seed.value())
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "nf": self.spin_nf.value(),
@@ -2182,6 +2239,9 @@ class ParametersPage(QtWidgets.QWidget):
             "nlayers_max": self.spin_nlayers_max.value(),
             "nlayers_fixed": self.spin_nlayers_fixed.value(),
             "filter": self.combo_filter.currentText(),
+            # Sprint 19.1 (v2.19): preferência de aleatoriedade do PRNG.
+            "random_seed": self.chk_random_seed.isChecked(),
+            "fixed_seed": int(self.spn_fixed_seed.value()),
         }
 
     def from_dict(self, d: Dict[str, Any]) -> None:
@@ -2214,6 +2274,9 @@ class ParametersPage(QtWidgets.QWidget):
             self.spin_nlayers_max.setValue(int(d.get("nlayers_max", 31)))
             self.spin_nlayers_fixed.setValue(int(d.get("nlayers_fixed", 0)))
             self.combo_filter.setCurrentText(d.get("filter", "werthmuller_201pt"))
+            # v2.19: restaura preferência de seed (default = aleatória).
+            self.chk_random_seed.setChecked(bool(d.get("random_seed", True)))
+            self.spn_fixed_seed.setValue(int(d.get("fixed_seed", 42)))
         except Exception:
             pass
 
@@ -2238,7 +2301,6 @@ class SimulatorPage(QtWidgets.QWidget):
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
-        ncpu = os.cpu_count() or 8
 
         grp_backend = QtWidgets.QGroupBox("Backend")
         form_bk = QtWidgets.QFormLayout(grp_backend)
@@ -2285,38 +2347,119 @@ class SimulatorPage(QtWidgets.QWidget):
         )
         par_form = QtWidgets.QFormLayout(grp_par)
         par_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.spin_workers = _spin_int(max(1, ncpu // 4), 1, 256)
-        self.spin_threads = _spin_int(max(2, ncpu // max(1, ncpu // 4)), 1, 256)
+        # ── Sprint 17.1 (v2.17): defaults baseados em CORES FÍSICOS ──────
+        # `recommend_default_parallelism()` detecta cores físicos vs
+        # lógicos (Hyperthreading/SMT) e recomenda configuração ótima
+        # ``n_workers × threads_per_worker = phys_cores``. Em hardware
+        # 8C/16T HT o default é (4, 2) — não mais (4, 4) que causava
+        # oversubscrição 2× e regressão de 3× em produção (commit
+        # bf5324b da v2.16 estabilizou threading masking, mas defaults
+        # eram errados para CPUs com HT/SMT).
+        from geosteering_ai.simulation import (
+            detect_cpu_topology,
+            recommend_default_parallelism,
+        )
+
+        _logical, _phys, _has_ht = detect_cpu_topology()
+        _rec_w, _rec_t = recommend_default_parallelism()
+        self.spin_workers = _spin_int(_rec_w, 1, 256)
+        self.spin_threads = _spin_int(_rec_t, 1, 256)
         _tooltip(
             self.spin_workers,
             (
                 "<b>Nº de workers sandbox</b><br/>"
                 "Processos isolados executados em paralelo (ProcessPoolExecutor). Cada worker "
-                "tem seu próprio warmup JIT (Numba) ou cópia do tatu.x (Fortran)."
+                "tem seu próprio warmup JIT (Numba) ou cópia do tatu.x (Fortran).<br/><br/>"
+                "<b>Recomendação v2.17:</b> Workers × Threads ≤ <i>cores físicos</i> "
+                "(não threads lógicas). Ultrapassar causa <i>oversubscrição</i> e "
+                "perda de 30–50% por contenção em Hyperthreading/SMT."
             ),
         )
         _tooltip(
             self.spin_threads,
             (
                 "<b>Nº de threads por worker</b><br/>"
-                "Define NUMBA_NUM_THREADS/OMP_NUM_THREADS dentro do subprocesso. "
-                "Workers × Threads ≤ nº de CPU lógicas recomendado."
+                "Define NUMBA_NUM_THREADS/OMP_NUM_THREADS dentro do subprocesso.<br/><br/>"
+                "<b>Recomendação v2.17:</b> Em CPU com Hyperthreading/SMT, prefira "
+                "<i>2 threads/worker</i> (1 por core físico) em vez de 4. Ex.: 8C/16T → "
+                "<code>4 workers × 2 threads = 8 = cores físicos</code> ✓"
             ),
         )
+        # Label informativa expandida (v2.17): mostra lógicas E físicas.
+        ht_label = " (HT/SMT ativo)" if _has_ht else ""
         self.lbl_ncpu = QtWidgets.QLabel(
-            f"CPU cores disponíveis: {ncpu}   |   Sistema: {platform.system()} {platform.release()}"
+            f"CPU: {_phys} cores físicos · {_logical} threads lógicas{ht_label}   |   "
+            f"Sistema: {platform.system()} {platform.release()}"
         )
         _tooltip(
             self.lbl_ncpu,
             (
-                "<b>Recursos do sistema</b><br/>"
-                "CPUs lógicas detectadas via <code>os.cpu_count()</code> + sistema operacional. "
-                "Use como referência para dimensionar Workers × Threads."
+                "<b>Recursos do sistema (v2.17)</b><br/>"
+                "Detecção de topologia em camadas (psutil → sysctl → /proc/cpuinfo → "
+                "wmic → heurística). Em CPU com HT/SMT, <i>cores físicos</i> é o "
+                "limite ideal de paralelismo CPU-bound. Threads lógicas só ajudam "
+                "em workloads I/O-bound."
             ),
         )
+        # Warning de oversubscrição (v2.17): label que muda cor quando
+        # workers × threads > cores físicos. Conectado abaixo via
+        # `valueChanged` de ambos os spinboxes.
+        self.lbl_parallel_warn = QtWidgets.QLabel("")
+        self.lbl_parallel_warn.setWordWrap(True)
+        self.lbl_parallel_warn.setStyleSheet(
+            "QLabel { color: #b00020; font-weight: 600; }"
+        )
+        self.lbl_parallel_warn.setVisible(False)
+        self._phys_cores_cached = _phys  # usado pelo callback de warning
+
+        def _update_parallel_warning() -> None:
+            """Atualiza visibilidade/texto do alerta de oversubscrição."""
+            try:
+                w = int(self.spin_workers.value())
+                t = int(self.spin_threads.value())
+                total = w * t
+                phys = int(self._phys_cores_cached)
+                if total > phys:
+                    factor = total / max(1, phys)
+                    self.lbl_parallel_warn.setText(
+                        f"⚠ Oversubscrição: {w} × {t} = {total} threads em {phys} "
+                        f"cores físicos ({factor:.2f}× sobrecarga). Performance "
+                        f"esperada: −30 a −50% por contenção. Recomendado: "
+                        f"workers × threads ≤ {phys}."
+                    )
+                    self.lbl_parallel_warn.setVisible(True)
+                else:
+                    self.lbl_parallel_warn.setVisible(False)
+            except Exception:
+                self.lbl_parallel_warn.setVisible(False)
+
+        self.spin_workers.valueChanged.connect(_update_parallel_warning)
+        self.spin_threads.valueChanged.connect(_update_parallel_warning)
+        _update_parallel_warning()  # checa estado inicial
+
+        # ── Sprint 18.2 (v2.18): status de pre-warm do pool Numba ───────
+        # PoolWarmupThread inicia ao abrir a página (QTimer.singleShot abaixo).
+        # Exibe "Aquecendo workers..." enquanto spawn + JIT rodam em background.
+        # Quando pronto: "Workers prontos: 4w × 2t (12.3s)" em verde.
+        # Na primeira simulação, pool já está warm → throughput = 85k mod/h.
+        self.lbl_warmup_status = QtWidgets.QLabel("Pool Numba: aguardando início...")
+        self.lbl_warmup_status.setStyleSheet("color:#a5a5a5; font-size:10px;")
+        _tooltip(
+            self.lbl_warmup_status,
+            (
+                "<b>Status do pool Numba (v2.18)</b><br/>"
+                "Pré-aquecimento em background: spawn de workers + compilação JIT "
+                "Numba (~10–12 s no primeiro uso). Quando 'Workers prontos', a "
+                "primeira simulação inicia sem overhead e reporta o throughput real."
+            ),
+        )
+        self._warmup_thread: Optional[PoolWarmupThread] = None
+
         par_form.addRow("Nº de workers sandbox:", self.spin_workers)
         par_form.addRow("Nº de threads por worker:", self.spin_threads)
         par_form.addRow("", self.lbl_ncpu)
+        par_form.addRow("", self.lbl_parallel_warn)
+        par_form.addRow("", self.lbl_warmup_status)
 
         grp_out = QtWidgets.QGroupBox("Saída")
         out_form = QtWidgets.QFormLayout(grp_out)
@@ -2585,6 +2728,13 @@ class SimulatorPage(QtWidgets.QWidget):
         # Log view sempre permanece nesta coluna (meio):
         root.addWidget(self.log_view, 1)
 
+        # ── Sprint 18.2 (v2.18): pré-aquecer pool Numba em background ───
+        # Dispara 500 ms após __init__ (QTimer.singleShot não bloqueia o
+        # paint inicial da janela). Se o usuário mudar para backend Fortran,
+        # _on_backend_changed_warmup oculta o status e cancela a thread.
+        self.combo_backend.currentTextChanged.connect(self._on_backend_changed_warmup)
+        QtCore.QTimer.singleShot(500, self._start_background_warmup)
+
     # ── v2.4b: API para SimulatorTab reparentar o grupo de hist\u00f3rico ──
     def take_history_group(self) -> QtWidgets.QGroupBox:
         """Retorna o ``grp_history`` (remove do layout atual se estiver).
@@ -2636,6 +2786,51 @@ class SimulatorPage(QtWidgets.QWidget):
                 continue
             haystack = (item.text() + "\n" + (item.toolTip() or "")).lower()
             item.setHidden(needle not in haystack)
+
+    # ── Sprint 18.2 (v2.18): pré-aquecimento do pool Numba ──────────────
+
+    def _start_background_warmup(self) -> None:
+        """Inicia PoolWarmupThread com a config atual dos spinboxes.
+
+        Chamado por QTimer.singleShot(500) no __init__ e por
+        _on_backend_changed_warmup quando o usuário volta para numba.
+        Ignorado se backend for Fortran ou se thread já estiver rodando.
+        """
+        if self.combo_backend.currentText() != "numba":
+            self.lbl_warmup_status.setVisible(False)
+            return
+        if self._warmup_thread is not None and self._warmup_thread.isRunning():
+            return
+        n_w = self.spin_workers.value()
+        n_t = self.spin_threads.value()
+        self.lbl_warmup_status.setText(
+            f"Aquecendo {n_w}w × {n_t}t... (spawn + JIT Numba)"
+        )
+        self.lbl_warmup_status.setStyleSheet("color:#f0ad4e; font-size:10px;")
+        self.lbl_warmup_status.setVisible(True)
+        self._warmup_thread = PoolWarmupThread(n_w, n_t, parent=self)
+        self._warmup_thread.warmup_done.connect(self._on_warmup_done)
+        self._warmup_thread.warmup_error.connect(self._on_warmup_error)
+        self._warmup_thread.start()
+
+    def _on_warmup_done(self, elapsed: float, n_w: int, n_t: int) -> None:
+        """Pool aquecido — atualiza label para verde."""
+        self.lbl_warmup_status.setText(
+            f"Workers prontos: {n_w}w × {n_t}t ({elapsed:.1f}s warmup)"
+        )
+        self.lbl_warmup_status.setStyleSheet("color:#4ec9b0; font-size:10px;")
+
+    def _on_warmup_error(self, msg: str) -> None:
+        """Warmup falhou — mostra aviso amarelo (não-fatal: pool cria na simulação)."""
+        self.lbl_warmup_status.setText(f"Warmup falhou: {msg[:60]}")
+        self.lbl_warmup_status.setStyleSheet("color:#f0ad4e; font-size:10px;")
+
+    def _on_backend_changed_warmup(self, backend: str) -> None:
+        """Oculta status de warmup quando backend não for numba."""
+        if backend != "numba":
+            self.lbl_warmup_status.setVisible(False)
+        else:
+            self._start_background_warmup()
 
     def add_history_entry(
         self,
@@ -3112,7 +3307,6 @@ class BenchmarkPage(QtWidgets.QWidget):
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
-        ncpu = os.cpu_count() or 8
         # Estado interno da Config D (persistido mesmo com diálogo fechado)
         self._config_d_models: List[str] = []
         self._config_d_overrides: Dict[str, Dict[str, Any]] = {}
@@ -3267,25 +3461,63 @@ class BenchmarkPage(QtWidgets.QWidget):
         bk_layout.addStretch(1)
 
         # ── Paralelismo ─────────────────────────────────────────────────
+        # Sprint 17.1 (v2.17): defaults baseados em CORES FÍSICOS
+        # (recommend_default_parallelism). Em hardware 8C/16T HT,
+        # default Numba = (4 workers, 2 threads) = 8 = phys_cores ✓
+        # (eliminação da oversubscrição que causava 3× regressão).
+        from geosteering_ai.simulation import (
+            detect_cpu_topology,
+            recommend_default_parallelism,
+        )
+
+        _bk_logical, _bk_phys, _bk_has_ht = detect_cpu_topology()
+        _bk_rec_w, _bk_rec_t = recommend_default_parallelism()
+        # Fortran usa OpenMP (não Numba) — pode usar mais workers leves
+        # com 2 threads cada. Mantemos workers ≈ phys // 2 também.
+        _fort_workers = max(1, _bk_phys // 2)
+        _fort_threads = 2
+
         grp_par = QtWidgets.QGroupBox("Paralelismo")
         par_form = QtWidgets.QFormLayout(grp_par)
         par_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.spin_workers_numba = _spin_int(max(1, ncpu // 4), 1, 256)
-        self.spin_threads_numba = _spin_int(4, 1, 256)
-        self.spin_workers_fortran = _spin_int(max(1, ncpu // 2), 1, 256)
-        self.spin_threads_fortran = _spin_int(2, 1, 256)
+        self.spin_workers_numba = _spin_int(_bk_rec_w, 1, 256)
+        self.spin_threads_numba = _spin_int(_bk_rec_t, 1, 256)
+        self.spin_workers_fortran = _spin_int(_fort_workers, 1, 256)
+        self.spin_threads_fortran = _spin_int(_fort_threads, 1, 256)
         self.spin_n_iter = _spin_int(3, 1, 100)
         self.spin_fort_subset = _spin_int(300, 1, 30000)
         _tooltip(
-            self.spin_workers_numba, "Nº de processos-sandbox Numba rodando em paralelo."
+            self.spin_workers_numba,
+            (
+                "<b>Nº de workers Numba</b><br/>"
+                "Processos-sandbox rodando em paralelo. <b>Recomendação v2.17:</b> "
+                f"workers × threads ≤ <i>{_bk_phys} cores físicos</i> "
+                "(não threads lógicas — evita oversubscrição em HT/SMT)."
+            ),
         )
         _tooltip(
-            self.spin_threads_numba, "NUMBA_NUM_THREADS dentro de cada subprocesso Numba."
+            self.spin_threads_numba,
+            (
+                "<b>Nº de threads por worker Numba</b><br/>"
+                "NUMBA_NUM_THREADS dentro de cada subprocesso. Em HT/SMT, "
+                "<i>2 threads/worker</i> é típicamente ótimo (1 por core físico)."
+            ),
         )
         _tooltip(
-            self.spin_workers_fortran, "Nº de cópias independentes de tatu.x em paralelo."
+            self.spin_workers_fortran,
+            (
+                "<b>Nº de workers Fortran</b><br/>"
+                "Cópias independentes de tatu.x em paralelo. Fortran usa OpenMP "
+                "interno por instância — workers × threads ≤ cores físicos."
+            ),
         )
-        _tooltip(self.spin_threads_fortran, "OMP_NUM_THREADS por invocação de tatu.x.")
+        _tooltip(
+            self.spin_threads_fortran,
+            (
+                "<b>Nº de threads por worker Fortran</b><br/>"
+                "OMP_NUM_THREADS por invocação de tatu.x."
+            ),
+        )
         _tooltip(
             self.spin_n_iter,
             (
@@ -7908,19 +8140,31 @@ class MainWindow(QtWidgets.QMainWindow):
             # QThread separada, deixando a main thread livre para processar
             # o event loop Qt (mouse, paint, scroll, etc.) durante a geração.
             gen_cfg = params.build_gen_config()
-            sim.append_log(f"Gerando {n_models} modelos (generator={gen_cfg.generator})…")
+            # Sprint 19.1 (v2.19): semente PRNG vem da UI (None = aleatória,
+            # int = fixa). Antes era hardcoded em 42, gerando sempre os mesmos
+            # modelos a cada execução — bug funcional corrigido nesta versão.
+            rng_seed = params.get_rng_seed()
+            seed_label = "aleatória" if rng_seed is None else f"fixa={rng_seed}"
+            sim.append_log(
+                f"Gerando {n_models} modelos (generator={gen_cfg.generator}, "
+                f"semente={seed_label})…"
+            )
             sim.set_running(True)
             sim.progress.setValue(0)
             # Snapshot do estado pendente — recuperado em _on_models_ready.
             self._stochastic_models_in_progress = (req, sim)
             # Cria a thread; ela fica viva até finished_models/error/cancelled.
             self._gen_thread = ModelGenerationThread(
-                gen_cfg, n_models=n_models, rng_seed=42, parent=self
+                gen_cfg, n_models=n_models, rng_seed=rng_seed, parent=self
             )
             self._gen_thread.progress.connect(self._on_gen_progress)
             self._gen_thread.finished_models.connect(self._on_models_ready)
             self._gen_thread.error.connect(self._on_gen_error)
             self._gen_thread.cancelled.connect(self._on_gen_cancelled)
+            # v2.19: loga a semente PRNG efetivamente usada para reprodutibilidade.
+            self._gen_thread.seed_used.connect(
+                lambda s, _sim=sim: _sim.append_log(f"  Semente PRNG efetiva: {s}")
+            )
             self._phase_timer.begin("generation")
             self._gen_thread.start()
         except Exception as exc:
@@ -10291,6 +10535,32 @@ def _run_smoke_test() -> int:
         )
     except Exception as exc:
         check(False, f"v2.12 T24-T28: Workers Nativos ({exc})")
+
+    # ── v2.18 T29-T32: PoolWarmupThread + t0_sim (Sprint 18.1-18.2) ──────────
+    try:
+        from .sm_workers import PoolWarmupThread
+
+        sim_page = window.page_sim
+        # T29: PoolWarmupThread importável e instanciável
+        wt = PoolWarmupThread(1, 1, parent=None)
+        check(
+            isinstance(wt, PoolWarmupThread), "v2.18 T29: PoolWarmupThread instanciável"
+        )
+        check(
+            hasattr(wt, "warmup_done") and hasattr(wt, "warmup_error"),
+            "v2.18 T30: PoolWarmupThread tem signals warmup_done e warmup_error",
+        )
+        # T31: SimulationPage tem lbl_warmup_status e _warmup_thread
+        check(
+            hasattr(sim_page, "lbl_warmup_status"),
+            "v2.18 T31: SimulationPage tem lbl_warmup_status",
+        )
+        check(
+            hasattr(sim_page, "_warmup_thread"),
+            "v2.18 T32: SimulationPage tem _warmup_thread",
+        )
+    except Exception as exc:
+        check(False, f"v2.18 T29-T32: PoolWarmupThread ({exc})")
 
     print(f"\n=== Resultado: {len(failures)} falha(s) ===")
     window.close()

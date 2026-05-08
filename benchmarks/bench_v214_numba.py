@@ -55,11 +55,38 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from typing import Dict, Tuple
 
 import numpy as np
+
+
+def _configure_threads(threads_per_worker: int) -> None:
+    """Configura variáveis de ambiente de threading antes do import Numba.
+
+    Define ``OMP_NUM_THREADS`` e ``NUMBA_NUM_THREADS`` para controlar o
+    paralelismo intra-worker. O total de threads em uso é
+    ``n_workers × threads_per_worker``; ajuste em função do número real de
+    cores físicos para evitar oversubscription.
+
+    Args:
+        threads_per_worker: Threads por worker (1 para Cenário D, 2 default
+            para A/B/C). Range válido: ``[1, 16]``.
+
+    Note:
+        Esta função deve ser chamada ANTES de qualquer ``import numba`` ou
+        ``simulate_multi`` para que Numba leia o env var corretamente. O
+        v2.15 chama isto no topo de ``main()``, antes do worker pool.
+    """
+    if not 1 <= threads_per_worker <= 16:
+        raise ValueError(
+            f"threads_per_worker={threads_per_worker} fora de [1, 16]"
+        )
+    os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
+    os.environ["NUMBA_NUM_THREADS"] = str(threads_per_worker)
+    os.environ["MKL_NUM_THREADS"] = str(threads_per_worker)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Imports
@@ -78,14 +105,39 @@ except ImportError as e:
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuração Canonical
 # ──────────────────────────────────────────────────────────────────────────────
-def _canonical_3layer() -> Dict[str, np.ndarray]:
-    """Modelo 3 camadas para todos os cenários."""
+# Número de pontos de medição (n_positions) — exposto pelo CLI via
+# ``--n-positions``. Default 30 (microbenchmark rápido para CI). Em produção
+# (GUI do Simulation Manager), o valor típico é 600 (sequência LWD), e o
+# Cenário E permite reproduzir esse caso real.
+_N_POSITIONS: int = 30
+
+
+def _canonical_3layer(n_positions: int | None = None) -> Dict[str, np.ndarray]:
+    """Modelo 3 camadas para todos os cenários.
+
+    Args:
+        n_positions: Sobrescreve ``_N_POSITIONS`` se informado. Default
+            ``None`` (usa valor global setado pelo CLI).
+
+    Returns:
+        Dict com `rho_h`, `rho_v`, `esp`, `positions_z`.
+    """
+    npos = int(n_positions) if n_positions is not None else _N_POSITIONS
     return dict(
         rho_h=np.array([10.0, 1.0, 10.0]),
         rho_v=np.array([10.0, 1.0, 10.0]),
         esp=np.array([5.0]),
-        positions_z=np.linspace(-2.0, 7.0, 30),
+        positions_z=np.linspace(-2.0, 7.0, npos),
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Threads por worker — exposto pelo CLI, propagado a simulate_multi explicitamente
+# ──────────────────────────────────────────────────────────────────────────────
+# Usar variável global lida pelo main() é mais simples que passar args através
+# das 4 funções benchmark_scenario_*. Default 2 (4 workers × 2 = 8 = cores físicos
+# em hardware de 8 cores). Sobrescrita por --threads-per-worker no CLI.
+_THREADS_PER_WORKER: int = 2
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -114,6 +166,7 @@ def benchmark_scenario_a(n_models: int = 30000, n_workers: int = 4) -> Tuple[flo
             positions_z=m["positions_z"],
             frequencies_hz=[20000.0],
             tr_spacings_m=[1.0],
+            threads_per_worker=_THREADS_PER_WORKER,
             dip_degs=[0.0],
             n_workers=n_workers,
         )
@@ -160,6 +213,7 @@ def benchmark_scenario_b(
             tr_spacings_m=[1.0],
             dip_degs=[0.0],
             n_workers=n_workers,
+            threads_per_worker=_THREADS_PER_WORKER,
         )
         t1 = time.perf_counter()
         elapsed = t1 - t0
@@ -205,6 +259,7 @@ def benchmark_scenario_c(n_models: int = 5000, n_workers: int = 4) -> Tuple[floa
             tr_spacings_m=tr_spacings,
             dip_degs=dip_degs,
             n_workers=n_workers,
+            threads_per_worker=_THREADS_PER_WORKER,
         )
         t1 = time.perf_counter()
         elapsed = t1 - t0
@@ -265,42 +320,181 @@ def benchmark_scenario_d(n_iterations: int = 50) -> Tuple[float, float]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Cenário E — Production scale (n_positions=600, single-freq)
+# ──────────────────────────────────────────────────────────────────────────────
+def benchmark_scenario_e(
+    n_models: int = 300, n_workers: int = 4, n_positions: int = 600
+) -> Tuple[float, float]:
+    """Cenário E: production scale, n_positions=600 (típico LWD).
+
+    Reproduz a configuração real da GUI do Simulation Manager (sequência
+    LWD com ~600 pontos por modelo) para detectar regressões que não
+    aparecem no microbenchmark Cenário A (30 pts).
+
+    Histórico v2.16: adicionado para validar fix da regressão de threading
+    masking (commits 0f92035 + e1c8864 da v2.15) que reduziu produção da
+    GUI de 200k mod/h → 25–38k mod/h. Pós-fix esperado: ≥150k mod/h.
+
+    Args:
+        n_models: Número de modelos. Default 300 (20× menos que Cenário A
+            porque cada modelo é 20× mais lento com 600 pts).
+        n_workers: Workers pool. Default 4.
+        n_positions: Pontos de medição por modelo. Default 600 (production).
+
+    Returns:
+        Tupla (elapsed_s, throughput_mod_per_h).
+    """
+    m = _canonical_3layer(n_positions=n_positions)
+
+    # Gera N modelos idênticos
+    models = [m.copy() for _ in range(n_models)]
+
+    t0 = time.perf_counter()
+    try:
+        result = simulate_multi(
+            models=models,
+            positions_z=m["positions_z"],
+            frequencies_hz=[20000.0],
+            tr_spacings_m=[1.0],
+            threads_per_worker=_THREADS_PER_WORKER,
+            dip_degs=[0.0],
+            n_workers=n_workers,
+        )
+        t1 = time.perf_counter()
+        elapsed = t1 - t0
+
+        throughput = n_models / elapsed * 3600  # modelos/hora
+        return elapsed, throughput
+    finally:
+        release_pool()
+        release_numba_cache()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────────────
 def main():
-    """CLI runner para benchmarks v2.14."""
+    """CLI runner para benchmarks v2.14+ (Sprint 19.2 — defaults CPU-aware)."""
+    # Sprint 19.2 (v2.19): defaults automáticos via topologia de CPU.
+    # Em CPU 8C/16T HT, recomenda 4w × 2t = 8 threads (cores físicos),
+    # alinhado com a GUI v2.17 e evitando oversubscrição em hot paths
+    # com saturação de ALU (típico para Numba @njit numérico).
+    try:
+        from geosteering_ai.simulation import (
+            detect_cpu_topology,
+            recommend_default_parallelism,
+        )
+
+        _default_workers, _default_threads = recommend_default_parallelism()
+        _, _physical_cores, _has_ht = detect_cpu_topology()
+    except Exception:
+        # Fallback conservador caso a função ainda não esteja exposta.
+        _default_workers = 4
+        _default_threads = 2
+        _physical_cores = os.cpu_count() or 8
+        _has_ht = False
+
     parser = argparse.ArgumentParser(
-        description="Benchmark formal v2.14 — 4 cenários Numba (Sprints 13.1-13.4)"
+        description="Benchmark formal v2.14+ — 5 cenários Numba (Sprints 13.1-13.4 + 19.2)"
     )
     parser.add_argument(
         "--scenario",
-        choices=["A", "B", "C", "D"],
-        help="Cenário específico (A/B/C/D) ou --all",
+        choices=["A", "B", "C", "D", "E"],
+        help="Cenário específico (A/B/C/D/E) ou --all",
     )
     parser.add_argument(
-        "--all", action="store_true", help="Rodar todos os 4 cenários"
+        "--all", action="store_true", help="Rodar todos os 5 cenários (A–E)"
     )
     parser.add_argument(
-        "--models", type=int, default=30000, help="Número de modelos (Cenários A/B/C)"
+        "--models",
+        type=int,
+        default=30000,
+        help="Número de modelos (Cenários A/B/C/E). Cenário E usa min(--models, 300) "
+        "por padrão para manter tempo razoável com 600 pts.",
     )
     parser.add_argument(
         "--freqs", type=int, default=10, help="Número de frequências (Cenário B)"
     )
     parser.add_argument(
-        "--workers", type=int, default=4, help="Workers pool (Cenários A/B/C)"
+        "--workers",
+        type=int,
+        default=_default_workers,
+        help=f"Workers pool (default auto={_default_workers}; "
+        f"baseado em {_physical_cores} cores físicos)",
+    )
+    parser.add_argument(
+        "--threads-per-worker",
+        type=int,
+        default=_default_threads,
+        help=f"Threads intra-worker (default auto={_default_threads}). "
+        f"Total = workers × threads-per-worker. Recomendação CPU-aware "
+        f"v2.17+v2.20 confirmada: physical_cores. HT/SMT degrada o kernel "
+        f"hmd_tiv em 20-25 porcento por context switch entre hyperthreads "
+        f"e cache trashing.",
+    )
+    parser.add_argument(
+        "--n-positions",
+        type=int,
+        default=30,
+        help="Pontos de medição por modelo (default 30 microbench, 600 production). "
+        "Aplicável a Cenários A/B/C/D. Cenário E sempre usa 600 (override).",
     )
     args = parser.parse_args()
+
+    # Sprint 20.2 (v2.20): warning de oversubscrição com referência empírica.
+    #
+    # Análise empírica v2.20 (Mac 8C/16T HT, Cenário E 600 pts, 5 runs cada):
+    #   • 4w × 2t (8 threads = phys):    mediana 46k mod/h ✓ ótimo
+    #   • 4w × 4t (16 threads = logical):mediana 38k mod/h  -25%
+    #
+    # CONFIRMADO: oversubscription com HT NÃO ajuda este kernel — o
+    # custo de context switch entre hyperthreads + cache trashing supera
+    # o ganho hipotético de esconder cache miss latency.
+    _total_threads = args.workers * args.threads_per_worker
+    if _total_threads > _physical_cores:
+        ht_label = " (HT/SMT ativo, mas degrada throughput)" if _has_ht else ""
+        print(
+            f"  ATENCAO: {args.workers}w x {args.threads_per_worker}t = "
+            f"{_total_threads} threads em {_physical_cores} cores fisicos"
+            f"{ht_label}. Empiricamente (v2.20, 5 runs Cenario E), "
+            f"oversubscricao degrada throughput em 20-25%. "
+            f"Recomendado: {_default_workers}w x {_default_threads}t "
+            f"= {_default_workers * _default_threads} threads."
+        )
+        print()
+
+    # ── Configurar threading ANTES de qualquer trabalho Numba ────────────────
+    # Setar env vars OMP_NUM_THREADS / NUMBA_NUM_THREADS / MKL_NUM_THREADS
+    # antes de instanciar worker pool, garantindo que Numba JIT compile com
+    # o número correto de threads. Sem isto, Numba detecta cpu_count() e
+    # cria oversubscription quando combinado com worker pool.
+    _configure_threads(args.threads_per_worker)
+
+    # ── Propagar para benchmark_scenario_*  ─────────────────────────────────
+    # Os 3 cenários A/B/C passam ``threads_per_worker=_THREADS_PER_WORKER``
+    # explicitamente em ``simulate_multi(...)``, evitando o erro
+    # ``Cannot set NUMBA_NUM_THREADS to a different value once threads have
+    # been launched`` que ocorre quando ``run_batch`` calcula ``eff_threads``
+    # baseado em ``cpu_count`` heurística e diverge do env var.
+    global _THREADS_PER_WORKER, _N_POSITIONS
+    _THREADS_PER_WORKER = int(args.threads_per_worker)
+    _N_POSITIONS = int(args.n_positions)
 
     print("╔════════════════════════════════════════════════════════════════╗")
     print("║  Benchmark v2.14 — Otimizações Numba JIT (Sprints 13.1-13.4)  ║")
     print("║  Simulador Python — Geosteering AI v2.0                       ║")
     print("╚════════════════════════════════════════════════════════════════╝")
+    print(
+        f"  Threading: workers={args.workers} × threads/worker="
+        f"{args.threads_per_worker} → {args.workers * args.threads_per_worker} "
+        f"threads totais"
+    )
     print()
 
     # Definir quais cenários rodar
     scenarios = []
     if args.all:
-        scenarios = ["A", "B", "C", "D"]
+        scenarios = ["A", "B", "C", "D", "E"]
     elif args.scenario:
         scenarios = [args.scenario]
     else:
@@ -352,6 +546,21 @@ def main():
             print(
                 f"D         1            1        1          "
                 f"{elapsed:<12.2f} {ms_per_call:<20.2f} ms/call"
+            )
+
+        if "E" in scenarios:
+            # Cenário E: production scale (600 pts). Usa min(args.models, 300)
+            # para manter tempo razoável; pode ser sobrescrito via --models.
+            n_models_e = min(args.models, 300) if args.all else args.models
+            n_pos_e = 600  # override fixo do Cenário E
+            print(f"Cenário E (production 600 pts)... ", end="", flush=True)
+            elapsed, throughput = benchmark_scenario_e(
+                n_models=n_models_e, n_workers=args.workers, n_positions=n_pos_e
+            )
+            print(
+                f"E         {n_models_e:<12} 1        {args.workers:<10} "
+                f"{elapsed:<12.2f} {throughput:<20.1f} mod/h "
+                f"({n_pos_e} pts)"
             )
 
         print("-" * 82)
