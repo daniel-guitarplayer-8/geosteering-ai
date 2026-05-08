@@ -193,11 +193,13 @@ class TestKB018RngSeedHardcoded:
         in_smoke_test = False
 
         for i, line in enumerate(lines, start=1):
-            # Detectar se estamos dentro de _run_smoke_test ou função similar
+            # Detectar entrada em _run_smoke_test
             if re.search(r"def\s+(_run_smoke_test|_smoke|smoke_test)\s*\(", line):
                 in_smoke_test = True
-            elif re.match(r"^\s*def\s+", line) and in_smoke_test:
-                # Saímos do smoke test
+            elif re.match(r"^def\s+", line) and in_smoke_test:
+                # Saída: apenas def de nível 0 (sem indentação).
+                # Nested defs (ex.: def check(...) dentro de _run_smoke_test)
+                # NÃO terminam o contexto smoke.
                 in_smoke_test = False
 
             # Verificar rng_seed=42 fora do smoke test

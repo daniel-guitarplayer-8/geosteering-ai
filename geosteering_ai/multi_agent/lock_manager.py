@@ -100,8 +100,8 @@ class LockInfo:
         return int((datetime.now(timezone.utc) - acquired_dt).total_seconds())
 
     def is_expired(self) -> bool:
-        """``True`` se o lock excedeu o TTL."""
-        return self.age_seconds() > self.ttl_sec
+        """``True`` se o lock atingiu ou excedeu o TTL."""
+        return self.age_seconds() >= self.ttl_sec
 
     def is_pid_dead(self) -> bool:
         """``True`` se o PID que criou o lock não existe mais."""
