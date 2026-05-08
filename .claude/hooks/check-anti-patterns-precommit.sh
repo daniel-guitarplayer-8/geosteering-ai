@@ -40,7 +40,7 @@ for FILE_PATH in "$@"; do
         # shellcheck disable=SC2053
         [[ "$FILE_PATH" == $path_glob ]] || continue
 
-        if grep -qE "$pattern" "$FILE_PATH"; then
+        if grep -qE -- "$pattern" "$FILE_PATH"; then
             case "$severity" in
                 BLOCK)
                     echo "[BLOCK] $kb_id em $FILE_PATH (pattern: $pattern)" >&2

@@ -76,8 +76,11 @@ for DAY_DIR in "$BACKUPS_DIR"/*/; do
         continue
     fi
 
-    # Ultimas 24h (hoje ou ontem): preservar TODOS os backups
-    if [ "$DAY" = "$TODAY" ] || [ "$DAY" \> "$CUTOFF_24H" ]; then
+    # Ultimas 24h (hoje ou ontem): preservar TODOS os backups.
+    # Nota: comparacao por data-calendario — politica real e "2 dias completos"
+    # (hoje + ontem), nao exatamente 24h. Backups de CUTOFF_24H (ontem) tambem
+    # sao preservados (>= em vez de >).
+    if [ "$DAY" = "$TODAY" ] || [ "$DAY" \>= "$CUTOFF_24H" ]; then
         COUNT=$(find "$DAY_DIR" -name "*.bak" -type f 2>/dev/null | wc -l | tr -d ' ')
         KEPT=$((KEPT + COUNT))
         TOTAL=$((TOTAL + COUNT))
@@ -90,7 +93,7 @@ for DAY_DIR in "$BACKUPS_DIR"/*/; do
             TOTAL=$((TOTAL + 1))
             REMOVED=$((REMOVED + 1))
             if [ "$DRY_RUN" = "1" ]; then
-                echo "  [DRY] remover: $BAK"
+                echo "  [DRY] remover: $BAK" >&2
             else
                 rm -f "$BAK"
                 echo "  remover: $BAK" >&2
