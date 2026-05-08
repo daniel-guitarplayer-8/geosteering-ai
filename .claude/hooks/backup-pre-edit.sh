@@ -31,6 +31,8 @@ mkdir -p "$BACKUP_DIR"
 
 # Path relativo para preservar estrutura de diretórios
 REL_PATH="${FILE_PATH#$PROJECT_DIR/}"
+# Arquivo fora do PROJECT_DIR: REL_PATH seria o path absoluto completo — ignorar
+[ "$REL_PATH" = "$FILE_PATH" ] && exit 0
 
 # Sufixo com timestamp HH:MM:SS para múltiplas versões no mesmo dia
 TIMESTAMP=$(date +%H%M%S)

@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -67,14 +68,21 @@ def _load_rules_module() -> Any:
 
 
 # Lazy load para evitar erros em imports circulares ou ambientes sem .claude/
+# Lock protege inicialização em ambientes multi-thread (watchdog, daemons).
+# Double-checked locking: check externo sem lock (fast path) + check interno
+# com lock (slow path) — seguro porque atribuição a referência é atômica no CPython
+# e no Python 3.13 nogil (PEP 703) via referência counted.
 _RULES_MODULE: Any = None
+_RULES_LOCK: threading.Lock = threading.Lock()
 
 
 def _rules() -> Any:
-    """Retorna módulo cacheado (lazy load)."""
+    """Retorna módulo cacheado (lazy load, thread-safe)."""
     global _RULES_MODULE
     if _RULES_MODULE is None:
-        _RULES_MODULE = _load_rules_module()
+        with _RULES_LOCK:
+            if _RULES_MODULE is None:  # double-checked locking
+                _RULES_MODULE = _load_rules_module()
     return _RULES_MODULE
 
 

@@ -13,7 +13,7 @@
 # ╚══════════════════════════════════════════════════════════════════════╝
 set -euo pipefail
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || echo "/Users/daniel/Geosteering_AI")}"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 AGENT_ID="${CLAUDE_AGENT_ID:-orchestrator}"
 
 if [ -x "$HOME/Geosteering_AI_venv/bin/python" ]; then

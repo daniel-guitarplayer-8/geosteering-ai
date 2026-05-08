@@ -21,6 +21,11 @@
 # ╚══════════════════════════════════════════════════════════════════════╝
 set -euo pipefail
 
+# Bypass global: CLAUDE_BYPASS_ANTI_PATTERNS=1 desabilita todas as verificacoes.
+# Usar apenas em contextos legitimos: debugging de anti-patterns, escrita de
+# testes *sobre* padroes proibidos, ou geracoes intermediarias temporarias.
+[ "${CLAUDE_BYPASS_ANTI_PATTERNS:-0}" = "1" ] && exit 0
+
 INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 NEW=$(echo "$INPUT" | jq -r '.tool_input.new_string // .tool_input.content // empty')
@@ -51,8 +56,8 @@ while IFS=$'\t' read -r kb_id pattern severity path_glob; do
     # shellcheck disable=SC2053
     [[ "$FILE_PATH" == $path_glob ]] || continue
 
-    # Procurar regex no novo conteúdo
-    if echo "$NEW" | grep -qE "$pattern"; then
+    # Procurar regex no novo conteúdo (-- evita word-split em padrões com espaços)
+    if echo "$NEW" | grep -qE -- "$pattern"; then
         case "$severity" in
             BLOCK) BLOCKS+=("$kb_id — pattern: $pattern") ;;
             WARN)  WARNS+=("$kb_id — pattern: $pattern") ;;

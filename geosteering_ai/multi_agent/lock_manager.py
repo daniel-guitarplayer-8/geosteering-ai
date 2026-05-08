@@ -191,7 +191,13 @@ class LockManager:
             # Smoke-test acquired_at parseável; corrupção retorna None
             info.age_seconds()
             return info
-        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError, OSError):
+        except (
+            FileNotFoundError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            OSError,
+        ):
             return None
 
     # ── API pública ─────────────────────────────────────────────────────────
@@ -202,6 +208,7 @@ class LockManager:
         agent_id: str,
         ttl: int = DEFAULT_TTL_SEC,
         force: bool = False,
+        _depth: int = 0,
     ) -> bool:
         """Adquire lock para ``file_path`` em nome de ``agent_id``.
 
@@ -210,6 +217,7 @@ class LockManager:
             agent_id: identificador do agente requisitante.
             ttl: TTL do lock em segundos (default 300s).
             force: se ``True``, sobrescreve lock existente sem checar conflict.
+            _depth: contador de recursão interno (proteção contra loop infinito).
 
         Returns:
             ``True`` se lock adquirido com sucesso.
@@ -217,7 +225,15 @@ class LockManager:
         Raises:
             AgentConflictError: se já existe lock fresco (não-stale) com
                 outro ``agent_id``.
+            RuntimeError: se detectado loop de recursão > 3 tentativas
+                (sinal de corrupção persistente ou contention extrema).
         """
+        if _depth > 3:
+            raise RuntimeError(
+                f"acquire() loop de recursão excedido (depth={_depth}) para "
+                f"{file_path!r}. Lock file pode estar corrompido ou há "
+                "contention extrema entre agentes."
+            )
         lock_file = self._lock_file(file_path)
         info = LockInfo(
             agent_id=agent_id,
@@ -258,15 +274,19 @@ class LockManager:
                 lock_file.unlink()
             except FileNotFoundError:
                 pass
-            return self.acquire(file_path, agent_id, ttl=ttl, force=False)
+            return self.acquire(
+                file_path, agent_id, ttl=ttl, force=False, _depth=_depth + 1
+            )
 
         if existing.is_stale():
-            # Stale: remove e tenta novamente (recursão limitada por O_EXCL)
+            # Stale: remove e tenta novamente (recursão limitada por _depth cap)
             try:
                 lock_file.unlink()
             except FileNotFoundError:
                 pass
-            return self.acquire(file_path, agent_id, ttl=ttl, force=False)
+            return self.acquire(
+                file_path, agent_id, ttl=ttl, force=False, _depth=_depth + 1
+            )
 
         if existing.agent_id != agent_id:
             raise AgentConflictError(
@@ -392,7 +412,9 @@ def _cli_main(argv: Optional[list[str]] = None) -> int:
             if target == "--all":
                 agent_id = os.environ.get("CLAUDE_AGENT_ID", "default-agent")
                 count = mgr.release_by_agent(agent_id)
-                print(f"[lock] released {count} locks for '{agent_id}'", file=sys.stderr)
+                print(
+                    f"[lock] released {count} locks for '{agent_id}'", file=sys.stderr
+                )
             else:
                 released = mgr.release(target)
                 if released:

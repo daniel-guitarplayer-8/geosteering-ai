@@ -40,7 +40,7 @@ repos:
     hooks:
       - id: mypy
         files: ^geosteering_ai/.*\.py$
-        additional_dependencies: ["numpy", "tensorflow", "types-PyYAML"]
+        additional_dependencies: ["numpy", "types-PyYAML"]
         args: ["--ignore-missing-imports", "--follow-imports=silent"]
         exclude: ^geosteering_ai/simulation/tests/
 
@@ -60,3 +60,11 @@ repos:
         language: system
         files: ^(geosteering_ai/config\.py|configs/.*\.yaml)$
         pass_filenames: true
+
+      - id: fortran-parity-full
+        name: Paridade Fortran <1e-12 (suite completa — 7 modelos)
+        entry: env FORTRAN_PARITY_MODE=full bash .claude/hooks/run-fortran-parity.sh
+        language: system
+        files: ^geosteering_ai/simulation/(_numba/|forward\.py|multi_forward\.py)
+        pass_filenames: false
+        stages: [pre-commit]

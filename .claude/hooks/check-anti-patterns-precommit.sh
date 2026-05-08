@@ -12,6 +12,9 @@
 # ╚══════════════════════════════════════════════════════════════════════╝
 set -euo pipefail
 
+# Bypass global: CLAUDE_BYPASS_ANTI_PATTERNS=1 desabilita todas as verificacoes.
+[ "${CLAUDE_BYPASS_ANTI_PATTERNS:-0}" = "1" ] && exit 0
+
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 PATTERNS_FILE="$PROJECT_DIR/.claude/anti-patterns.txt"
 [ ! -f "$PATTERNS_FILE" ] && exit 0
