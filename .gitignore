@@ -93,3 +93,9 @@ benchmarks/reports/
 Resultados_Relatorio_2026/
 old_geosteering_ai/
 latex-document-skill-main.zip
+# Pastas locais de prompts e relatórios LaTeX (não versionar)
+Prompts_Geosteering_AI/
+Relatorio_2025/
+Relatorio_2026/
+# Backups manuais de relatórios em docs/reports/
+docs/reports/BACKUP*.md

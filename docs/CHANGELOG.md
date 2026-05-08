@@ -7,6 +7,43 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.22.0] — 2026-05-08 — Sprint FLAT prange
+
+### Sprint v2.22 FLAT prange (Caminho A do roadmap multi-agente §22.2.1.1)
+
+- **Sprint v2.22.1 — `_fields_at_single_freq`**: extração do corpo do
+  `for i_f in range(nf)` em `_fields_in_freqs_kernel_cached` para função
+  `@njit(cache=True, nogil=True)` reusável que computa tensor H rotacionado
+  para uma única frequência. Aceita slices 2D dos caches (já indexados por
+  `i_f`) e `camad_t/camad_r` pré-calculados.
+- **Sprint v2.22.2 — `_simulate_combined_prange_flat`**: novo kernel
+  `@njit(parallel=True, cache=True, nogil=True)` em `forward.py` que colapsa
+  4 dimensões (`nTR × nAng × n_pos × nf`) em **um único `prange`**, eliminando
+  o `range(nf)` serial residual em `_fields_in_freqs_kernel_cached`.
+- **`SimulationConfig.use_flat_prange`**: novo campo opt-in (default `False`)
+  ativa o caminho FLAT. Backward-compat total preservada — `False` mantém
+  v2.21 (Sprint 13.3 + 21.1).
+- **Dispatcher em `multi_forward.py`**: roteia `_simulate_combined_prange_flat`
+  vs `_simulate_combined_prange` baseado em `cfg.use_flat_prange`.
+- **Sprint v2.22.3 — Benchmarks**: novo `bench_v22_flat_prange.py` com
+  Cenários E/B/F (CLI `--scenario X --runs N`).
+- **Validação**: 27 testes em `test_simulation_v22_flat_prange.py`. 100% PASS.
+  Suite total: **1597 PASS / 295 SKIP / 0 FAIL** em 916s (15min).
+- **Performance** (single-process, M-series 8C/16T, 3 runs medianos):
+  - Cenário E (n_pos=600, nf=1, 1TR/1ang): 214k → 212k mod/h (0.99×, sem regressão)
+  - Cenário B (n_pos=200, nf=1, 3TR×4ang): 48k → 54k mod/h (**1.11×**)
+  - Cenário F (n_pos=600, nf=4, 1TR/1ang): 53k → 57k mod/h (**1.09×**)
+- **Paridade Fortran <1e-12**: preservada por TRANSITIVIDADE (FLAT ≡ legacy
+  bit-exato; legacy ≅ Fortran <1e-12). Confirmada em pre-commit hook em
+  todos os commits da sprint.
+- **Benefício arquitetural**: elimina anti-pattern v2.13 (range(nf) em contexto
+  nested) e estabelece padrão FLAT como base para Sprints v2.23+ (fastmath,
+  Hankel pré-cômputo, cache contexto).
+- **Decisão sobre default**: `use_flat_prange=False` mantido por 1 semana de
+  validação em produção antes de promover a `True` (v2.22.1 patch release).
+
+---
+
 ## [Quality Mesh 1.5] — 2026-05-08
 
 ### Polishing & Estabilização (Etapa 1.5)
