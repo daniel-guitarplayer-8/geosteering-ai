@@ -112,12 +112,13 @@ Note:
     Para paridade byte-exata com Fortran `.dat`, use
     :func:`io.binary_dat_multi.export_multi_tr_dat` após `simulate_multi`.
 """
+
 from __future__ import annotations
 
 import logging
 import math
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -125,8 +126,6 @@ import numpy as np
 # Re-usa helpers e kernels da implementação single (forward.py Sprint 2.10)
 from geosteering_ai.simulation._numba.geometry import _sanitize_profile_kernel
 from geosteering_ai.simulation._numba.kernel import (
-    _fields_in_freqs_kernel,
-    _fields_in_freqs_kernel_cached,
     compute_zrho,
     fields_in_freqs,
     precompute_common_arrays_cache,
@@ -682,7 +681,9 @@ def simulate_multi(
                 "(b) batch: models=[...]."
             )
         if positions_z is None:
-            raise ValueError("simulate_multi(models=[...]) requer positions_z explícito.")
+            raise ValueError(
+                "simulate_multi(models=[...]) requer positions_z explícito."
+            )
         # Import lazy para evitar ciclo na inicialização do módulo.
         from geosteering_ai.simulation._workers import run_batch
 
@@ -711,7 +712,9 @@ def simulate_multi(
             "frequencies_hz": (
                 list(frequencies_hz) if frequencies_hz is not None else None
             ),
-            "tr_spacings_m": (list(tr_spacings_m) if tr_spacings_m is not None else None),
+            "tr_spacings_m": (
+                list(tr_spacings_m) if tr_spacings_m is not None else None
+            ),
             "dip_degs": list(dip_degs) if dip_degs is not None else None,
             "cfg": _cfg,
             "hankel_filter": hankel_filter,
@@ -870,8 +873,8 @@ def simulate_multi(
     # _simulate_combined_prange é o dispatcher Sprint 13.3 (prange flat TR×ang).
     from geosteering_ai.simulation.forward import (
         _simulate_combined_prange,
+        _simulate_combined_prange_flat,
         _simulate_positions_njit_cached,
-        _simulate_positions_parallel,
     )
 
     # ── Sprint 15.1 (v2.16): mascaramento de threads observável ──────────────
@@ -956,35 +959,68 @@ def simulate_multi(
         RTMup_unique = np.stack([t[7] for t in unique_tuples], axis=0)
         AdmInt_unique = np.stack([t[8] for t in unique_tuples], axis=0)
 
-        # ── Passo 4: Despacho adaptativo Sprint 13.3 — prange flat ──────
-        _simulate_combined_prange(
-            dz_halfs,
-            r_halfs,
-            dip_rads_flat,
-            cache_indices,
-            nAngles,
-            u_unique,
-            s_unique,
-            uh_unique,
-            sh_unique,
-            RTEdw_unique,
-            RTEup_unique,
-            RTMdw_unique,
-            RTMup_unique,
-            AdmInt_unique,
-            positions_z,
-            n,
-            rho_h,
-            rho_v,
-            h_arr_static,
-            prof_arr_static,
-            eta_static,
-            freqs_hz,
-            krJ0J1,
-            wJ0,
-            wJ1,
-            H_tensor,
-        )
+        # ── Passo 4: Despacho adaptativo — FLAT prange v2.22 ou Sprint 13.3 ──
+        # Sprint v2.22: quando `cfg.use_flat_prange=True`, paraleliza
+        # também a dimensão `nf` (4D flat). Default False mantém o
+        # comportamento v2.21 (nf serial dentro do kernel cached).
+        if cfg.use_flat_prange:
+            _simulate_combined_prange_flat(
+                dz_halfs,
+                r_halfs,
+                dip_rads_flat,
+                cache_indices,
+                nAngles,
+                u_unique,
+                s_unique,
+                uh_unique,
+                sh_unique,
+                RTEdw_unique,
+                RTEup_unique,
+                RTMdw_unique,
+                RTMup_unique,
+                AdmInt_unique,
+                positions_z,
+                n,
+                rho_h,
+                rho_v,
+                h_arr_static,
+                prof_arr_static,
+                eta_static,
+                freqs_hz,
+                krJ0J1,
+                wJ0,
+                wJ1,
+                H_tensor,
+            )
+        else:
+            _simulate_combined_prange(
+                dz_halfs,
+                r_halfs,
+                dip_rads_flat,
+                cache_indices,
+                nAngles,
+                u_unique,
+                s_unique,
+                uh_unique,
+                sh_unique,
+                RTEdw_unique,
+                RTEup_unique,
+                RTMdw_unique,
+                RTMup_unique,
+                AdmInt_unique,
+                positions_z,
+                n,
+                rho_h,
+                rho_v,
+                h_arr_static,
+                prof_arr_static,
+                eta_static,
+                freqs_hz,
+                krJ0J1,
+                wJ0,
+                wJ1,
+                H_tensor,
+            )
 
         # ── Passo 5: z_obs em Python (não hot-path) ───────────────────
         # v2.15 P1 (code review): preserva semântica v2.14 (z_obs amostrado

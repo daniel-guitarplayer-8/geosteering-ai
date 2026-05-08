@@ -61,28 +61,27 @@ Example:
         >>> result.H_tensor.shape
         (100, 1, 9)
 """
+
 from __future__ import annotations
 
 import logging
-import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
-from geosteering_ai.simulation._numba.geometry import _sanitize_profile_kernel
+from geosteering_ai.simulation._numba.geometry import find_layers_tr
 from geosteering_ai.simulation._numba.kernel import (
     _compute_zrho_kernel,
+    _fields_at_single_freq,
     _fields_in_freqs_kernel,
     _fields_in_freqs_kernel_cached,
     compute_zrho,
     fields_in_freqs,
-    precompute_common_arrays_cache,
 )
-from geosteering_ai.simulation._numba.propagation import HAS_NUMBA, njit
+from geosteering_ai.simulation._numba.propagation import njit
 from geosteering_ai.simulation.config import SimulationConfig
-from geosteering_ai.simulation.filters import FilterLoader
 
 # Sprint 2.9: import de prange para paralelismo real de threads Numba.
 try:
@@ -465,6 +464,182 @@ def _simulate_combined_prange(
             AdmInt_unique[ci],
         )
         H_tensor[i_tr, i_ang, j, :, :] = cH
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _simulate_combined_prange_flat — Sprint v2.22: prange 4D (TR×Ang×pos×freq)
+# ──────────────────────────────────────────────────────────────────────────────
+# Versão FLAT do `_simulate_combined_prange` (Sprint 13.3) que colapsa as
+# QUATRO dimensões de paralelismo (`nTR × nAng × n_pos × nf`) em um único
+# `prange`, eliminando o `range(nf)` serial residual em
+# `_fields_in_freqs_kernel_cached` (loop body extraído para
+# `_fields_at_single_freq`).
+#
+# Arquitetura do paralelismo:
+#   ┌──────────────────────────────────────────────────────────────────┐
+#   │  v2.21 (Sprint 13.3 + 21.1 fix):                                │
+#   │    prange(nTR × nAng × n_pos)                                    │
+#   │       └── range(nf) serial dentro de _fields_in_freqs_kernel    │
+#   │                                                                  │
+#   │  v2.22 (FLAT prange):                                            │
+#   │    prange(nTR × nAng × n_pos × nf)                               │
+#   │       └── 1 iteração serial (frequência única) em               │
+#   │           _fields_at_single_freq                                  │
+#   └──────────────────────────────────────────────────────────────────┘
+#
+# Decomposição de índice (k → i_combo, j, i_f):
+#   n_combo_pos_f  = n_pos * nf
+#   i_combo        = k // n_combo_pos_f
+#   rem            = k %  n_combo_pos_f
+#   j              = rem // nf
+#   i_f            = rem %  nf
+#   i_tr           = i_combo // nAngles
+#   i_ang          = i_combo % nAngles
+#
+# Garantias:
+#   • H_tensor[i_tr, i_ang, j, i_f, :] é WRITE EXCLUSIVO por k (sem race)
+#   • find_layers_tr é O(log n) ≈ 50ns vs hmd_tiv+vmd ≈ 200μs → overhead
+#     de redundância (chamada nf vezes p/ mesma posição) é 0.025%
+#   • Caches `u_unique[ci, i_f]` são VIEWS 2D (sem cópia)
+#
+# Quando usar:
+#   • Cenário 2/6/7/8 (nf > 1): ganho de 1.3–2.9× via paralelismo de nf
+#   • Cenário B (multi-TR/Ang com nf=1): mesma topologia que v2.21
+#     (k = nTR*nAng*n_pos*1) — sem regressão
+#
+# Ativado via `cfg.use_flat_prange=True` (default False, opt-in).
+
+
+@njit(parallel=True, cache=True, nogil=True)
+def _simulate_combined_prange_flat(
+    # Geometria flat [n_combos = nTR * nAngles]
+    dz_halfs: np.ndarray,
+    r_halfs: np.ndarray,
+    dip_rads_flat: np.ndarray,
+    cache_indices: np.ndarray,
+    nAngles: int,
+    # Caches empilhados [n_unique, nf, npt, n]
+    u_unique: np.ndarray,
+    s_unique: np.ndarray,
+    uh_unique: np.ndarray,
+    sh_unique: np.ndarray,
+    RTEdw_unique: np.ndarray,
+    RTEup_unique: np.ndarray,
+    RTMdw_unique: np.ndarray,
+    RTMup_unique: np.ndarray,
+    AdmInt_unique: np.ndarray,
+    # Dados estáticos do modelo
+    positions_z: np.ndarray,
+    n: int,
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    h_arr: np.ndarray,
+    prof_arr: np.ndarray,
+    eta: np.ndarray,
+    freqs_hz: np.ndarray,
+    krJ0J1: np.ndarray,
+    wJ0: np.ndarray,
+    wJ1: np.ndarray,
+    # Output pré-alocado [nTR, nAngles, n_pos, nf, 9]
+    H_tensor: np.ndarray,
+) -> None:
+    """Prange flat 4D sobre (TR × Ang × pos × freq) — Sprint v2.22.
+
+    Substitui `_simulate_combined_prange` (Sprint 13.3) eliminando o
+    `range(nf)` serial em `_fields_in_freqs_kernel_cached`. Cada tarefa
+    paralela computa UMA frequência única para UMA posição, em UMA
+    combinação de (TR, ângulo).
+
+    Args:
+        dz_halfs, r_halfs, dip_rads_flat: Geometria flat [n_combos].
+        cache_indices: int64[n_combos] — índice na stack de caches únicos.
+        nAngles: número de ângulos (decomposição i_tr/i_ang).
+        u_unique, ..., AdmInt_unique: Caches empilhados [n_unique, nf, npt, n].
+        positions_z: Profundidades ponto-médio [n_pos].
+        n, rho_h, rho_v, h_arr, prof_arr, eta: Dados geológicos estáticos.
+        freqs_hz: Frequências [nf].
+        krJ0J1, wJ0, wJ1: Filtro Hankel.
+        H_tensor: Output pré-alocado [nTR, nAngles, n_pos, nf, 9].
+
+    Note:
+        Função sem retorno: preenche H_tensor inplace. Bit-exata vs
+        `_simulate_combined_prange` (Sprint 13.3) — mesma física, mesma
+        ordem de operações por (i_tr, i_ang, j, i_f), apenas o LOOP
+        outer foi colapsado.
+
+        Sprint v2.22 (Caminho A do roadmap multiagente §22.2.1.1).
+    """
+    n_combos = dz_halfs.shape[0]
+    n_pos = positions_z.shape[0]
+    nf = freqs_hz.shape[0]
+    n_combo_pos_f = n_pos * nf
+    n_total = n_combos * n_combo_pos_f
+
+    for k in _prange(n_total):
+        # Decomposição de índice flat 4D
+        i_combo = k // n_combo_pos_f
+        rem = k % n_combo_pos_f
+        j = rem // nf
+        i_f = rem % nf
+
+        i_tr = i_combo // nAngles
+        i_ang = i_combo % nAngles
+
+        # Parâmetros geométricos para este combo
+        dz_half = dz_halfs[i_combo]
+        r_half = r_halfs[i_combo]
+        dip_rad = dip_rads_flat[i_combo]
+
+        # Índice na stack de caches únicos (deduplicação)
+        ci = cache_indices[i_combo]
+
+        # Coordenadas T/R — Convenção Fortran (PerfilaAnisoOmp.f08:677-679)
+        z_mid = positions_z[j]
+        Tz = z_mid + dz_half
+        cz = z_mid - dz_half
+        Tx = r_half
+        cx = -r_half
+        Ty = 0.0
+        cy = 0.0
+
+        # find_layers_tr é O(log n) — overhead 0.025% vs hmd_tiv+vmd
+        # OK redundância: chamado nf vezes para mesma posição (j)
+        camad_t, camad_r = find_layers_tr(n, Tz, cz, prof_arr)
+
+        # Computa tensor para frequência i_f apenas. Slices 2D dos caches
+        # (u_unique[ci, i_f] etc.) são VIEWS — sem cópia.
+        out_9 = _fields_at_single_freq(
+            Tx,
+            Ty,
+            Tz,
+            cx,
+            cy,
+            cz,
+            dip_rad,
+            n,
+            h_arr,
+            prof_arr,
+            eta,
+            freqs_hz[i_f],
+            krJ0J1,
+            wJ0,
+            wJ1,
+            u_unique[ci, i_f],
+            s_unique[ci, i_f],
+            uh_unique[ci, i_f],
+            sh_unique[ci, i_f],
+            RTEdw_unique[ci, i_f],
+            RTEup_unique[ci, i_f],
+            RTMdw_unique[ci, i_f],
+            RTMup_unique[ci, i_f],
+            AdmInt_unique[ci, i_f],
+            camad_t,
+            camad_r,
+        )
+
+        # Write exclusivo por (i_tr, i_ang, j, i_f) — sem race condition
+        for c in range(9):
+            H_tensor[i_tr, i_ang, j, i_f, c] = out_9[c]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

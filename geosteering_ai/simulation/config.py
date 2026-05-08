@@ -111,11 +111,12 @@ Note:
     `simulate(cfg)` (forward) será adicionada na Fase 2 (backend Numba)
     em `geosteering_ai/simulation/forward.py`.
 """
+
 from __future__ import annotations
 
 import dataclasses
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Final, List, Optional, Tuple
 
@@ -352,6 +353,22 @@ class SimulationConfig:
     num_threads: int = -1
     seed: int = 42
     parallel: bool = True
+
+    # ── Sprint v2.22: FLAT prange (nTR × nAng × n_pos × nf) ──────────
+    # Quando True (e parallel=True), o dispatcher de simulate_multi
+    # roteia para `_simulate_combined_prange_flat` em forward.py, que
+    # paraleliza TAMBÉM a dimensão `nf` (eliminando o `range(nf)` serial
+    # residual em `_fields_in_freqs_kernel_cached`).
+    #
+    # Backward-compat: default False mantém o caminho v2.21 (Sprint 13.3
+    # + 21.1). Ativação opt-in via `cfg.use_flat_prange=True` ou em
+    # fixtures de paridade/benchmark. Após validação em produção (≥1
+    # semana sem regressão), o default poderá ser elevado para True.
+    #
+    # Critério de eligibilidade: nfx (n_combos × n_pos × nf) ≥ 4 ×
+    # num_threads para amortizar overhead de fork/join. Para perfis
+    # pequenos (n_combos=1, nf=1, n_pos<8) o ganho é marginal.
+    use_flat_prange: bool = False
 
     # ─────────────────────────────────────────────────────────────────
     # SPRINT 12.1 (v2.12) — Workers Nativos no `simulate_multi`
@@ -593,17 +610,17 @@ class SimulationConfig:
         # roda exclusivamente em CPU. Tentar usá-lo com GPU é um erro
         # de configuração — o usuário provavelmente quis usar 'jax'.
         assert not (self.backend == "fortran_f2py" and self.device == "gpu"), (
-            f"backend='fortran_f2py' é incompatível com device='gpu'. "
-            f"O binário tatu.x roda apenas em CPU. Para GPU, use "
-            f"backend='jax' (disponível na Fase 3)."
+            "backend='fortran_f2py' é incompatível com device='gpu'. "
+            "O binário tatu.x roda apenas em CPU. Para GPU, use "
+            "backend='jax' (disponível na Fase 3)."
         )
 
         # ── Exclusividade entre backend e dtype em GPU ───────────────
         # O backend Numba não suporta GPU no roadmap atual. Se o
         # usuário pediu Numba + GPU, provavelmente quis JAX.
         assert not (self.backend == "numba" and self.device == "gpu"), (
-            f"backend='numba' roda apenas em CPU no roadmap atual. "
-            f"Para GPU, use backend='jax'."
+            "backend='numba' roda apenas em CPU no roadmap atual. "
+            "Para GPU, use backend='jax'."
         )
 
         # ── Listas opcionais (multi-f, multi-TR) ─────────────────────
@@ -611,8 +628,8 @@ class SimulationConfig:
         # lista vazia (len=0) é sempre erro de configuração.
         if self.frequencies_hz is not None:
             assert len(self.frequencies_hz) >= 1, (
-                f"frequencies_hz=[] inválido: se definido, deve conter "
-                f"≥ 1 frequência."
+                "frequencies_hz=[] inválido: se definido, deve conter "
+                "≥ 1 frequência."
             )
             for i, f in enumerate(self.frequencies_hz):
                 assert fmin <= f <= fmax, (
@@ -621,8 +638,8 @@ class SimulationConfig:
 
         if self.tr_spacings_m is not None:
             assert len(self.tr_spacings_m) >= 1, (
-                f"tr_spacings_m=[] inválido: se definido, deve conter "
-                f"≥ 1 espaçamento."
+                "tr_spacings_m=[] inválido: se definido, deve conter "
+                "≥ 1 espaçamento."
             )
             for i, s in enumerate(self.tr_spacings_m):
                 assert smin <= s <= smax, (
