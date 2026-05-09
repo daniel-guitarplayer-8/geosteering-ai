@@ -12,6 +12,8 @@ description: |
   "compensação", "midpoint", "Kong", "Anderson", "filtro adaptativo",
   "jacobiano", "jacobian", "∂H/∂ρ", "sensibilidade", "F10",
   "compute_jacobian_fd", "simulate_v10_jacobian", "PINN", "Estratégia B", "Estratégia C".
+model: claude-opus-4-7
+effort: extra-high
 ---
 
 # Geosteering AI — Simulador Fortran EM 1D TIV

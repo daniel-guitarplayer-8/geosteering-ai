@@ -13,6 +13,7 @@ tools:
   - Bash
   - Agent
 model: claude-sonnet-4-6
+effort: high
 constraints:
   - "Split por modelo geológico (P1) — NUNCA por amostra (data leakage)"
   - "Scaler fit em dados LIMPOS — NUNCA em ruidosos"

@@ -14,6 +14,7 @@ tools:
   - Bash
   - Agent
 model: claude-sonnet-4-6
+effort: extra-high
 constraints:
   - "Paridade JAX vs Numba <1e-10 inviolável (preserva paridade Fortran <1e-12 transitiva)"
   - "Não tocar Fortran_Gerador/* (delegar para `geosteering-simulator-fortran`)"
