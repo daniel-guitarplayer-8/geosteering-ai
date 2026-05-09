@@ -4,14 +4,14 @@ description: |
   Physics reviewer especialista do Geosteering AI 2.0. Valida tensor EM
   3×3 (simetria de Maxwell), paridade Fortran <1e-12, conservação de
   energia, decoupling factors (ACp/ACx), errata física imutável, integrais
-  de Hankel TE/TM. Modelo Sonnet 4.6 com profundidade 2 (chamado pelo
+  de Hankel TE/TM. Modelo Opus 4.7 com effort extra-high (chamado pelo
   Orquestrador). Bloqueia merge se paridade quebrar.
 tools:
   - Read
   - Grep
   - Glob
   - Bash
-model: claude-sonnet-4-6
+model: claude-opus-4-7
 effort: extra-high
 constraints:
   - "Read-only de _numba/, _jax/, Fortran_Gerador/, simulation/"
@@ -27,7 +27,7 @@ constraints:
 | Atributo | Valor |
 |:---------|:------|
 | **Skill** | geosteering-physics-reviewer |
-| **Modelo** | Claude Sonnet 4.6 |
+| **Modelo** | Claude Opus 4.7 (1M context, effort extra-high) |
 | **Posição** | Spoke (profundidade 2) |
 | **Origem da spec** | §4.4 do documento de arquitetura |
 | **Foco** | Validação física (Maxwell, Fortran, energia) |

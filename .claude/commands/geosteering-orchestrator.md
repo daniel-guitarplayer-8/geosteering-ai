@@ -192,24 +192,93 @@ Fase 5 (Encerramento — 30min):
 
 ---
 
+## Configuração Dinâmica de Agentes
+
+### Parâmetro `model` — Override via Agent()
+
+O tool `Agent` suporta o parâmetro `model` para sobrescrever o modelo padrão
+definido no frontmatter da skill. Valores aceitos: `"opus"`, `"sonnet"`, `"haiku"`.
+Se não informado, o campo `model:` do arquivo MD da skill é usado.
+
+```python
+# Padrão — usa model: do frontmatter da skill (ex.: Sonnet 4.6 para geosteering-jax)
+Agent(subagent_type="geosteering-jax", prompt="...")
+
+# Override para Opus — necessário em refatorações arquiteturais JAX
+Agent(subagent_type="geosteering-jax", model="opus", prompt="...")
+
+# Override para Sonnet — quando a tarefa é trivial e Opus seria custo excessivo
+Agent(subagent_type="geosteering-simulator-fortran", model="sonnet",
+      prompt="Verificar indentação em Makefile")
+```
+
+**Regra de ouro para override de modelo:**
+
+| Tarefa | Override | Justificativa |
+|:-------|:---------|:--------------|
+| Debug paridade Fortran multi-commit | `model="opus"` | Contexto histórico extenso |
+| Refatoração arquitetural `_jax/` (>5 arquivos) | `model="opus"` | Cross-file reasoning |
+| Revisão física rápida (1 arquivo) | padrão Opus | Physics-reviewer já é Opus |
+| Implementação isolada (1 módulo) | padrão Sonnet | Sonnet suficiente |
+| Benchmark tabular simples | `model="haiku"` | Boilerplate, sem raciocínio |
+
+### Parâmetro `effort` — Convenção via Prompt
+
+O tool `Agent` **não suporta** parâmetro `effort` diretamente. O campo `effort:` no
+frontmatter define o budget de raciocínio padrão da skill. Para ajustar o esforço
+sem criar variantes da skill, use prefixo de contexto no `prompt`:
+
+```python
+# Indicar alto esforço (debugging profundo — paridade quebrada em produção)
+Agent(
+    subagent_type="geosteering-physics-reviewer",
+    model="opus",
+    prompt=(
+        "CONTEXTO: Paridade Fortran quebrou em produção após merge feat/v2.26. "
+        "Esta é uma análise crítica — verifique TODOS os 7 modelos canônicos, "
+        "incluindo alta resistividade (>1000 Ω·m). Não pule modelos edge-case.\n\n"
+        "Tarefa: ..."
+    )
+)
+
+# Indicar esforço reduzido (review rápido pré-merge trivial)
+Agent(
+    subagent_type="geosteering-physics-reviewer",
+    prompt=(
+        "CONTEXTO: Review rápido — apenas validar simetria Maxwell no novo módulo. "
+        "Não é necessário rodar suite completa, apenas smoke test oklahoma_3.\n\n"
+        "Tarefa: ..."
+    )
+)
+```
+
+**Quando usar `effort: max` no orquestrador:**
+
+O orquestrador (`geosteering-orchestrator`) já opera com `effort: max` por padrão.
+Para tarefas que requerem raciocínio excepcional (regressões misteriosas, design 2D/3D),
+invoque o orquestrador diretamente — ele deterministicamente usará `effort: max`.
+
+---
+
 ## Subagentes Disponíveis (Spoke)
 
-| Agente | Modelo | Quando Delegar |
-|:-------|:-------|:---------------|
-| `geosteering-simulator-numba` | Opus 4.7 | Mudanças em `_numba/` ou `forward.py` |
-| `geosteering-simulator-fortran` | Opus 4.7 | Mudanças em `Fortran_Gerador/` (raras) |
-| `geosteering-jax` | Sonnet 4.6 | Mudanças em `_jax/` |
-| `geosteering-pinns` | Sonnet 4.6 | Cenários PINN (8 casos) |
-| `geosteering-data` | Sonnet 4.6 | DataPipeline P1-P5, FV/GS |
-| `geosteering-realtime` | Sonnet 4.6 | LWD streaming, inferência online |
-| `geosteering-physics-reviewer` | Sonnet 4.6 | Validar tensor EM, paridade Fortran |
-| `geosteering-perf-reviewer` | Haiku 4.5 | Benchmarks, mediana 5 runs |
-| `geosteering-code-reviewer` | Sonnet 4.6 | PEP8, D1-D14, type hints |
-| `geosteering-security-auditor` | Sonnet 4.6 | Secrets em diff, .gitignore |
-| `geosteering-research` | Sonnet 4.6 | Consensus + ArXiv + bioRxiv |
-| `geosteering-documentation` | Haiku 4.5 | Relatório, CHANGELOG, MEMORY |
-| `Explore` (built-in) | Haiku/Sonnet | Auditoria read-only de codebase |
-| `Plan` (built-in) | Sonnet | Planejamento de implementação |
+| Agente | Modelo (default) | Effort | Override Típico | Quando Delegar |
+|:-------|:----------------|:-------|:----------------|:---------------|
+| `geosteering-simulator-numba` | Opus 4.7 | extra-high | — | Mudanças em `_numba/` ou `forward.py` |
+| `geosteering-simulator-fortran` | Opus 4.7 | extra-high | `model="sonnet"` em fix trivial | Mudanças em `Fortran_Gerador/` |
+| `geosteering-simulator-python` | Opus 4.7 | extra-high | — | Mudanças multi-arquivo em `simulation/` |
+| `geosteering-physics-reviewer` | **Opus 4.7** | extra-high | — | Validar tensor EM, paridade Fortran |
+| `geosteering-jax` | Sonnet 4.6 | extra-high | `model="opus"` em refatoração | Mudanças em `_jax/` |
+| `geosteering-pinns` | Sonnet 4.6 | extra-high | `model="opus"` em novo cenário | Cenários PINN (8 casos) |
+| `geosteering-data` | Sonnet 4.6 | high | — | DataPipeline P1-P5, FV/GS |
+| `geosteering-realtime` | Sonnet 4.6 | high | — | LWD streaming, inferência online |
+| `geosteering-perf-reviewer` | Haiku 4.5 | high | — | Benchmarks, mediana 5 runs |
+| `geosteering-code-reviewer` | Sonnet 4.6 | high | — | PEP8, D1-D14, type hints |
+| `geosteering-security-auditor` | Sonnet 4.6 | high | — | Secrets em diff, .gitignore |
+| `geosteering-research` | Sonnet 4.6 | high | — | Consensus + ArXiv + bioRxiv |
+| `geosteering-documentation` | Sonnet 4.6 | high | `model="haiku"` em append simples | Relatório, CHANGELOG, MEMORY |
+| `Explore` (built-in) | Haiku/Sonnet | — | — | Auditoria read-only de codebase |
+| `Plan` (built-in) | Sonnet | — | — | Planejamento de implementação |
 
 ---
 

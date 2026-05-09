@@ -15,6 +15,8 @@ description: |
   "commonfactorsMD Python", "hmd_TIV Python", "empymod", "half-space",
   "paridade Fortran", "Sprint 1.1", "Sprint 1.2", "Fase 0 simulador",
   "feature/simulator-python".
+model: claude-opus-4-7
+effort: extra-high
 ---
 
 # Geosteering AI — Simulador Python Otimizado (JAX + Numba)
@@ -504,7 +506,7 @@ de GIL).
 - `geosteering_ai/simulation/visualization/plot_tensor.py` — `plot_tensor_profile()`
   + `plot_resistivity_profile()` com layout GridSpec(3,7) (19 axes) —
   replica padrão de `buildValidamodels.py:571-628`
-- `geosteering_ai/simulation/visualization/plot_benchmark.py` — 
+- `geosteering_ai/simulation/visualization/plot_benchmark.py` —
   `plot_benchmark_comparison()` (2 painéis: throughput + % Fortran)
 
 **Testes**: `tests/test_simulation_visualization.py` — **11 testes PASS** em
@@ -689,7 +691,7 @@ Compensação Midpoint e F7 Antenas Inclinadas.
   F7 quando ativos no config. Opt-in via `cfg.export_model_in=True`.
 
 - `geosteering_ai/simulation/io/binary_dat.py` (~400 LOC) —
-  `export_binary_dat()` escreve `.dat` 22-col stream nativo + 
+  `export_binary_dat()` escreve `.dat` 22-col stream nativo +
   `export_out_metadata()` escreve `info{filename}.out` texto. Round-trip
   byte-exato via `np.fromfile(path, dtype=DTYPE_22COL)`. Opt-in via
   `cfg.export_binary_dat=True`.
