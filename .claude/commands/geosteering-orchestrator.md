@@ -39,6 +39,7 @@ constraints:
 |:---------|:------|
 | **Skill** | geosteering-orchestrator |
 | **Modelo** | Claude Opus 4.7 (1M context) |
+| **Effort** | `max` — budget máximo (hierarquia: `high` < `extra-high` < `max`) |
 | **Posição arquitetural** | Hub central (hub-and-spoke) |
 | **Profundidade** | 0 (orquestra todos os agentes spoke) |
 | **Origem da spec** | §4.2 do documento de arquitetura |
