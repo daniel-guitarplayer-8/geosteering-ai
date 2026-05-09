@@ -7,6 +7,39 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.22.4] — 2026-05-09 — Promoção FLAT prange a default
+
+### Mudança
+
+- **`SimulationConfig.use_flat_prange`**: default mudado de `False` (opt-in)
+  para `True` (default ativo).
+- Backward-compat preservado: `cfg.use_flat_prange=False` reverte para o
+  caminho v2.21 (Sprint 13.3 + 21.1) — útil para A/B testing e debug.
+- Sem regressão em paridade Numba bit-exata (validada em 27 testes
+  `test_simulation_v22_flat_prange.py`, 100% PASS pós-bump).
+- Sem regressão em paridade Fortran <1e-12 (transitividade FLAT ≡ legacy).
+- Smoke benchmark Cenário E (n_pos=600, nf=1): 224k mod/h pós-bump
+  (legacy 224k vs flat 224k, speedup 1.00× — dentro do ruído).
+
+### Justificativa
+
+Após validação completa da Sprint v2.22 (commit `f377a37`):
+- 1597 PASS / 0 FAIL na suite total (15min)
+- Cenário B +11%, F +9% single-process
+- Cenário E sem regressão (0.99× original; 1.00× pós-bump)
+- 27/27 testes paridade FLAT vs legacy bit-exato (`np.array_equal`)
+
+Promoção desbloqueia Sprint v2.23 (fastmath + adaptive threads) que
+assume FLAT como pré-requisito arquitetural.
+
+### Arquivos modificados
+
+- `geosteering_ai/simulation/config.py`: `use_flat_prange: bool = True`
+  (era `False`); comentário expandido com histórico de promoção.
+- `docs/CHANGELOG.md`: entrada `[v2.22.4]` (esta).
+
+---
+
 ## [v2.22.0] — 2026-05-08 — Sprint FLAT prange
 
 ### Sprint v2.22 FLAT prange (Caminho A do roadmap multi-agente §22.2.1.1)

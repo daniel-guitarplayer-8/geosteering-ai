@@ -354,21 +354,26 @@ class SimulationConfig:
     seed: int = 42
     parallel: bool = True
 
-    # ── Sprint v2.22: FLAT prange (nTR × nAng × n_pos × nf) ──────────
-    # Quando True (e parallel=True), o dispatcher de simulate_multi
-    # roteia para `_simulate_combined_prange_flat` em forward.py, que
-    # paraleliza TAMBÉM a dimensão `nf` (eliminando o `range(nf)` serial
-    # residual em `_fields_in_freqs_kernel_cached`).
+    # ── Sprint v2.22.4: FLAT prange — DEFAULT TRUE (promovido v2.22.4) ─
+    # Quando True (default desde v2.22.4) e parallel=True, o dispatcher
+    # de simulate_multi roteia para `_simulate_combined_prange_flat` em
+    # forward.py, que paraleliza TAMBÉM a dimensão `nf` (eliminando o
+    # `range(nf)` serial residual em `_fields_in_freqs_kernel_cached`).
     #
-    # Backward-compat: default False mantém o caminho v2.21 (Sprint 13.3
-    # + 21.1). Ativação opt-in via `cfg.use_flat_prange=True` ou em
-    # fixtures de paridade/benchmark. Após validação em produção (≥1
-    # semana sem regressão), o default poderá ser elevado para True.
+    # Promoção a default em v2.22.4 após validação:
+    #   • 27 testes paridade FLAT vs legacy bit-exato (np.array_equal)
+    #   • 1597 PASS / 0 FAIL na suite total (Sprint v2.22)
+    #   • Cenário B +11%, F +9% single-process; E sem regressão (0.99×)
+    #   • Paridade Fortran <1e-12 preservada por transitividade
+    #
+    # Backward-compat: `cfg.use_flat_prange=False` reverte ao caminho
+    # v2.21 (Sprint 13.3 + 21.1) — útil para A/B testing e debug.
     #
     # Critério de eligibilidade: nfx (n_combos × n_pos × nf) ≥ 4 ×
     # num_threads para amortizar overhead de fork/join. Para perfis
-    # pequenos (n_combos=1, nf=1, n_pos<8) o ganho é marginal.
-    use_flat_prange: bool = False
+    # pequenos (n_combos=1, nf=1, n_pos<8) o ganho é marginal mas
+    # ainda há redução de overhead vs caminho legacy.
+    use_flat_prange: bool = True
 
     # ─────────────────────────────────────────────────────────────────
     # SPRINT 12.1 (v2.12) — Workers Nativos no `simulate_multi`
