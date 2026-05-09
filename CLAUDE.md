@@ -13,7 +13,7 @@
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |
 | **Pacote** | `geosteering_ai/` (pip installable) |
 | **Referencia** | `docs/ARCHITECTURE_v2.md` (documento completo da arquitetura) |
-| **Simulation Manager** | v2.21 (2026-05-02) — **CAUSA-RAIZ DA REGRESSÃO HISTÓRICA**: análise comparativa com `old_geosteering_ai/` revelou que Sprint 13.1 (v2.13) introduziu `@njit(parallel=True)` em `_fields_in_freqs_kernel_cached` causando overhead de paralelismo aninhado em milhões de chamadas. Fix: remove `parallel=True`. Cenário E: 46k → 122k mod/h (2.65×, atinge meta histórica >120k). v2.20: investigação empírica HT/SMT. v2.19: random seed UI + nogil. v2.18: t0_sim + PoolWarmupThread. Paridade Fortran <1e-12 · 13+14+4+7+19+4+12+1 testes pass |
+| **Simulation Manager** | v2.22.6 (2026-05-09) — **Fase 1 Fundação Multi-Agente COMPLETA (§22.1)**: I1.2 skill `geosteering-simulator-numba.md` (Opus 4.7 extra-high, 384 LOC) + I1.9 MCP `physics-validator` handlers REAIS (6 tools, 15 testes) + I1.10 MCP `numba-profiler` handlers REAIS (6 tools, 17 testes) + `get_jit_cache_info()` em `multi_forward.py`. Working tree clean (0 SKIP=mypy,ruff necessário). v2.22.5: skills agent-config-override (physics-reviewer Sonnet→Opus 4.7). v2.22.4: `use_flat_prange=True` default. v2.22: FLAT prange 4D (Cenário B +11%, F +9%; E sem regressão; 27 testes paridade bit-exato). v2.21: causa-raiz KB-013 (Sprint 13.1) Cenário E 46k→122k. Paridade Fortran <1e-12 inviolável · 1597 PASS / 295 SKIP / 0 FAIL na suite total |
 
 ---
 

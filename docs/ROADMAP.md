@@ -1,6 +1,6 @@
 # Roadmap Completo — Geosteering AI v2.0+
 
-**Versão do documento:** 1.1 (Abril 2026)
+**Versão do documento:** 1.2 (Maio 2026)
 **Autor:** Daniel Leal
 **Projeto:** Inversão 1D de Resistividade via Deep Learning para Geosteering
 **Framework:** TensorFlow 2.x / Keras (exclusivo)
@@ -29,9 +29,14 @@
 | v2.19 | 2026-05-02 | Fix bug funcional do gerador aleatório (`rng_seed=42` hardcoded) + UI control de semente (default aleatório) + `nogil=True` universal no hot path Numba + benchmark CLI CPU-aware defaults + warning de oversubscrição. Cenário A: 189k→802k mod/h (4×) com defaults corretos. Auditoria PyQt6 descarta como causa-raiz | 12 novos (7 random seed + 5 pool warmup) | `feat/simulation-manager-v2.19` |
 | v2.20 | 2026-05-02 | Investigação empírica rigorosa (5 runs × 2 configs) refuta hipótese "HT-aware = logical cores" e confirma estratégia v2.17 (phys_cores) como ótima. 4w × 2t mediana 46k mod/h em E vs 4w × 4t mediana 38k mod/h (-25%). Cenário A com defaults v2.20: 1.18M mod/h | 1 novo (M2/M3 Pro topology) | `feat/simulation-manager-v2.20` |
 | **v2.21** | **2026-05-02** | **CAUSA-RAIZ DA REGRESSÃO HISTÓRICA encontrada via análise comparativa `old_geosteering_ai/`: Sprint 13.1 (v2.13) introduziu `@njit(parallel=True)` em `_fields_in_freqs_kernel_cached` (chamada milhões de vezes de prange outer) → overhead de paralelismo aninhado pago em cada chamada (~14s acumulado em Cenário E). Fix: remove `parallel=True`, range serial. Cenário E saltou 46k → 122k mod/h (2.65× ganho), atingindo meta histórica >120k. Paridade Fortran <1e-12 preservada.** | **0 novos (regressão é fix arquitetural; 68/68 testes existentes PASS)** | **`feat/simulation-manager-v2.21`** |
+| **v2.22** | **2026-05-08** | **FLAT prange 4D (`nTR×nAng×n_pos×nf`) elimina `range(nf)` serial em `_fields_in_freqs_kernel_cached`. Cenário B +11%, F +9% single-process; E sem regressão. 27 testes paridade FLAT vs legacy bit-exato. Suite total 1597 PASS / 295 SKIP / 0 FAIL.** | 27 novos (paridade FLAT) | `feat/simulation-manager-v2.22-flat-prange` |
+| **v2.22.4** | 2026-05-09 | **Promoção `cfg.use_flat_prange=True` a default** (após validação 1 semana opt-in). Backward-compat preservada via flag. Sem regressão Cenário E. Desbloqueia Sprint v2.23. | mantém | `main` (mergeado) |
+| **v2.22.5** | 2026-05-09 | **Skills agent-config-override**: physics-reviewer Sonnet→Opus 4.7 extra-high; simulator-fortran+python+jax+pinns model+effort campos; orquestrador override conforme §19. 13 skills configuradas. 0 CodeRabbit findings. | — | `main` (mergeado) |
+| **v2.22.6** | **2026-05-09** | **Fase 1 Fundação Multi-Agente COMPLETA (§22.1)**: I1.2 skill `geosteering-simulator-numba.md` (Opus 4.7 extra-high, 384 LOC) + I1.9 MCP `physics-validator` handlers REAIS (6 tools, 15 testes) + I1.10 MCP `numba-profiler` handlers REAIS (6 tools, 17 testes) + `get_jit_cache_info()` em `multi_forward.py`. Fix dos 3 erros pré-existentes ruff/mypy (F821 + 2× type narrowing). Working tree clean: 0 SKIP em pre-commit. | 30 novos (15+15) | `feat/fase1-fundacao-multiagente` |
 
 Documentação detalhada em `docs/reports/v2.{N}_2026-04-{D}.md` e
-`docs/CHANGELOG.md`.
+`docs/CHANGELOG.md`. Relatório técnico Fase 1 completa em
+`docs/reports/fase1_fundacao_multiagente_completa_2026-05-09.md`.
 
 ---
 
