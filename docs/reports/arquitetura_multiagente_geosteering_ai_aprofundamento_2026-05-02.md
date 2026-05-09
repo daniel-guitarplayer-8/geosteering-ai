@@ -13353,6 +13353,19 @@ SDAR_CANONICAL_MODELS = {
 Decisão derivada do pré-mortem inaugural (2026-05-09 — ver
 `docs/reports/premortem_geosteering_ai_2026-05-09.md`, §4.5 e §5.B5).
 
+**Atualização 2026-05-09 (mesmo dia)**: após investigação técnica adicional
+(ver §75.10 abaixo), a estratégia evoluiu de "permitir PyTorch via adapter"
+para uma **estratégia 3-Tier** que separa três decisões distintas:
+
+1. **Tier 1**: backend-agnostic code hygiene (auditoria `tf.*` → `keras.ops.*`)
+2. **Tier 2**: PyTorch via adapter opt-in para casos extremos
+3. **Tier 3**: multi-backend Keras ativo (DEFERIDO, condicional)
+
+O Tier 2 é a refatoração originalmente descrita em §75.2-§75.8 (mantida).
+O Tier 1 é progresso incremental NOVO. O Tier 3 é a possibilidade de usar
+PyTorch como **backend do próprio Keras 3.x** — investigado em §75.10 e
+**deferido** por razões técnicas concretas. Ver `docs/reports/status_geosteering_ai_2026-05-09.md` para detalhes.
+
 A proibição de PyTorch (CLAUDE.md "Proibicoes Absolutas") foi instituída em
 v1.0 para preservar coerência arquitetural com TensorFlow/Keras. Análise
 crítica identificou custo de oportunidade real:
@@ -13463,16 +13476,28 @@ deploy em campo (GUI Studio, Simulation Manager standalone).
 
 ### §75.4 — Política de Coexistência
 
-| Camada | TF | PyTorch | ONNX |
-|:-------|:--:|:-------:|:----:|
-| Pipeline de produção (`training/`, `inference/`) | ✅ default exclusivo | ❌ proibido | ✅ deploy only |
-| Módulos de pesquisa exploratória (`research/`, `experimental/`) | ✅ permitido | ✅ permitido | ✅ permitido |
-| Imports diretos `import torch` fora de `adapters/` | N/A | ❌ proibido | N/A |
-| Hook `validate-no-pytorch.sh` | — | grep `import torch` em production paths → block | — |
+**Regra base** (sempre vigente, independente de tier):
 
-**Regra absoluta**: **nenhum módulo em `geosteering_ai/{models,losses,training,
-inference,evaluation}/`** pode importar `torch` diretamente. PyTorch é **sempre**
-acessado via `get_adapter("pytorch")`.
+| Camada | TF/Keras 3.x (PRIMÁRIO) | PyTorch | ONNX |
+|:-------|:-----------------------:|:-------:|:----:|
+| Pipeline de produção (`models/`, `losses/`, `training/`, `inference/`, `evaluation/`, `data/`, `simulation/`, `visualization/`, `utils/`) | ✅ default exclusivo | ❌ proibido | ✅ deploy only |
+| `geosteering_ai/adapters/` (Tier 2) | ✅ permitido | ✅ permitido (opt-in) | ✅ permitido |
+| `geosteering_ai/research/` (módulos exploratórios) | ✅ permitido | ✅ permitido | ✅ permitido |
+| `tests/`, `benchmarks/`, `notebooks/`, `scripts/` | ✅ permitido | ✅ permitido | ✅ permitido |
+| Imports diretos `import torch` fora de adapters/research/ | N/A | ❌ proibido (hook bloqueia) | N/A |
+
+**Regra absoluta**: nenhum módulo em production paths pode importar `torch`
+diretamente. PyTorch é **sempre** acessado via `get_adapter("pytorch")` (Tier 2)
+OU dentro de `geosteering_ai/research/` (pesquisa exploratória sem garantias
+de produção).
+
+**Hook ativo**: `validate-no-pytorch.sh` em PreToolUse — bloqueia imports
+torch em production paths, permite em adapters/, research/, tests/, etc.
+
+**Aplicação por Tier**: Tier 1 (backend-agnostic hygiene) NÃO altera esta
+política — apenas torna o código menos dependente de `tf.*` específico,
+preparando para futuro Tier 3. Tier 2 (adapter opt-in) usa esta política
+como está. Tier 3 (multi-backend ativo) requereria revisão futura.
 
 ### §75.5 — Migration Path
 
@@ -13575,6 +13600,132 @@ A "Proibição Absoluta" original deve ser refinada:
 **Pré-requisito**: pré-mortem inaugural confirma decisão de adoção (ver
 relatório `docs/reports/premortem_geosteering_ai_2026-05-09.md`,
 calibração com Obs. 5 do usuário).
+
+### §75.10 — Roadmap 3-Tier Detalhado
+
+**Origem**: investigação técnica do uso de PyTorch como backend do Keras 3.x
+(2026-05-09, mesmo dia do pré-mortem inaugural). A pesquisa concluiu que
+**ativar PyTorch como backend Keras é tecnicamente viável mas economicamente
+desfavorável no curto prazo**, levando à formulação da estratégia 3-tier
+abaixo.
+
+#### §75.10.1 — Tier 1: Backend-Agnostic Code Hygiene (RECOMENDADO)
+
+**Sprint v2.31** (cronograma estimado: 1-2 semanas).
+
+**Objetivo**: tornar o código menos dependente de `tf.*` específico e mais
+dependente de `keras.ops.*` (genérico). Não muda o backend padrão (TF
+continua exclusivo no pipeline de produção). Habilita JAX backend
+naturalmente sem esforço adicional.
+
+**Ações concretas**:
+
+```text
+1. Auditar geosteering_ai/models/ (48 arquiteturas):
+   - Buscar usos de tf.reduce_*, tf.concat, tf.stack, tf.where, etc.
+   - Substituir por keras.ops.* equivalente onde possível
+   - Manter tf.* APENAS em casos com justificativa documentada
+
+2. Auditar geosteering_ai/losses/ (catalog.py):
+   - Mesma estratégia para losses padrão (não-PINN)
+   - PINNs com tf.GradientTape: documentar como TF-specific (NÃO migrar)
+
+3. Auditar callbacks em geosteering_ai/training/:
+   - Substituir tf.* genérico por keras.* equivalente
+
+4. Pipeline tf.data.Dataset:
+   - MANTER intacto (continua funcionando em qualquer backend)
+   - Documentar quais map_fn chamam layers Keras (TF-only)
+
+5. Adicionar testes paramétricos:
+   - @pytest.fixture para testar mesmo código com backend TF e JAX
+   - Não adicionar PyTorch backend ainda (Tier 3)
+```
+
+**Output esperado**:
+
+| Métrica | Estado atual (v2.0) | Estado pós-v2.31 |
+|:--------|:-------------------:|:----------------:|
+| Imports diretos `tensorflow as tf` em `models/` | ~80% | ~30% |
+| Cobertura `keras.ops.*` em código custom | ~20% | ~70% |
+| Compatibilidade JAX backend (sem mudança de código) | Parcial | Total (PINNs continuam TF-only por design) |
+| Compatibilidade Torch backend | Não testada | Não testada (deferida para Tier 3) |
+
+**Pré-requisito**: nenhum (pode rodar imediatamente após v2.30).
+
+**Risco**: BAIXO — nenhuma mudança funcional, apenas refactor cosmético com
+testes preservando paridade.
+
+#### §75.10.2 — Tier 2: PyTorch Adapter Opt-In (MANTIDO)
+
+**Sprint v2.30** (cronograma já documentado em §75.5).
+
+Mantém integralmente a especificação de §75.2 a §75.8: `BaseInversionModel`,
+adapters TF/PyTorch/ONNX, política de coexistência, hook
+`validate-no-pytorch.sh`.
+
+**Quando usar**:
+
+- Integração com HuggingFace transformers (foundation models)
+- Modelos `torch.nn.Module` nativos (segmentation_models_pytorch)
+- Bibliotecas PyTorch específicas sem equivalente TF (e.g., torchvision com
+  arquiteturas pré-treinadas específicas)
+
+**Restrição mantida**: PyTorch APENAS via `get_adapter("pytorch")` ou em
+`geosteering_ai/research/`. Hook `validate-no-pytorch.sh` bloqueia direct
+imports em production paths.
+
+#### §75.10.3 — Tier 3: Multi-Backend Keras Ativo (DEFERIDO)
+
+**Status**: NÃO IMPLEMENTAR no roadmap atual. Documentado como possibilidade
+futura.
+
+**Razões para deferir** (investigação técnica 2026-05-09):
+
+| Razão | Impacto | Fonte |
+|:------|:-------:|:------|
+| Performance Torch backend 2-4× pior que TF/JAX | ALTO | Benchmark oficial Keras 3 (A100, BERT/SAM/Gemma) |
+| `tf.GradientTape` em PINNs (8 cenários) requer rewrite extenso | ALTO | keras.io/guides/custom_train_step_in_torch |
+| `tf.data.map_fn` chamando layers Keras: TF-only | CRÍTICO | keras.io/api/data_loading limitação documentada |
+| Reprodutibilidade bit-exact entre backends NÃO garantida (drift ~1e-7) | MÉDIO | keras.io/examples/keras_recipes/reproducibility_recipes |
+| Sem ganho científico identificado no curto prazo | ALTO | Sem foundation model EM em HuggingFace; sem hardware AMD/Intel Gaudi no roadmap |
+
+**Condições para REABRIR** (qualquer uma):
+
+1. HuggingFace publica foundation model para EM/geofísica que justifique
+   integração nativa via `TorchModuleWrapper`
+2. Hardware muda: adoção de AMD MI300, Intel Gaudi, ou outro acelerador
+   com PyTorch superior ao TensorFlow
+3. PyTorch publica biblioteca de PINN superior ao stack atual (TF-Keras)
+4. Comunidade científica de geofísica DL converge fortemente para PyTorch
+   (e.g., após v3.0 do projeto, quando produto científico já estiver
+   estável)
+
+**Documentação de gatilho**: incluir em pré-mortem trimestral (§24.4) a
+verificação de qualquer uma das condições acima.
+
+#### §75.10.4 — Comparação dos 3 Tiers
+
+| Aspecto | Tier 1 | Tier 2 | Tier 3 |
+|:--------|:------:|:------:|:------:|
+| Sprint | v2.31 | v2.30 | DEFERIDO |
+| Esforço | 1-2 sem | 4-6 sem | 2-4 sem (futuro) |
+| Risco | Baixo | Baixo | Alto |
+| ROI imediato | Alto (JAX habilitado) | Médio (casos extremos) | Nenhum (futuro) |
+| Mudança da API principal? | Não | Não | Não (Keras permanece) |
+| Mudança do backend padrão? | Não | Não | Sim (DEFERIDA) |
+| Captura oportunidade pré-mortem? | Parcial | Sim | Sim |
+
+#### §75.10.5 — Recomendação Final
+
+**Implementar Tier 1 + Tier 2 sequencialmente** (v2.30 → v2.31). **Manter
+Tier 3 documentado como possibilidade**, com gatilhos claros para reabrir.
+Esta estratégia:
+
+- Captura a oportunidade do pré-mortem (PyTorch acessível via adapter)
+- Reduz lock-in tácito ao TensorFlow (Tier 1 → JAX habilitado)
+- Não compromete performance, reprodutibilidade ou cultura de paridade
+- Permite reabrir Tier 3 quando contexto mudar (gatilhos objetivos)
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════╗
