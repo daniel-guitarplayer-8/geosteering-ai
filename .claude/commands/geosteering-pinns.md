@@ -12,6 +12,7 @@ tools:
   - Bash
   - Agent
 model: claude-sonnet-4-6
+effort: extra-high
 constraints:
   - "PINN cenários DEVEM passar gate de paridade EM (residue < ε no validation)"
   - "λ_phys ≥ 0 sempre; lambda_schedule warmup obrigatório (1k+ epochs)"

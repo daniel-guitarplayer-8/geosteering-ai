@@ -17,6 +17,7 @@ tools:
   - WebFetch
   - TodoWrite
 model: claude-opus-4-7
+effort: max
 constraints:
   - "F1 PT-BR acentuação inviolável em docs/comentários"
   - "F2 paridade Fortran <1e-12 inviolável em simulação"

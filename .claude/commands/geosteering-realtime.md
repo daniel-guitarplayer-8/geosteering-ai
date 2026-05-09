@@ -12,6 +12,7 @@ tools:
   - Bash
   - Agent
 model: claude-sonnet-4-6
+effort: high
 constraints:
   - "Apenas modelos com `causal_compatible=True` em produção LWD streaming"
   - "Latência alvo: <100ms por sample (LWD typical 1Hz update rate)"

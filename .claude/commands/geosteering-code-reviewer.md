@@ -12,6 +12,7 @@ tools:
   - Glob
   - Bash
 model: claude-sonnet-4-6
+effort: high
 constraints:
   - "Read-only de qualquer .py em geosteering_ai/, tests/, benchmarks/"
   - "Não tocar Fortran_Gerador/* (delegar para Físico Reviewer)"
