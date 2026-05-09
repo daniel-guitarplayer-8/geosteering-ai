@@ -12,6 +12,7 @@ tools:
   - Glob
   - Bash
 model: claude-sonnet-4-6
+effort: high
 constraints:
   - "Bloqueia merge se segredo no diff (alta severidade)"
   - "Read-only de qualquer arquivo no repositório"

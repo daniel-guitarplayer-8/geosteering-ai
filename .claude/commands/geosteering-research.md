@@ -16,6 +16,7 @@ tools:
   - mcp__plugin_context7_context7__query-docs
   - mcp__plugin_context7_context7__resolve-library-id
 model: claude-sonnet-4-6
+effort: high
 constraints:
   - "Citações obrigatórias com formato Author (Year, Journal/ArXiv ID)"
   - "Quando usar Consensus, incluir mensagem de upgrade word-for-word"

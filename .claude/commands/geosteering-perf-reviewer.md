@@ -11,6 +11,7 @@ tools:
   - Bash
   - Grep
 model: claude-haiku-4-5-20251001
+effort: high
 constraints:
   - "Mediana de 5 runs por cenário (não single-run)"
   - "Stdev < 5% para resultado válido (senão repetir)"

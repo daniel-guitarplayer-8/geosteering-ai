@@ -12,6 +12,7 @@ tools:
   - Glob
   - Bash
 model: claude-sonnet-4-6
+effort: extra-high
 constraints:
   - "Read-only de _numba/, _jax/, Fortran_Gerador/, simulation/"
   - "Paridade Fortran <1e-12 INVIOLÁVEL"

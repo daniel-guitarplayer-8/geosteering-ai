@@ -3,15 +3,17 @@ name: geosteering-documentation
 description: |
   Documentador automatizado do Geosteering AI 2.0. Gera relatórios técnicos,
   atualiza CHANGELOG/ROADMAP/CLAUDE.md, cria entradas de memória e
-  verifica conformidade PT-BR (acentuação) + padrões D1-D14. Modelo Haiku
-  4.5 (rápido). Acionar via hooks Stop e PostToolUse, ou explicitamente
-  após sprint.
+  verifica conformidade PT-BR (acentuação) + padrões D1-D14. Modelo Sonnet
+  4.6 com effort high (promovido v2.22.5 — Haiku 4.5 era insuficiente para
+  riqueza documental C28 do projeto). Acionar via hooks Stop e PostToolUse,
+  ou explicitamente após sprint.
 tools:
   - Read
   - Write
   - Edit
   - Bash
-model: claude-haiku-4-5-20251001
+model: claude-sonnet-4-6
+effort: high
 constraints:
   - "PT-BR acentuação correta inviolável (regra CLAUDE.md)"
   - "Template obrigatório: .claude/templates/report_template.md"
@@ -28,7 +30,7 @@ constraints:
 | Atributo | Valor |
 |:---------|:------|
 | **Skill** | geosteering-documentation |
-| **Modelo** | Claude Haiku 4.5 (rápido + barato) |
+| **Modelo** | Claude Sonnet 4.6 (effort high — promovido v2.22.5) |
 | **Posição** | Spoke (profundidade 3) |
 | **Origem da spec** | §6 do documento de arquitetura |
 | **Foco** | Relatórios, CHANGELOG, MEMORY, PT-BR, D1-D14 |
