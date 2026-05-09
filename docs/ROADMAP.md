@@ -1,6 +1,6 @@
 # Roadmap Completo — Geosteering AI v2.0+
 
-**Versão do documento:** 1.2 (Maio 2026)
+**Versão do documento:** 1.3 (Maio 2026)
 **Autor:** Daniel Leal
 **Projeto:** Inversão 1D de Resistividade via Deep Learning para Geosteering
 **Framework:** TensorFlow 2.x / Keras (exclusivo)
@@ -33,10 +33,21 @@
 | **v2.22.4** | 2026-05-09 | **Promoção `cfg.use_flat_prange=True` a default** (após validação 1 semana opt-in). Backward-compat preservada via flag. Sem regressão Cenário E. Desbloqueia Sprint v2.23. | mantém | `main` (mergeado) |
 | **v2.22.5** | 2026-05-09 | **Skills agent-config-override**: physics-reviewer Sonnet→Opus 4.7 extra-high; simulator-fortran+python+jax+pinns model+effort campos; orquestrador override conforme §19. 13 skills configuradas. 0 CodeRabbit findings. | — | `main` (mergeado) |
 | **v2.22.6** | **2026-05-09** | **Fase 1 Fundação Multi-Agente COMPLETA (§22.1)**: I1.2 skill `geosteering-simulator-numba.md` (Opus 4.7 extra-high, 384 LOC) + I1.9 MCP `physics-validator` handlers REAIS (6 tools, 15 testes) + I1.10 MCP `numba-profiler` handlers REAIS (6 tools, 17 testes) + `get_jit_cache_info()` em `multi_forward.py`. Fix dos 3 erros pré-existentes ruff/mypy (F821 + 2× type narrowing). Working tree clean: 0 SKIP em pre-commit. | 30 novos (15+15) | `feat/fase1-fundacao-multiagente` |
+| **v2.22.7-docs** | **2026-05-09** | **Pré-Mortem inaugural + atualizações arquiteturais**: relatório `premortem_geosteering_ai_2026-05-09.md` + §74 (Backends de Inversão Alternativa: Occam + LUT + Tikhonov) + §75 (Framework-Agnostic Core) + §24.4 (cadência de pré-mortem) + skill `geosteering-premortem-analyst`. Não muda código de produção. | — | `feat/premortem-analysis-artifacts` |
+| **v2.28 (PLANEJADO)** | TBD | **Adapter opt-in para Datasets LWD Reais** (validação suplementar antecipada): `geosteering_ai/data/loaders/real_data_adapter.py` + SDAR/SPWLA canonical models + Volve/Teapot suplementares. **NÃO-BLOQUEANTE** — prioridade primária permanece simuladores 1D→2D→2.5D→3D (§21). | — | TBD |
+| **v2.29 (PLANEJADO)** | TBD | **Métodos Alternativos de Inversão**: Occam regularizado + Look-up Table + Tikhonov + benchmark comparativo (§74 doc arquitetura). Baseline científico para paper de validação. | — | TBD |
+| **v2.30 (PLANEJADO)** | TBD | **Framework-Agnostic Core**: `BaseInversionModel` + adapters TF/PyTorch/ONNX (§75 doc arquitetura). TF default exclusivo no pipeline; PyTorch opt-in para pesquisa; ONNX para deploy em campo. | — | TBD |
 
 Documentação detalhada em `docs/reports/v2.{N}_2026-04-{D}.md` e
 `docs/CHANGELOG.md`. Relatório técnico Fase 1 completa em
 `docs/reports/fase1_fundacao_multiagente_completa_2026-05-09.md`.
+Pré-mortem inaugural em
+`docs/reports/premortem_geosteering_ai_2026-05-09.md`.
+
+**Cadência transversal (F-cross)**: Pré-mortem trimestral via skill
+`geosteering-premortem-analyst` (Opus 4.7, effort extra-high). Detalhes em
+§24.4 do documento de aprofundamento. Próximo: ~2026-08-09 OU sob gatilho
+explícito (release major, mudança de fase F).
 
 ---
 
