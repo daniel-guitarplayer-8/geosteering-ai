@@ -132,6 +132,11 @@ geosteering_ai/
 ├── inference/             ← InferencePipeline, realtime, export
 ├── evaluation/            ← Metricas, comparacao
 ├── visualization/         ← Plots, Picasso, EDA
+├── adapters/              ← (PLANEJADO Sprint v2.30) BaseInversionModel +
+│                            pytorch_adapter.py + tf_adapter.py + onnx_adapter.py
+│                            Acesso: from geosteering_ai.adapters import get_adapter
+├── research/              ← (PLANEJADO Sprint v2.30) módulos de pesquisa
+│                            exploratória — PyTorch direto permitido aqui
 └── utils/                 ← Logger, timer, validation, formatting
 ```
 

@@ -13474,9 +13474,23 @@ diretamente.
 modelos exportados de TF ou PyTorch, executa via `onnxruntime`. Útil para
 deploy em campo (GUI Studio, Simulation Manager standalone).
 
-### §75.4 — Política de Coexistência
+### §75.4 — Política de Coexistência (POLÍTICA CANÔNICA)
 
-**Regra base** (sempre vigente, independente de tier):
+> **REGRA CANÔNICA**: TF/Keras 3.x é **default exclusivo no pipeline de
+> produção**. PyTorch é **permitido apenas via adapters/ ou research/**
+> (Tier 2 do roadmap §75.10). Nenhum production path pode `import torch`
+> diretamente. Esta regra **supersede** qualquer formulação anterior em
+> CLAUDE.md, ARCHITECTURE_v2.md ou outras seções do doc de aprofundamento.
+
+**Cross-references** (manter sincronizado com esta seção):
+
+- `CLAUDE.md` linhas 10 + 57 ("Identidade do Projeto" + "Proibições Absolutas")
+- `docs/ARCHITECTURE_v2.md` linha 10 (header tabela)
+- `.claude/hooks/validate-no-pytorch.sh` (aplicação automática)
+- §75.8 abaixo (TODO de implementação Sprint v2.30)
+- §75.10 (Roadmap 3-Tier)
+
+**Detalhamento da política** (sempre vigente, independente de tier):
 
 | Camada | TF/Keras 3.x (PRIMÁRIO) | PyTorch | ONNX |
 |:-------|:-----------------------:|:-------:|:----:|
