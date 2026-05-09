@@ -44,10 +44,12 @@ Documentação detalhada em `docs/reports/v2.{N}_2026-04-{D}.md` e
 Pré-mortem inaugural em
 `docs/reports/premortem_geosteering_ai_2026-05-09.md`.
 
-**Cadência transversal (F-cross)**: Pré-mortem trimestral via skill
-`geosteering-premortem-analyst` (Opus 4.7, effort extra-high). Detalhes em
-§24.4 do documento de aprofundamento. Próximo: ~2026-08-09 OU sob gatilho
-explícito (release major, mudança de fase F).
+**Cadência transversal (F-cross — fase cross-cutting de governança)**:
+Pré-mortem trimestral via skill `geosteering-premortem-analyst` (Opus 4.7,
+effort extra-high). Detalhes em §24.4 do
+[documento de aprofundamento](reports/arquitetura_multiagente_geosteering_ai_aprofundamento_2026-05-02.md).
+Próximo: ~2026-08-09 OU sob gatilho explícito (release major, mudança de
+fase F).
 
 ---
 

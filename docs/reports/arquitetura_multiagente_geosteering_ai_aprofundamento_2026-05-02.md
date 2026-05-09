@@ -13357,7 +13357,9 @@ A proibição de PyTorch (CLAUDE.md "Proibicoes Absolutas") foi instituída em
 v1.0 para preservar coerência arquitetural com TensorFlow/Keras. Análise
 crítica identificou custo de oportunidade real:
 
-- PyTorch tem **>70% share** em papers de DL geofísica publicados em 2024-2026
+- PyTorch é majoritário em papers de DL geofísica publicados em 2024-2026
+  (observação qualitativa baseada em proceedings SEG/EAGE/SPWLA recentes;
+  citação bibliométrica formal pendente — ver TODO em §75.9)
 - Modelos fundacionais novos (segmentation, foundation models para tensorial
   geophysical data) chegam primeiro em PyTorch
 - Colaborações acadêmicas externas frequentemente requerem código PyTorch
@@ -13555,6 +13557,24 @@ A "Proibição Absoluta" original deve ser refinada:
   geosteering_ai/adapters/pytorch_adapter.py para módulos de pesquisa
   exploratória
 ```
+
+### §75.9 — TODO de Implementação Sprint v2.30
+
+| Item | Status | Notas |
+|:-----|:------:|:------|
+| Citação bibliométrica formal de PyTorch share em DL geofísica | TODO | Buscar survey peer-reviewed em SEG/EAGE/SPWLA proceedings 2024-2026; sugestão: análise via arxiv-search skill |
+| Atualizar CLAUDE.md com regra refinada de PyTorch | TODO | Após implementação do adapter; manter regra absoluta atual até lá |
+| Implementar `validate-no-pytorch.sh` com whitelist `adapters/` e `research/` | TODO | Hook pré-commit; bloqueia `import torch` fora de paths permitidos |
+| Implementar `geosteering_ai/core/base_model.py` (interface abstrata) | TODO | Sprint v2.30 semana 1 |
+| Implementar `tf_adapter.py` (refatoração não-destrutiva) | TODO | Sprint v2.30 semana 1-2 |
+| Implementar `pytorch_adapter.py` (subset arquiteturas) | TODO | Sprint v2.30 semana 3 |
+| Implementar `onnx_adapter.py` (deploy) | TODO | Sprint v2.30 semana 4 |
+| Suite de testes paridade TF↔PyTorch ↔ ONNX | TODO | Sprint v2.30 semana 5 |
+| Atualizar relatório técnico final | TODO | Sprint v2.30 semana 6 |
+
+**Pré-requisito**: pré-mortem inaugural confirma decisão de adoção (ver
+relatório `docs/reports/premortem_geosteering_ai_2026-05-09.md`,
+calibração com Obs. 5 do usuário).
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════╗
