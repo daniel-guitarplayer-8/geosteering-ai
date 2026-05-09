@@ -1,2 +1,7 @@
-mcp>=0.9.0
+# physics-validator MCP — Fase 1 §22.1 I1.9 (handlers reais)
+# Instalação: pip install -r requirements.txt
+# Pré-requisito: pip install -e . (do repo root) para geosteering_ai
+
+mcp>=1.0,<2.0
 numpy>=1.24
+# geosteering_ai é importado via sys.path em runtime (ver server.py:_REPO_ROOT)
