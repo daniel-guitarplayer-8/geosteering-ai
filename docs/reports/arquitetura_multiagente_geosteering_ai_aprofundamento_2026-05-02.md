@@ -13191,7 +13191,10 @@ data". Geophysics 52(3): 289-300.
 
 - Incerteza Bayesiana calibrada (covariância posterior matematicamente correta)
 - Interpretabilidade total (cada parâmetro tem significado físico direto)
-- Garantia de convergência (problema convexo após linearização)
+- Convergência condicional (depende de inicialização, regularização e
+  condicionamento do problema; cada subproblema linearizado é convexo,
+  mas convergência global do loop não é garantida para inversão
+  não-linear)
 - Não requer treino — funciona out-of-the-box em qualquer hardware
 
 **Limitações**:
