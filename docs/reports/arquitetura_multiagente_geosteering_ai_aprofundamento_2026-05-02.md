@@ -3385,6 +3385,71 @@ Cenário ATIVO (Daniel + arquitetura completa em produção):
    • Sprint trivial: 1 subagente sequential é suficiente
 ```
 
+### 24.4 Cadência de Pré-Mortem (Análise Crítica de Premissas)
+
+**Motivação**: a Quality Mesh 7 camadas (§41) verifica qualidade de **código**;
+não verifica qualidade de **decisões arquiteturais sistêmicas**. Pré-mortem
+preenche essa lacuna ao forçar raciocínio contrafactual sobre premissas centrais
+(simulador como ground truth, complexidade combinatória, single-vendor lock-in,
+etc.).
+
+**Definição**: pré-mortem é exercício de governança em que se assume que o projeto
+falhou em data futura (e.g., 2028) e trabalha-se em retrospectiva para identificar
+causas raiz hipotéticas. Diferente de análise de risco tradicional (probabilidade ×
+impacto), o pré-mortem **assume falha** e revela pontos cegos do otimismo do
+dia-a-dia.
+
+**Gatilhos** (qualquer um aciona pré-mortem):
+
+| Gatilho | Cadência | Exemplo |
+|:--------|:--------:|:--------|
+| Release major (v2.X → v2.X+1 com >5 sprints) | Por release | v2.22 → v3.0 |
+| Mudança de fase F (F1→F2, F2→F3...) | Por fase | F1 fundação → F2 treinamento GPU |
+| Decisão arquitetural significativa | Sob demanda | Adoção de novo backend, framework, vendor |
+| Trimestral mínima | A cada 3 meses | Cadência de calibração |
+| Antes de parceria/financiamento | Sob demanda | Apresentação a stakeholders externos |
+
+**Processo padronizado**:
+
+```
+1. Invocar skill: geosteering-premortem-analyst (Opus 4.7, effort extra-high)
+2. Eixos de análise (8 categorias):
+   • Dados (validação contra realidade)
+   • Arquitetura (complexidade × valor)
+   • Latência (hardware-alvo real × benchmark)
+   • Dependências (single-vendor risks)
+   • Produto (entregabilidade)
+   • Validação (testes verificam o que importa?)
+   • Governança (cadência de revisão crítica)
+   • Mercado (relevância no horizonte de entrega)
+3. Análise adversarial: para cada premissa, formular o oposto
+4. Calibrar com observações do usuário
+5. Gerar relatório MD em docs/reports/premortem_*_YYYY-MM-DD.md
+6. Atualizar ROADMAP.md / arquitetura se necessário
+7. Adicionar pointer no MEMORY.md
+```
+
+**Output esperado**: relatório seguindo template de
+`docs/reports/premortem_geosteering_ai_2026-05-09.md` (referência canônica).
+
+**Tempo investido**: ~2-3h por exercício. Custo aceitável dado o impacto de
+calibração arquitetural.
+
+**Anti-patterns a evitar no próprio exercício**:
+
+| Anti-padrão | Por que é ruim |
+|:------------|:---------------|
+| Niilismo: tudo está errado | Pré-mortem identifica riscos, não condena projeto |
+| Ignorar pontos fortes | Análise honesta inclui o que está funcionando |
+| Não calibrar com o usuário | Recomendações sem contexto real podem desalinhar prioridades |
+| Confundir crítica com hostilidade | Tom técnico, não emocional |
+
+**Histórico de pré-mortems**:
+
+| Data | Versão analisada | Relatório |
+|:-----|:----------------:|:----------|
+| 2026-05-09 | v2.22.6 | `docs/reports/premortem_geosteering_ai_2026-05-09.md` (inaugural) |
+
 ---
 
 ## 25. Critérios de Aceitação e Métricas
@@ -13074,6 +13139,422 @@ Geosteering AI v3.0+.**
 da adoção Parte V (agente colab-bridge + hook + skill + 3 templates) OU
 após Semana 4 da adoção Parte IV (JAX scenarios + FEM 2D Phase 5.1),
 o que vier primeiro.
+
+---
+
+## §74 — Backends de Inversão Alternativa (Occam + LUT + Tikhonov)
+
+### §74.1 — Motivação
+
+Decisão derivada do pré-mortem inaugural (2026-05-09 — ver
+`docs/reports/premortem_geosteering_ai_2026-05-09.md`, §4.1 e §5.B1).
+
+O projeto Geosteering AI tem como pilar central a inversão via Deep Learning,
+mas nunca foi benchmarkado contra métodos analíticos clássicos em dados reais.
+Para problemas de baixa dimensão (N≤6 camadas — caso típico de geosteering),
+métodos analíticos podem ser **mais rápidos**, **mais interpretáveis**,
+**com incerteza calibrada matematicamente**, e com **garantias de convergência**.
+
+O projeto já computa o **jacobiano `∂H/∂ρ`** em Numba (Sprint v2.X). Esse é
+exatamente o ingrediente para inversão de segunda ordem rigorosa.
+
+### §74.2 — Os Três Métodos
+
+#### §74.2.1 — Inversão de Occam Regularizada
+
+**Arquivo previsto**: `geosteering_ai/inversion/occam.py`
+
+**Fundamentação**: Constable, Parker & Constable (1987) — "Occam's inversion: a
+practical algorithm for generating smooth models from electromagnetic sounding
+data". Geophysics 52(3): 289-300.
+
+**Algoritmo**:
+
+```
+1. Inicializar modelo m_0 (resistividade homogênea ou prior geológico)
+2. Loop:
+   a. Computar f(m_k) = forward simulation via Numba
+   b. Computar J = ∂H/∂ρ (jacobiano via Numba)
+   c. Resolver subproblema regularizado:
+      m_{k+1} = (J^T W J + μ R^T R)^{-1} J^T W d
+      onde:
+        W = matriz de pesos (inversa da covariância de ruído)
+        R = operador de suavidade (Δ² ou Δ¹)
+        μ = parâmetro de regularização (line search)
+   d. Atualizar μ até atingir misfit alvo (χ² ≈ N_dados)
+3. Retornar m_final + bandas de incerteza via covariância posterior
+```
+
+**Latência alvo**: <0.1s para N≤6 camadas em Intel i9.
+
+**Vantagens**:
+
+- Incerteza Bayesiana calibrada (covariância posterior matematicamente correta)
+- Interpretabilidade total (cada parâmetro tem significado físico direto)
+- Garantia de convergência (problema convexo após linearização)
+- Não requer treino — funciona out-of-the-box em qualquer hardware
+
+**Limitações**:
+
+- Linear-em-parâmetros (assume modelo linearizável localmente)
+- Pode ficar preso em mínimos locais sem bom prior
+- Não escala para N>20 camadas eficientemente
+
+**Implementação**: usar `scipy.optimize.least_squares` com `method="trf"` e
+jacobiano analítico fornecido pelo simulador Numba. Regularização via penalidade
+explícita no resíduo aumentado.
+
+#### §74.2.2 — Look-up Table (LUT) com Interpolação
+
+**Arquivo previsto**: `geosteering_ai/inversion/lut.py`
+
+**Fundamentação**: caso clássico de inversão por busca pré-computada. Em
+problemas de baixa dimensão, uma malha 4D (ρ_h, ρ_v, espessura, z_obs)
+pré-computada com resolução adequada permite inversão por **busca + interpolação
+trilinear** em microssegundos.
+
+**Estrutura da LUT**:
+
+```
+Dimensão 1: ρ_h     ∈ [0.1, 10000]  Ω·m  (log-space, 100 pontos)
+Dimensão 2: ρ_v     ∈ [0.1, 10000]  Ω·m  (log-space, 100 pontos)
+Dimensão 3: espessura ∈ [0.5, 50]   m    (log-space, 50 pontos)
+Dimensão 4: z_obs   ∈ [0, 100]      m    (linear, 100 pontos)
+
+Total: 100 × 100 × 50 × 100 = 5×10⁷ pontos
+Tamanho em disco: ~4 GB (float32, 9 componentes do tensor)
+```
+
+**Algoritmo**:
+
+```
+1. Pre-compute (offline, uma única vez): rodar Numba sobre toda a malha
+2. Salvar em HDF5 com chunking otimizado para acesso aleatório
+3. Em runtime:
+   a. Receber observação H_obs
+   b. Buscar K vizinhos mais próximos via KDTree em ρ-space
+   c. Interpolar trilinear (scipy.interpolate.RegularGridInterpolator)
+   d. Refinar via Occam local se precisão > tolerância
+```
+
+**Latência alvo**: <1ms (sem refinamento), <50ms (com refinamento Occam).
+
+**Vantagens**:
+
+- Latência extrema (ideal para realtime em hardware limitado)
+- Não requer GPU
+- Determinístico — mesma entrada gera mesma saída sempre
+
+**Limitações**:
+
+- Curse of dimensionality: a malha cresce 100× por dimensão adicional
+- Para N>4 parâmetros torna-se proibitivo em disco
+- Resolução fixa pode falhar em transições agudas
+
+**Uso recomendado**: hardware limitado, fallback rápido, validação cruzada.
+
+#### §74.2.3 — Tikhonov Regularizado
+
+**Arquivo previsto**: `geosteering_ai/inversion/tikhonov.py`
+
+**Fundamentação**: Tikhonov & Arsenin (1977) — "Solutions of Ill-Posed Problems".
+Baseline clássico que toda publicação de inversão geofísica inclui para
+comparação peer-reviewed.
+
+**Funcional**:
+
+```
+Φ(m) = ||W (d - f(m))||² + α₁ ||L₁ m||² + α₂ ||L₂ m||²
+       └─── data misfit ──┘   └ ord 1 ┘   └ ord 2 ┘
+
+L₁ = operador gradiente (∇)
+L₂ = operador Laplaciano (∇²)
+α₁, α₂ = parâmetros de regularização (escolhidos via L-curve criterion)
+```
+
+**Algoritmo**: `scipy.optimize.minimize` com método `trust-constr` ou `L-BFGS-B`.
+Gradiente numérico (não analítico) — baseline mais simples que Occam.
+
+**Latência alvo**: <0.5s para N≤6 camadas.
+
+**Uso primário**: baseline obrigatório para paper de validação peer-reviewed.
+
+### §74.3 — Benchmark Comparativo
+
+**Arquivo previsto**: `benchmarks/bench_inversion_methods.py`
+
+**Métricas**:
+
+| Métrica | Como medir |
+|:--------|:-----------|
+| Acurácia | RMSE entre `ρ_estimado` e `ρ_true` em casos canônicos SPWLA SDAR |
+| Latência | Tempo de inversão (ms) em Intel i9 single-thread |
+| Incerteza calibrada | Calibration curve, ECE (Expected Calibration Error) |
+| Robustez ao ruído | Performance em SNR de 10, 20, 40 dB |
+| Generalização | Teste em modelos canônicos não vistos no fit (LOOCV) |
+
+**Tabela esperada (post-implementação)**:
+
+| Método | Acurácia | Latência | Incerteza | Hardware | Uso primário |
+|:-------|:--------:|:--------:|:---------:|:--------:|:-------------|
+| DL (ResNet_18) | Alta | ~10ms | Heurística | GPU/CPU | Casos high-throughput, com prior treinado |
+| Occam | Alta | ~100ms | Bayesiana | CPU | Casos críticos, interpretabilidade |
+| LUT | Média | <1ms | Aproximada | CPU | Hardware limitado, fallback |
+| Tikhonov | Média | ~500ms | Frequentista | CPU | Baseline acadêmico |
+
+### §74.4 — Sprint de Implementação
+
+**Sprint v2.29** (cronograma estimado: 3-4 semanas):
+
+```
+Semana 1: occam.py + testes unitários + validação em oklahoma_3..5
+Semana 2: lut.py + scripts de pre-compute + HDF5 storage
+Semana 3: tikhonov.py + L-curve criterion + comparação com SimPEG
+Semana 4: bench_inversion_methods.py + relatório técnico
+```
+
+**Pré-requisitos**:
+
+- v2.28 (adapter de dados reais) — não bloqueante mas desejável para validação cruzada
+- Jacobiano `∂H/∂ρ` validado — já disponível (Sprint v2.X)
+- SDAR canonical models incorporados — ver §74.5
+
+### §74.5 — Integração com Validação SDAR/SPWLA
+
+Os 3 métodos devem ser benchmarkados contra os modelos canônicos SDAR
+(155 ft @ 2 kHz, 75 ft @ 6-12 kHz, 45 ft @ 12-24 kHz, 24 in @ 2 MHz —
+ver §7.3 do pré-mortem 2026-05-09). Adicionar em
+`geosteering_ai/simulation/validation/canonical_models.py`:
+
+```python
+SDAR_CANONICAL_MODELS = {
+    "sdar_ultra_deep_155ft_2khz": {...},
+    "sdar_deep_75ft_6_12khz": {...},
+    "sdar_medium_45ft_12_24khz": {...},
+    "sdar_shallow_24in_2mhz": {...},
+}
+```
+
+### §74.6 — Riscos
+
+| Risco | Mitigação |
+|:------|:----------|
+| Occam pode ficar preso em mínimo local | Multi-start com priors geológicos diversos |
+| LUT consome 4 GB em disco | Chunking HDF5 + lazy loading; só carregar slabs relevantes |
+| Tikhonov pode ser lento em N>10 | Documentar como baseline acadêmico, não produção |
+| Validação contra DL pode mostrar DL inferior | Aceitar resultado honesto; usar como baseline para tunar DL |
+
+---
+
+## §75 — Framework-Agnostic Core
+
+### §75.1 — Motivação
+
+Decisão derivada do pré-mortem inaugural (2026-05-09 — ver
+`docs/reports/premortem_geosteering_ai_2026-05-09.md`, §4.5 e §5.B5).
+
+A proibição de PyTorch (CLAUDE.md "Proibicoes Absolutas") foi instituída em
+v1.0 para preservar coerência arquitetural com TensorFlow/Keras. Análise
+crítica identificou custo de oportunidade real:
+
+- PyTorch tem **>70% share** em papers de DL geofísica publicados em 2024-2026
+- Modelos fundacionais novos (segmentation, foundation models para tensorial
+  geophysical data) chegam primeiro em PyTorch
+- Colaborações acadêmicas externas frequentemente requerem código PyTorch
+- Ferramentas industriais de deploy (ONNX runtime, TensorRT) exportam de ambos
+  os frameworks com fidelidade similar
+
+**Decisão**: introduzir interface abstrata `BaseInversionModel` que permite
+PyTorch como **adapter opt-in** para módulos de pesquisa exploratória, sem
+quebrar TF como default exclusivo no pipeline de produção.
+
+### §75.2 — Interface `BaseInversionModel`
+
+**Arquivo previsto**: `geosteering_ai/core/base_model.py`
+
+```python
+"""Interface abstrata para modelos de inversão Geosteering AI.
+
+Define contrato comum que TF, PyTorch e ONNX devem implementar via adapter.
+Pipeline de produção sempre usa TF (default exclusivo); PyTorch e ONNX são
+opt-in para módulos de pesquisa e deploy respectivamente.
+"""
+from abc import ABC, abstractmethod
+from typing import Literal, Optional, Protocol
+import numpy as np
+
+ExportFormat = Literal["onnx", "tflite", "savedmodel", "torchscript"]
+
+
+class BaseInversionModel(ABC):
+    """Contrato abstrato para todo modelo de inversão.
+
+    Pipeline de produção (training/, inference/, evaluation/) DEVE consumir
+    apenas instâncias dessa interface. Módulos concretos (TF/PyTorch/ONNX)
+    NUNCA devem ser importados diretamente fora de `adapters/`.
+    """
+
+    framework: Literal["tensorflow", "pytorch", "onnx"]
+
+    @abstractmethod
+    def fit(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: Optional[np.ndarray] = None,
+        y_val: Optional[np.ndarray] = None,
+        epochs: int = 100,
+        batch_size: int = 32,
+        callbacks: Optional[list] = None,
+    ) -> "TrainingHistory":
+        """Treina o modelo. Implementação específica por adapter."""
+
+    @abstractmethod
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Inferência determinística."""
+
+    @abstractmethod
+    def predict_with_uncertainty(
+        self,
+        X: np.ndarray,
+        method: Literal["mc_dropout", "ensemble", "inn"] = "mc_dropout",
+        n_samples: int = 100,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Retorna (média, std) sobre n_samples."""
+
+    @abstractmethod
+    def export(self, path: str, format: ExportFormat = "onnx") -> None:
+        """Exporta para deploy. ONNX é interoperável entre frameworks."""
+
+    @abstractmethod
+    def summary(self) -> str:
+        """Retorna sumário textual do modelo (parameters, layers)."""
+```
+
+### §75.3 — Adapters
+
+**Estrutura de pacote**:
+
+```
+geosteering_ai/
+├── core/
+│   ├── __init__.py
+│   └── base_model.py          ← Interface abstrata (sempre carregada)
+└── adapters/
+    ├── __init__.py             ← Lazy imports (não força TF nem torch)
+    ├── tf_adapter.py           ← Default — mantém código atual
+    ├── pytorch_adapter.py      ← Opt-in via `pip install -e ".[pytorch]"`
+    └── onnx_adapter.py         ← Opt-in via `pip install -e ".[onnx]"`
+```
+
+**Adapter TF** (`tf_adapter.py`): refatora código atual de `models/`, `losses/`,
+`training/` para implementar `BaseInversionModel`. Default exclusivo no pipeline.
+
+**Adapter PyTorch** (`pytorch_adapter.py`): implementação paralela usando
+`torch.nn.Module`. Importado **apenas** via `from geosteering_ai.adapters import
+get_adapter("pytorch")`. Nenhum módulo de produção pode importar `torch`
+diretamente.
+
+**Adapter ONNX** (`onnx_adapter.py`): apenas para inferência em deploy. Aceita
+modelos exportados de TF ou PyTorch, executa via `onnxruntime`. Útil para
+deploy em campo (GUI Studio, Simulation Manager standalone).
+
+### §75.4 — Política de Coexistência
+
+| Camada | TF | PyTorch | ONNX |
+|:-------|:--:|:-------:|:----:|
+| Pipeline de produção (`training/`, `inference/`) | ✅ default exclusivo | ❌ proibido | ✅ deploy only |
+| Módulos de pesquisa exploratória (`research/`, `experimental/`) | ✅ permitido | ✅ permitido | ✅ permitido |
+| Imports diretos `import torch` fora de `adapters/` | N/A | ❌ proibido | N/A |
+| Hook `validate-no-pytorch.sh` | — | grep `import torch` em production paths → block | — |
+
+**Regra absoluta**: **nenhum módulo em `geosteering_ai/{models,losses,training,
+inference,evaluation}/`** pode importar `torch` diretamente. PyTorch é **sempre**
+acessado via `get_adapter("pytorch")`.
+
+### §75.5 — Migration Path
+
+**Sprint v2.30** (cronograma estimado: 4-6 semanas):
+
+```
+Semana 1-2: Refatorar code atual em tf_adapter.py (manter backward compat 100%)
+Semana 3:   Implementar pytorch_adapter.py (subset de arquiteturas: ResNet, U-Net)
+Semana 4:   Implementar onnx_adapter.py + scripts de export TF→ONNX
+Semana 5:   Atualizar hook validate-no-pytorch.sh + testes de integração
+Semana 6:   Documentação + relatório técnico
+```
+
+**Backward compatibility**: 100%. Código atual `from geosteering_ai.models import
+build_resnet18` continua funcionando. A diferença é que internamente passa por
+`tf_adapter.py`.
+
+### §75.6 — Testes
+
+```python
+# tests/test_framework_agnostic.py
+def test_tf_adapter_implements_base_model():
+    from geosteering_ai.adapters import get_adapter
+    adapter = get_adapter("tensorflow")
+    model = adapter.build("ResNet_18", config)
+    assert isinstance(model, BaseInversionModel)
+    assert model.framework == "tensorflow"
+
+def test_pytorch_adapter_optional():
+    """PyTorch só carrega se instalado."""
+    try:
+        from geosteering_ai.adapters import get_adapter
+        adapter = get_adapter("pytorch")
+        # Se importou, valida interface
+        model = adapter.build("ResNet_18", config)
+        assert model.framework == "pytorch"
+    except ImportError:
+        pytest.skip("PyTorch not installed (opt-in)")
+
+def test_onnx_export_roundtrip():
+    """TF → ONNX → carregamento funciona."""
+    tf_model = get_adapter("tensorflow").build("ResNet_18", config)
+    tf_model.export("/tmp/test.onnx", format="onnx")
+
+    onnx_model = get_adapter("onnx").load("/tmp/test.onnx")
+    np.testing.assert_allclose(
+        tf_model.predict(X_test),
+        onnx_model.predict(X_test),
+        rtol=1e-5,
+    )
+
+def test_no_pytorch_in_production_paths():
+    """Hook deve bloquear imports diretos de torch fora de adapters/."""
+    import subprocess
+    result = subprocess.run(
+        ["grep", "-r", "import torch", "geosteering_ai/models/",
+         "geosteering_ai/losses/", "geosteering_ai/training/",
+         "geosteering_ai/inference/", "geosteering_ai/evaluation/"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0  # grep não encontrou nada (esperado)
+```
+
+### §75.7 — Riscos
+
+| Risco | Mitigação |
+|:------|:----------|
+| Refatoração quebra produção atual | Backward compat 100%; tf_adapter envolve código existente sem alterar |
+| PyTorch adapter divergir de TF | Test suite paralela validando paridade <1e-4 (aceitável dado float32 + diferenças numéricas) |
+| Manutenção dual aumenta esforço | PyTorch adapter mantido apenas para subset de arquiteturas críticas |
+| Comunidade adota PyTorch como default — TF se torna legado | Aceitar e documentar; Geosteering AI continua funcionando ambos |
+
+### §75.8 — Atualização de CLAUDE.md
+
+A "Proibição Absoluta" original deve ser refinada:
+
+```markdown
+- **PyTorch em pipeline de produção** — PROIBIDO em
+  geosteering_ai/{models,losses,training,inference,evaluation}/
+  (Hook validate-no-pytorch.sh bloqueia)
+- **PyTorch via adapter isolado** — PERMITIDO em
+  geosteering_ai/adapters/pytorch_adapter.py para módulos de pesquisa
+  exploratória
+```
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════╗
