@@ -13584,32 +13584,46 @@ def test_no_pytorch_in_production_paths():
 | Manutenção dual aumenta esforço | PyTorch adapter mantido apenas para subset de arquiteturas críticas |
 | Comunidade adota PyTorch como default — TF se torna legado | Aceitar e documentar; Geosteering AI continua funcionando ambos |
 
-### §75.8 — Atualização de CLAUDE.md
+### §75.8 — Atualização de CLAUDE.md (✅ APLICADA em v2.22.7-docs)
 
-A "Proibição Absoluta" original deve ser refinada:
+**Status**: APLICADO no sprint v2.22.7-docs (2026-05-09).
+
+A "Proibição Absoluta" original foi refinada para:
 
 ```markdown
 - **PyTorch em pipeline de produção** — PROIBIDO em
-  geosteering_ai/{models,losses,training,inference,evaluation}/
-  (Hook validate-no-pytorch.sh bloqueia)
+  geosteering_ai/{models,losses,training,inference,evaluation,data,
+  simulation,visualization,utils}/ (Hook validate-no-pytorch.sh
+  bloqueia imports diretos)
 - **PyTorch via adapter isolado** — PERMITIDO em
   geosteering_ai/adapters/pytorch_adapter.py para módulos de pesquisa
-  exploratória
+  exploratória. Acesso sempre via `from geosteering_ai.adapters import
+  get_adapter("pytorch")` (Sprint v2.30 — ver §75 do doc de
+  aprofundamento)
 ```
 
-### §75.9 — TODO de Implementação Sprint v2.30
+Localização: CLAUDE.md linhas 10 (header) + 57-58 (Proibições Absolutas).
+Diagrama de pacote em CLAUDE.md também atualizado para incluir adapters/
+e research/ marcados como "(PLANEJADO Sprint v2.30)".
+
+`docs/ARCHITECTURE_v2.md` linha 10 sincronizado.
+
+### §75.9 — Status de Implementação (parcialmente aplicado em v2.22.7-docs)
 
 | Item | Status | Notas |
 |:-----|:------:|:------|
-| Citação bibliométrica formal de PyTorch share em DL geofísica | TODO | Buscar survey peer-reviewed em SEG/EAGE/SPWLA proceedings 2024-2026; sugestão: análise via arxiv-search skill |
-| Atualizar CLAUDE.md com regra refinada de PyTorch | TODO | Após implementação do adapter; manter regra absoluta atual até lá |
-| Implementar `validate-no-pytorch.sh` com whitelist `adapters/` e `research/` | TODO | Hook pré-commit; bloqueia `import torch` fora de paths permitidos |
+| Atualizar CLAUDE.md com regra refinada de PyTorch | ✅ APLICADO | v2.22.7-docs commits b999619 + ec6b877 |
+| Atualizar `docs/ARCHITECTURE_v2.md` (sincronizar regra) | ✅ APLICADO | v2.22.7-docs commit b999619 |
+| Implementar `validate-no-pytorch.sh` com whitelist `adapters/` e `research/` | ✅ APLICADO | v2.22.7-docs commit 50e7d5a; PreToolUse Edit/Write; smoke test 4 cenários OK |
+| Adicionar hook em `.claude/settings.json` | ✅ APLICADO | v2.22.7-docs commit 50e7d5a |
+| Citação bibliométrica formal de PyTorch share em DL geofísica | TODO | Buscar survey peer-reviewed em SEG/EAGE/SPWLA proceedings 2024-2026; sugestão: análise via arxiv-search skill (não-bloqueante) |
 | Implementar `geosteering_ai/core/base_model.py` (interface abstrata) | TODO | Sprint v2.30 semana 1 |
 | Implementar `tf_adapter.py` (refatoração não-destrutiva) | TODO | Sprint v2.30 semana 1-2 |
 | Implementar `pytorch_adapter.py` (subset arquiteturas) | TODO | Sprint v2.30 semana 3 |
 | Implementar `onnx_adapter.py` (deploy) | TODO | Sprint v2.30 semana 4 |
 | Suite de testes paridade TF↔PyTorch ↔ ONNX | TODO | Sprint v2.30 semana 5 |
 | Atualizar relatório técnico final | TODO | Sprint v2.30 semana 6 |
+| **Tier 1 (§75.10.1) — Backend-Agnostic Code Hygiene** | TODO | Sprint v2.31 (post-v2.30) |
 
 **Pré-requisito**: pré-mortem inaugural confirma decisão de adoção (ver
 relatório `docs/reports/premortem_geosteering_ai_2026-05-09.md`,
@@ -13717,6 +13731,28 @@ futura.
 
 **Documentação de gatilho**: incluir em pré-mortem trimestral (§24.4) a
 verificação de qualquer uma das condições acima.
+
+**Log de Verificação de Claims** (manter atualizado):
+
+As alegações em §75.10.3 são **time-sensitive** e devem ser revalidadas
+trimestralmente como parte da cadência de pré-mortem (§24.4). Estrutura
+de verificação:
+
+| Claim | Última verificação | Fonte primária | Próxima |
+|:------|:------------------:|:---------------|:-------:|
+| Torch backend 2-4× pior que TF/JAX (A100) | 2026-05-09 | https://keras.io/getting_started/benchmarks/ | 2026-08-09 |
+| `tf.GradientTape` em PINNs requer rewrite para torch backend | 2026-05-09 | https://keras.io/guides/custom_train_step_in_torch/ | 2026-08-09 |
+| `tf.data.map_fn` com layers Keras é TF-only | 2026-05-09 | https://keras.io/api/data_loading/ + GitHub issue keras-team/keras#20037 | 2026-08-09 |
+| Reprodutibilidade bit-exact NÃO garantida entre backends (drift ~1e-7) | 2026-05-09 | https://keras.io/examples/keras_recipes/reproducibility_recipes/ | 2026-08-09 |
+| Sem foundation model EM em HuggingFace | 2026-05-09 | https://huggingface.co/models (busca "geophysics" + "EM" + "resistivity") | 2026-08-09 |
+
+**Procedimento de revalidação**:
+
+1. Re-rodar links acima e confirmar que conclusões persistem
+2. Atualizar coluna "Última verificação" com data atual
+3. Se alguma claim mudar (e.g., Keras 3.x publica patch que reduz gap de
+   performance), reabrir Tier 3 conforme §75.10.3
+4. Registrar resultado em pré-mortem trimestral (`docs/reports/premortem_*_YYYY-MM-DD.md`)
 
 #### §75.10.4 — Comparação dos 3 Tiers
 
