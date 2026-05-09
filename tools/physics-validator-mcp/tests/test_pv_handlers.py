@@ -6,18 +6,22 @@ Não requer ``mcp`` instalado — testa os ``_impl_*`` diretamente.
 
 from __future__ import annotations
 
+# Permite executar tanto via `pytest tools/physics-validator-mcp/tests/`
+# quanto via `pytest` na raiz do repo. Carrega o server.py com nome único
+# (`physics_validator_server`) para evitar colisão com o `server` do MCP irmão.
+import importlib.util  # noqa: E402
 import sys
 from pathlib import Path
 
 import pytest
 
-# Permite executar tanto via `pytest tools/physics-validator-mcp/tests/`
-# quanto via `pytest` na raiz do repo.
 _MCP_DIR = Path(__file__).resolve().parents[1]
-if str(_MCP_DIR) not in sys.path:
-    sys.path.insert(0, str(_MCP_DIR))
-
-import server  # noqa: E402
+_SERVER_PATH = _MCP_DIR / "server.py"
+_spec = importlib.util.spec_from_file_location("physics_validator_server", _SERVER_PATH)
+assert _spec and _spec.loader, "Falha ao carregar physics_validator/server.py"
+server = importlib.util.module_from_spec(_spec)
+sys.modules["physics_validator_server"] = server
+_spec.loader.exec_module(server)
 
 _REPO_ROOT = _MCP_DIR.parents[1]
 _TATU_X = _REPO_ROOT / "Fortran_Gerador" / "tatu.x"

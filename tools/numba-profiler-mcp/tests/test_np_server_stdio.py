@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util  # noqa: E402
 import sys
 from pathlib import Path
 
 _MCP_DIR = Path(__file__).resolve().parents[1]
-if str(_MCP_DIR) not in sys.path:
-    sys.path.insert(0, str(_MCP_DIR))
-
-import server  # noqa: E402
+_SERVER_PATH = _MCP_DIR / "server.py"
+_spec = importlib.util.spec_from_file_location("numba_profiler_server", _SERVER_PATH)
+assert _spec and _spec.loader, "Falha ao carregar numba_profiler/server.py"
+server = importlib.util.module_from_spec(_spec)
+sys.modules["numba_profiler_server"] = server
+_spec.loader.exec_module(server)
 
 
 def test_server_imports_without_mcp_installed() -> None:
