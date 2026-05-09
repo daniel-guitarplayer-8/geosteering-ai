@@ -119,7 +119,7 @@ import logging
 import math
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -144,6 +144,12 @@ try:
     HAS_NUMBA = True
 except ImportError:  # pragma: no cover
     HAS_NUMBA = False
+
+# TYPE_CHECKING-only: resolve forward-ref de `MultiSimulationResultBatch` sem
+# import circular. Em runtime, o import real é lazy dentro de `simulate_multi`
+# (linha ~795+), pois Workers Nativos (Sprint 12.1) é opt-in via cfg.
+if TYPE_CHECKING:
+    from geosteering_ai.simulation._workers import MultiSimulationResultBatch
 
 logger = logging.getLogger(__name__)
 
@@ -1252,7 +1258,13 @@ def simulate_multi(
 
     # ── F6: Compensação Midpoint CDR (opt-in) ──────────────────────
     if use_compensation:
-        # apply_compensation espera (nTR, ntheta, nmeds, nf, 9) → layout exato de H_tensor
+        # apply_compensation espera (nTR, ntheta, nmeds, nf, 9) → layout exato de H_tensor.
+        # Type narrowing: use_compensation=True implica comp_pairs is not None
+        # (validado por SimulationConfig.__post_init__ Sprint 2.2).
+        if comp_pairs is None:
+            raise ValueError(
+                "use_compensation=True requer comp_pairs (tuple de pares (near, far))."
+            )
         H_comp, phase_diff_deg, atten_db = apply_compensation(
             H_tensors_per_tr=H_tensor,
             comp_pairs=comp_pairs,
@@ -1263,9 +1275,14 @@ def simulate_multi(
 
     # ── F7: Antenas Inclinadas (opt-in) ────────────────────────────
     if use_tilted:
-        # apply_tilted_antennas aceita shape (..., 9) → projeta para (n_tilted, *prefix)
+        # apply_tilted_antennas aceita shape (..., 9) → projeta para (n_tilted, *prefix).
         # Aplicamos sobre H_tensor (nTR, nAngles, n_pos, nf, 9) →
         # saída (n_tilted, nTR, nAngles, n_pos, nf).
+        # Type narrowing: use_tilted=True implica tilted_configs is not None.
+        if tilted_configs is None:
+            raise ValueError(
+                "use_tilted=True requer tilted_configs (tuple de pares (beta, phi))."
+            )
         result.H_tilted = apply_tilted_antennas(
             H_tensor=H_tensor,
             tilted_configs=tilted_configs,
