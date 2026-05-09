@@ -262,6 +262,113 @@ def get_numba_cache_size() -> int:
         return len(_GLOBAL_HORDIST_CACHE)
 
 
+def get_jit_cache_info() -> Dict[str, Any]:
+    """Diagnóstico expandido do cache JIT Numba (I1.10 Fase 1, v2.22.6).
+
+    Reporta visão consolidada do estado dos caches Numba do simulador:
+
+    - ``_GLOBAL_HORDIST_CACHE`` (cache em RAM de ``common_arrays``)
+    - Assinaturas compiladas dos dispatchers Numba (uma por shape distinto)
+    - Tamanho on-disk do diretório ``__pycache__`` de ``_numba/`` (entradas
+      ``.nbi`` / ``.nbc`` persistidas via ``cache=True``)
+
+    Pareia com :func:`release_numba_cache` para observabilidade do MCP
+    ``numba-profiler`` (handler ``analyze_jit_cache``).
+
+    Returns:
+        Dict com chaves:
+
+        - ``n_entries`` (int): entradas vivas em ``_GLOBAL_HORDIST_CACHE``
+          (cache hordist em RAM).
+        - ``approx_bytes`` (int): estimativa do tamanho em RAM via
+          ``sys.getsizeof`` recursivo nos arrays.
+        - ``keys_summary`` (list[str]): até 10 chaves do cache (string
+          truncada para inspeção; chaves binárias completas são pesadas).
+        - ``dispatcher_signatures`` (dict[str, int]): número de assinaturas
+          compiladas por dispatcher Numba relevante (e.g.
+          ``_simulate_combined_prange_flat``).
+        - ``cache_dir_disk_bytes`` (int): bytes ocupados em
+          ``__pycache__/_numba/``. ``-1`` se diretório não existir.
+
+    Example:
+        >>> from geosteering_ai.simulation import get_jit_cache_info
+        >>> info = get_jit_cache_info()
+        >>> info["n_entries"]
+        0
+        >>> info["dispatcher_signatures"]
+        {'_simulate_combined_prange_flat': 0, ...}
+
+    Note:
+        Esta função é segura quando Numba não compilou nada ainda
+        (retorna zeros nos campos correspondentes). Não dispara
+        compilação JIT.
+    """
+    import sys
+    from pathlib import Path
+
+    # 1. Cache em RAM (_GLOBAL_HORDIST_CACHE)
+    with _CACHE_LOCK:
+        n_entries = len(_GLOBAL_HORDIST_CACHE)
+        keys_summary: list[str] = []
+        approx_bytes = 0
+        for i, (key, arrays) in enumerate(_GLOBAL_HORDIST_CACHE.items()):
+            if i < 10:
+                hordist_key = key[0] if isinstance(key, tuple) else key
+                keys_summary.append(f"hordist={hordist_key:.6g}")
+            for arr in arrays:
+                if hasattr(arr, "nbytes"):
+                    approx_bytes += arr.nbytes
+                else:
+                    approx_bytes += sys.getsizeof(arr)
+
+    # 2. Assinaturas compiladas dos dispatchers Numba
+    dispatcher_signatures: Dict[str, int] = {}
+    try:
+        from geosteering_ai.simulation._numba.kernel import (
+            _fields_at_single_freq,
+            _fields_in_freqs_kernel_cached,
+            precompute_common_arrays_cache,
+        )
+        from geosteering_ai.simulation.forward import (
+            _simulate_combined_prange,
+            _simulate_combined_prange_flat,
+            _simulate_positions_njit,
+            _simulate_positions_njit_cached,
+        )
+
+        for fn in (
+            _simulate_combined_prange_flat,
+            _simulate_combined_prange,
+            _simulate_positions_njit,
+            _simulate_positions_njit_cached,
+            _fields_in_freqs_kernel_cached,
+            _fields_at_single_freq,
+            precompute_common_arrays_cache,
+        ):
+            sigs = getattr(fn, "signatures", None)
+            dispatcher_signatures[fn.__name__] = len(sigs) if sigs else 0
+    except ImportError:
+        # Numba indisponível ou módulo ainda não compilado — reporta vazio
+        pass
+
+    # 3. Tamanho on-disk de __pycache__/_numba/
+    numba_pycache = Path(__file__).resolve().parent / "_numba" / "__pycache__"
+    if numba_pycache.exists():
+        cache_dir_disk_bytes = sum(
+            f.stat().st_size for f in numba_pycache.rglob("*") if f.is_file()
+        )
+    else:
+        cache_dir_disk_bytes = -1
+
+    return {
+        "n_entries": n_entries,
+        "approx_bytes": approx_bytes,
+        "keys_summary": keys_summary,
+        "dispatcher_signatures": dispatcher_signatures,
+        "cache_dir_disk_bytes": cache_dir_disk_bytes,
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # MultiSimulationResult — container de saída multi-dimensional
 # ──────────────────────────────────────────────────────────────────────────────
