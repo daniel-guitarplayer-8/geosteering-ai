@@ -7,7 +7,7 @@
 | **Projeto** | Inversao 1D de Resistividade via Deep Learning para Geosteering |
 | **Versao** | v5.0.15 → v2.0 (arquitetura de software) |
 | **Autor** | Daniel Leal |
-| **Framework** | TensorFlow 2.x / Keras **EXCLUSIVO** (PyTorch PROIBIDO) |
+| **Framework** | TensorFlow 2.x / Keras 3.x **PRIMÁRIO** (PyTorch via adapter opt-in — §75 doc aprofundamento; estratégia 3-tier em §75.10) |
 | **Ambiente** | Desenvolvimento: VSCode + Claude Code · Versionamento: GitHub · Execucao: Google Colab Pro+ (GPU) |
 | **Linguagem** | Python 3.10+ · Variaveis em ingles · Comentarios/docs em PT-BR |
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |

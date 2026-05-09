@@ -29,12 +29,13 @@ NEW_STRING=$(echo "$INPUT" | jq -r '.tool_input.new_string // .tool_input.conten
 
 VIOLATIONS=()
 
-# ── 1. PyTorch proibido (qualquer .py) ───────────────────────────────
-if [[ "$FILE_PATH" == *.py ]]; then
-    if echo "$NEW_STRING" | grep -qE '^[[:space:]]*(import torch|from torch)'; then
-        VIOLATIONS+=("PROIBIDO: PyTorch nao pode ser importado. Framework exclusivo: TensorFlow/Keras.")
-    fi
-fi
+# ── 1. PyTorch — DELEGADO PARA validate-no-pytorch.sh ──────────────
+#    A política de PyTorch foi refinada (§75 do documento de
+#    aprofundamento + pré-mortem inaugural 2026-05-09):
+#      - PROIBIDO em production paths
+#      - PERMITIDO via adapter (geosteering_ai/adapters/) e research/
+#    A lógica path-aware está em validate-no-pytorch.sh, executado
+#    no mesmo PreToolUse após este hook.
 
 # ── 2. eps perigoso para float32 (qualquer .py) ─────────────────────
 #    Detecta eps = 1e-20, 1e-25, 1e-30 etc. (expoentes -16 a -99)

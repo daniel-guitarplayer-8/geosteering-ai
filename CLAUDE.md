@@ -7,13 +7,13 @@
 | **Projeto** | Inversao 1D de Resistividade via Deep Learning para Geosteering |
 | **Versao** | v2.0 (arquitetura de software) |
 | **Autor** | Daniel Leal |
-| **Framework** | TensorFlow 2.x / Keras **EXCLUSIVO** (PyTorch PROIBIDO) |
+| **Framework** | TensorFlow 2.x / Keras 3.x **PRIMÁRIO** (PyTorch via adapter opt-in — §75 doc aprofundamento; estratégia 3-tier em §75.10) |
 | **Ambiente** | VSCode + Claude Code (dev, Python 3.13) · GitHub (CI, Python 3.13) · Google Colab Pro+ GPU (exec, Python 3.13) |
 | **Linguagem** | Python 3.13 · Variaveis em ingles · Comentarios/docs em PT-BR |
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |
 | **Pacote** | `geosteering_ai/` (pip installable) |
 | **Referencia** | `docs/ARCHITECTURE_v2.md` (documento completo da arquitetura) |
-| **Simulation Manager** | v2.21 (2026-05-02) — **CAUSA-RAIZ DA REGRESSÃO HISTÓRICA**: análise comparativa com `old_geosteering_ai/` revelou que Sprint 13.1 (v2.13) introduziu `@njit(parallel=True)` em `_fields_in_freqs_kernel_cached` causando overhead de paralelismo aninhado em milhões de chamadas. Fix: remove `parallel=True`. Cenário E: 46k → 122k mod/h (2.65×, atinge meta histórica >120k). v2.20: investigação empírica HT/SMT. v2.19: random seed UI + nogil. v2.18: t0_sim + PoolWarmupThread. Paridade Fortran <1e-12 · 13+14+4+7+19+4+12+1 testes pass |
+| **Simulation Manager** | v2.22.6 (2026-05-09) — **Fase 1 Fundação Multi-Agente COMPLETA (§22.1)**: I1.2 skill `geosteering-simulator-numba.md` (Opus 4.7 extra-high, 384 LOC) + I1.9 MCP `physics-validator` handlers REAIS (6 tools, 15 testes) + I1.10 MCP `numba-profiler` handlers REAIS (6 tools, 17 testes) + `get_jit_cache_info()` em `multi_forward.py`. Working tree clean (0 SKIP=mypy,ruff necessário). v2.22.5: skills agent-config-override (physics-reviewer Sonnet→Opus 4.7). v2.22.4: `use_flat_prange=True` default. v2.22: FLAT prange 4D (Cenário B +11%, F +9%; E sem regressão; 27 testes paridade bit-exato). v2.21: causa-raiz KB-013 (Sprint 13.1) Cenário E 46k→122k. Paridade Fortran <1e-12 inviolável · 1597 PASS / 295 SKIP / 0 FAIL na suite total |
 
 ---
 
@@ -54,7 +54,8 @@ Python 3.13 tem compatibilidade 100% com todas as dependências do projeto.
 
 ## Proibicoes Absolutas
 
-- **PyTorch** — PROIBIDO em qualquer parte do pipeline
+- **PyTorch em pipeline de produção** — PROIBIDO em `geosteering_ai/{models,losses,training,inference,evaluation,data,simulation,visualization,utils}/` (Hook `validate-no-pytorch.sh` bloqueia imports diretos)
+- **PyTorch via adapter isolado** — PERMITIDO em `geosteering_ai/adapters/pytorch_adapter.py` para módulos de pesquisa exploratória. Acesso sempre via `from geosteering_ai.adapters import get_adapter("pytorch")` (Sprint v2.30 — ver §75 do doc de aprofundamento)
 - **FREQUENCY_HZ = 2.0** — o default e 20000.0 (range valido: 100–1e6 Hz, derivado do .out)
 - **SPACING_METERS = 1000.0** — o default e 1.0 (range valido: 0.1–10.0 m)
 - **SEQUENCE_LENGTH = 601** — o default e 600 (range valido: 10–100000, derivado do .out)
@@ -131,6 +132,11 @@ geosteering_ai/
 ├── inference/             ← InferencePipeline, realtime, export
 ├── evaluation/            ← Metricas, comparacao
 ├── visualization/         ← Plots, Picasso, EDA
+├── adapters/              ← (PLANEJADO Sprint v2.30) BaseInversionModel +
+│                            pytorch_adapter.py + tf_adapter.py + onnx_adapter.py
+│                            Acesso: from geosteering_ai.adapters import get_adapter
+├── research/              ← (PLANEJADO Sprint v2.30) módulos de pesquisa
+│                            exploratória — PyTorch direto permitido aqui
 └── utils/                 ← Logger, timer, validation, formatting
 ```
 

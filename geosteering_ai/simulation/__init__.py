@@ -122,6 +122,7 @@ Note:
     `backend='jax'` será avaliada na Fase 3 apenas se a paridade numérica
     e de performance for atingida.
 """
+
 from __future__ import annotations
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -149,6 +150,7 @@ from geosteering_ai.simulation.filters import FilterLoader, HankelFilter
 from geosteering_ai.simulation.forward import SimulationResult, simulate
 from geosteering_ai.simulation.multi_forward import (
     MultiSimulationResult,
+    get_jit_cache_info,
     get_numba_cache_size,
     release_numba_cache,
     simulate_multi,
@@ -179,6 +181,7 @@ __all__ = [
     "compute_jacobian_fd_numba",
     "compute_jacobian_jax",
     "detect_cpu_topology",
+    "get_jit_cache_info",
     "get_numba_cache_size",
     "recommend_default_parallelism",
     "release_numba_cache",
