@@ -152,21 +152,36 @@ def test_run_scenario_benchmark_A_quick() -> None:
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_compare_branches_dirty_tree_detection(tmp_path, monkeypatch) -> None:
+def test_compare_branches_dirty_tree_detection(monkeypatch) -> None:
     """Se git status reporta dirty, retorna error sem rodar bench."""
-    # Forçamos uma working dir suja: criamos um arquivo untracked em raiz
-    # do repo. Como não controlamos o estado real, verificamos só estrutura.
+    import subprocess
+
+    class _FakeRun:
+        """Substitui subprocess.run para forçar saída suja determinística."""
+
+        def __init__(self, stdout: str = " M file.py\n", returncode: int = 0):
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = returncode
+
+    def _fake_run(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        # Simula 'git status --porcelain' retornando saída não-vazia (dirty)
+        if cmd and len(cmd) >= 2 and cmd[1] == "status":
+            return _FakeRun(stdout=" M tracked_file.py\n?? untracked.py\n")
+        # Demais chamadas (git branch --show-current) — não devem ocorrer
+        # quando o tree é detectado dirty, mas retornamos vazio por segurança
+        return _FakeRun(stdout="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    # Re-aplica também ao módulo server (que importou subprocess no topo)
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
     result = server._impl_compare_branches(scenario_id="E", runs=1)
-    # Se branch atual está limpo, segue para bench (sem erro);
-    # se sujo, retorna error. Validamos estrutura conforme estado.
-    if "error" in result:
-        assert (
-            result.get("error") in {"dirty tree"}
-            or "git" in str(result.get("error", "")).lower()
-        )
-    else:
-        # Branch limpo: deve ter bench_b ou nota de limitação
-        assert "current_branch" in result or "bench_b" in result
+    assert "error" in result
+    assert result["error"] == "dirty tree"
+    assert "details" in result
+    assert "git_status" in result
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -14,9 +14,12 @@ Como mcp pode não estar instalado no env de teste, validamos:
 from __future__ import annotations
 
 import asyncio
-import importlib.util  # noqa: E402
+import builtins
+import importlib.util
 import sys
 from pathlib import Path
+
+import pytest
 
 _MCP_DIR = Path(__file__).resolve().parents[1]
 _SERVER_PATH = _MCP_DIR / "server.py"
@@ -63,26 +66,25 @@ def test_tool_registry_callables_work_via_asyncio_to_thread() -> None:
 
 
 def test_main_emits_error_when_mcp_missing(monkeypatch, capsys) -> None:
-    """Se ``mcp`` não pode ser importado, ``main()`` emite JSON e exit(1)."""
-    # Simula ImportError forçando 'mcp' inexistente em sys.modules
-    # NB: se mcp já estiver instalado, este teste é skipado implicitamente
-    try:
-        import mcp  # noqa: F401
+    """Se ``mcp`` não pode ser importado, ``main()`` emite JSON e exit(1).
 
-        # mcp instalado — não podemos testar branch de erro sem mexer em runtime
-        # Skip via condicional pytest
-        import pytest
-
-        pytest.skip("mcp já instalado; branch de erro só testável sem mcp")
-    except ImportError:
-        pass
-
-    # Remove qualquer mcp parcialmente carregado
+    Mock determinístico via ``__import__``: força ImportError em ``mcp`` e
+    submódulos, independente do ambiente de teste ter mcp instalado.
+    """
+    # Remove qualquer "mcp" cacheado em sys.modules
     for mod_name in list(sys.modules):
         if mod_name == "mcp" or mod_name.startswith("mcp."):
             monkeypatch.delitem(sys.modules, mod_name, raising=False)
 
-    import pytest
+    # Força ImportError quando alguém tentar `import mcp` ou submódulo
+    real_import = builtins.__import__
+
+    def _blocking_import(name, *args, **kwargs):
+        if name == "mcp" or name.startswith("mcp."):
+            raise ImportError(f"No module named '{name}' (test mock)")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _blocking_import)
 
     with pytest.raises(SystemExit) as exc_info:
         server.main()
