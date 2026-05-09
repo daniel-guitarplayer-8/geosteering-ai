@@ -7,6 +7,23 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.22.5] — 2026-05-09 — Upgrade skills físicas para Opus 4.7
+
+### Skills
+
+- **`geosteering-physics-reviewer`**: modelo Sonnet 4.6 → Opus 4.7 extra-high (conformidade §19).
+- **`geosteering-simulator-fortran`**: adicionados `model: claude-opus-4-7` + `effort: extra-high`.
+- **`geosteering-simulator-python`**: adicionados `model: claude-opus-4-7` + `effort: extra-high`.
+- **`geosteering-orchestrator`**: seção "Configuração Dinâmica de Agentes" + hierarquia effort.
+
+### Infraestrutura
+
+- Hierarquia de effort documentada: `high` < `extra-high` < `max`.
+- Conformidade §19 do documento de arquitetura: 9/9 categorias de tarefa mapeadas.
+- Branch `feat/skills-agent-config-override`: 0 findings CodeRabbit (branch limpa).
+
+---
+
 ## [v2.22.4] — 2026-05-09 — Promoção FLAT prange a default
 
 ### Mudança
