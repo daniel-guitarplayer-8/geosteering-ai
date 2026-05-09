@@ -7,7 +7,7 @@
 | **Projeto** | Inversao 1D de Resistividade via Deep Learning para Geosteering |
 | **Versao** | v2.0 (arquitetura de software) |
 | **Autor** | Daniel Leal |
-| **Framework** | TensorFlow 2.x / Keras **EXCLUSIVO** (PyTorch PROIBIDO) |
+| **Framework** | TensorFlow 2.x / Keras 3.x **PRIMÁRIO** (PyTorch via adapter opt-in — §75 doc aprofundamento; estratégia 3-tier em §75.10) |
 | **Ambiente** | VSCode + Claude Code (dev, Python 3.13) · GitHub (CI, Python 3.13) · Google Colab Pro+ GPU (exec, Python 3.13) |
 | **Linguagem** | Python 3.13 · Variaveis em ingles · Comentarios/docs em PT-BR |
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |
@@ -54,7 +54,8 @@ Python 3.13 tem compatibilidade 100% com todas as dependências do projeto.
 
 ## Proibicoes Absolutas
 
-- **PyTorch** — PROIBIDO em qualquer parte do pipeline
+- **PyTorch em pipeline de produção** — PROIBIDO em `geosteering_ai/{models,losses,training,inference,evaluation,data,simulation,visualization,utils}/` (Hook `validate-no-pytorch.sh` bloqueia imports diretos)
+- **PyTorch via adapter isolado** — PERMITIDO em `geosteering_ai/adapters/pytorch_adapter.py` para módulos de pesquisa exploratória. Acesso sempre via `from geosteering_ai.adapters import get_adapter("pytorch")` (Sprint v2.30 — ver §75 do doc de aprofundamento)
 - **FREQUENCY_HZ = 2.0** — o default e 20000.0 (range valido: 100–1e6 Hz, derivado do .out)
 - **SPACING_METERS = 1000.0** — o default e 1.0 (range valido: 0.1–10.0 m)
 - **SEQUENCE_LENGTH = 601** — o default e 600 (range valido: 10–100000, derivado do .out)
