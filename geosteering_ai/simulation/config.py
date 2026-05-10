@@ -375,6 +375,23 @@ class SimulationConfig:
     # ainda há redução de overhead vs caminho legacy.
     use_flat_prange: bool = True
 
+    # ── Sprint v2.23 A.1 — Fastmath dual-mode (opt-in) ───────────────
+    use_fastmath: bool = False
+    """Sprint v2.23 A.1 — habilita @njit(fastmath=True) em kernels auxiliares.
+
+    Default False (opt-in inicial). Quando True, fastmath é aplicado em
+    funções de geometria (find_layers_tr, layer_at_depth) e rotação
+    (build_rotation_matrix, rotate_tensor). NUNCA é aplicado em funções
+    raiz (_simulate_positions_njit*, _fields_*_kernel*) ou em
+    propagation/dipoles (raiz da cadeia comparada contra Fortran <1e-12).
+
+    NOTA: O efeito real desta flag em v2.23 é principalmente documental —
+    os decoradores @njit(fastmath=True) são aplicados de forma
+    INCONDICIONAL em geometry.py e rotation.py (operações de baixo risco
+    validadas). A flag permite que sprints futuras (v2.24+) introduzam
+    kernels condicionais sem quebrar configurações existentes.
+    """
+
     # ─────────────────────────────────────────────────────────────────
     # SPRINT 12.1 (v2.12) — Workers Nativos no `simulate_multi`
     # ─────────────────────────────────────────────────────────────────
@@ -657,6 +674,35 @@ class SimulationConfig:
             f"auto-detectar (usa todos os cores) ou um inteiro >= 1."
         )
 
+        # ── Sprint v2.23 A.2 — auto-detect threads quando ambos None ──────────
+        # Se usuário NÃO setou n_workers nem threads_per_worker explicitamente,
+        # usa recommend_default_parallelism() do _workers.py para configurar
+        # defaults adaptativos baseados na topologia da CPU detectada.
+        # Backward-compat: n_workers=1 (ou threads_per_worker=1) explícito
+        # permanece single-process — apenas o caso AMBOS None dispara auto-detect.
+        # Tolerante a falhas: se import falhar (psutil missing, etc.), mantém
+        # None e segue com comportamento legado (sem quebrar config existente).
+        if self.n_workers is None and self.threads_per_worker is None:
+            try:
+                from geosteering_ai.simulation._workers import (
+                    recommend_default_parallelism,
+                )
+
+                rec_workers, rec_threads = recommend_default_parallelism()
+                object.__setattr__(self, "n_workers", rec_workers)
+                object.__setattr__(self, "threads_per_worker", rec_threads)
+                logger.info(
+                    "Sprint v2.23 A.2 — auto-detect: n_workers=%d, threads_per_worker=%d",
+                    rec_workers,
+                    rec_threads,
+                )
+            except (ImportError, Exception) as exc:
+                logger.warning(
+                    "Sprint v2.23 A.2 — auto-detect falhou (%s). "
+                    "Mantendo n_workers=None (legado single-process).",
+                    exc,
+                )
+
         # Sprint 12.1 (v2.12) — workers nativos. None = backward-compat
         # (single-process). Inteiros válidos: n_workers ∈ [1, 1024],
         # threads_per_worker ∈ [1, 256]. Os limites superiores são
@@ -672,6 +718,34 @@ class SimulationConfig:
                 f"threads_per_worker={self.threads_per_worker} inválido. "
                 f"Deve estar em [1, 256] ou None (auto-anti-oversubscription)."
             )
+
+        # ── Sprint v2.23 A.2 — defesa em camadas anti-oversubscription (KB-019) ─
+        # Valida invariante n_workers × threads_per_worker ≤ 4 × physical_cores
+        # (margem 4× tolera casos legítimos de I/O-bound e configs experimentais).
+        # KB-019: oversubscription severa (e.g., 256w × 256t) degrada throughput
+        # em até 4× via context-switch + cache thrashing. _resolve_effective_threads
+        # em _workers.py também aplica defesa em runtime — esta é defesa em config.
+        if self.n_workers is not None and self.threads_per_worker is not None:
+            try:
+                from geosteering_ai.simulation._workers import detect_cpu_topology
+
+                _, physical_cores, _ = detect_cpu_topology()
+                total_threads = self.n_workers * self.threads_per_worker
+                limit = 4 * physical_cores
+                if total_threads > limit:
+                    logger.warning(
+                        "Sprint v2.23 — oversubscription severa detectada: "
+                        "n_workers=%d × threads_per_worker=%d = %d threads totais > "
+                        "4× physical_cores (%d). Pode degradar throughput (KB-019).",
+                        self.n_workers,
+                        self.threads_per_worker,
+                        total_threads,
+                        limit,
+                    )
+            except Exception:
+                # detect_cpu_topology raramente falha (tem 4 fallbacks),
+                # mas se falhar, apenas omite o warning — não bloqueia config.
+                pass
 
         # Sprint 12 (PR #25 / v1.6.0 E4) — chunking de posições.
         # None = desabilitado (monolítico). Valores válidos: 1–10000.
