@@ -85,6 +85,7 @@ Note:
     `z >= prof[n-1]` (Python, usando profs sem sentinel final), onde
     `prof` aqui tem shape `(n,)` no estilo Fortran sem `prof(0)=0`.
 """
+
 from __future__ import annotations
 
 from typing import Tuple
@@ -167,7 +168,9 @@ def sanitize_profile(
         )
 
     # Sprint 2.9: delega para kernel @njit puro.
-    return _sanitize_profile_kernel(n, esp)
+    # Sprint v2.23: fastmath=True invalidou cache mypy e revelou no-any-return
+    # latente — Numba Dispatcher retorna Any. Ignore é localizado e seguro.
+    return _sanitize_profile_kernel(n, esp)  # type: ignore[no-any-return]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -177,7 +180,13 @@ def sanitize_profile(
 # validações com f-strings. Assume shape já validado pelo wrapper.
 
 
-@njit(cache=True)
+# ── Sprint v2.23 A.1 — fastmath=True em geometria (zero risco) ────
+# Funções de geometria (find_layers_tr, layer_at_depth, _sanitize_profile_kernel)
+# operam apenas em comparações lógicas (≥, >) e atribuições simples.
+# fastmath não afeta operações lógicas — nenhuma operação FMA reorderable.
+# Aplicação INCONDICIONAL (não depende de cfg.use_fastmath, pois decoradores
+# Numba são imutáveis em runtime). Paridade Fortran <1e-12 preservada.
+@njit(cache=True, fastmath=True)
 def _sanitize_profile_kernel(
     n: int,
     esp: np.ndarray,
@@ -207,7 +216,7 @@ def _sanitize_profile_kernel(
     return h, prof
 
 
-@njit
+@njit(fastmath=True)
 def find_layers_tr(
     n: int,
     h0: float,
@@ -294,7 +303,7 @@ def find_layers_tr(
     return camad_t, camad_r
 
 
-@njit
+@njit(fastmath=True)
 def layer_at_depth(n: int, z: float, prof: np.ndarray) -> int:
     """Determina a camada 0-based em que a profundidade `z` se encontra.
 

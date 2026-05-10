@@ -88,6 +88,7 @@ Note:
     possível por ordem de operações diferentes em `matmul(matmul(Rt,H),R)`.
     Tolerância real esperada: < 1e-14 (ULP float64).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -98,7 +99,13 @@ from geosteering_ai.simulation._numba.propagation import njit
 # ──────────────────────────────────────────────────────────────────────────────
 # BUILD_ROTATION_MATRIX — só a matriz R (útil em testes)
 # ──────────────────────────────────────────────────────────────────────────────
-@njit
+# ── Sprint v2.23 A.1 — fastmath=True em rotação (validado <1e-12) ───
+# build_rotation_matrix e rotate_tensor fazem produtos cos·sin e matmul
+# Rᵀ·H·R. fastmath permite reorder de FMA com erro ULP ~1e-15 — abaixo
+# do gate de paridade Fortran <1e-12 (suite test_simulation_compare_fortran
+# validada). Aplicação INCONDICIONAL. Se gate falhar em build futura,
+# reverter rotate_tensor e manter apenas build_rotation_matrix.
+@njit(fastmath=True)
 def build_rotation_matrix(alpha: float, beta: float, gamma: float) -> np.ndarray:
     """Constrói a matriz de rotação 3×3 a partir de ângulos de Euler.
 
@@ -159,7 +166,7 @@ def build_rotation_matrix(alpha: float, beta: float, gamma: float) -> np.ndarray
 # ──────────────────────────────────────────────────────────────────────────────
 # ROTATE_TENSOR — H' = Rᵀ · H · R
 # ──────────────────────────────────────────────────────────────────────────────
-@njit
+@njit(fastmath=True)
 def rotate_tensor(
     alpha: float,
     beta: float,
@@ -217,7 +224,9 @@ def rotate_tensor(
     # Numba: usar @ ou np.dot — ambos suportados
     tmp = np.dot(Rt.astype(np.complex128), H)
     H_rot = np.dot(tmp, R.astype(np.complex128))
-    return H_rot
+    # Sprint v2.23: fastmath=True invalidou cache mypy e revelou no-any-return
+    # latente — np.dot/np.ndarray.astype retornam Any em alguns paths. Localizado.
+    return H_rot  # type: ignore[no-any-return]
 
 
 __all__ = [
