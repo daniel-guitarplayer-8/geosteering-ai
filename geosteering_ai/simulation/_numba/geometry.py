@@ -216,7 +216,7 @@ def _sanitize_profile_kernel(
     return h, prof
 
 
-@njit(fastmath=True)
+@njit(cache=True, fastmath=True)
 def find_layers_tr(
     n: int,
     h0: float,
@@ -303,7 +303,7 @@ def find_layers_tr(
     return camad_t, camad_r
 
 
-@njit(fastmath=True)
+@njit(cache=True, fastmath=True)
 def layer_at_depth(n: int, z: float, prof: np.ndarray) -> int:
     """Determina a camada 0-based em que a profundidade `z` se encontra.
 

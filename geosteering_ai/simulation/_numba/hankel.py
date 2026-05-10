@@ -71,6 +71,7 @@ Example:
         >>> # Resultado: ∫₀^∞ J₀(kr·r)·1·dkr = δ(r) (distribuição)
         >>> # Numericamente: soma truncada dos pesos ÷ r
 """
+
 from __future__ import annotations
 
 from typing import Tuple
@@ -87,7 +88,7 @@ _HORDIST_SINGULARITY_EPS: float = 1.0e-9
 _R_GUARD: float = 1.0e-2
 
 
-@njit(fastmath=True)
+@njit(cache=True, fastmath=True)
 def prepare_kr(hordist: float, krJ0J1: np.ndarray) -> np.ndarray:
     """Escala as abscissas do filtro Hankel pela distância horizontal.
 
@@ -118,7 +119,7 @@ def prepare_kr(hordist: float, krJ0J1: np.ndarray) -> np.ndarray:
     return krJ0J1 / r
 
 
-@njit(fastmath=True)
+@njit(cache=True, fastmath=True)
 def integrate_j0(f_kr: np.ndarray, weights_j0: np.ndarray, hordist: float) -> complex:
     """Calcula a integral de Hankel digital do tipo J₀.
 
@@ -153,7 +154,7 @@ def integrate_j0(f_kr: np.ndarray, weights_j0: np.ndarray, hordist: float) -> co
     return total / r
 
 
-@njit(fastmath=True)
+@njit(cache=True, fastmath=True)
 def integrate_j1(f_kr: np.ndarray, weights_j1: np.ndarray, hordist: float) -> complex:
     """Calcula a integral de Hankel digital do tipo J₁.
 
@@ -179,7 +180,7 @@ def integrate_j1(f_kr: np.ndarray, weights_j1: np.ndarray, hordist: float) -> co
     return total / r
 
 
-@njit(fastmath=True)
+@njit(cache=True, fastmath=True)
 def integrate_j0_j1(
     f_kr: np.ndarray,
     weights_j0: np.ndarray,

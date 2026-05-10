@@ -105,7 +105,7 @@ from geosteering_ai.simulation._numba.propagation import njit
 # do gate de paridade Fortran <1e-12 (suite test_simulation_compare_fortran
 # validada). Aplicação INCONDICIONAL. Se gate falhar em build futura,
 # reverter rotate_tensor e manter apenas build_rotation_matrix.
-@njit(fastmath=True)
+@njit(cache=True, fastmath=True)
 def build_rotation_matrix(alpha: float, beta: float, gamma: float) -> np.ndarray:
     """Constrói a matriz de rotação 3×3 a partir de ângulos de Euler.
 
@@ -166,7 +166,7 @@ def build_rotation_matrix(alpha: float, beta: float, gamma: float) -> np.ndarray
 # ──────────────────────────────────────────────────────────────────────────────
 # ROTATE_TENSOR — H' = Rᵀ · H · R
 # ──────────────────────────────────────────────────────────────────────────────
-@njit(fastmath=True)
+@njit(cache=True, fastmath=True)
 def rotate_tensor(
     alpha: float,
     beta: float,
