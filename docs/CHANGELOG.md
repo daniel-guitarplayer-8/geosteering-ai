@@ -7,6 +7,64 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.23] — 2026-05-10 — Fastmath Dual-Mode + Threads Adaptativos (Multi-Agent)
+
+### Performance
+
+- **A.1 Fastmath Dual-Mode**: `@njit(fastmath=True)` aplicado em kernels auxiliares
+  de baixo risco:
+  - `_numba/geometry.py`: `find_layers_tr`, `layer_at_depth`, `_sanitize_profile_kernel`
+    (operações lógicas — fastmath é inócuo em comparações)
+  - `_numba/rotation.py`: `build_rotation_matrix`, `rotate_tensor` (produtos
+    `cos·sin` + matmul `Rᵀ·H·R` — FMA reorder com erro ULP ~1e-15, abaixo
+    do gate de paridade Fortran <1e-12)
+  - Funções raiz (`_simulate_positions_njit*`, `_fields_*_kernel*`) e
+    propagação/dipolos (cascata crítica) **mantêm `fastmath=False` por design**
+- **A.2 Threads Adaptativos**: `SimulationConfig.__post_init__` agora chama
+  `recommend_default_parallelism()` quando `n_workers=None AND threads_per_worker=None`,
+  configurando defaults baseados na topologia detectada da CPU (sucessor de v2.20)
+- **Defesa em camadas KB-019**: warning emitido se `n_workers × threads_per_worker
+  > 4× physical_cores` (oversubscription severa)
+
+### Novos campos
+
+- `SimulationConfig.use_fastmath: bool = False` — opt-in documental para
+  futuras sprints que possam introduzir kernels condicionais
+
+### Validação
+
+- **Paridade Fortran <1e-12 PRESERVADA**: 13/13 testes em `test_simulation_compare_fortran.py`
+  (oklahoma_3, oklahoma_5, oklahoma_28, hou_7, devine_8, oklahoma_15, viking_graben_10,
+  smoke tests, alta resistividade)
+- **7 novos testes** em `tests/test_simulation_v223_fastmath_threads.py`:
+  default False, decoradores aplicados, auto-detect, backward-compat (workers/threads
+  explícitos), log informativo
+- **Não-regressão**: 52/52 PASS (KB 11 + MCPs 32 + worktree 9)
+
+### Multi-Agent Workflow
+
+- Implementação coordenada via `geosteering-orchestrator` (Opus 4.7 max) com
+  `geosteering-simulator-numba` (Opus 4.7 extra-high)
+- Reviews paralelos: `geosteering-physics-reviewer` (Opus 4.7), `geosteering-perf-reviewer`
+  (Haiku 4.5), `geosteering-code-reviewer` (Sonnet 4.6)
+- Aplicação de 3 fixes críticos do perf-reviewer pre-merge: regressão de teste,
+  validação anti-oversubscription, try-except em lazy import
+
+### Hook
+
+- **`setup-environment.sh`**: exibe topologia CPU detectada + recomendação v2.23
+  (`{P}P/{L}L (HT={sim|nao}) - default v2.23: {nw}w x {npt}t`) — tolerante a
+  falhas (omite linha se import falhar)
+
+### Backward-compat
+
+- `n_workers=1` (ou `threads_per_worker=1`) explícito **preserva** comportamento
+  single-process — apenas o caso AMBOS None dispara auto-detect
+- Try-except no lazy import garante que falhas em `_workers.py` (e.g., psutil
+  ausente) não quebrem construção de `SimulationConfig`
+
+---
+
 ## [v2.22.5] — 2026-05-09 — Upgrade skills físicas para Opus 4.7
 
 ### Skills
