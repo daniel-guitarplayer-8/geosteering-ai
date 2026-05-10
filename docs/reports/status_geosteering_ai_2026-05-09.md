@@ -1,8 +1,8 @@
 # Status do Projeto Geosteering AI — Snapshot 2026-05-09
 
 **Versão do documento**: 1.0
-**Branch atual**: `feat/premortem-analysis-artifacts` (25 commits ahead de `main`)
-**Versão de código**: v2.22.6 estável → v2.22.7-docs em curso
+**Branch atual**: `feat/premortem-analysis-artifacts` (Mergeada em main — commit 42c5836, tag v2.22.7-docs, 2026-05-09)
+**Versão de código**: v2.22.6 estável → v2.22.7-docs (mergeada em main, tag publicada)
 **Autor**: Daniel Leal · **Compilado por**: Claude Opus 4.7 (effort extra-high)
 
 ---
@@ -57,7 +57,7 @@ em `main` com tag `v2.22.7-docs`.
 | d041b9d | feat(skills): adicionar geosteering-premortem-analyst |
 | 42103db | docs(coderabbit): aplicar findings minor (refs + claim PyTorch) |
 
-Total: 25 commits ahead de `main`. **Pronto para merge** após aprovação.
+Total: 25 commits → **mergeada em main** (42c5836, tag v2.22.7-docs, 2026-05-09).
 
 ### 2.3 Tag esperada se aprovado
 

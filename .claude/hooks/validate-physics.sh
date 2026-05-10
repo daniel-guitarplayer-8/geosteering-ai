@@ -1,19 +1,19 @@
 #!/bin/bash
 # ╔══════════════════════════════════════════════════════════════════════╗
-# ║  HOOK A: Protecao da Integridade das Validacoes Fisicas            ║
+# ║  HOOK A: Proteção da Integridade das Validações Físicas            ║
 # ║  Evento: PreToolUse (Edit|Write)                                   ║
 # ║  Projeto: Geosteering AI v2.0                                      ║
 # ║                                                                    ║
 # ║  Protege contra:                                                   ║
-# ║    1. Enfraquecimento das validacoes de errata em config.py        ║
+# ║    1. Enfraquecimento das validações de errata em config.py        ║
 # ║    2. Valores perigosos em YAML configs (antes do runtime)         ║
 # ║    3. Import de PyTorch (proibido no projeto)                      ║
 # ║    4. eps < 1e-15 (float32 unsafe)                                 ║
 # ║    5. globals().get() em modulos v2.0                              ║
 # ║                                                                    ║
-# ║  NOTA: frequency_hz, spacing_meters, etc. sao defaults validados   ║
-# ║  pelo __post_init__ em runtime. Este hook protege a LOGICA de      ║
-# ║  validacao contra enfraquecimento e captura erros em YAML antes    ║
+# ║  NOTA: frequency_hz, spacing_meters, etc. são defaults validados   ║
+# ║  pelo __post_init__ em runtime. Este hook protege a LÓGICA de      ║
+# ║  validação contra enfraquecimento e captura erros em YAML antes    ║
 # ║  de from_yaml() ser chamado.                                       ║
 # ║                                                                    ║
 # ║  Compatibilidade: macOS (BSD grep -E) + Linux (GNU grep -E).      ║
@@ -45,13 +45,13 @@ if [[ "$FILE_PATH" == *.py ]]; then
     fi
 fi
 
-# ── 3. Protecao da logica de validacao em config.py ──────────────────
+# ── 3. Proteção da lógica de validação em config.py ──────────────────
 if [[ "$FILE_PATH" == *config.py ]]; then
     # frequency_hz, spacing_meters, sequence_length agora usam range validation
-    # (100-1e6 Hz, 0.1-10.0 m, 10-100000) — nao mais equality assert.
+    # (100-1e6 Hz, 0.1-10.0 m, 10-100000) — não mais equality assert.
     # Proteger apenas contra comentar asserts dos campos IMUTAVEIS.
     if echo "$NEW_STRING" | grep -qE '#[[:space:]]*assert[[:space:]]+self\.(target_scaling|input_features|output_targets)'; then
-        VIOLATIONS+=("config.py: Assertiva de errata comentada. Validacoes de errata nao devem ser desativadas.")
+        VIOLATIONS+=("config.py: Assertiva de errata comentada. Validações de errata não devem ser desativadas.")
     fi
 fi
 
@@ -81,7 +81,7 @@ fi
 # ── Resultado ────────────────────────────────────────────────────────
 if [ ${#VIOLATIONS[@]} -gt 0 ]; then
     {
-        echo "Hook A — Protecao da Integridade das Validacoes Fisicas:"
+        echo "Hook A — Proteção da Integridade das Validações Físicas:"
         echo "Arquivo: $FILE_PATH"
         for v in "${VIOLATIONS[@]}"; do
             echo "  - $v"
