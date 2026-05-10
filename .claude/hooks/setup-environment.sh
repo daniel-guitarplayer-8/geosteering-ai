@@ -39,6 +39,20 @@ else
     TEST_RESULT="Sem diretorio tests/"
 fi
 
+# ── Sprint v2.23 — CPU topology + recomendacao de paralelismo ─────────
+# Mostra topologia detectada e defaults adaptativos (n_workers x threads).
+# Tolerante a falhas: se modulo nao importavel, omite linha.
+CPU_INFO=$(${PYTHON:-python} -c "
+try:
+    from geosteering_ai.simulation._workers import detect_cpu_topology, recommend_default_parallelism
+    logical, physical, has_ht = detect_cpu_topology()
+    nw, npt = recommend_default_parallelism()
+    ht = 'sim' if has_ht else 'nao'
+    print(f'CPU: {physical}P/{logical}L (HT={ht}) - default v2.23: {nw}w x {npt}t')
+except Exception:
+    pass
+" 2>/dev/null)
+
 # ── Injetar contexto ────────────────────────────────────────────────
 cat << EOF
 === Geosteering AI v2.0 — Sessao Iniciada ===
@@ -47,6 +61,7 @@ Git: $MODIFIED modificado(s), $UNTRACKED nao-rastreado(s)
 Pacote: $PKG_FILES .py em geosteering_ai/ | $TEST_FILES testes
 Testes: $TEST_RESULT
 $PY_VERSION
+${CPU_INFO:+$CPU_INFO}
 EOF
 
 exit 0

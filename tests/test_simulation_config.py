@@ -19,6 +19,7 @@
 # ║      7. É imutável (frozen dataclass).                                  ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 """Testes de `SimulationConfig` — Sprint 1.2."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -630,11 +631,32 @@ class TestSprint121WorkersFields:
     Defaults são `None` (backward-compat com v2.11).
     """
 
-    def test_defaults_none(self) -> None:
-        """Defaults: n_workers=None, threads_per_worker=None."""
+    def test_defaults_auto_detect_v223(self) -> None:
+        """Sprint v2.23 A.2 — defaults agora auto-detectam via recommend_default_parallelism().
+
+        Antes (v2.12-v2.22): defaults eram None (backward-compat single-process).
+        Desde v2.23: quando ambos são None, __post_init__ chama
+        recommend_default_parallelism() e popula n_workers + threads_per_worker
+        com valores adaptativos baseados na topologia da CPU detectada.
+
+        Para forçar single-process, passe n_workers=1 (ou threads_per_worker=1)
+        explicitamente — backward-compat preservada.
+        """
+        from geosteering_ai.simulation._workers import recommend_default_parallelism
+
         cfg = SimulationConfig()
-        assert cfg.n_workers is None
-        assert cfg.threads_per_worker is None
+        rec_workers, rec_threads = recommend_default_parallelism()
+        assert (
+            cfg.n_workers == rec_workers
+        ), f"Auto-detect deveria popular n_workers com {rec_workers}"
+        assert (
+            cfg.threads_per_worker == rec_threads
+        ), f"Auto-detect deveria popular threads_per_worker com {rec_threads}"
+
+    def test_defaults_explicit_none_workers_one_preserves_single_process(self) -> None:
+        """Sprint v2.23 A.2 — n_workers=1 explícito preserva single-process."""
+        cfg = SimulationConfig(n_workers=1)
+        assert cfg.n_workers == 1, "n_workers=1 explícito não deve disparar auto-detect"
 
     def test_n_workers_valid_range(self) -> None:
         """Valores válidos: 1 a 1024."""
