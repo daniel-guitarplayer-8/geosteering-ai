@@ -1,0 +1,107 @@
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║  Catálogo PT-BR — Palavras Sem Acentuação (I2.5)                  ║
+# ║  Projeto: Geosteering AI v2.0 / Sprint v2.24                        ║
+# ║                                                                    ║
+# ║  Formato TSV 2 colunas:                                            ║
+# ║    palavra_sem_acento<TAB>palavra_com_acento                       ║
+# ║                                                                    ║
+# ║  Comentários começam com '#'. Linhas em branco são ignoradas.      ║
+# ║                                                                    ║
+# ║  Origem: regra inviolável CLAUDE.md "Acentuação em PT-BR           ║
+# ║  obrigatória — TODOS os documentos MD em língua portuguesa e TODA  ║
+# ║  documentação de código gerada DEVEM ter acentuação garantida."    ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+
+# ── Substantivos abstratos terminados em -ção / -são ────────────────
+configuracao	configuração
+implementacao	implementação
+execucao	execução
+funcao	função
+operacao	operação
+decisao	decisão
+rotacao	rotação
+simulacao	simulação
+criacao	criação
+selecao	seleção
+iteracao	iteração
+verificacao	verificação
+validacao	validação
+inicializacao	inicialização
+finalizacao	finalização
+otimizacao	otimização
+avaliacao	avaliação
+documentacao	documentação
+demonstracao	demonstração
+informacao	informação
+integracao	integração
+geracao	geração
+computacao	computação
+automacao	automação
+aplicacao	aplicação
+observacao	observação
+importacao	importação
+exportacao	exportação
+manutencao	manutenção
+contagem	contagem
+acentuacao	acentuação
+multiplicacao	multiplicação
+divisao	divisão
+adicao	adição
+subtracao	subtração
+
+# ── Negativas e verbos comuns ─────────────────────────────────────
+# NOTA: "ate" foi removido por ser falso-positivo em código inglês
+# (e.g., "generate", "iterate" são excluídos por word-boundary, mas
+# "ate" como verbo legítimo "to eat" é capturado em comentários EN).
+nao	não
+porem	porém
+tambem	também
+voce	você
+
+# ── Substantivos / adjetivos comuns ───────────────────────────────
+codigo	código
+modulo	módulo
+diretorio	diretório
+historia	história
+metodo	método
+metricas	métricas
+metrica	métrica
+analise	análise
+analises	análises
+sintaxe	sintaxe
+unico	único
+ultimo	último
+proximo	próximo
+maximo	máximo
+minimo	mínimo
+basico	básico
+fisico	físico
+fisica	física
+logico	lógico
+logica	lógica
+generico	genérico
+publica	pública
+publico	público
+estrategia	estratégia
+referencia	referência
+referencias	referências
+relatorio	relatório
+relatorios	relatórios
+versao	versão
+versoes	versões
+sessao	sessão
+sessoes	sessões
+indice	índice
+ambito	âmbito
+domestico	doméstico
+trafego	tráfego
+energetico	energético
+caracteristica	característica
+
+# ── Verbos no infinitivo ─────────────────────────────────────────
+sera	será
+estara	estará
+faltara	faltará
+chegara	chegará
+podera	poderá
+contera	conterá
