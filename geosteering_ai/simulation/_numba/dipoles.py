@@ -143,6 +143,7 @@ Note:
     Esta API é **interna** ao simulador Python. Consumidores devem usar
     `geosteering_ai.simulation.simulate(cfg)` (Sprint 2.5 em diante).
 """
+
 from __future__ import annotations
 
 from typing import Final
@@ -176,7 +177,7 @@ _TWO_PI: Final[float] = 2.0 * np.pi
 # ──────────────────────────────────────────────────────────────────────────────
 # HMD_TIV — Horizontal Magnetic Dipole (2 polarizações: x, y)
 # ──────────────────────────────────────────────────────────────────────────────
-@njit
+@njit(cache=True)
 def hmd_tiv(
     Tx: float,
     Ty: float,
@@ -587,7 +588,9 @@ def hmd_tiv(
             * Tuup[:, camad_r]
             * (
                 np.exp(u[:, camad_r] * (z - h0))
-                - RTEup[:, camad_r] * Euup * np.exp(-u[:, camad_r] * (z - prof[camad_r]))
+                - RTEup[:, camad_r]
+                * Euup
+                * np.exp(-u[:, camad_r] * (z - prof[camad_r]))
                 - RTEdw[:, camad_r]
                 * Eudw
                 * np.exp(u[:, camad_r] * (z - prof[camad_r + 1]))
@@ -610,7 +613,9 @@ def hmd_tiv(
             * Tudw[:, camad_r]
             * (
                 np.exp(-u[:, camad_r] * (z - h0))
-                - RTEup[:, camad_r] * Euup * np.exp(-u[:, camad_r] * (z - prof[camad_r]))
+                - RTEup[:, camad_r]
+                * Euup
+                * np.exp(-u[:, camad_r] * (z - prof[camad_r]))
                 - RTEdw[:, camad_r]
                 * Eudw
                 * np.exp(u[:, camad_r] * (z - prof[camad_r + 1]))
@@ -700,7 +705,7 @@ def hmd_tiv(
 # ──────────────────────────────────────────────────────────────────────────────
 # VMD — Vertical Magnetic Dipole (polarização z)
 # ──────────────────────────────────────────────────────────────────────────────
-@njit
+@njit(cache=True)
 def vmd(
     Tx: float,
     Ty: float,
@@ -886,7 +891,9 @@ def vmd(
         fac = TEupz[:, camad_r] * (
             np.exp(u[:, camad_r] * (z - h0))
             + RTEup[:, camad_r] * FEupz * np.exp(-u[:, camad_r] * (z - prof[camad_r]))
-            + RTEdw[:, camad_r] * FEdwz * np.exp(u[:, camad_r] * (z - prof[camad_r + 1]))
+            + RTEdw[:, camad_r]
+            * FEdwz
+            * np.exp(u[:, camad_r] * (z - prof[camad_r + 1]))
         )
         KtezJ0 = fac * wJ0
         KtezJ1 = fac * wJ1
@@ -895,7 +902,9 @@ def vmd(
             * TEupz[:, camad_r]
             * (
                 np.exp(u[:, camad_r] * (z - h0))
-                - RTEup[:, camad_r] * FEupz * np.exp(-u[:, camad_r] * (z - prof[camad_r]))
+                - RTEup[:, camad_r]
+                * FEupz
+                * np.exp(-u[:, camad_r] * (z - prof[camad_r]))
                 + RTEdw[:, camad_r]
                 * FEdwz
                 * np.exp(u[:, camad_r] * (z - prof[camad_r + 1]))
@@ -905,7 +914,9 @@ def vmd(
         fac = TEdwz[:, camad_r] * (
             np.exp(-u[:, camad_r] * (z - h0))
             + RTEup[:, camad_r] * FEupz * np.exp(-u[:, camad_r] * (z - prof[camad_r]))
-            + RTEdw[:, camad_r] * FEdwz * np.exp(u[:, camad_r] * (z - prof[camad_r + 1]))
+            + RTEdw[:, camad_r]
+            * FEdwz
+            * np.exp(u[:, camad_r] * (z - prof[camad_r + 1]))
         )
         KtezJ0 = fac * wJ0
         KtezJ1 = fac * wJ1
@@ -914,7 +925,9 @@ def vmd(
             * TEdwz[:, camad_r]
             * (
                 np.exp(-u[:, camad_r] * (z - h0))
-                + RTEup[:, camad_r] * FEupz * np.exp(-u[:, camad_r] * (z - prof[camad_r]))
+                + RTEup[:, camad_r]
+                * FEupz
+                * np.exp(-u[:, camad_r] * (z - prof[camad_r]))
                 - RTEdw[:, camad_r]
                 * FEdwz
                 * np.exp(u[:, camad_r] * (z - prof[camad_r + 1]))

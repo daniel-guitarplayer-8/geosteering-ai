@@ -59,6 +59,10 @@ dev = [
     "pre-commit>=3.0",   # .pre-commit-config.yaml
 ]
 
+[project.scripts]
+# Sprint v2.24 — I2.6 — CLI MVP
+geosteering-cli = "geosteering_ai.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["geosteering_ai*"]
 

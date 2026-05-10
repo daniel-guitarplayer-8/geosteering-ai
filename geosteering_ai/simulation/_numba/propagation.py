@@ -148,6 +148,7 @@ Note:
     A API desta função é **interna** ao simulador Python. Consumidores
     devem usar `geosteering_ai.simulation.simulate()` (Sprint 2.5).
 """
+
 from __future__ import annotations
 
 import logging
@@ -247,7 +248,7 @@ _HORDIST_SINGULARITY_R: Final[float] = 1.0e-2
 # ──────────────────────────────────────────────────────────────────────────────
 # COMMON_ARRAYS — pré-calcula 9 arrays invariantes em j
 # ──────────────────────────────────────────────────────────────────────────────
-@njit
+@njit(cache=True)
 def common_arrays(
     n: int,
     npt: int,
@@ -479,7 +480,7 @@ def common_arrays(
 # ──────────────────────────────────────────────────────────────────────────────
 # COMMON_FACTORS — calcula 6 fatores de onda refletida
 # ──────────────────────────────────────────────────────────────────────────────
-@njit
+@njit(cache=True)
 def common_factors(
     n: int,
     npt: int,
