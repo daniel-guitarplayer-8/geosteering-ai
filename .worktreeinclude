@@ -16,24 +16,26 @@ configs/
 
 # Simuladores
 Fortran_Gerador/
-Modelos/
-Modelos_Gerados/
 
 # Documentação técnica (necessária para validações)
 docs/
 CLAUDE.md
 README.md
-LICENSE
+
+# Servidores MCP (necessários para testes e desenvolvimento)
+tools/
+
+# Outputs e experimentos do simulador (necessários para desenvolvimento SM)
+sm_output/
+sm_experiments/
+
+# Código legado (referência histórica para contexto v2.0)
+legacy/
 
 # Configuração de build/dev
 .claude/
 .github/
 pyproject.toml
-setup.py
-setup.cfg
-requirements.txt
-requirements-dev.txt
-pytest.ini
 .gitignore
 
 # Excluir explicitamente (não copiar para worktree)
