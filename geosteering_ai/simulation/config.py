@@ -696,11 +696,22 @@ class SimulationConfig:
                     rec_workers,
                     rec_threads,
                 )
-            except (ImportError, Exception) as exc:
+            except (ImportError, ModuleNotFoundError) as exc:
+                # Falha de import (e.g., psutil ausente em ambiente mínimo).
+                # Mantém n_workers=None (comportamento legado single-process).
                 logger.warning(
-                    "Sprint v2.23 A.2 — auto-detect falhou (%s). "
+                    "Sprint v2.23 A.2 — auto-detect indisponível (%s). "
                     "Mantendo n_workers=None (legado single-process).",
                     exc,
+                )
+            except (TypeError, ValueError) as exc:
+                # recommend_default_parallelism retornou valores inválidos
+                # (e.g., (0, 0) por bug). Loga com traceback para diagnóstico.
+                logger.warning(
+                    "Sprint v2.23 A.2 — recommend_default_parallelism retornou "
+                    "valores inválidos (%s). Mantendo n_workers=None.",
+                    exc,
+                    exc_info=True,
                 )
 
         # Sprint 12.1 (v2.12) — workers nativos. None = backward-compat

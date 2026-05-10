@@ -70,11 +70,21 @@ def test_simulation_config_explicit_n_workers_preserved():
 
 
 def test_simulation_config_explicit_threads_preserved():
-    """Sprint v2.23 A.2 — threads_per_worker explícito NÃO dispara auto-detect."""
+    """Sprint v2.23 A.2 — threads_per_worker explícito NÃO dispara auto-detect.
+
+    Edge case: quando o usuário passa apenas threads_per_worker (não None) e
+    deixa n_workers=None, o auto-detect NÃO dispara (requer ambos None).
+    Resultado esperado: threads_per_worker preservado E n_workers permanece None
+    (downstream em simulate_multi decide single-process ou multi-worker).
+    """
     cfg = SimulationConfig(n_workers=None, threads_per_worker=4)
     assert (
         cfg.threads_per_worker == 4
     ), "threads_per_worker explícito foi sobrescrito pelo auto-detect"
+    assert cfg.n_workers is None, (
+        "n_workers deveria permanecer None (auto-detect só dispara se AMBOS None). "
+        f"Valor obtido: {cfg.n_workers}"
+    )
 
 
 def test_threads_adaptive_logged(caplog):
