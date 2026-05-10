@@ -7,6 +7,76 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.24] — 2026-05-10 — Débitos Técnicos + I2.5 + I2.6 (Multi-Agent)
+
+### Sprint v2.24 — Débitos Técnicos (Frente 1)
+
+- **1.1 Script PASS count automatizado** — `scripts/count_pytest_pass.py`
+  elimina o débito recorrente de contagem manual (M2 da revisão final v2.23).
+  Suporta `--json` e `--from-file` para automação CI.
+- **1.2 PT-BR `setup-environment.sh`** — todas as palavras do hook agora
+  acentuadas (Sessão, início, último, rápido, versão, informações, diretório,
+  recomendação, módulo, importável). 11+ ocorrências corrigidas.
+- **1.3 `cache=True` explícito em TODOS os `@njit`** em `_numba/`:
+  - `propagation.py`: `common_arrays`, `common_factors`
+  - `dipoles.py`: `hmd_tiv`, `vmd`
+  - `rotation.py`: `build_rotation_matrix`, `rotate_tensor` (mantêm fastmath)
+  - `hankel.py`: `prepare_kr`, `integrate_j0`, `integrate_j1`, `integrate_j0_j1`
+  - `geometry.py`: `find_layers_tr`, `layer_at_depth` (mantêm fastmath)
+- **1.4 `use_fastmath` documentado como status documental** — docstring em
+  `SimulationConfig.use_fastmath` esclarece que dispatcher real foi deferido
+  para v2.25+ (decisão conservadora). Reduz superfície de risco sem perder
+  o débito (fica documentado e justificado).
+
+### I2.5 — Hooks de Qualidade
+
+- **`check-ptbr-accentuation.sh`** — novo hook PostToolUse Edit|Write que
+  alerta sobre palavras PT-BR sem acentuação em arquivos `.md`/`.py`/`.sh`.
+  Severidade WARN (não bloqueia). Catálogo TSV em `.claude/ptbr-words.txt`
+  (60+ pares). Whitelist para `legacy/`, `old_geosteering_ai/`, `.backups/`.
+  Bypass via `CLAUDE_BYPASS_PTBR=1`. Registrado em `.claude/settings.json`.
+- **`generate-pr-description.sh`** — gerador de descrição de PR via
+  `git log` + `git diff --stat` aplicados ao template
+  `.claude/templates/pr_description_template.md`. Output stdout markdown
+  estruturado (Resumo / Mudanças / Test Plan / Referências).
+
+### I2.6 — CLI MVP
+
+- **`geosteering-cli`** — entry point declarado em `pyproject.toml`
+  (`[project.scripts]`) com 3 subcomandos:
+  - `version` — exibe versão atual do Simulation Manager
+  - `simulate` — gera modelos sintéticos via `simulate_multi`
+    (--models N, --n-pos, --workers, --threads, --seed, --out)
+  - `benchmark` — executa cenários A/B/C/D/E/F e reporta mod/h
+- Lazy imports nos handlers para `--help` rápido (<5s)
+- Reutiliza infraestrutura existente: `simulate_multi`,
+  `recommend_default_parallelism` (Sprint v2.23 A.2)
+
+### Validação
+
+- **41 novos testes**:
+  - 11 em `tests/test_sprint_v224.py` (script + PT-BR + cache=True + use_fastmath)
+  - 17 em `tests/test_hooks_i25.py` (hook PT-BR + PR description + catálogo)
+  - 13 em `tests/test_cli_mvp.py` (estrutura + subcomandos + lazy imports)
+- **Paridade Fortran <1e-12 PRESERVADA** em 13/13 modelos canônicos
+  (oklahoma_3, 5, 28, hou_7, devine_8, oklahoma_15, viking_graben_10)
+- **Suite total**: 1665+ PASS / 295 SKIP / 0 FAIL
+
+### Arquivos modificados/criados
+
+**Modificados**: `setup-environment.sh`, `_numba/{propagation,dipoles,rotation,hankel,geometry}.py`,
+`config.py`, `settings.json`, `pyproject.toml`, `CLAUDE.md`, `CHANGELOG.md`, `ROADMAP.md`.
+
+**Criados**: `scripts/count_pytest_pass.py`, `.claude/hooks/{check-ptbr-accentuation,generate-pr-description}.sh`,
+`.claude/ptbr-words.txt`, `.claude/templates/pr_description_template.md`,
+`geosteering_ai/cli/{__init__,__main__,main,simulate,benchmark}.py`,
+`tests/{test_sprint_v224,test_hooks_i25,test_cli_mvp}.py`,
+`docs/reports/v2.24_2026-05-10.md`.
+
+**Backup**: `.backups/2026-05-10_v2.24/` (10 arquivos).
+
+---
+
 ## [v2.23] — 2026-05-10 — Fastmath Dual-Mode + Threads Adaptativos (Multi-Agent)
 
 ### Performance
