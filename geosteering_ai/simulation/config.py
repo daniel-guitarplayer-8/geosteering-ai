@@ -375,21 +375,32 @@ class SimulationConfig:
     # ainda há redução de overhead vs caminho legacy.
     use_flat_prange: bool = True
 
-    # ── Sprint v2.23 A.1 — Fastmath dual-mode (opt-in) ───────────────
+    # ── Sprint v2.23 A.1 — Fastmath dual-mode (status documental) ────
     use_fastmath: bool = False
-    """Sprint v2.23 A.1 — habilita @njit(fastmath=True) em kernels auxiliares.
+    """Sprint v2.23 A.1 / v2.24 — flag de evolução do regime de fastmath.
 
-    Default False (opt-in inicial). Quando True, fastmath é aplicado em
-    funções de geometria (find_layers_tr, layer_at_depth) e rotação
-    (build_rotation_matrix, rotate_tensor). NUNCA é aplicado em funções
-    raiz (_simulate_positions_njit*, _fields_*_kernel*) ou em
-    propagation/dipoles (raiz da cadeia comparada contra Fortran <1e-12).
+    **Status atual (v2.24): puramente documental.** Os decoradores
+    `@njit(cache=True, fastmath=True)` são aplicados de forma
+    INCONDICIONAL nas 5 funções auxiliares já validadas <1e-12 contra
+    Fortran (geometry: find_layers_tr, layer_at_depth, _sanitize_profile_kernel;
+    rotation: build_rotation_matrix, rotate_tensor). Mudar `use_fastmath`
+    em runtime NÃO altera comportamento — os bytecodes já estão compilados.
 
-    NOTA: O efeito real desta flag em v2.23 é principalmente documental —
-    os decoradores @njit(fastmath=True) são aplicados de forma
-    INCONDICIONAL em geometry.py e rotation.py (operações de baixo risco
-    validadas). A flag permite que sprints futuras (v2.24+) introduzam
-    kernels condicionais sem quebrar configurações existentes.
+    **Roadmap**: O dispatcher real (compilar 2 versões `_fast`/`_safe` e
+    selecionar via wrapper Python) está deferido para sprint futura
+    (v2.25+) — ver padrão de referência em `cfg.use_flat_prange` em
+    `multi_forward.py`. Decisão conservadora: complexidade adicional
+    foi diferida até haver demanda real por desligar fastmath em
+    runtime (debugging avançado de paridade).
+
+    **Funções NUNCA elegíveis a fastmath** (raiz da cadeia comparada
+    contra Fortran <1e-12): `_simulate_positions_njit*`,
+    `_simulate_combined_prange_flat`, `_fields_*_kernel*` (forward.py,
+    kernel.py); `common_arrays`, `common_factors` (propagation.py);
+    `hmd_tiv`, `vmd` (dipoles.py).
+
+    Mantida como `False` para preservar contrato API e permitir que
+    sprints futuras introduzam dispatcher real sem quebrar configs.
     """
 
     # ─────────────────────────────────────────────────────────────────
