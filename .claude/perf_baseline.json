@@ -1,0 +1,11 @@
+{
+  "scenarios": {
+    "E_n200": {
+      "throughput_mod_h": 69336,
+      "measured_at": "2026-05-11T17:03:12Z",
+      "version": "v2.29.3"
+    }
+  },
+  "threshold_pct": 90,
+  "notes": "Atualize manualmente após otimizações intencionais (>+5%)."
+}
