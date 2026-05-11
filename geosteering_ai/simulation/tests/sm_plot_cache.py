@@ -32,6 +32,7 @@
 # ║    • Preserva `self._current_sim` — este cache só gerencia histórico.   ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 """Cache LRU de plot_bundles por snapshot_id, com limite duplo (N, bytes)."""
+
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -39,7 +40,57 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-__all__ = ["LRUPlotCache"]
+__all__ = ["LRUPlotCache", "default_max_bytes"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# v2.29.2 — Auto-detect default baseado em RAM disponível
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def default_max_bytes() -> float:
+    """Calcula limite default do cache LRU baseado em RAM disponível.
+
+    Estratégia: 10% da RAM total, com piso 500 MB e teto 4 GB. Fallback
+    para 500 MB se ``psutil`` não estiver instalado (comportamento idêntico
+    ao default histórico de v2.4c–v2.29.1).
+
+    Returns:
+        Limite default em bytes (``float``).
+
+    Example:
+        Em uma máquina com 16 GB de RAM, retorna 1.6 GB (10% × 16 GB)::
+
+            >>> default_max_bytes() / 1e9  # ~1.6 GB em Mac M-series 16 GB
+            1.6
+
+        Em uma máquina com 4 GB de RAM, retorna 500 MB (piso)::
+
+            >>> # 0.10 × 4e9 = 400 MB → max(500e6, 400e6) = 500e6
+
+        Em uma máquina com 64 GB de RAM, retorna 4 GB (teto)::
+
+            >>> # 0.10 × 64e9 = 6.4 GB → min(4e9, 6.4e9) = 4 GB
+
+    Note:
+        O cache armazena snapshots `complex128` shape
+        ``(n_models, nTR, nAng, n_pos, nf, 9)``. Para um cenário típico
+        multi-freq × multi-angle (1000 × 2 × 4 × 600 × 4 × 9 × 16 B), o
+        tensor consome ~2.77 GB — muito além dos 500 MB históricos. O
+        auto-detect 10% RAM acomoda esse tamanho em hardware moderno.
+    """
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        ram_bytes = float(psutil.virtual_memory().total)
+        target = 0.10 * ram_bytes
+        return max(500e6, min(target, 4e9))
+    except Exception:
+        # ImportError: psutil ausente.
+        # PermissionError/OSError/AttributeError: psutil.virtual_memory() pode
+        # falhar em sandboxes ou builds estranhos. Em qualquer falha, cai no
+        # default histórico de 500 MB (preserva comportamento v2.4c–v2.29.1).
+        return 500e6
 
 
 class LRUPlotCache:
@@ -52,7 +103,9 @@ class LRUPlotCache:
 
     Attributes:
         maxlen: Número máximo de bundles em cache. Default 3.
-        max_bytes: Limite superior de bytes totais. Default 500 MB.
+        max_bytes: Limite superior de bytes totais. Default ``None`` →
+            usa :func:`default_max_bytes` (10% RAM, piso 500 MB, teto 4 GB
+            via ``psutil``). Aceita ``float`` explícito para override.
 
     Example:
         >>> cache = LRUPlotCache(maxlen=2)
@@ -70,9 +123,12 @@ class LRUPlotCache:
         Operações são todas O(1) amortizado via OrderedDict.
     """
 
-    def __init__(self, maxlen: int = 3, max_bytes: float = 500e6) -> None:
+    def __init__(self, maxlen: int = 3, max_bytes: Optional[float] = None) -> None:
         if maxlen < 1:
             raise ValueError(f"maxlen must be >= 1, got {maxlen}")
+        # v2.29.2: max_bytes=None ativa auto-detect via default_max_bytes()
+        if max_bytes is None:
+            max_bytes = default_max_bytes()
         if max_bytes < 0:
             raise ValueError(f"max_bytes must be >= 0, got {max_bytes}")
         self.maxlen: int = int(maxlen)
