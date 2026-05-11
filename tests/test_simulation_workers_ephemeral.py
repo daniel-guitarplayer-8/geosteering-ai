@@ -230,3 +230,92 @@ def test_simulation_thread_has_pause_cancel() -> None:
             f"SimulationThread.{signal} ausente — v2.29 deveria preservar "
             f"os signals Qt de controle cooperativo da Sprint v2.11."
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 7. v2.29.1 — Contrato de env var NUMBA_NUM_THREADS no PAI, não no worker
+# ──────────────────────────────────────────────────────────────────────────
+def test_run_numba_chunk_does_not_set_numba_num_threads_env_var() -> None:
+    """v2.29.1: ``run_numba_chunk`` NÃO pode setar ``NUMBA_NUM_THREADS``.
+
+    Razão: o módulo ``geosteering_ai.simulation.tests.sm_workers`` é
+    importado durante o bootstrap do worker spawned (para resolver o
+    pickle de ``run_numba_chunk``), e essa cadeia importa numba ANTES
+    de qualquer linha de ``run_numba_chunk`` rodar. Setar a env var
+    aqui dispara ``RuntimeError: Cannot set NUMBA_NUM_THREADS to a
+    different value once the threads have been launched``.
+
+    Fix v2.29.1: ``SimulationThread.run`` (pai) seta a env var ANTES
+    de criar o ``ProcessPoolExecutor``, e workers spawned herdam o
+    ambiente correto.
+    """
+    import inspect
+
+    from geosteering_ai.simulation.tests.sm_workers import run_numba_chunk
+
+    src = inspect.getsource(run_numba_chunk)
+    forbidden_patterns = [
+        'os.environ["NUMBA_NUM_THREADS"] =',
+        "os.environ['NUMBA_NUM_THREADS'] =",
+        'os.environ["OMP_NUM_THREADS"] =',
+        "os.environ['OMP_NUM_THREADS'] =",
+    ]
+    for pat in forbidden_patterns:
+        assert pat not in src, (
+            f"run_numba_chunk NÃO pode setar env var {pat!r} no worker "
+            f"(spawn bootstrap importa numba antes; setar aqui causa "
+            f"RuntimeError). Mover para SimulationThread.run (pai)."
+        )
+
+
+def test_simulation_thread_sets_numba_num_threads_before_pool() -> None:
+    """v2.29.1: ``SimulationThread.run`` deve setar ``NUMBA_NUM_THREADS``
+    no env do PAI antes de criar o ``ProcessPoolExecutor``.
+
+    Workers spawned herdam o ambiente do pai. Setar a env var antes do
+    pool garante que cada worker nasça com pool numba dimensionado em
+    ``req.n_threads``. ``multi_forward.py`` chama
+    ``numba.set_num_threads(req.n_threads)`` para mascarar threads
+    ativas (operação runtime-safe).
+    """
+    import inspect
+
+    from geosteering_ai.simulation.tests.sm_workers import SimulationThread
+
+    src = inspect.getsource(SimulationThread.run)
+    nnt_idx = src.find('os.environ["NUMBA_NUM_THREADS"] =')
+    if nnt_idx < 0:
+        nnt_idx = src.find("os.environ['NUMBA_NUM_THREADS'] =")
+    pool_idx = src.find("ProcessPoolExecutor(")
+
+    assert nnt_idx >= 0, (
+        "SimulationThread.run deve setar NUMBA_NUM_THREADS no env do PAI "
+        "antes do ProcessPoolExecutor (v2.29.1 fix)."
+    )
+    assert pool_idx >= 0, "SimulationThread.run deve criar ProcessPoolExecutor"
+    assert nnt_idx < pool_idx, (
+        "NUMBA_NUM_THREADS deve ser setado ANTES de ProcessPoolExecutor — "
+        "workers spawned herdam o env var do pai (v2.29.1 fix)."
+    )
+
+
+def test_simulation_thread_restores_env_vars_in_finally() -> None:
+    """v2.29.1: o setup de ``NUMBA_NUM_THREADS`` no pai deve estar em
+    ``try/finally`` que restaura o estado original, evitando vazamento
+    de config para outras partes da GUI (benchmark, smoke tests).
+    """
+    import inspect
+
+    from geosteering_ai.simulation.tests.sm_workers import SimulationThread
+
+    src = inspect.getsource(SimulationThread.run)
+    assert "finally:" in src, (
+        "SimulationThread.run deve usar try/finally para restaurar env vars "
+        "após o ProcessPoolExecutor (v2.29.1)."
+    )
+    has_restore = (
+        'os.environ.pop("NUMBA_NUM_THREADS"' in src
+        or "os.environ.pop('NUMBA_NUM_THREADS'" in src
+        or "_prev_nnt" in src
+    )
+    assert has_restore, "Deve restaurar NUMBA_NUM_THREADS no finally (v2.29.1)."
