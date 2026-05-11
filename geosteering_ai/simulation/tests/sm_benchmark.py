@@ -34,20 +34,20 @@ Fornece ``BenchmarkSuite`` (chamável diretamente em CLI ou via QThread) e
 ``BenchRecord`` (dataclass de saída por célula), além de ``BenchmarkThread``
 para execução não-bloqueante na GUI.
 """
+
 from __future__ import annotations
 
 import csv
 import os
 import time
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from .sm_model_gen import GenConfig, generate_models
 from .sm_qt_compat import QObject, QThread, Signal
-from .sm_workers import SimRequest, run_fortran_chunk, run_numba_chunk
+from .sm_workers import run_fortran_chunk, run_numba_chunk
 
 # ──────────────────────────────────────────────────────────────────────────
 # Estruturas de dados
@@ -319,7 +319,9 @@ class BenchmarkSettings:
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _positions_z_for_config(tj: float, p_med: float, dip_deg: float = 0.0) -> np.ndarray:
+def _positions_z_for_config(
+    tj: float, p_med: float, dip_deg: float = 0.0
+) -> np.ndarray:
     """Grade de posições (ponto-médio T-R) com dip arbitrário.
 
     Mantém 600 pontos quando ``tj=120`` e ``p_med=0.2``, alinhando com os
@@ -404,7 +406,7 @@ def _single_cell(
     if settings.run_fortran and settings.fortran_binary:
         log_fn(f"  Fortran[{model_name}/{config_label}] n_iter={n_iter}...")
         orig_dir = os.getcwd()
-        with _chdir_tmp(settings.output_dir) as workdir:
+        with _chdir_tmp(settings.output_dir) as _workdir:  # noqa: F841 — context handle
             try:
                 _, _files, elapsed_f = run_fortran_chunk(
                     worker_id=0,
@@ -594,10 +596,6 @@ class BenchmarkSuite:
         # Numba full 30k
         if s.run_numba:
             log_fn(f"  Numba full 30k (workers={s.n_workers_numba})...")
-            from .sm_workers import SimRequest, SimulationThread  # evita ciclo
-
-            t0 = time.perf_counter()
-            total_elapsed = 0.0
             # Executa em paralelo usando n_workers_numba sem QThread (modo síncrono)
             elapsed = _run_numba_parallel_sync(
                 models=models,
@@ -735,25 +733,42 @@ def _run_numba_parallel_sync(
         batches.append((w, models[start:end]))
         start = end
 
+    # v2.29.1 FIX: setar NUMBA_NUM_THREADS no PAI antes do spawn (workers
+    # herdam env var). Ver geosteering_ai/simulation/tests/sm_workers.py
+    # para análise da regressão v2.29 e detalhes do bug.
+    _prev_nnt = os.environ.get("NUMBA_NUM_THREADS")
+    _prev_omp = os.environ.get("OMP_NUM_THREADS")
+    os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
+    os.environ["OMP_NUM_THREADS"] = str(n_threads)
     t0 = time.perf_counter()
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        futures = [
-            pool.submit(
-                run_numba_chunk,
-                wid,
-                chunk,
-                positions_z,
-                freqs,
-                trs,
-                dips,
-                hankel_filter,
-                n_threads,
-            )
-            for wid, chunk in batches
-        ]
-        for _ in as_completed(futures):
-            pass
-    return time.perf_counter() - t0
+    try:
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            futures = [
+                pool.submit(
+                    run_numba_chunk,
+                    wid,
+                    chunk,
+                    positions_z,
+                    freqs,
+                    trs,
+                    dips,
+                    hankel_filter,
+                    n_threads,
+                )
+                for wid, chunk in batches
+            ]
+            for _ in as_completed(futures):
+                pass
+        return time.perf_counter() - t0
+    finally:
+        if _prev_nnt is None:
+            os.environ.pop("NUMBA_NUM_THREADS", None)
+        else:
+            os.environ["NUMBA_NUM_THREADS"] = _prev_nnt
+        if _prev_omp is None:
+            os.environ.pop("OMP_NUM_THREADS", None)
+        else:
+            os.environ["OMP_NUM_THREADS"] = _prev_omp
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -788,7 +803,9 @@ class BenchmarkThread(QThread):
                 csv_path = os.path.join(
                     self._settings.output_dir, "benchmark_summary.csv"
                 )
-                md_path = os.path.join(self._settings.output_dir, "benchmark_summary.md")
+                md_path = os.path.join(
+                    self._settings.output_dir, "benchmark_summary.md"
+                )
                 suite.export_csv(csv_path)
                 suite.export_markdown(md_path)
                 self.log.emit(f"Relatório salvo em {md_path}")

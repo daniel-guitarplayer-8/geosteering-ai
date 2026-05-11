@@ -141,9 +141,17 @@ def run_numba_chunk(
 ) -> Tuple[int, np.ndarray, np.ndarray, float]:
     """Executa ``simulate_multi`` num chunk de modelos dentro de um worker.
 
-    O ambiente ``NUMBA_NUM_THREADS`` é definido ANTES do import de numba,
-    garantindo que o thread pool do subprocesso respeite o valor solicitado
-    (v2.16 fix — regressão histórica 4–8× quando env var era setada após import).
+    v2.29.1: ``NUMBA_NUM_THREADS`` NÃO é setado aqui. O módulo
+    ``geosteering_ai.simulation.tests.sm_workers`` é importado durante o
+    bootstrap do worker spawned (para resolver o pickle de
+    ``run_numba_chunk``), e essa cadeia importa numba ANTES de qualquer
+    linha desta função rodar. Setar ``os.environ["NUMBA_NUM_THREADS"]``
+    aqui dispararia ``RuntimeError: Cannot set NUMBA_NUM_THREADS to a
+    different value once the threads have been launched``. Em vez disso,
+    ``SimulationThread.run`` (pai) seta o env var ANTES de criar o
+    ``ProcessPoolExecutor``, e workers spawned herdam o ambiente correto.
+    ``multi_forward.py`` aplica ``numba.set_num_threads(cfg.num_threads)``
+    para mascarar threads ativas (operação runtime-safe, n ≤ pool_size).
 
     A primeira chamada de ``simulate_multi`` é **descartada (warmup JIT)** —
     usa dados REAIS do primeiro modelo do chunk, garantindo que TODOS os paths
@@ -167,9 +175,6 @@ def run_numba_chunk(
         ``H_stack`` tem shape ``(n_chunk, nTR, nAng, n_pos, nf, 9)`` e
         ``elapsed_sec`` exclui o tempo de warmup JIT.
     """
-    os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
-    os.environ["OMP_NUM_THREADS"] = str(n_threads)
-
     from geosteering_ai.simulation import SimulationConfig, simulate_multi
 
     positions_z = np.asarray(positions_z, dtype=np.float64)
@@ -670,76 +675,80 @@ class SimulationThread(QThread):
                         f"  Aquecendo JIT em {n_workers} workers "
                         f"(~10–30 s no primeiro modelo de cada worker)…"
                     )
-                with ProcessPoolExecutor(max_workers=n_workers) as pool:
-                    futures = {
-                        pool.submit(
-                            run_numba_chunk,
-                            wid,
-                            chunk,
-                            req.positions_z,
-                            req.frequencies_hz,
-                            req.tr_spacings_m,
-                            req.dip_degs,
-                            req.hankel_filter,
-                            req.n_threads,
-                            progress_q if use_progress_q else None,
-                            100,
-                            n_total if use_progress_q else None,
-                        ): (wid, chunk, s, e)
-                        for wid, chunk, s, e in batches
-                    }
+                # ── v2.29.1 FIX: dimensionar pool Numba via env var no PAI ─────
+                # Workers spawned herdam o ambiente do pai. Setar
+                # NUMBA_NUM_THREADS AQUI (antes de ProcessPoolExecutor)
+                # garante que cada worker, ao importar numba durante o
+                # bootstrap, nasça com pool dimensionado em `req.n_threads`.
+                # multi_forward.py chama `numba.set_num_threads(req.n_threads)`
+                # para mascarar threads ativas (runtime-safe, n ≤ pool_size).
+                #
+                # v2.29 setava esse env var DENTRO de run_numba_chunk, mas o
+                # módulo sm_workers é importado transitively pelo unpickle da
+                # função no spawn bootstrap, e essa cadeia importa numba antes
+                # da linha os.environ. Resultado: numba lia env var do PAI
+                # (no caso do usuário: NUMBA_NUM_THREADS=2) → worker nascia com
+                # pool de 2 threads → set_num_threads(req.n_threads) falhava
+                # com `RuntimeError: Cannot set NUMBA_NUM_THREADS to a
+                # different value once the threads have been launched`.
+                _prev_nnt = os.environ.get("NUMBA_NUM_THREADS")
+                _prev_omp = os.environ.get("OMP_NUM_THREADS")
+                os.environ["NUMBA_NUM_THREADS"] = str(req.n_threads)
+                os.environ["OMP_NUM_THREADS"] = str(req.n_threads)
+                try:
+                    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+                        futures = {
+                            pool.submit(
+                                run_numba_chunk,
+                                wid,
+                                chunk,
+                                req.positions_z,
+                                req.frequencies_hz,
+                                req.tr_spacings_m,
+                                req.dip_degs,
+                                req.hankel_filter,
+                                req.n_threads,
+                                progress_q if use_progress_q else None,
+                                100,
+                                n_total if use_progress_q else None,
+                            ): (wid, chunk, s, e)
+                            for wid, chunk, s, e in batches
+                        }
 
-                    if use_progress_q:
-                        # Modo sequencial: drena progress_q enquanto o único
-                        # future roda (single future, usamos list() para pegar).
-                        (fut,) = list(futures.keys())
-                        warmup_logged = False
-                        while not fut.done():
-                            if self._stopped:
-                                break
-                            self._wait_if_paused()  # v2.11: bloqueia se pausado
-                            try:
-                                evt = progress_q.get(timeout=0.5)
-                            except Exception:
-                                continue
-                            if not isinstance(evt, dict):
-                                continue
-                            if evt.get("event") == "warmup_done":
-                                if not warmup_logged:
-                                    self.log.emit(
-                                        "  JIT aquecido — iniciando processamento."
+                        if use_progress_q:
+                            # Modo sequencial: drena progress_q enquanto o único
+                            # future roda (single future, usamos list() para pegar).
+                            (fut,) = list(futures.keys())
+                            warmup_logged = False
+                            while not fut.done():
+                                if self._stopped:
+                                    break
+                                self._wait_if_paused()  # v2.11: bloqueia se pausado
+                                try:
+                                    evt = progress_q.get(timeout=0.5)
+                                except Exception:
+                                    continue
+                                if not isinstance(evt, dict):
+                                    continue
+                                if evt.get("event") == "warmup_done":
+                                    if not warmup_logged:
+                                        self.log.emit(
+                                            "  JIT aquecido — iniciando processamento."
+                                        )
+                                        warmup_logged = True
+                                    continue
+                                if evt.get("event") == "block":
+                                    self._emit_block_log(evt)
+                                    dt = max(time.perf_counter() - t0, 1e-6)
+                                    throughput = float(evt["done"]) / dt * 3600.0
+                                    self.progress_update.emit(
+                                        int(evt["done"]), n_total, throughput
                                     )
-                                    warmup_logged = True
-                                continue
-                            if evt.get("event") == "block":
-                                self._emit_block_log(evt)
-                                dt = max(time.perf_counter() - t0, 1e-6)
-                                throughput = float(evt["done"]) / dt * 3600.0
-                                self.progress_update.emit(
-                                    int(evt["done"]), n_total, throughput
-                                )
-                        wid, H_stack, z_obs, elapsed_w = fut.result()
-                        H_parts[wid] = H_stack
-                        if z_obs_ref is None and z_obs.size > 0:
-                            z_obs_ref = z_obs
-                        done = H_stack.shape[0]
-                        dt = max(time.perf_counter() - t0, 1e-6)
-                        throughput = done / dt * 3600.0
-                        self.progress_update.emit(done, n_total, throughput)
-                        self.log.emit(
-                            f"  Worker {wid}: {H_stack.shape[0]} modelos "
-                            f"em {elapsed_w:.2f}s"
-                        )
-                    else:
-                        for future in as_completed(futures):
-                            if self._stopped:
-                                break
-                            self._wait_if_paused()  # v2.11: bloqueia se pausado
-                            wid, H_stack, z_obs, elapsed_w = future.result()
+                            wid, H_stack, z_obs, elapsed_w = fut.result()
                             H_parts[wid] = H_stack
                             if z_obs_ref is None and z_obs.size > 0:
                                 z_obs_ref = z_obs
-                            done += H_stack.shape[0]
+                            done = H_stack.shape[0]
                             dt = max(time.perf_counter() - t0, 1e-6)
                             throughput = done / dt * 3600.0
                             self.progress_update.emit(done, n_total, throughput)
@@ -747,6 +756,35 @@ class SimulationThread(QThread):
                                 f"  Worker {wid}: {H_stack.shape[0]} modelos "
                                 f"em {elapsed_w:.2f}s"
                             )
+                        else:
+                            for future in as_completed(futures):
+                                if self._stopped:
+                                    break
+                                self._wait_if_paused()  # v2.11: bloqueia se pausado
+                                wid, H_stack, z_obs, elapsed_w = future.result()
+                                H_parts[wid] = H_stack
+                                if z_obs_ref is None and z_obs.size > 0:
+                                    z_obs_ref = z_obs
+                                done += H_stack.shape[0]
+                                dt = max(time.perf_counter() - t0, 1e-6)
+                                throughput = done / dt * 3600.0
+                                self.progress_update.emit(done, n_total, throughput)
+                                self.log.emit(
+                                    f"  Worker {wid}: {H_stack.shape[0]} modelos "
+                                    f"em {elapsed_w:.2f}s"
+                                )
+                finally:
+                    # Restaura env vars NUMBA_NUM_THREADS/OMP_NUM_THREADS para
+                    # não vazar config para outras partes da GUI (benchmark,
+                    # smoke tests). Garantido mesmo em caso de exceção do pool.
+                    if _prev_nnt is None:
+                        os.environ.pop("NUMBA_NUM_THREADS", None)
+                    else:
+                        os.environ["NUMBA_NUM_THREADS"] = _prev_nnt
+                    if _prev_omp is None:
+                        os.environ.pop("OMP_NUM_THREADS", None)
+                    else:
+                        os.environ["OMP_NUM_THREADS"] = _prev_omp
                 # Reagrupa preservando ordem dos workers (id asc). Filtra
                 # arrays vazios para evitar ValueError "arrays must have
                 # same number of dimensions" quando algum worker não
