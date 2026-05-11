@@ -7,6 +7,83 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.29.1] — 2026-05-11 — Fix `NUMBA_NUM_THREADS` no PAI + restauração de 150k mod/h
+
+### Causa-raiz
+
+A v2.29 ("Back to Basics") restaurou a arquitetura `ProcessPoolExecutor` efêmero
+do `old_geosteering_ai/`, mas reintroduziu bug latente: setar
+`os.environ["NUMBA_NUM_THREADS"]` **dentro** do worker `run_numba_chunk` falha
+quando o ambiente do pai já tem `NUMBA_NUM_THREADS` setado para valor distinto.
+
+Em produção (com `NUMBA_NUM_THREADS=2` herdado do shell, cenário 2 freqs + 2 dips
++ 1 TR + 4w × 4t):
+
+```text
+[ERRO] Cannot set NUMBA_NUM_THREADS to a different value once the threads
+have been launched (currently have 2, trying to set 16)
+```
+
+**Por que falha em modo spawn**: o módulo `geosteering_ai.simulation.tests.sm_workers`
+é importado durante o bootstrap do worker (para resolver pickle de `run_numba_chunk`),
+e a cadeia importa numba ANTES de qualquer linha de `run_numba_chunk` rodar. Setar
+env var dentro do worker é tardio demais — pool numba já inicializado com env do pai.
+
+A v2.29 removeu `_acquire_numba_pool` (que setava env var no pai antes do spawn)
+junto com `PoolWarmupThread`, perdendo essa proteção essencial.
+
+### Solução v2.29.1
+
+| Antes (v2.29) | Depois (v2.29.1) |
+|:---|:---|
+| `os.environ[...]=str(n_threads)` em `run_numba_chunk` (worker) | `os.environ[...]=str(req.n_threads)` em `SimulationThread.run` (pai), antes do `ProcessPoolExecutor` |
+| Sem cleanup | `try/finally` restaura env vars (evita vazamento) |
+| Single point of failure no worker | Workers spawned herdam env var correto |
+
+`multi_forward.py:1010-1028` ainda chama `numba.set_num_threads(req.n_threads)` para
+mascarar threads ativas (operação runtime-safe, n ≤ pool_size).
+
+**Arquivos modificados**:
+
+- `geosteering_ai/simulation/tests/sm_workers.py`: `run_numba_chunk` não seta env var;
+  `SimulationThread.run` adiciona try/finally com setup/restore
+- `geosteering_ai/simulation/tests/sm_benchmark.py`: mesmo padrão em
+  `_run_numba_parallel_sync`
+- `tests/test_simulation_workers_ephemeral.py`: +3 guard tests v2.29.1
+- `docs/reports/v2.29.1_2026-05-11.md`: relatório técnico completo
+
+### Validação Empírica
+
+| Suite | Resultado |
+|:------|:----------|
+| `test_simulation_workers_ephemeral.py` | **9/9 PASS** (6 v2.29 + 3 novos v2.29.1) |
+| `test_simulation_compare_fortran.py` | **10/10 PASS — paridade <1e-12 PRESERVADA** |
+| `test_simulation_workers_threading.py` | 3/3 PASS |
+| `test_simulation_v223_fastmath_threads.py` | 7/7 PASS |
+| `test_simulation_parameters_seed.py` | 1/1 PASS |
+| CodeRabbit (`coderabbit review --agent`) | **0 findings** |
+
+### Throughput Pós-Fix (Apple Silicon 8C/16T HT, 4w × 4t)
+
+Reprodução do cenário do bug (2 freqs + 2 dips + 1 TR, `NUMBA_NUM_THREADS=2`
+inicial herdado do shell):
+
+| Run | Cache | Throughput | Status |
+|:---:|:-----:|:----------:|:------:|
+| 1 | Cold | 130,408 mod/h | ✓ sem RuntimeError |
+| 2 | Warm | 141,754 mod/h | ✓ env vars restauradas |
+| 3 | Warm steady-state | **149,984 mod/h ≈ 150k 🎯** | **Meta empírica atingida** |
+
+Benchmark CLI single-process (warm cache):
+
+| Cenário | Throughput | Comparação |
+|:--------|:----------:|:-----------|
+| A (default) | **3,152,977 mod/h** | >>>150k |
+| E (n_pos=600) | 145,202 mod/h | Próximo da meta canônica 150k |
+| F (multi-freq+TR) | 52,319 mod/h | Multi-eixo, oportunidade futura |
+
+---
+
 ## [v2.29] — 2026-05-11 — Back to Basics: reversão arquitetural
 
 ### Causa-raiz da regressão persistente v2.18–v2.28
