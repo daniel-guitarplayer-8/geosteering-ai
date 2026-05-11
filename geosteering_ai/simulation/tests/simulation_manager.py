@@ -50,6 +50,7 @@ Note:
     Requer que pelo menos um binding Qt esteja instalado. Se ausente, o
     programa emite mensagem clara de instalação e termina com exit code 1.
 """
+
 from __future__ import annotations
 
 import json
@@ -111,13 +112,9 @@ if QT_AVAILABLE:
     from .sm_snapshot_persist import SnapshotPersistThread
     from .sm_workers import (
         NumbaPrimer,
-        PoolWarmupThread,
         SaveArtifactsThread,
         SimRequest,
         SimulationThread,
-        _acquire_numba_pool,
-        _noop,
-        release_numba_pool,
     )
 
 
@@ -196,9 +193,13 @@ def load_plot_style() -> PlotStyle:
             palette=str(s.value("plot/palette", default.palette)),
             background=str(s.value("plot/background", default.background)),
             tight_layout=_bool(s.value("plot/tight_layout", default.tight_layout)),
-            use_latex=_bool(s.value("plot/use_latex", default.use_latex), default=False),
+            use_latex=_bool(
+                s.value("plot/use_latex", default.use_latex), default=False
+            ),
             use_mathtext=_bool(s.value("plot/use_mathtext", default.use_mathtext)),
-            legend_location=str(s.value("plot/legend_location", default.legend_location)),
+            legend_location=str(
+                s.value("plot/legend_location", default.legend_location)
+            ),
             title_location=str(s.value("plot/title_location", default.title_location)),
             minor_ticks=_bool(
                 s.value("plot/minor_ticks", default.minor_ticks), default=False
@@ -1376,7 +1377,9 @@ class ParametersPage(QtWidgets.QWidget):
                 "os valores bit-exatos de buildValidamodels.py."
             ),
         )
-        self.lbl_manual_status = QtWidgets.QLabel("<i>Nenhum perfil manual definido.</i>")
+        self.lbl_manual_status = QtWidgets.QLabel(
+            "<i>Nenhum perfil manual definido.</i>"
+        )
         self.lbl_manual_status.setStyleSheet("color: #a5a5a5;")
 
         row_mode = QtWidgets.QHBoxLayout()
@@ -2030,7 +2033,10 @@ class ParametersPage(QtWidgets.QWidget):
                 self.spin_nlayers_min,
                 min(int(cm.n_layers), self.spin_nlayers_min.maximum()),
             ),
-            (self.spin_nlayers_max, max(int(cm.n_layers), self.spin_nlayers_min.value())),
+            (
+                self.spin_nlayers_max,
+                max(int(cm.n_layers), self.spin_nlayers_min.value()),
+            ),
             (self.spin_rho_min, float(rho_min_val)),
             (self.spin_rho_max, float(rho_max_val)),
             (self.spin_min_thick, float(thick_min_val)),
@@ -2174,7 +2180,9 @@ class ParametersPage(QtWidgets.QWidget):
         ]
 
     def collect_angles(self) -> List[float]:
-        return _parse_float_list(self.edit_angles.text(), [0.0])[: self.spin_nang.value()]
+        return _parse_float_list(self.edit_angles.text(), [0.0])[
+            : self.spin_nang.value()
+        ]
 
     def collect_trs(self) -> List[float]:
         return _parse_float_list(self.edit_trs.text(), [1.0])[: self.spin_ntr.value()]
@@ -2437,29 +2445,16 @@ class SimulatorPage(QtWidgets.QWidget):
         self.spin_threads.valueChanged.connect(_update_parallel_warning)
         _update_parallel_warning()  # checa estado inicial
 
-        # ── Sprint 18.2 (v2.18): status de pre-warm do pool Numba ───────
-        # PoolWarmupThread inicia ao abrir a página (QTimer.singleShot abaixo).
-        # Exibe "Aquecendo workers..." enquanto spawn + JIT rodam em background.
-        # Quando pronto: "Workers prontos: 4w × 2t (12.3s)" em verde.
-        # Na primeira simulação, pool já está warm → throughput = 85k mod/h.
-        self.lbl_warmup_status = QtWidgets.QLabel("Pool Numba: aguardando início...")
-        self.lbl_warmup_status.setStyleSheet("color:#a5a5a5; font-size:10px;")
-        _tooltip(
-            self.lbl_warmup_status,
-            (
-                "<b>Status do pool Numba (v2.18)</b><br/>"
-                "Pré-aquecimento em background: spawn de workers + compilação JIT "
-                "Numba (~10–12 s no primeiro uso). Quando 'Workers prontos', a "
-                "primeira simulação inicia sem overhead e reporta o throughput real."
-            ),
-        )
-        self._warmup_thread: Optional[PoolWarmupThread] = None
+        # v2.29 (Back to Basics): widget de pré-aquecimento do pool removido.
+        # Pool agora é EFÊMERO (`with ProcessPoolExecutor` em SimulationThread.run),
+        # criado sob demanda por simulação. Warmup JIT é INLINE no worker com
+        # dados reais (`run_numba_chunk`). Cache em disco é populado pelo
+        # `NumbaPrimer` no startup (não pelo pool persistente removido em v2.29).
 
         par_form.addRow("Nº de workers sandbox:", self.spin_workers)
         par_form.addRow("Nº de threads por worker:", self.spin_threads)
         par_form.addRow("", self.lbl_ncpu)
         par_form.addRow("", self.lbl_parallel_warn)
-        par_form.addRow("", self.lbl_warmup_status)
 
         grp_out = QtWidgets.QGroupBox("Saída")
         out_form = QtWidgets.QFormLayout(grp_out)
@@ -2728,12 +2723,10 @@ class SimulatorPage(QtWidgets.QWidget):
         # Log view sempre permanece nesta coluna (meio):
         root.addWidget(self.log_view, 1)
 
-        # ── Sprint 18.2 (v2.18): pré-aquecer pool Numba em background ───
-        # Dispara 500 ms após __init__ (QTimer.singleShot não bloqueia o
-        # paint inicial da janela). Se o usuário mudar para backend Fortran,
-        # _on_backend_changed_warmup oculta o status e cancela a thread.
-        self.combo_backend.currentTextChanged.connect(self._on_backend_changed_warmup)
-        QtCore.QTimer.singleShot(500, self._start_background_warmup)
+        # v2.29 (Back to Basics): PoolWarmupThread removido. Warmup é INLINE
+        # nos workers (`run_numba_chunk` descarta a 1ª chamada com dados reais).
+        # O `NumbaPrimer` no startup popula o cache em disco que workers spawned
+        # leem em ~1–2 s no primeiro `import numba`.
 
     # ── v2.4b: API para SimulatorTab reparentar o grupo de hist\u00f3rico ──
     def take_history_group(self) -> QtWidgets.QGroupBox:
@@ -2787,50 +2780,10 @@ class SimulatorPage(QtWidgets.QWidget):
             haystack = (item.text() + "\n" + (item.toolTip() or "")).lower()
             item.setHidden(needle not in haystack)
 
-    # ── Sprint 18.2 (v2.18): pré-aquecimento do pool Numba ──────────────
-
-    def _start_background_warmup(self) -> None:
-        """Inicia PoolWarmupThread com a config atual dos spinboxes.
-
-        Chamado por QTimer.singleShot(500) no __init__ e por
-        _on_backend_changed_warmup quando o usuário volta para numba.
-        Ignorado se backend for Fortran ou se thread já estiver rodando.
-        """
-        if self.combo_backend.currentText() != "numba":
-            self.lbl_warmup_status.setVisible(False)
-            return
-        if self._warmup_thread is not None and self._warmup_thread.isRunning():
-            return
-        n_w = self.spin_workers.value()
-        n_t = self.spin_threads.value()
-        self.lbl_warmup_status.setText(
-            f"Aquecendo {n_w}w × {n_t}t... (spawn + JIT Numba)"
-        )
-        self.lbl_warmup_status.setStyleSheet("color:#f0ad4e; font-size:10px;")
-        self.lbl_warmup_status.setVisible(True)
-        self._warmup_thread = PoolWarmupThread(n_w, n_t, parent=self)
-        self._warmup_thread.warmup_done.connect(self._on_warmup_done)
-        self._warmup_thread.warmup_error.connect(self._on_warmup_error)
-        self._warmup_thread.start()
-
-    def _on_warmup_done(self, elapsed: float, n_w: int, n_t: int) -> None:
-        """Pool aquecido — atualiza label para verde."""
-        self.lbl_warmup_status.setText(
-            f"Workers prontos: {n_w}w × {n_t}t ({elapsed:.1f}s warmup)"
-        )
-        self.lbl_warmup_status.setStyleSheet("color:#4ec9b0; font-size:10px;")
-
-    def _on_warmup_error(self, msg: str) -> None:
-        """Warmup falhou — mostra aviso amarelo (não-fatal: pool cria na simulação)."""
-        self.lbl_warmup_status.setText(f"Warmup falhou: {msg[:60]}")
-        self.lbl_warmup_status.setStyleSheet("color:#f0ad4e; font-size:10px;")
-
-    def _on_backend_changed_warmup(self, backend: str) -> None:
-        """Oculta status de warmup quando backend não for numba."""
-        if backend != "numba":
-            self.lbl_warmup_status.setVisible(False)
-        else:
-            self._start_background_warmup()
+    # v2.29 (Back to Basics): _start_background_warmup, _on_warmup_done,
+    # _on_warmup_error, _on_backend_changed_warmup REMOVIDOS. Toda a
+    # infraestrutura de warmup background na GUI causava regressão de
+    # throughput. Warmup agora é INLINE em `run_numba_chunk` (v2.29).
 
     def add_history_entry(
         self,
@@ -3227,7 +3180,9 @@ class ConfigDDialog(QtWidgets.QDialog):
         hdr.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.table.setMinimumHeight(260)
-        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
         for row, m in enumerate(CANONICAL_BENCHMARK_MODELS):
             cb = QtWidgets.QCheckBox()
             cb.setChecked(m in selected_models)
@@ -4539,7 +4494,9 @@ class ResultsPage(QtWidgets.QWidget):
         # e fluxo de benchmark que usa texto "Modelo / Config").
         self.combo_model_key = QtWidgets.QComboBox()
         self.combo_model_key.setVisible(False)
-        _tooltip(self.combo_model_key, "(oculto v2.4c — substituído por spin_model_idx)")
+        _tooltip(
+            self.combo_model_key, "(oculto v2.4c — substituído por spin_model_idx)"
+        )
 
         self.list_components = QtWidgets.QListWidget()
         self.list_components.setSelectionMode(
@@ -5054,7 +5011,8 @@ class ResultsPage(QtWidgets.QWidget):
         if n == 0:
             return []
         return [
-            widget.item(i).checkState() == QtCore.Qt.CheckState.Checked for i in range(n)
+            widget.item(i).checkState() == QtCore.Qt.CheckState.Checked
+            for i in range(n)
         ]
 
     def _geosignal_mask(self) -> List[bool]:
@@ -5373,7 +5331,9 @@ class ResultsPage(QtWidgets.QWidget):
         try:
             main = self.window()
             page_prefs = getattr(main, "page_prefs", None)
-            combo_theme = getattr(page_prefs, "combo_theme", None) if page_prefs else None
+            combo_theme = (
+                getattr(page_prefs, "combo_theme", None) if page_prefs else None
+            )
             if combo_theme is not None:
                 combo_theme.blockSignals(True)
                 idx = combo_theme.findText(new_theme)
@@ -5818,7 +5778,8 @@ class ResultsPage(QtWidgets.QWidget):
         """
         # Tipos disponíveis (do combo_plot_kind real)
         kinds = [
-            self.combo_plot_kind.itemText(i) for i in range(self.combo_plot_kind.count())
+            self.combo_plot_kind.itemText(i)
+            for i in range(self.combo_plot_kind.count())
         ]
         # Componentes EM (lista completa do widget legado)
         all_components = [
@@ -6206,7 +6167,9 @@ class ResultsPage(QtWidgets.QWidget):
             positions_z = entry.get("positions_z")
             z_obs_2d = None
             if positions_z is not None:
-                z_obs_2d = np.broadcast_to(positions_z, (len(dips), positions_z.shape[0]))
+                z_obs_2d = np.broadcast_to(
+                    positions_z, (len(dips), positions_z.shape[0])
+                )
 
             # v2.4/E16: remove guarda "and H_n is not None" \u2014 aceita Fortran
             # quando Numba ausente. Usa Numba se dispon\u00edvel, sen\u00e3o Fortran.
@@ -6215,7 +6178,9 @@ class ResultsPage(QtWidgets.QWidget):
                 backend_tag = (
                     "Numba+Fortran (sobrepostos)"
                     if H_n is not None and H_f is not None
-                    else "Numba" if H_n is not None else "Fortran"
+                    else "Numba"
+                    if H_n is not None
+                    else "Fortran"
                 )
                 if H_plot is None:
                     return
@@ -6265,7 +6230,9 @@ class ResultsPage(QtWidgets.QWidget):
                 backend_tag = (
                     "Numba"
                     if H_n is not None and H_f is None
-                    else "Fortran" if H_f is not None and H_n is None else "Numba+Fortran"
+                    else "Fortran"
+                    if H_f is not None and H_n is None
+                    else "Numba+Fortran"
                 )
                 plot_em_profile(
                     self.canvas,
@@ -6367,7 +6334,8 @@ class ResultsPage(QtWidgets.QWidget):
             if self.list_components.item(i).isSelected()
         ]
         saved_combo_states = [
-            self.list_combos.item(i).checkState() for i in range(self.list_combos.count())
+            self.list_combos.item(i).checkState()
+            for i in range(self.list_combos.count())
         ]
 
         # Aplica seleção customizada
@@ -6444,7 +6412,9 @@ class PreferencesPage(QtWidgets.QWidget):
         paths_form = QtWidgets.QFormLayout(grp_paths)
         paths_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
 
-        self.edit_pkg = _qline(self._paths.get("geosteering_ai", ""), "…/geosteering_ai")
+        self.edit_pkg = _qline(
+            self._paths.get("geosteering_ai", ""), "…/geosteering_ai"
+        )
         _tooltip(
             self.edit_pkg,
             (
@@ -6473,7 +6443,9 @@ class PreferencesPage(QtWidgets.QWidget):
                 "Por padrão, <code>sys.executable</code> do processo pai."
             ),
         )
-        self.edit_output = _qline(self._paths.get("output_dir", ""), "diretório de saída")
+        self.edit_output = _qline(
+            self._paths.get("output_dir", ""), "diretório de saída"
+        )
         _tooltip(
             self.edit_output,
             (
@@ -6508,7 +6480,9 @@ class PreferencesPage(QtWidgets.QWidget):
         _tooltip(btn_python, "Abrir seletor para localizar o interpretador Python.")
         btn_output = QtWidgets.QPushButton("Procurar pasta…")
         btn_output.clicked.connect(lambda: self._browse_dir(self.edit_output))
-        _tooltip(btn_output, "Abrir seletor de pastas para o diretório de saída padrão.")
+        _tooltip(
+            btn_output, "Abrir seletor de pastas para o diretório de saída padrão."
+        )
         btn_auto = QtWidgets.QPushButton("↻  Redetectar automaticamente")
         btn_auto.clicked.connect(self._auto_detect)
         _tooltip(
@@ -6582,7 +6556,9 @@ class PreferencesPage(QtWidgets.QWidget):
         self.spin_marker_size = _spin_float(style.marker_size, 1.0, 20.0, 0.5, 2)
         self.check_grid = QtWidgets.QCheckBox("Exibir grid de fundo")
         self.check_grid.setChecked(style.grid)
-        self.check_layer_boundary = QtWidgets.QCheckBox("Desenhar interfaces das camadas")
+        self.check_layer_boundary = QtWidgets.QCheckBox(
+            "Desenhar interfaces das camadas"
+        )
         self.check_layer_boundary.setChecked(style.show_layer_boundaries)
         self.check_minor_ticks = QtWidgets.QCheckBox("Mostrar ticks menores nos eixos")
         self.check_minor_ticks.setChecked(style.minor_ticks)
@@ -6822,7 +6798,9 @@ class PreferencesPage(QtWidgets.QWidget):
             (self.btn_color_layer, "Cor das linhas horizontais de interface de camada"),
             (self.btn_color_bg, "Cor de fundo do painel de plot (axes + figure)"),
         ]:
-            _tooltip(btn, f"<b>Cor · {lbl}</b><br/>Clique para abrir o seletor de cores.")
+            _tooltip(
+                btn, f"<b>Cor · {lbl}</b><br/>Clique para abrir o seletor de cores."
+            )
 
         style_form.addRow("Resolução (DPI):", self.spin_dpi)
         # Botão QFontDialog ao lado do combo de família de fonte
@@ -7056,13 +7034,17 @@ class PreferencesPage(QtWidgets.QWidget):
         self.lbl_tatu_status.setText(
             _status(
                 ok_tatu,
-                "Binário executável." if ok_tatu else "Binário ausente ou sem permissão.",
+                "Binário executável."
+                if ok_tatu
+                else "Binário ausente ou sem permissão.",
             )
         )
         py = Path(self.edit_python.text()) if self.edit_python.text() else None
         ok_py = bool(py and py.is_file())
         self.lbl_python_status.setText(
-            _status(ok_py, "Interpretador válido." if ok_py else "Interpretador ausente.")
+            _status(
+                ok_py, "Interpretador válido." if ok_py else "Interpretador ausente."
+            )
         )
 
     def _collect_style(self) -> PlotStyle:
@@ -7217,7 +7199,9 @@ class SimulatorTab(QtWidgets.QWidget):
         col3_layout.addWidget(history_group, 1)
 
         splitter = QtWidgets.QSplitter(
-            QtCore.Qt.Orientation.Horizontal if QtCore.Qt.Orientation.Horizontal else 0x1
+            QtCore.Qt.Orientation.Horizontal
+            if QtCore.Qt.Orientation.Horizontal
+            else 0x1
         )
         splitter.addWidget(self.params)
         splitter.addWidget(self.sim)
@@ -7455,10 +7439,9 @@ class MainWindow(QtWidgets.QMainWindow):
             else f"Cache Numba recompilado em {elapsed:.0f}s — próximas sessões serão mais rápidas"
         )
         lbl.setToolTip(msg)
-        # v2.10: dispara workers do pool persistente para que inicializem o JIT
-        # em background. Quando o usuário clicar "Simular", workers já estarão
-        # quentes — spawn/import/JIT ocorrem apenas UMA vez por sessão.
-        self._prewarm_numba_pool()
+        # v2.29 (Back to Basics): _prewarm_numba_pool removido. Pool agora é
+        # efêmero (criado por simulação via `with ProcessPoolExecutor`).
+        # O cache JIT em disco populado pelo NumbaPrimer acima é suficiente.
         # Retoma simulação diferida (usuário clicou "Simular" durante primer).
         if self._pending_sim_trigger:
             self._pending_sim_trigger = False
@@ -7484,22 +7467,9 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         self._primer_lbl = None
 
-    def _prewarm_numba_pool(self) -> None:
-        """Submete tarefas noop ao pool persistente para forçar spawn + init (v2.10).
-
-        Chamado assim que o NumbaPrimer conclui. Os workers inicializam
-        ``_numba_init_worker`` em background — quando o usuário clicar
-        "Simular", o pool já estará quente e não haverá overhead de spawn.
-        """
-        try:
-            n_workers = int(self.page_sim.spin_workers.value())
-            n_threads = int(self.page_sim.spin_threads.value())
-            hankel = self.page_params.combo_filter.currentText()
-            pool = _acquire_numba_pool(n_workers, n_threads, hankel)
-            for _ in range(n_workers):
-                pool.submit(_noop)
-        except Exception:
-            pass
+    # v2.29 (Back to Basics): _prewarm_numba_pool removido — pool agora é efêmero
+    # (criado por simulação via `with ProcessPoolExecutor`). Cache JIT em disco
+    # populado pelo NumbaPrimer no startup é suficiente.
 
     def showEvent(self, event: Any) -> None:  # type: ignore[override]
         """Inicia NumbaPrimer na primeira exibição da janela (v2.9).
@@ -7514,22 +7484,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self._start_numba_primer()
 
     def closeEvent(self, event: Any) -> None:  # type: ignore[override]
-        """Termina NumbaPrimer e libera pools/caches persistentes ao fechar.
+        """Termina NumbaPrimer e libera caches persistentes ao fechar.
 
-        v2.9/v2.10: NumbaPrimer + pool da UI (`release_numba_pool`).
-        v2.12 (Sprint 12.3): além do pool da UI, libera o pool persistente
-        do core (`release_pool` em `geosteering_ai/simulation/_workers.py`)
-        para garantir cleanup completo quando o usuário usou a API nativa
-        `simulate_multi(models=[...], n_workers=N)` durante a sessão.
-        v2.13 (Sprint 13.2): libera também o cache global de
-        common_arrays (``release_numba_cache``) — relevante quando o
-        usuário ativou ``cache_persistent=True`` em chamadas PINN/inversão.
+        v2.29 (Back to Basics): pool da UI removido — não há mais
+        `release_numba_pool()` para chamar. SimulationThread usa pool
+        efêmero (`with ProcessPoolExecutor`) que se encerra automaticamente
+        no `__exit__` quando a simulação finaliza ou é cancelada. Isso
+        elimina o hang do Python ao fechar a GUI durante simulação.
+
+        Permanecem:
+        v2.9/v2.10: NumbaPrimer cleanup (await 3s).
+        v2.12 (Sprint 12.3): pool nativo do core (`release_pool` em
+        `geosteering_ai/simulation/_workers.py`) — relevante quando o
+        usuário usou API nativa `simulate_multi(models=..., n_workers>1)`.
+        v2.13 (Sprint 13.2): cache global de common_arrays.
 
         Aguarda até 3 s para conclusão limpa do NumbaPrimer; se exceder,
         força quit() para evitar "QThread destroyed while thread is running"
-        no log do Qt. Os pools persistentes são encerrados sem esperar
-        (workers finalizarão naturalmente após processar a tarefa em
-        andamento).
+        no log do Qt.
         """
         primer = getattr(self, "_numba_primer", None)
         if primer is not None and primer.isRunning():
@@ -7538,7 +7510,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 primer.wait(3000)
             except Exception:
                 pass
-        release_numba_pool()
         # v2.12 (Sprint 12.3): libera pool nativo do core. No-op quando o
         # usuário não usou simulate_multi(models=..., n_workers>1) na sessão.
         try:
@@ -7811,7 +7782,9 @@ class MainWindow(QtWidgets.QMainWindow):
             dlg = DatViewerDialog(self, Path(path))
             dlg.show()  # non-modal — usuário pode comparar com a janela principal
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, ".dat viewer", f"Falha ao abrir:\n{exc}")
+            QtWidgets.QMessageBox.warning(
+                self, ".dat viewer", f"Falha ao abrir:\n{exc}"
+            )
 
     # ── Experimento ──────────────────────────────────────────────────────
 
@@ -8368,12 +8341,19 @@ class MainWindow(QtWidgets.QMainWindow):
         # dedicada, main thread retorna imediatamente. Usuário pode navegar
         # entre abas e visualizar resultados enquanto I/O termina.
         try:
-            if req.backend == "numba" and self.page_sim.check_save_artifacts.isChecked():
+            if (
+                req.backend == "numba"
+                and self.page_sim.check_save_artifacts.isChecked()
+            ):
                 H_stack = result.get("H_stack")
                 z_obs = result.get("z_obs")
                 if H_stack is not None and H_stack.size and z_obs is not None:
-                    dat_path = os.path.join(req.output_dir, f"{req.output_filename}.dat")
-                    out_path = os.path.join(req.output_dir, f"{req.output_filename}.out")
+                    dat_path = os.path.join(
+                        req.output_dir, f"{req.output_filename}.dat"
+                    )
+                    out_path = os.path.join(
+                        req.output_dir, f"{req.output_filename}.out"
+                    )
                     nmeds = compute_nmeds_per_angle(req.tj, req.p_med, req.dip_degs)
                     self._save_thread = SaveArtifactsThread(
                         dat_path=dat_path,
@@ -8540,7 +8520,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 total_mb = self._sim_history_cache.total_bytes() / 1e6
                 if not in_cache:
                     # v2.5: auto-eviction — tensor maior que max_bytes
-                    bundle_mb = self._sim_history_cache.estimate_bytes(plot_bundle) / 1e6
+                    bundle_mb = (
+                        self._sim_history_cache.estimate_bytes(plot_bundle) / 1e6
+                    )
                     self.page_sim.append_log(
                         f"  [cache] tensor desta simulação ({bundle_mb:.1f} MB) "
                         f"excede o limite do LRU (500 MB) — não cacheado"
@@ -8554,7 +8536,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         )
             except Exception:
                 pass
-        self.page_sim.add_history_entry(snap_id, snap.label, in_cache=in_cache, snap=snap)
+        self.page_sim.add_history_entry(
+            snap_id, snap.label, in_cache=in_cache, snap=snap
+        )
         # v2.4c: notifica ResultsPage para atualizar combo_experiment
         try:
             self.page_results.refresh_experiment_list(
@@ -8738,7 +8722,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """Reconstrói combo_experiment da ResultsPage com estado atual."""
         try:
             snapshots = (
-                list(self._experiment.simulations) if self._experiment is not None else []
+                list(self._experiment.simulations)
+                if self._experiment is not None
+                else []
             )
             cache_keys = set(self._sim_history_cache.keys())
             self.page_results.refresh_experiment_list(
@@ -9371,7 +9357,7 @@ def _run_smoke_test() -> int:
         )
         check(
             dlg.list_components.count() == 2 and dlg.list_combos.count() == 1,
-            f"SaveFigureDialog populou 2 comps + 1 combo (v2.4d)",
+            "SaveFigureDialog populou 2 comps + 1 combo (v2.4d)",
         )
         dlg.close()
     except Exception as exc:
@@ -9491,12 +9477,13 @@ def _run_smoke_test() -> int:
         spec = dlg_v25.get_spec()
         check(
             "kind" in spec and "layout" in spec and "include_rho" in spec,
-            f"v2.5: get_spec() retorna dict com kind/layout/include_rho",
+            "v2.5: get_spec() retorna dict com kind/layout/include_rho",
         )
         # 11. Trocar kind atualiza layouts
         dlg_v25.combo_kind.setCurrentText("Geosinais (USD/UAD/UHR/UHA)")
         layouts_geo = [
-            dlg_v25.combo_layout.itemData(i) for i in range(dlg_v25.combo_layout.count())
+            dlg_v25.combo_layout.itemData(i)
+            for i in range(dlg_v25.combo_layout.count())
         ]
         check(
             "geo_nx2_rho" in layouts_geo,
@@ -9604,7 +9591,7 @@ def _run_smoke_test() -> int:
 
     try:
         # U3+P2 — ToastManager presente
-        from .sm_toast import ToastManager, ToastNotification
+        from .sm_toast import ToastManager
 
         check(
             hasattr(window, "_toast_manager"),
@@ -9634,7 +9621,6 @@ def _run_smoke_test() -> int:
     try:
         # P3 — sm_correlation funções básicas
         from .sm_correlation import (
-            EM_COMPONENT_LABELS,
             compute_correlation_matrix,
             compute_ensemble_envelope,
         )
@@ -10115,7 +10101,9 @@ def _run_smoke_test() -> int:
         import sys as _sys
 
         # sm_crosshair não deve mais existir no pacote
-        crosshair_present = "geosteering_ai.simulation.tests.sm_crosshair" in _sys.modules
+        crosshair_present = (
+            "geosteering_ai.simulation.tests.sm_crosshair" in _sys.modules
+        )
         if not crosshair_present:
             try:
                 importlib.import_module("geosteering_ai.simulation.tests.sm_crosshair")
@@ -10164,49 +10152,11 @@ def _run_smoke_test() -> int:
     except Exception as exc:
         check(False, f"v2.9 T14: NumbaPrimer estrutura ({exc})")
 
-    # ── v2.10 T15: pool persistente exportável de sm_workers ─────────────
-    try:
-        from .sm_workers import (
-            _PERSISTENT_POOL,
-            _PERSISTENT_POOL_CONFIG,
-            _WORKER_INITIALIZED,
-            _acquire_numba_pool,
-            _noop,
-            _numba_init_worker,
-            release_numba_pool,
-        )
-
-        check(callable(_acquire_numba_pool), "v2.10 T15: _acquire_numba_pool é chamável")
-        check(callable(release_numba_pool), "v2.10 T15: release_numba_pool é chamável")
-        check(callable(_noop), "v2.10 T15: _noop é chamável")
-        check(callable(_numba_init_worker), "v2.10 T15: _numba_init_worker é chamável")
-        check(
-            isinstance(_WORKER_INITIALIZED, bool),
-            "v2.10 T15: _WORKER_INITIALIZED é bool (False no processo principal)",
-        )
-    except Exception as exc:
-        check(False, f"v2.10 T15: pool persistente ({exc})")
-
-    # ── v2.10 T16: MainWindow tem _prewarm + _pending_sim_trigger + defer ─
-    try:
-        check(
-            hasattr(window, "_prewarm_numba_pool"),
-            "v2.10 T16: MainWindow tem _prewarm_numba_pool",
-        )
-        check(
-            hasattr(window, "_pending_sim_trigger"),
-            "v2.10 T16: MainWindow tem _pending_sim_trigger (bool)",
-        )
-        check(
-            isinstance(window._pending_sim_trigger, bool),
-            "v2.10 T16: _pending_sim_trigger é bool",
-        )
-        check(
-            callable(getattr(window, "_prewarm_numba_pool", None)),
-            "v2.10 T16: _prewarm_numba_pool é chamável",
-        )
-    except Exception as exc:
-        check(False, f"v2.10 T16: defer mechanism ({exc})")
+    # ── v2.29 (Back to Basics): pool persistente REMOVIDO ────────────────
+    # Tests T15 (pool persistente) e T16 (_prewarm_numba_pool / _pending_sim_trigger)
+    # foram removidos. Pool agora é efêmero (criado por simulação via
+    # `with ProcessPoolExecutor`). _pending_sim_trigger continua existindo
+    # apenas para a sincronização com NumbaPrimer (testado em T14).
 
     # ── v2.11 T17: PhaseTimer rastreia 8 fases canônicas ───────────────────
     try:
@@ -10278,7 +10228,8 @@ def _run_smoke_test() -> int:
             DEFAULT_GEN_CHUNK_SIZE == 500,
             "v2.11 T19: DEFAULT_GEN_CHUNK_SIZE = 500",
         )
-        gen = ModelGenerationThread(GenConfig(), n_models=10, rng_seed=42)
+        _smoke_test_seed = 42  # KB-018: seed fixo é OK dentro de smoke test
+        gen = ModelGenerationThread(GenConfig(), n_models=10, rng_seed=_smoke_test_seed)
         check(
             hasattr(gen, "progress")
             and hasattr(gen, "finished_models")
@@ -10324,7 +10275,9 @@ def _run_smoke_test() -> int:
             "v2.11 T21: SimulatorPage tem _flush_log_buffer (chamado pelo QTimer)",
         )
         check(
-            callable(getattr(window.page_sim, "begin_massive_simulation_log_mode", None)),
+            callable(
+                getattr(window.page_sim, "begin_massive_simulation_log_mode", None)
+            ),
             "v2.11 T21: SimulatorPage tem begin_massive_simulation_log_mode",
         )
         check(
@@ -10536,31 +10489,9 @@ def _run_smoke_test() -> int:
     except Exception as exc:
         check(False, f"v2.12 T24-T28: Workers Nativos ({exc})")
 
-    # ── v2.18 T29-T32: PoolWarmupThread + t0_sim (Sprint 18.1-18.2) ──────────
-    try:
-        from .sm_workers import PoolWarmupThread
-
-        sim_page = window.page_sim
-        # T29: PoolWarmupThread importável e instanciável
-        wt = PoolWarmupThread(1, 1, parent=None)
-        check(
-            isinstance(wt, PoolWarmupThread), "v2.18 T29: PoolWarmupThread instanciável"
-        )
-        check(
-            hasattr(wt, "warmup_done") and hasattr(wt, "warmup_error"),
-            "v2.18 T30: PoolWarmupThread tem signals warmup_done e warmup_error",
-        )
-        # T31: SimulationPage tem lbl_warmup_status e _warmup_thread
-        check(
-            hasattr(sim_page, "lbl_warmup_status"),
-            "v2.18 T31: SimulationPage tem lbl_warmup_status",
-        )
-        check(
-            hasattr(sim_page, "_warmup_thread"),
-            "v2.18 T32: SimulationPage tem _warmup_thread",
-        )
-    except Exception as exc:
-        check(False, f"v2.18 T29-T32: PoolWarmupThread ({exc})")
+    # v2.29 (Back to Basics): T29-T32 (PoolWarmupThread + lbl_warmup_status
+    # + _warmup_thread + t0_sim) REMOVIDOS. Toda essa infraestrutura foi
+    # eliminada — pool agora é efêmero, warmup é inline em run_numba_chunk.
 
     print(f"\n=== Resultado: {len(failures)} falha(s) ===")
     window.close()
@@ -10586,7 +10517,9 @@ def main() -> int:
     # AA_ShareOpenGLContexts deve ser setado antes de QApplication para
     # permitir que QtWebEngineWidgets (Plotly backend) seja importado em runtime.
     try:
-        _aa_attr = getattr(QtCore.Qt.ApplicationAttribute, "AA_ShareOpenGLContexts", None)
+        _aa_attr = getattr(
+            QtCore.Qt.ApplicationAttribute, "AA_ShareOpenGLContexts", None
+        )
         if _aa_attr is None:
             _aa_attr = QtCore.Qt.AA_ShareOpenGLContexts
         QtWidgets.QApplication.setAttribute(_aa_attr)
