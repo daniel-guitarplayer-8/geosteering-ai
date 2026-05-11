@@ -18,7 +18,7 @@ Origem do débito (M2 da revisão final v2.23):
 Modos de operação:
     - Default: roda `pytest tests/ -q --tb=no` e imprime a linha formatada
     - --json: emite JSON estruturado (para automação CI/CD)
-    - --no-run: lê output existente em /tmp ou stdin (para testar regex)
+    - --from-file PATH: lê output do pytest do arquivo (em vez de executar)
 
 Exemplo de uso:
     $ python scripts/count_pytest_pass.py

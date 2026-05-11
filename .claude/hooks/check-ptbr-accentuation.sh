@@ -55,9 +55,12 @@ while IFS=$'\t' read -r unaccented accented; do
     case "$unaccented" in '#'*) continue ;; esac
     [ -z "${accented:-}" ] && continue
 
-    # grep -wE = word-boundary, evita match em "naomi", "configuracaoX", etc.
+    # grep -w = word-boundary, evita match em "naomi", "configuracaoX", etc.
     # -i = case-insensitive (cobre "Nao", "NAO", etc.)
-    if echo "$NEW" | grep -wiE "$unaccented" > /dev/null 2>&1; then
+    # -F = fixed string (não interpreta meta-caracteres regex no padrão).
+    #      Mais seguro que -E porque catálogo pode evoluir e incluir
+    #      caracteres especiais (ex: 'pais', 'voce') sem quebrar o hook.
+    if echo "$NEW" | grep -wiF "$unaccented" > /dev/null 2>&1; then
         WARNS+=("'$unaccented' → deveria ser '$accented'")
     fi
 done < "$WORDS_FILE"

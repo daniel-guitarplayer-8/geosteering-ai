@@ -17,7 +17,7 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - **1.2 PT-BR `setup-environment.sh`** — todas as palavras do hook agora
   acentuadas (Sessão, início, último, rápido, versão, informações, diretório,
   recomendação, módulo, importável). 11+ ocorrências corrigidas.
-- **1.3 `cache=True` explícito em TODOS os `@njit`** em `_numba/`:
+- **1.3 `cache=True` explícito em 13 decoradores `@njit`** em `_numba/`:
   - `propagation.py`: `common_arrays`, `common_factors`
   - `dipoles.py`: `hmd_tiv`, `vmd`
   - `rotation.py`: `build_rotation_matrix`, `rotate_tensor` (mantêm fastmath)
@@ -58,8 +58,10 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
   - 11 em `tests/test_sprint_v224.py` (script + PT-BR + cache=True + use_fastmath)
   - 17 em `tests/test_hooks_i25.py` (hook PT-BR + PR description + catálogo)
   - 13 em `tests/test_cli_mvp.py` (estrutura + subcomandos + lazy imports)
-- **Paridade Fortran <1e-12 PRESERVADA** em 13/13 modelos canônicos
-  (oklahoma_3, 5, 28, hou_7, devine_8, oklahoma_15, viking_graben_10)
+- **Paridade Fortran <1e-12 PRESERVADA** em 7 modelos canônicos
+  (oklahoma_3, 5, 28, hou_7, devine_8, oklahoma_15, viking_graben_10) —
+  10/10 testes em `tests/test_simulation_compare_fortran.py` (7 paramétricos
+  + 1 high-rho stability + 2 smoke/parser)
 - **Suite total**: 1665+ PASS / 295 SKIP / 0 FAIL
 
 ### Arquivos modificados/criados
@@ -103,9 +105,9 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ### Validação
 
-- **Paridade Fortran <1e-12 PRESERVADA**: 13/13 testes em `test_simulation_compare_fortran.py`
-  (oklahoma_3, oklahoma_5, oklahoma_28, hou_7, devine_8, oklahoma_15, viking_graben_10,
-  smoke tests, alta resistividade)
+- **Paridade Fortran <1e-12 PRESERVADA**: 10/10 testes em `test_simulation_compare_fortran.py`
+  — 7 modelos canônicos paramétricos (oklahoma_3, oklahoma_5, oklahoma_28, hou_7,
+  devine_8, oklahoma_15, viking_graben_10) + 1 high-rho stability + 2 smoke/parser
 - **7 novos testes** em `tests/test_simulation_v223_fastmath_threads.py`:
   default False, decoradores aplicados, auto-detect, backward-compat (workers/threads
   explícitos), log informativo
