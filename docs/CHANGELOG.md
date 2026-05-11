@@ -7,6 +7,84 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.28] — 2026-05-11 — Fix warmup incompleto: Warmups C+D para cobertura total
+
+### Causa-raiz diagnosticada
+
+v2.27 eliminou a saturação LLVM (1 future ao invés de N), mas introduziu nova
+regressão: **throughput aparente ~55k mod/h** (esperado: 800k–1.4M mod/h).
+
+Análise dos timestamps de `__pycache__` revelou que 5 funções JIT críticas
+eram compiladas **APÓS `t0_sim`** (durante a simulação real):
+
+| Funções compiladas no WARMUP (22:29) | Funções compiladas na SIMULAÇÃO (23:01–23:05) |
+|:-------------------------------------|:----------------------------------------------|
+| `kernel._compute_zrho_kernel` | `propagation.common_arrays` |
+| `kernel._fields_in_freqs_kernel_cached` | `propagation.common_factors` |
+| `rotation.rotate_tensor` | `geometry.find_layers_tr` |
+| `rotation.build_rotation_matrix` | `geometry._sanitize_profile_kernel` |
+| `dipoles.vmd` / `dipoles.hmd_tiv` | `kernel.precompute_common_arrays_cache` |
+| `forward._simulate_positions_njit_cached` | — |
+
+**Por que isso ocorria**: `_run_numba_warmup_task` (v2.27) executava `simulate_multi`
+com `rho_h == rho_v` (isotrópico) e `dip_degs=[0.0]` (dip nulo). As 5 funções
+do segundo grupo só são compiladas em paths anisotrópicos (`rho_v ≠ rho_h`) ou
+de dip não-nulo (`hordist = L·|sin(dip)| > 0`). Workers 1..N acionavam o
+warmup secundário com dados REAIS, compilando essas funções INLINE após
+`t0_sim` — ~30 s contados como tempo de simulação → throughput aparente ~55k.
+
+**Por que funcionava antes de v2.25 (paradoxo)**: v2.10–v2.24 tinham warmup
+quebrado silenciosamente (shape errada de `esp`). Workers compilavam JIT
+LAZILY na 1ª chamada real com dados ANISOTRÓPICOS+DIP≠0 — todas as 22 funções
+compilavam corretamente. v2.25 "consertou" o warmup mas com parâmetros
+incompletos. v2.27 herdou o problema.
+
+### Mudanças implementadas
+
+- **`_run_numba_warmup_task` — Warmups C e D** (cobertura completa):
+  - Warmup A (existente): isotrópico + dip=0° + single-combo
+  - Warmup B (existente): isotrópico + dip=0° + multi-combo
+  - **Warmup C (novo)**: anisotrópico (`_rho_v = _rho * 0.3`) + dip=0°
+    → ativa `common_arrays`/`common_factors` em especializações TIV reais
+  - **Warmup D (novo)**: anisotrópico + `dip_degs=[30.0]`
+    → ativa `find_layers_tr`/`_sanitize_profile_kernel`/
+      `precompute_common_arrays_cache` no path inclinado (hordist > 0)
+  - Docstring expandida com diagrama dos 4 cenários e tabela histórica
+    v2.10–v2.28.
+
+- **`tests/test_simulation_pool_warmup.py` — T11 e T12** (total 12 testes):
+  - `test_run_numba_warmup_task_covers_anisotropic_path`: verifica
+    presença de `_rho_v` e `0.3` no código (não na docstring).
+  - `test_run_numba_warmup_task_covers_nonzero_dip_path`: verifica
+    presença de `30.0` no código.
+
+### Performance e validação
+
+| Métrica | v2.27 | v2.28 (esperado) |
+|:--------|:------|:-----------------|
+| Warmup cold JIT | ~30 s (cache parcial) | ~35–45 s (cache completo) |
+| Warmup warm cache | <2 s | <2 s |
+| Throughput 1ª exec | **~55k mod/h** ❌ | **800k–1.4M mod/h** ✅ |
+| Workers 1..N secondary warmup | ~30 s cold inline | <2 s (cache hit) |
+| Hang no shutdown | Não | Não |
+
+### Testes
+
+```
+tests/test_simulation_pool_warmup.py     — 12/12 PASS (11.51 s)
+tests/test_simulation_compare_fortran.py — 10/10 PASS (4.72 s) [paridade <1e-12]
+tests/test_simulation_v223_fastmath_threads.py — 7/7 PASS (2.58 s)
+```
+
+**Paridade Fortran INVIOLADA** — fix não altera nenhum path numérico, apenas
+adiciona 2 chamadas extras de `simulate_multi` durante o warmup.
+
+### Relatório detalhado
+
+Ver: [`docs/reports/v2.28_2026-05-11.md`](reports/v2.28_2026-05-11.md)
+
+---
+
 ## [v2.27] — 2026-05-10 — Fix warmup LLVM saturation (1 worker → cache compartilhado)
 
 ### Causa-raiz diagnosticada
