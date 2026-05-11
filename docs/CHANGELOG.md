@@ -7,6 +7,94 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.30] — 2026-05-11 — CLI Multi-Dimensional (multi-freq + multi-dip + multi-TR)
+
+### Resumo
+
+Sprint v2.30 implementa **personalização multi-dimensional completa do CLI Geosteering AI**.
+Os subcomandos `simulate` e `benchmark` agora aceitam flags para frequências arbitrárias,
+ângulos de dip variados e espaçamentos transmissor-receptor customizados, eliminando
+restrições anteriores.
+
+### Mudanças Principais
+
+**1. Novos argumentos CLI — `simulate` subcomando**:
+
+- `--frequencies HZ` (padrão: 20000): frequências EM em Hz separadas por vírgula
+- `--dips DEG` (padrão: 0): ângulos de inclinação em graus
+- `--tr-spacings M` (padrão: 1.0): espaçamentos transmissor-receptor em metros
+
+**2. Novos argumentos CLI — `benchmark` subcomando (overrides)**:
+
+Mesmos 3 flags acima, agora sobrescrevem valores do cenário pré-definido.
+
+**3. Novo cenário benchmark — Cenário G**:
+
+| Parâmetro | Valor |
+| :--- | :--- |
+| n_pos | 100 |
+| Frequências | 2000, 20000, 100000, 400000 Hz (4) |
+| TRs | 0.5, 1.0, 1.5, 2.0 m (4) |
+| Dips | 0, 15, 30, 45 graus (4) |
+| **Combinatória total** | **256 configurações por modelo** |
+
+Cenário G representa máxima flexibilidade multi-dimensional (4 freq × 4 TR × 4 dips).
+
+**4. Helper `_parse_float_list()` — edge cases robustos**:
+
+- Trata input vazio, nulo, whitespace
+- Suporta separadores: `,` e `;`
+- Edge case ",,," (só separadores) → retorna default
+- ValueError → log warning + retorna default
+
+**5. Atualização de handlers**:
+
+- `handle_simulate()`: parseia args → frequencies_hz, dip_degs, tr_spacings_m
+- `handle_benchmark()`: aplica override logic + ambas chamadas `simulate_multi()` recebem dip_degs
+- Logs atualizados: mostram "X freq, Y dips, Z TR"
+
+### Exemplos de Uso
+
+```bash
+# Múltiplas frequências
+geosteering-cli simulate --models 100 --frequencies 2000,20000,100000,400000 --n-pos 600
+
+# Múltiplos ângulos de dip
+geosteering-cli simulate --models 50 --dips 0,15,30,45 --n-pos 200
+
+# Combinação completa
+geosteering-cli simulate --models 200 \
+  --frequencies 2000,20000 \
+  --dips 0,15,30 \
+  --tr-spacings 0.5,1.0,1.5 \
+  --n-pos 300
+
+# Benchmark Cenário G (máxima combinatória)
+geosteering-cli benchmark --scenario G --n 50
+
+# Benchmark com override de dips
+geosteering-cli benchmark --scenario E --n 100 --dips 0,15,30
+```
+
+### Testes
+
+- **8 novos testes multi-dim**: PASS 100%
+- **17 testes CLI existentes**: PASS (backward-compatible)
+- **10 testes Fortran parity**: PASS <1e-12
+- **Total**: 42/42 PASS (CLI + Fortran + cache)
+
+### Revisão de Código
+
+- **CodeRabbit**: 0 findings (após fix 2 menores em _parse_float_list)
+- **mypy**: 0 erros
+- **ruff**: 0 erros
+
+### Backward Compatibility
+
+✅ **100% backward-compatible**: novos argumentos são opcionais.
+
+---
+
 ## [v2.29.3] — 2026-05-11 — Investigação de regressão + infraestrutura anti-regressão
 
 ### Contexto
