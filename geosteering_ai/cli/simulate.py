@@ -4,8 +4,8 @@
 # ║  ---------------------------------------------------------------------    ║
 # ║  Módulo      : Subcomando `simulate` da CLI                               ║
 # ║  Projeto     : Geosteering AI v2.0                                        ║
-# ║  Subsistema  : CLI MVP (Sprint v2.24 — I2.6)                              ║
-# ║  Versão      : v2.24                                                      ║
+# ║  Subsistema  : CLI MVP (Sprint v2.30 — multi-dim)                         ║
+# ║  Versão      : v2.30                                                      ║
 # ║  Autor       : Daniel Leal                                                ║
 # ║  Criação     : 2026-05-10                                                 ║
 # ║  Status      : Produção — MVP                                             ║
@@ -41,6 +41,38 @@ from pathlib import Path
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_float_list(text: str | None, default: list[float]) -> list[float]:
+    """Interpreta string CSV de floats; retorna ``default`` se None ou inválido.
+
+    Aceita vírgula ou ponto-e-vírgula como separador. Espaços são ignorados.
+
+    Args:
+        text: string no formato ``"1.0,2.0,3.0"`` ou ``None``.
+        default: lista retornada quando ``text`` é None, vazio ou inválido.
+
+    Returns:
+        Lista de floats parseados, ou ``default`` em caso de erro.
+
+    Example:
+        >>> _parse_float_list("2000, 20000, 100000", [20000.0])
+        [2000.0, 20000.0, 100000.0]
+        >>> _parse_float_list(None, [20000.0])
+        [20000.0]
+    """
+    if not text or not text.strip():
+        return default
+    try:
+        parsed = [
+            float(v.strip()) for v in text.replace(";", ",").split(",") if v.strip()
+        ]
+        return parsed if parsed else default
+    except ValueError:
+        logger.warning(
+            "Valor inválido em lista de floats: %r — usando default %s", text, default
+        )
+        return default
 
 
 def _build_random_models(n_models: int, seed: int) -> list[dict]:
@@ -103,6 +135,9 @@ def handle_simulate(args: argparse.Namespace) -> int:
             - ``workers`` (int | None): workers paralelos
             - ``threads`` (int | None): threads Numba por worker
             - ``seed`` (int): semente do gerador
+            - ``frequencies`` (str | None): CSV de Hz (ex: ``"2000,20000"``)
+            - ``dips`` (str | None): CSV de graus (ex: ``"0,15,30"``)
+            - ``tr_spacings`` (str | None): CSV de metros (ex: ``"0.5,1.0"``)
             - ``out`` (str | None): diretório de saída (None = memória)
             - ``quiet`` (bool): suprime logs informativos
 
@@ -125,10 +160,17 @@ def handle_simulate(args: argparse.Namespace) -> int:
         Em produção via CLI::
 
             $ geosteering-cli simulate --models 10 --n-pos 100 --quiet
+            $ geosteering-cli simulate --frequencies 2000,20000 --dips 0,15,30
+            $ geosteering-cli simulate --tr-spacings 0.5,1.0,1.5 --models 50
     """
     # Lazy imports — Sprint v2.24 I2.6 — evita carregar numba em --help
     from geosteering_ai.simulation import simulate_multi
     from geosteering_ai.simulation.config import SimulationConfig
+
+    # Parsear parâmetros multi-dim — Sprint v2.30
+    frequencies_hz = _parse_float_list(getattr(args, "frequencies", None), [20000.0])
+    dip_degs = _parse_float_list(getattr(args, "dips", None), [0.0])
+    tr_spacings_m = _parse_float_list(getattr(args, "tr_spacings", None), [1.0])
 
     # Constrói perfil de posições — N pontos uniformes em [-5, +5] m
     positions_z = np.linspace(-5.0, 5.0, args.n_pos).astype(np.float64)
@@ -150,17 +192,27 @@ def handle_simulate(args: argparse.Namespace) -> int:
     )
     if not args.quiet:
         logger.info(
-            "Paralelismo: %d workers × %d threads/worker",
+            "Configuração: %d modelos × %d pos × %d freq × %d dips × %d TR — %dw × %dt",
+            args.models,
+            args.n_pos,
+            len(frequencies_hz),
+            len(dip_degs),
+            len(tr_spacings_m),
             cfg.n_workers or 1,
             cfg.threads_per_worker or 1,
         )
 
-    # Executa simulação — passa apenas cfg (W5 do code-review: dupla
-    # passagem n_workers/threads era redundante; cfg já contém ambos
-    # após __post_init__ da Sprint v2.23 A.2).
+    # Executa simulação — passa parâmetros multi-dim (Sprint v2.30)
     t0 = time.perf_counter()
     try:
-        result = simulate_multi(positions_z=positions_z, models=models, cfg=cfg)
+        result = simulate_multi(
+            positions_z=positions_z,
+            models=models,
+            cfg=cfg,
+            frequencies_hz=frequencies_hz,
+            dip_degs=dip_degs,
+            tr_spacings_m=tr_spacings_m,
+        )
     except (ValueError, RuntimeError, OSError) as exc:
         logger.error("Erro durante simulação: %s", exc, exc_info=True)
         return 1
