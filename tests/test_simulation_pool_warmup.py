@@ -316,3 +316,67 @@ def test_run_numba_chunk_sets_worker_initialized_after_secondary_warmup() -> Non
         "(PoolWarmupThread usa 1 worker) precisam marcar o flag após o warmup "
         "em run_numba_chunk para evitar warmup redundante a cada chunk."
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 11. Regressão v2.28: warmup cobre path anisotrópico (rho_v ≠ rho_h)
+# ──────────────────────────────────────────────────────────────────────────
+def test_run_numba_warmup_task_covers_anisotropic_path() -> None:
+    """``_run_numba_warmup_task`` v2.28 deve incluir Warmup C (anisotrópico).
+
+    Bug v2.27: Warmups A+B usavam ``rho_h == rho_v`` (isotrópico). Funções
+    JIT como ``common_arrays`` e ``common_factors`` só eram compiladas quando
+    chamadas com rho_v ≠ rho_h — o que só ocorria no warmup secundário dos
+    Workers 1..N, após ``t0_sim``. Essa compilação inline dragged o throughput
+    para ~55k mod/h em vez de 800k–1.4M mod/h.
+
+    v2.28: Warmup C usa ``_rho_v = _rho * 0.3`` (anisotrópico). Isso garante
+    que ``common_arrays``/``common_factors`` sejam compilados e gravados em
+    cache durante o warmup (Worker 0), antes de ``t0_sim``.
+    """
+    import inspect
+
+    from geosteering_ai.simulation.tests.sm_workers import _run_numba_warmup_task
+
+    src = inspect.getsource(_run_numba_warmup_task)
+    _first = src.index('"""')
+    _close = src.index('"""', _first + 3)
+    code = src[_close + 3 :]
+    assert "_rho_v" in code and "0.3" in code, (
+        "_run_numba_warmup_task não cobre path anisotrópico (Warmup C). "
+        "Bug v2.27: rho_h==rho_v em todos os warmups → common_arrays/"
+        "common_factors compilados inline após t0_sim → ~55k mod/h. "
+        "v2.28: adicionar _rho_v = _rho * 0.3 e usar rho_v=_rho_v."
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 12. Regressão v2.28: warmup cobre path dip≠0 (formação inclinada)
+# ──────────────────────────────────────────────────────────────────────────
+def test_run_numba_warmup_task_covers_nonzero_dip_path() -> None:
+    """``_run_numba_warmup_task`` v2.28 deve incluir Warmup D (dip≠0°).
+
+    Bug v2.27: Warmups A+B usavam ``dip_degs=[0.0]``. Funções JIT como
+    ``find_layers_tr``, ``_sanitize_profile_kernel`` e
+    ``precompute_common_arrays_cache`` no path inclinado (hordist > 0)
+    não eram compiladas durante o warmup — só durante a simulação real,
+    após ``t0_sim``, contribuindo para a regressão de ~55k mod/h.
+
+    v2.28: Warmup D usa ``dip_degs=[30.0]``. Isso ativa o path inclinado
+    (hordist = L·|sin(30°)| = 0.5 m > 0) e garante compilação antecipada
+    de todas as funções JIT dependentes de dip≠0.
+    """
+    import inspect
+
+    from geosteering_ai.simulation.tests.sm_workers import _run_numba_warmup_task
+
+    src = inspect.getsource(_run_numba_warmup_task)
+    _first = src.index('"""')
+    _close = src.index('"""', _first + 3)
+    code = src[_close + 3 :]
+    assert "30.0" in code, (
+        "_run_numba_warmup_task não cobre path de dip≠0 (Warmup D). "
+        "Bug v2.27: dip_degs=[0.0] em todos os warmups → find_layers_tr/"
+        "_sanitize_profile_kernel/precompute_common_arrays_cache compilados "
+        "inline após t0_sim → ~55k mod/h. v2.28: adicionar dip_degs=[30.0]."
+    )
