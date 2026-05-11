@@ -8467,9 +8467,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status.showMessage("Simulação pausada")
 
     def _resume_simulation(self) -> None:
-        """Retoma simulação pausada (v2.11)."""
+        """Retoma simulação pausada (v2.11).
+
+        v2.29.3: ``is_paused`` é método (não atributo) em ``SimulationThread``
+        desde v2.29. Sem os parênteses, ``sim.is_paused`` retorna a referência
+        do método (sempre truthy), entrando no bloco mesmo quando a simulação
+        não está pausada — request_resume() é idempotente, então não causava
+        regressão funcional, mas o teste lógico estava incorreto.
+        """
         sim = self._sim_thread
-        if sim is not None and sim.isRunning() and sim.is_paused:
+        if sim is not None and sim.isRunning() and sim.is_paused():
             sim.request_resume()
             self.page_sim.append_log("▶  Simulação retomada.")
             self.status.showMessage("Simulação rodando")
@@ -10447,6 +10454,10 @@ def _run_smoke_test() -> int:
             callable(getattr(gen, "request_cancel", None)),
             "v2.11 T19: ModelGenerationThread.request_cancel é chamável",
         )
+        # NOTA v2.29.3: ModelGenerationThread.is_cancelled é @property
+        # (sm_model_gen.py:603); SimulationThread.is_cancelled é método
+        # (sm_workers.py:562). Convenção inconsistente — manter assim por
+        # retrocompat. Aqui usa-se acesso de atributo (property).
         check(
             gen.is_cancelled is False,
             "v2.11 T19: ModelGenerationThread.is_cancelled inicializa False",
