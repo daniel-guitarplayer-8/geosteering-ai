@@ -6,6 +6,7 @@
 # ║  Subsistema  : Simulation Manager — Workers Numba + Fortran               ║
 # ║  Autor       : Daniel Leal                                                ║
 # ║  Criação     : 2026-04-18                                                 ║
+# ║  Última rev. : 2026-05-11 (v2.29 — Back to Basics)                       ║
 # ║  Status      : Produção                                                   ║
 # ║  Framework   : concurrent.futures.ProcessPoolExecutor + subprocess        ║
 # ║  Dependências: numpy, geosteering_ai.simulation.simulate_multi            ║
@@ -17,36 +18,58 @@
 # ║    reusa o cache `@njit` após warmup único por processo; o Fortran       ║
 # ║    tatu.x é copiado para um TemporaryDirectory exclusivo.                 ║
 # ║                                                                           ║
+# ║  ARQUITETURA v2.29 (Back to Basics)                                       ║
+# ║    Sprint v2.29 (2026-05-11) reverteu a infraestrutura v2.18–v2.28       ║
+# ║    (pool persistente + PoolWarmupThread + _run_numba_warmup_task +       ║
+# ║     _WORKER_INITIALIZED + t0_sim + NOOPs de sincronização) que causava   ║
+# ║    regressão de throughput (75–107k vs >150k esperado), warmup visível    ║
+# ║    de ~33s na GUI, e hang do Python ao fechar antes da simulação        ║
+# ║    finalizar.                                                            ║
+# ║                                                                           ║
+# ║    A arquitetura restaurada (modelo `old_geosteering_ai/`):              ║
+# ║      • Pool EFÊMERO (`with ProcessPoolExecutor`) — criado por           ║
+# ║        simulação, fechado limpo via context manager.                     ║
+# ║      • Warmup INLINE em `run_numba_chunk` — primeira chamada de         ║
+# ║        `simulate_multi` é descartada usando dados REAIS de `chunk[0]`.  ║
+# ║      • `t0 = time.perf_counter()` em `run_numba_chunk` APÓS o warmup    ║
+# ║        — o tempo retornado por worker exclui JIT cold start.             ║
+# ║      • Sem inicializador custom, sem warmup background na GUI, sem      ║
+# ║        flag global `_WORKER_INITIALIZED`. Cache JIT em disco             ║
+# ║        (populado pelo `NumbaPrimer` no startup) é lido pelos workers     ║
+# ║        em ~1–2 s no spawn.                                              ║
+# ║                                                                           ║
 # ║  FLUXO DE EXECUÇÃO                                                        ║
 # ║    ┌──────────────────────────────────────────────────────────────────┐  ║
 # ║    │ Master (QThread)                                                 │  ║
 # ║    │  ├─ chunk_models → n_workers batches                            │  ║
-# ║    │  └─ ProcessPoolExecutor:                                         │  ║
-# ║    │      ├─ Worker 0: warmup JIT → loop chunk → stack H             │  ║
-# ║    │      ├─ Worker 1: idem                                           │  ║
-# ║    │      └─ Worker K: idem                                           │  ║
+# ║    │  └─ with ProcessPoolExecutor(n_workers) as pool:                │  ║
+# ║    │      ├─ Worker 0: warmup JIT (chunk[0]) → loop chunk → stack H │  ║
+# ║    │      ├─ Worker 1: idem                                          │  ║
+# ║    │      └─ Worker K: idem                                          │  ║
 # ║    └──────────────────────────────────────────────────────────────────┘  ║
 # ║                                                                           ║
 # ║  SINAIS QT                                                                ║
 # ║    • progress_update(done, total, mod_per_h)  — cada 100 modelos         ║
-# ║    • worker_finished(worker_id, n_done)       — fim de cada chunk        ║
-# ║    • finished_all(result_dict)                — término da execução      ║
-# ║    • error(msg)                                — erros irrecuperáveis   ║
+# ║    • log(str)                                  — mensagens informativas  ║
+# ║    • finished_all(dict)                        — resultado consolidado   ║
+# ║    • error(str)                                — erros irrecuperáveis   ║
+# ║    • paused() / resumed() / cancelled()        — controle cooperativo    ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-"""Workers assíncronos para simulação Numba e Fortran.
+"""Workers assíncronos para simulação Numba e Fortran (v2.29 Back to Basics).
 
 O módulo expõe ``SimulationThread`` (subclasse ``QThread``) que orquestra
-um ``ProcessPoolExecutor`` com workers sandbox, além de funções
-``run_numba_chunk`` e ``run_fortran_chunk`` (picklable para IPC).
+um ``ProcessPoolExecutor`` efêmero com workers sandbox, além de funções
+``run_numba_chunk`` e ``run_fortran_chunk`` (picklable para IPC) e o
+``NumbaPrimer`` (QThread que popula o cache JIT em disco no startup).
 """
 
 from __future__ import annotations
 
-import multiprocessing as _mp
 import os
 import shutil
 import subprocess
 import tempfile
+import threading as _threading
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -56,268 +79,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .sm_qt_compat import QObject, QThread, Signal
-
-# ──────────────────────────────────────────────────────────────────────────
-# Pool persistente — elimina overhead de spawn/import/JIT por simulação
-# ──────────────────────────────────────────────────────────────────────────
-
-# Flag de controle: True dentro de um worker após o inicializador rodar.
-# False no processo principal — impede warmup redundante.
-_WORKER_INITIALIZED: bool = False
-
-# Pool singleton reaproveitado entre simulações consecutivas.
-_PERSISTENT_POOL: Optional[ProcessPoolExecutor] = None
-_PERSISTENT_POOL_CONFIG: Optional[Tuple[int, int, str]] = None
-
-
-def _numba_init_worker(n_threads: int, hankel_filter: str) -> None:
-    """Inicializador leve do pool — roda UMA vez por worker ao spawnar.
-
-    Configura variáveis de ambiente de threading (OMP/KMP) e retorna em
-    < 100 ms. O aquecimento do JIT Numba é feito por ``_run_numba_warmup_task``
-    (submetido como Future pelo ``PoolWarmupThread``), o que garante que o
-    warmup seja cancelável e não bloqueie o shutdown do aplicativo.
-
-    Histórico:
-        v2.10–v2.24: warmup usava ``esp=[5.0, 5.0]`` (shape inválida) no
-        próprio inicializador. Falha silenciosa via ValueError →
-        ``_WORKER_INITIALIZED = True`` sem warmup real → cold-start em prod.
-
-        v2.25: corrigiu o shape mas manteve ``simulate_multi`` no
-        inicializador. Efeito colateral: inicializador levava 35–38 s (JIT
-        frio) ou 6 s (cache em disco) e NÃO podia ser cancelado. O handler
-        ``atexit`` do ``ProcessPoolExecutor`` chama ``shutdown(wait=True)``
-        em todos os pools rastreados — com workers presos no inicializador,
-        isso causa travamento garantido ao fechar o aplicativo.
-
-        v2.26: warmup movido para ``_run_numba_warmup_task`` (Future).
-        Inicializador retorna em < 100 ms; cancelamento via
-        ``cancel_futures=True`` é garantido; sem hang no shutdown.
-
-    Note:
-        NÃO setamos ``NUMBA_NUM_THREADS`` aqui — ver docstring de
-        ``_acquire_numba_pool`` para a razão completa. ``OMP_NUM_THREADS``
-        (BLAS/MKL) é seguro setar porque não conflita com o config do Numba.
-    """
-    os.environ["OMP_NUM_THREADS"] = str(n_threads)
-    os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
-    os.environ.setdefault("KMP_WARNINGS", "FALSE")
-    # _WORKER_INITIALIZED permanece False até _run_numba_warmup_task concluir.
-
-
-def _run_numba_warmup_task(n_threads: int, hankel_filter: str) -> bool:
-    """Aquece o JIT Numba no worker — submetido como Future pelo PoolWarmupThread.
-
-    Ao contrário do inicializador, Futures são canceláveis via
-    ``cancel_futures=True`` no shutdown do pool — eliminando o travamento
-    ao fechar o aplicativo que ocorria quando o warmup ficava no
-    inicializador (v2.25).
-
-    Executa ``simulate_multi`` com shapes representativas e corretas:
-
-      ┌────────────────────────────────────────────────────────────────────┐
-      │  n_layers = 10  →  esp.shape = (n-2,) = (8,)                     │
-      │  positions_z = 50 pontos (suficiente para ativar JIT)             │
-      │  Warmup A: single-combo, isotrópico, dip=0° → kernel cached      │
-      │  Warmup B: multi-combo,  isotrópico, dip=0° → FLAT prange        │
-      │  Warmup C: single-combo, anisotrópico (rho_v≠rho_h), dip=0°     │
-      │            → ativa common_arrays / common_factors nas             │
-      │               especializações de tipo reais (v2.28)              │
-      │  Warmup D: single-combo, anisotrópico, dip=30°                   │
-      │            → ativa find_layers_tr / _sanitize_profile_kernel /   │
-      │               precompute_common_arrays_cache path inclinado       │
-      │               (v2.28)                                             │
-      └────────────────────────────────────────────────────────────────────┘
-
-    50 posições (vs. 600 em v2.25): JIT é ativado pela PRIMEIRA chamada,
-    não pelo tamanho do array. Arrays grandes só adicionam latência ao
-    warmup quente (~6 s → ~2 s com 50 posições) sem benefício de bytecode.
-
-    Bug v2.27: Warmups A+B usavam ``rho_h == rho_v`` (isotrópico) e
-    ``dip_degs=[0.0]``. Funções JIT chamadas APENAS em paths anisotrópicos
-    ou de dip≠0 não eram compiladas durante o warmup. Workers 1..N as
-    compilavam inline durante a simulação real, após ``t0_sim`` — causando
-    ~35 s de JIT cold inline contado como tempo de simulação (~55k mod/h).
-    Fix v2.28: Warmups C+D cobrem esses paths, populando o cache em disco
-    durante o warmup (Worker 0) antes de ``t0_sim``. Workers 1..N carregam
-    do cache em disco (< 2 s) em vez de recompilar.
-
-    Histórico:
-        v2.10–v2.24: Bug de shape → ValueError silencioso → warm falso.
-        v2.25: shape correto, mas warmup no inicializador → hang no shutdown.
-        v2.26: warmup como Future, shape correto, 50 posições.
-        v2.27: 1 future (não n_workers) — elimina saturação LLVM. Mas
-               Warmups A+B apenas (isotrópico+dip=0) → cache incompleto.
-        v2.28: Warmups C+D adicionados — cobertura completa de paths.
-
-    Args:
-        n_threads: Threads Numba (mascaramento via ``SimulationConfig``).
-        hankel_filter: Filtro Hankel — deve coincidir com o da simulação real
-            para garantir warm hit no primeiro uso.
-
-    Returns:
-        True se o warmup completou sem exceção; False caso contrário.
-        Quando False, ``run_numba_chunk`` executa o warmup secundário no
-        primeiro chunk real (fora de ``t0_sim``).
-    """
-    global _WORKER_INITIALIZED
-    if _WORKER_INITIALIZED:
-        return True
-    warmup_failed = False
-    try:
-        import numpy as _np
-
-        from geosteering_ai.simulation import SimulationConfig, simulate_multi
-
-        _cfg = SimulationConfig(
-            backend="numba", num_threads=n_threads, hankel_filter=hankel_filter
-        )
-        # n_layers=10 → esp.shape=(n-2,)=(8,) — correto para _validate_multi_inputs.
-        _rho = _np.array(
-            [1.0, 10.0, 1.0, 50.0, 1.0, 100.0, 1.0, 5.0, 20.0, 1.0],
-            dtype=_np.float64,
-        )
-        _esp = _np.full(8, 3.0, dtype=_np.float64)
-        # 50 posições: ativa JIT (qualquer tamanho ≥ 1 serve) e aquece
-        # alocadores moderadamente sem overhead excessivo no path quente.
-        _pos = _np.linspace(-5.0, 20.0, 50, dtype=_np.float64)
-        # Warmup A — single-combo → _simulate_positions_njit_cached
-        simulate_multi(
-            rho_h=_rho,
-            rho_v=_rho,
-            esp=_esp,
-            positions_z=_pos,
-            frequencies_hz=[20000.0],
-            tr_spacings_m=[1.0],
-            dip_degs=[0.0],
-            cfg=_cfg,
-        )
-        # Warmup B — multi-combo → _simulate_combined_prange_flat
-        simulate_multi(
-            rho_h=_rho,
-            rho_v=_rho,
-            esp=_esp,
-            positions_z=_pos,
-            frequencies_hz=[20000.0, 40000.0],
-            tr_spacings_m=[1.0, 2.0],
-            dip_degs=[0.0],
-            cfg=_cfg,
-        )
-        # Warmup C — anisotrópico (rho_v ≠ rho_h): ativa common_arrays e
-        # common_factors nas especializações reais. Em A+B rho_h==rho_v
-        # (isotrópico) pode gerar especializações de tipo distintas das
-        # usadas nas simulações reais onde rho_v < rho_h (TIV típico).
-        _rho_v = _rho * 0.3  # resistividade vertical ≠ horizontal
-        simulate_multi(
-            rho_h=_rho,
-            rho_v=_rho_v,
-            esp=_esp,
-            positions_z=_pos,
-            frequencies_hz=[20000.0],
-            tr_spacings_m=[1.0],
-            dip_degs=[0.0],
-            cfg=_cfg,
-        )
-        # Warmup D — dip≠0 + anisotrópico: ativa find_layers_tr,
-        # _sanitize_profile_kernel e precompute_common_arrays_cache
-        # no path de formação inclinada (hordist > 0). Esses JIT foram
-        # compilados inline durante a simulação real em v2.27 (após
-        # t0_sim), causando regressão de throughput (~55k mod/h).
-        simulate_multi(
-            rho_h=_rho,
-            rho_v=_rho_v,
-            esp=_esp,
-            positions_z=_pos,
-            frequencies_hz=[20000.0],
-            tr_spacings_m=[1.0],
-            dip_degs=[30.0],
-            cfg=_cfg,
-        )
-    except Exception:
-        # Mantém _WORKER_INITIALIZED=False para que run_numba_chunk execute
-        # o warmup secundário no primeiro chunk real (fora de t0_sim).
-        warmup_failed = True
-    if not warmup_failed:
-        _WORKER_INITIALIZED = True
-    return not warmup_failed
-
-
-def _noop() -> None:
-    """Função vazia usada para sincronizar o pool sem carga real."""
-
-
-def _acquire_numba_pool(
-    n_workers: int, n_threads: int, hankel_filter: str
-) -> ProcessPoolExecutor:
-    """Retorna (ou cria) o pool persistente com os parâmetros especificados.
-
-    Se o pool existente tiver configuração diferente, o antigo é encerrado
-    sem esperar antes de criar o novo.
-
-    Note (v2.16):
-        Sprint 15.1 — antes do spawn dos workers, setamos
-        ``NUMBA_NUM_THREADS = n_threads`` no env do processo pai. Os workers
-        spawn herdam este env, e Numba lê o valor durante a primeira
-        ``import numba`` no worker (que é disparada pelo unpickle do próprio
-        ``_numba_init_worker``). Resultado: o pool de threads do Numba dentro
-        de cada worker nasce dimensionado em ``n_threads``, e
-        ``numba.set_num_threads(n_threads)`` em ``simulate_multi`` apenas
-        confirma esse mascaramento (sem RuntimeError).
-
-        Em v2.15 (commits 0f92035 + e1c8864), este passo foi removido sob a
-        teoria de que ``set_num_threads`` resolveria sozinho. Mas como o
-        pool nasce com ``cpu_count()`` (16 em hyperthreaded), e
-        ``set_num_threads`` falha silenciosamente em chamadas posteriores
-        em alguns estados internos, workers acabavam rodando com threads
-        ativas em estado indefinido — provocando regressão 4–8×.
-
-        Mantemos ``OMP_NUM_THREADS = n_threads`` para BLAS/MKL.
-    """
-    global _PERSISTENT_POOL, _PERSISTENT_POOL_CONFIG
-    cfg_key = (n_workers, n_threads, hankel_filter)
-    if _PERSISTENT_POOL is None or _PERSISTENT_POOL_CONFIG != cfg_key:
-        if _PERSISTENT_POOL is not None:
-            try:
-                _PERSISTENT_POOL.shutdown(wait=False, cancel_futures=True)
-            except TypeError:
-                _PERSISTENT_POOL.shutdown(wait=False)
-            except Exception:
-                pass
-        # ── FIX v2.16: dimensionar pool de threads do Numba no spawn ─────
-        # Setado no PAI antes do spawn — herdado pelos workers. Numba lê
-        # NUMBA_NUM_THREADS na primeira import (durante o spawn dos workers).
-        os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
-        os.environ["OMP_NUM_THREADS"] = str(n_threads)
-        os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
-        os.environ.setdefault("KMP_WARNINGS", "FALSE")
-        # ────────────────────────────────────────────────────────────────
-        _PERSISTENT_POOL = ProcessPoolExecutor(
-            max_workers=n_workers,
-            mp_context=_mp.get_context("spawn"),
-            initializer=_numba_init_worker,
-            initargs=(n_threads, hankel_filter),
-        )
-        _PERSISTENT_POOL_CONFIG = cfg_key
-    return _PERSISTENT_POOL
-
-
-def release_numba_pool() -> None:
-    """Encerra o pool persistente de forma limpa.
-
-    Deve ser chamado em ``closeEvent()`` da janela principal para liberar
-    os subprocessos antes do encerramento do aplicativo.
-    """
-    global _PERSISTENT_POOL, _PERSISTENT_POOL_CONFIG
-    if _PERSISTENT_POOL is not None:
-        try:
-            _PERSISTENT_POOL.shutdown(wait=False, cancel_futures=True)
-        except TypeError:
-            _PERSISTENT_POOL.shutdown(wait=False)
-        except Exception:
-            pass
-        _PERSISTENT_POOL = None
-        _PERSISTENT_POOL_CONFIG = None
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # Estruturas de configuração
@@ -380,11 +141,16 @@ def run_numba_chunk(
 ) -> Tuple[int, np.ndarray, np.ndarray, float]:
     """Executa ``simulate_multi`` num chunk de modelos dentro de um worker.
 
-    O número ativo de threads Numba é controlado via ``cfg.num_threads``
-    (mascaramento interno com ``numba.set_num_threads``). Não alteramos
-    ``NUMBA_NUM_THREADS`` em env var — ver nota em ``_numba_init_worker``.
-    A primeira chamada é descartada (warmup JIT) quando o pool initializer
-    não a executou.
+    O ambiente ``NUMBA_NUM_THREADS`` é definido ANTES do import de numba,
+    garantindo que o thread pool do subprocesso respeite o valor solicitado
+    (v2.16 fix — regressão histórica 4–8× quando env var era setada após import).
+
+    A primeira chamada de ``simulate_multi`` é **descartada (warmup JIT)** —
+    usa dados REAIS do primeiro modelo do chunk, garantindo que TODOS os paths
+    de tipo Numba (anisotrópico, dip≠0, multi-frequência, multi-TR) sejam
+    exercitados antes de ``t0`` ser setado. Essa abordagem é superior à de
+    warmups sintéticos (v2.25–v2.28) que usavam `n_layers=10` hardcoded e
+    falhavam para modelos reais com `n_layers` diferentes.
 
     Args:
         progress_q: ``multiprocessing.Queue`` opcional. Quando fornecido, o
@@ -398,13 +164,11 @@ def run_numba_chunk(
 
     Returns:
         Tupla ``(worker_id, H_stack, z_obs, elapsed_sec)`` onde
-        ``H_stack`` tem shape ``(n_chunk, nTR, nAng, n_pos, nf, 9)``.
+        ``H_stack`` tem shape ``(n_chunk, nTR, nAng, n_pos, nf, 9)`` e
+        ``elapsed_sec`` exclui o tempo de warmup JIT.
     """
-    # OMP_NUM_THREADS: limita BLAS/MKL por worker (seguro setar após import Numba).
-    # NUMBA_NUM_THREADS NÃO é setado aqui — ver docstring de _numba_init_worker.
+    os.environ["NUMBA_NUM_THREADS"] = str(n_threads)
     os.environ["OMP_NUM_THREADS"] = str(n_threads)
-    os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
-    os.environ.setdefault("KMP_WARNINGS", "FALSE")
 
     from geosteering_ai.simulation import SimulationConfig, simulate_multi
 
@@ -417,14 +181,10 @@ def run_numba_chunk(
         num_threads=n_threads,
     )
 
-    # ── Warmup JIT secundário (1 chamada descartada por processo) ───────────
-    # Pulado quando _run_numba_warmup_task já aqueceu este worker (flag True).
-    # v2.27: PoolWarmupThread aquece apenas 1 worker; os outros (Workers 1..N)
-    # carregam bytecode compilado do cache em disco (< 2 s) neste bloco.
-    # _WORKER_INITIALIZED é setado True aqui para evitar warmup redundante em
-    # todos os chunks subsequentes deste worker na mesma sessão.
-    global _WORKER_INITIALIZED
-    if chunk and not _WORKER_INITIALIZED:
+    # ── Warmup JIT (1 chamada descartada por processo, dados REAIS) ──────
+    # Usa chunk[0] (modelo real) — garante cobertura completa de paths JIT
+    # (n_layers reais, dips reais, anisotropia real) antes de medir tempo.
+    if chunk:
         m0 = chunk[0]
         _ = simulate_multi(
             rho_h=np.asarray(m0["rho_h"], dtype=np.float64),
@@ -437,17 +197,15 @@ def run_numba_chunk(
             cfg=cfg,
             hankel_filter=hankel_filter,
         )
-        _WORKER_INITIALIZED = True
-    # Publica evento de warmup concluído — sempre, para que o master
-    # atualize o log independentemente do caminho tomado acima.
-    if progress_q is not None:
-        try:
-            progress_q.put({"event": "warmup_done", "worker_id": worker_id})
-        except Exception:
-            pass
+        # Publica evento de warmup concluído (útil p/ warmup feedback em GUI).
+        if progress_q is not None:
+            try:
+                progress_q.put({"event": "warmup_done", "worker_id": worker_id})
+            except Exception:
+                pass
 
     total = int(total_hint) if total_hint is not None else len(chunk)
-    t0 = time.perf_counter()
+    t0 = time.perf_counter()  # ← APÓS warmup: tempo retornado exclui JIT cold start
     block_start_t = t0
     H_list: List[np.ndarray] = []
     z_obs_ref: Optional[np.ndarray] = None
@@ -705,13 +463,14 @@ def run_fortran_chunk(
 
 
 class SimulationThread(QThread):
-    """Thread Qt que orquestra o ProcessPoolExecutor.
+    """Thread Qt que orquestra o ProcessPoolExecutor efêmero (v2.29).
 
     Emite sinais:
       * ``progress_update(done, total, mod_per_h)`` — a cada worker finalizado
       * ``log(str)`` — mensagens informativas
       * ``finished_all(dict)`` — resultado consolidado
       * ``error(str)`` — erros irrecuperáveis
+      * ``paused()`` / ``resumed()`` / ``cancelled()`` — controle cooperativo (v2.11)
 
     O resultado consolidado contém:
       * ``backend``: "numba" ou "fortran"
@@ -720,13 +479,26 @@ class SimulationThread(QThread):
       * ``dat_files``: list[str] — Fortran
       * ``elapsed``: float total wall clock em segundos
       * ``throughput_mod_h``: float
+      * ``n_models``: int
+
+    Note v2.29 — Back to Basics:
+        A medição ``t0 = time.perf_counter()`` na linha do ``run()`` ocorre
+        ANTES do pool ser criado e do warmup inline dos workers. O ``elapsed``
+        retornado INCLUI o overhead de spawn + warmup (~10–30 s na 1ª simulação
+        com cache JIT frio). Em simulações com N >= 1000 modelos esse overhead
+        dilui-se (throughput agregado tende ao steady-state pós-warmup). O
+        log "Aquecendo JIT em N workers (~10–30 s ...)" alerta o usuário.
+
+        Para evitar a regressão do v2.18–v2.28 (warmup background na GUI com
+        cobertura incompleta + pool persistente + medição "limpa" via t0_sim),
+        o v2.29 voltou ao modelo OLD: cada worker faz warmup com dados REAIS
+        do `chunk[0]` (todos os paths JIT cobertos automaticamente).
     """
 
     progress_update = Signal(int, int, float)
     log = Signal(str)
     finished_all = Signal(dict)
     error = Signal(str)
-    # v2.11 — sinais de pausa/retomada/cancelamento cooperativo
     paused = Signal()
     resumed = Signal()
     cancelled = Signal()
@@ -740,35 +512,21 @@ class SimulationThread(QThread):
         super().__init__(parent)
         self._req = req
         self._models = models
-        # Flag legada de cancelamento — preservada para retro-compat.
-        # request_stop() = "pare ao final do chunk em curso" (cancelamento).
         self._stopped = False
-        # v2.11 — flag separada para "cancelamento agressivo" pedido pelo
-        # botão Cancel da UI. Distingue cancel intencional vs stop legado.
-        self._cancel_requested = False
-        # v2.11 — Event para pausa cooperativa. Quando setado (default),
-        # a thread roda livremente; quando clear, a thread bloqueia em wait().
-        # Uso em pontos checkpoint dentro do loop run().
-        import threading as _threading
-
+        # v2.11: controle cooperativo de pausa/cancel
         self._pause_event = _threading.Event()
-        self._pause_event.set()
+        self._pause_event.set()  # default: não pausado
         self._is_paused: bool = False
 
     def request_stop(self) -> None:
-        """Solicita interrupção cooperativa (entre chunks).
-
-        Mantém comportamento v2.10 — usado pelo botão "Parar" legado.
-        Para cancelamento explícito v2.11, ver :meth:`request_cancel`.
-        """
+        """Solicita interrupção cooperativa (entre chunks). Alias legado."""
         self._stopped = True
+        # Libera o wait se estiver pausado, para permitir cleanup.
+        self._pause_event.set()
 
     def request_pause(self) -> None:
-        """Solicita pausa cooperativa (v2.11).
-
-        A thread bloqueia em pontos checkpoint dentro do loop ``run()``
-        até :meth:`request_resume` ou :meth:`request_cancel`. Idempotente.
-        """
+        """Pausa a execução cooperativa (v2.11). Bloqueia novos chunks
+        até :meth:`request_resume` ou :meth:`request_cancel`. Idempotente."""
         if self._is_paused:
             return
         self._is_paused = True
@@ -784,34 +542,24 @@ class SimulationThread(QThread):
         self.resumed.emit()
 
     def request_cancel(self) -> None:
-        """Solicita cancelamento agressivo da simulação (v2.11).
+        """Cancela a execução cooperativamente (v2.11). Bloqueio de novos
+        chunks; workers atuais terminam naturalmente. Idempotente."""
+        if self._stopped:
+            return
+        self._stopped = True
+        self._pause_event.set()  # libera wait
+        # cancelled signal emitido após cleanup natural do `with ProcessPoolExecutor`
 
-        Diferente de ``request_stop``, este método também libera a thread
-        de qualquer pausa em andamento, garantindo que o cleanup ocorra
-        imediatamente. Emite ``cancelled`` quando o cleanup conclui.
-        """
-        self._cancel_requested = True
-        self._stopped = True  # também sinaliza para o loop legado
-        # Libera qualquer wait pendente em pause checkpoint.
-        self._pause_event.set()
-
-    @property
     def is_paused(self) -> bool:
-        """Estado atual da pausa cooperativa (v2.11)."""
+        """Retorna True se ``request_pause`` foi chamado sem ``request_resume``."""
         return self._is_paused
 
-    @property
     def is_cancelled(self) -> bool:
-        """Estado atual do cancelamento (v2.11)."""
-        return self._cancel_requested
+        """Retorna True se ``request_cancel`` ou ``request_stop`` foi chamado."""
+        return self._stopped
 
     def _wait_if_paused(self) -> None:
-        """Bloqueia se houver pausa solicitada (v2.11). Chamado em checkpoints.
-
-        Usar timeout interno em ``Event.wait`` permitiria checagem de
-        cancelamento durante a pausa — mas como ``request_cancel`` faz
-        ``_pause_event.set()`` para liberar o wait, basta um wait simples.
-        """
+        """Bloqueia se ``_pause_event`` estiver clear (pausa cooperativa)."""
         if not self._pause_event.is_set():
             self._pause_event.wait()
 
@@ -867,12 +615,21 @@ class SimulationThread(QThread):
         # não-monotônica e o log de blocos se tornaria confuso.
         use_progress_q = n_workers == 1
 
+        # v2.17: diagnóstico de topologia da CPU (não-bloqueante)
+        if req.backend == "numba":
+            try:
+                from geosteering_ai.simulation import detect_cpu_topology
+
+                _logical, _phys, _has_ht = detect_cpu_topology()
+                if _phys > 0:
+                    self.log.emit(
+                        f"  CPU: {_phys} cores físicos, {_logical} lógicos "
+                        f"(HT/SMT={'sim' if _has_ht else 'não'})"
+                    )
+            except Exception:
+                pass  # diagnóstico best-effort
+
         t0 = time.perf_counter()
-        # t0_sim: redefinido no branch Numba APÓS todos os workers completarem
-        # _numba_init_worker (spawn + JIT). Throughput usa t0_sim para excluir
-        # overhead de pool creation (~10–12 s no cold start).
-        # t0 permanece como referência de tempo total (pool + simulação).
-        t0_sim: Optional[float] = None
         done = 0
         throughput = 0.0
         H_parts: Dict[int, np.ndarray] = {}
@@ -902,141 +659,94 @@ class SimulationThread(QThread):
 
         try:
             if req.backend == "numba":
-                # ── Sprint 17.1 (v2.17): diagnóstico de paralelismo ──────
-                # Loga topologia da CPU e detecta oversubscrição (workers
-                # × threads > cores físicos), que causa perda 30-50% em
-                # CPUs com Hyperthreading/SMT. Esta era a CAUSA RAIZ da
-                # regressão remanescente em produção GUI (38k mod/h):
-                # defaults v2.16 produziam 4w × 4t = 16 threads em 8 cores
-                # físicos = 2× oversubscrição.
-                try:
-                    from geosteering_ai.simulation import detect_cpu_topology
-
-                    _logical, _phys, _has_ht = detect_cpu_topology()
-                    _total_threads = n_workers * int(req.n_threads)
-                    _ht_tag = " (HT/SMT)" if _has_ht else ""
-                    self.log.emit(
-                        f"CPU: {_phys} cores físicos · {_logical} threads "
-                        f"lógicas{_ht_tag} · alvo paralelo: {_total_threads} threads"
-                    )
-                    if _total_threads > _phys:
-                        factor = _total_threads / max(1, _phys)
-                        self.log.emit(
-                            f"  ⚠ AVISO: oversubscrição {factor:.2f}× "
-                            f"({_total_threads} threads > {_phys} cores físicos). "
-                            f"Performance pode degradar 30-50%. Recomendado: "
-                            f"reduzir workers ou threads para {_phys} threads totais."
-                        )
-                except Exception:
-                    pass
                 self.log.emit(
                     f"Numba — {n_workers} workers × {req.n_threads} threads "
                     f"({n_total} modelos)."
                 )
-                # Pool persistente: workers já aquecidos pelo _run_numba_warmup_task
-                # (Future submetido por PoolWarmupThread na abertura da GUI).
-                # Spawn/import/JIT só ocorrem na PRIMEIRA simulação ou quando
-                # n_workers/n_threads/hankel_filter mudam.
-                pool = _acquire_numba_pool(n_workers, req.n_threads, req.hankel_filter)
-                # ── Sprint 18.1 (v2.18) / v2.26: aguarda workers, define t0_sim ──
-                # Os _noop ficam na fila FIFO ATRÁS dos _run_numba_warmup_task já
-                # submetidos por PoolWarmupThread. Quando _noop retorna, todos os
-                # warmup futures já concluíram → JIT pronto → t0_sim correto.
-                # Pool warm (2.ª simulação mesma sessão) → retorna em ~0 ms.
-                # Pool frio (JIT ainda em andamento) → bloqueia até warmup futures
-                # concluírem, depois retorna imediatamente. t0_sim excluí overhead.
-                _init_futs = [pool.submit(_noop) for _ in range(n_workers)]
-                for _if in _init_futs:
-                    try:
-                        _if.result(timeout=120)
-                    except Exception:
-                        pass
-                t0_sim = time.perf_counter()
-                _warmup_s = t0_sim - t0
-                if _warmup_s > 0.5:
+                if n_workers > 1:
+                    # Warmup JIT feedback inline: avisa antes do primeiro
+                    # future.result() que silenciaria 10-30 s de compilação.
                     self.log.emit(
-                        f"  Pool aquecido em {_warmup_s:.1f}s (spawn + JIT). "
-                        "Throughput mede apenas simulação daqui em diante."
+                        f"  Aquecendo JIT em {n_workers} workers "
+                        f"(~10–30 s no primeiro modelo de cada worker)…"
                     )
-                futures = {
-                    pool.submit(
-                        run_numba_chunk,
-                        wid,
-                        chunk,
-                        req.positions_z,
-                        req.frequencies_hz,
-                        req.tr_spacings_m,
-                        req.dip_degs,
-                        req.hankel_filter,
-                        req.n_threads,
-                        progress_q if use_progress_q else None,
-                        100,
-                        n_total if use_progress_q else None,
-                    ): (wid, chunk, s, e)
-                    for wid, chunk, s, e in batches
-                }
+                with ProcessPoolExecutor(max_workers=n_workers) as pool:
+                    futures = {
+                        pool.submit(
+                            run_numba_chunk,
+                            wid,
+                            chunk,
+                            req.positions_z,
+                            req.frequencies_hz,
+                            req.tr_spacings_m,
+                            req.dip_degs,
+                            req.hankel_filter,
+                            req.n_threads,
+                            progress_q if use_progress_q else None,
+                            100,
+                            n_total if use_progress_q else None,
+                        ): (wid, chunk, s, e)
+                        for wid, chunk, s, e in batches
+                    }
 
-                if use_progress_q:
-                    # Modo sequencial: drena progress_q enquanto o único
-                    # future roda (single future, usamos list() para pegar).
-                    (fut,) = list(futures.keys())
-                    warmup_logged = False
-                    while not fut.done():
-                        # v2.11: pausa cooperativa — bloqueia se _pause_event
-                        # foi clear via request_pause(). request_cancel libera.
-                        self._wait_if_paused()
-                        if self._stopped:
-                            break
-                        try:
-                            evt = progress_q.get(timeout=0.5)
-                        except Exception:
-                            continue
-                        if not isinstance(evt, dict):
-                            continue
-                        if evt.get("event") == "warmup_done":
-                            if not warmup_logged:
-                                self.log.emit(
-                                    "  JIT aquecido — iniciando processamento."
+                    if use_progress_q:
+                        # Modo sequencial: drena progress_q enquanto o único
+                        # future roda (single future, usamos list() para pegar).
+                        (fut,) = list(futures.keys())
+                        warmup_logged = False
+                        while not fut.done():
+                            if self._stopped:
+                                break
+                            self._wait_if_paused()  # v2.11: bloqueia se pausado
+                            try:
+                                evt = progress_q.get(timeout=0.5)
+                            except Exception:
+                                continue
+                            if not isinstance(evt, dict):
+                                continue
+                            if evt.get("event") == "warmup_done":
+                                if not warmup_logged:
+                                    self.log.emit(
+                                        "  JIT aquecido — iniciando processamento."
+                                    )
+                                    warmup_logged = True
+                                continue
+                            if evt.get("event") == "block":
+                                self._emit_block_log(evt)
+                                dt = max(time.perf_counter() - t0, 1e-6)
+                                throughput = float(evt["done"]) / dt * 3600.0
+                                self.progress_update.emit(
+                                    int(evt["done"]), n_total, throughput
                                 )
-                                warmup_logged = True
-                            continue
-                        if evt.get("event") == "block":
-                            self._emit_block_log(evt)
-                            dt = max(time.perf_counter() - (t0_sim or t0), 1e-6)
-                            throughput = float(evt["done"]) / dt * 3600.0
-                            self.progress_update.emit(
-                                int(evt["done"]), n_total, throughput
-                            )
-                    wid, H_stack, z_obs, elapsed_w = fut.result()
-                    H_parts[wid] = H_stack
-                    if z_obs_ref is None and z_obs.size > 0:
-                        z_obs_ref = z_obs
-                    done = H_stack.shape[0]
-                    dt = max(time.perf_counter() - (t0_sim or t0), 1e-6)
-                    throughput = done / dt * 3600.0
-                    self.progress_update.emit(done, n_total, throughput)
-                    self.log.emit(
-                        f"  Worker {wid}: {H_stack.shape[0]} modelos "
-                        f"em {elapsed_w:.2f}s"
-                    )
-                else:
-                    for future in as_completed(futures):
-                        # v2.11: pausa cooperativa entre workers concluídos.
-                        self._wait_if_paused()
-                        if self._stopped:
-                            break
-                        wid, H_stack, z_obs, elapsed_w = future.result()
+                        wid, H_stack, z_obs, elapsed_w = fut.result()
                         H_parts[wid] = H_stack
                         if z_obs_ref is None and z_obs.size > 0:
                             z_obs_ref = z_obs
-                        done += H_stack.shape[0]
-                        dt = max(time.perf_counter() - (t0_sim or t0), 1e-6)
+                        done = H_stack.shape[0]
+                        dt = max(time.perf_counter() - t0, 1e-6)
                         throughput = done / dt * 3600.0
                         self.progress_update.emit(done, n_total, throughput)
                         self.log.emit(
                             f"  Worker {wid}: {H_stack.shape[0]} modelos "
                             f"em {elapsed_w:.2f}s"
                         )
+                    else:
+                        for future in as_completed(futures):
+                            if self._stopped:
+                                break
+                            self._wait_if_paused()  # v2.11: bloqueia se pausado
+                            wid, H_stack, z_obs, elapsed_w = future.result()
+                            H_parts[wid] = H_stack
+                            if z_obs_ref is None and z_obs.size > 0:
+                                z_obs_ref = z_obs
+                            done += H_stack.shape[0]
+                            dt = max(time.perf_counter() - t0, 1e-6)
+                            throughput = done / dt * 3600.0
+                            self.progress_update.emit(done, n_total, throughput)
+                            self.log.emit(
+                                f"  Worker {wid}: {H_stack.shape[0]} modelos "
+                                f"em {elapsed_w:.2f}s"
+                            )
                 # Reagrupa preservando ordem dos workers (id asc). Filtra
                 # arrays vazios para evitar ValueError "arrays must have
                 # same number of dimensions" quando algum worker não
@@ -1055,9 +765,6 @@ class SimulationThread(QThread):
                 else:
                     H_full = np.empty((0,), dtype=np.complex128)
                 elapsed_total = time.perf_counter() - t0
-                # sim_elapsed: apenas tempo de simulação (exclui warmup de pool).
-                # t0_sim é definido após os _noop confirmarem init dos workers.
-                sim_elapsed = time.perf_counter() - (t0_sim or t0)
                 # Linha-resumo de finalização com 89 traços (mesmo padrão de
                 # fifthBuildTIVModels.py:1294).
                 self.log.emit("─" * 89)
@@ -1065,13 +772,15 @@ class SimulationThread(QThread):
                     f"Tempo de execução (treinamento): "
                     f"{elapsed_total / 3600.0:.4f} horas  ({elapsed_total:.1f} s)"
                 )
+                if self._stopped:
+                    self.cancelled.emit()
                 self.finished_all.emit(
                     {
                         "backend": "numba",
                         "H_stack": H_full,
                         "z_obs": z_obs_ref,
                         "elapsed": elapsed_total,
-                        "throughput_mod_h": n_total / max(sim_elapsed, 1e-6) * 3600.0,
+                        "throughput_mod_h": n_total / max(elapsed_total, 1e-6) * 3600.0,
                         "n_models": n_total,
                     }
                 )
@@ -1120,10 +829,9 @@ class SimulationThread(QThread):
                 if use_progress_q:
                     (fut,) = list(futures.keys())
                     while not fut.done():
-                        # v2.11: pausa cooperativa Fortran path (sequencial).
-                        self._wait_if_paused()
                         if self._stopped:
                             break
+                        self._wait_if_paused()  # v2.11
                         try:
                             evt = progress_q.get(timeout=0.5)
                         except Exception:
@@ -1146,10 +854,9 @@ class SimulationThread(QThread):
                     )
                 else:
                     for future in as_completed(futures):
-                        # v2.11: pausa cooperativa Fortran path (paralelo).
-                        self._wait_if_paused()
                         if self._stopped:
                             break
+                        self._wait_if_paused()  # v2.11
                         wid, files, elapsed_w = future.result()
                         dat_files.extend([nn for (_, nn) in files])
                         done += len(futures[future][1])
@@ -1165,6 +872,8 @@ class SimulationThread(QThread):
                 f"Tempo de execução (treinamento): "
                 f"{elapsed_total / 3600.0:.4f} horas  ({elapsed_total:.1f} s)"
             )
+            if self._stopped:
+                self.cancelled.emit()
             self.finished_all.emit(
                 {
                     "backend": "fortran",
@@ -1179,136 +888,12 @@ class SimulationThread(QThread):
 
             self.error.emit(f"{exc}\n{traceback.format_exc()[:2000]}")
         finally:
-            # v2.11 — emit cancelled após cleanup se foi cancelamento explícito.
-            # Diferencia stop legado (apenas _stopped) de cancel intencional.
-            if self._cancel_requested:
-                self.cancelled.emit()
             # Encerra o Manager (se criado) para liberar o subprocess auxiliar.
             if mp_manager is not None:
                 try:
                     mp_manager.shutdown()
                 except Exception:
                     pass
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# QThread para pré-aquecimento do pool Numba em background (v2.18)
-# ──────────────────────────────────────────────────────────────────────────
-
-
-class PoolWarmupThread(QThread):
-    """Pré-aquece o pool Numba persistente em background para eliminar cold-start.
-
-    Quando ``SimulationPage`` é aberta, esta thread cria/reusa o pool com os
-    defaults recomendados e submete ``_run_numba_warmup_task`` como Future
-    para **1 worker**. Na primeira simulação real, o pool já está pronto:
-
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │  Sem pre-warm (v2.17):                                              │
-    │    Usuário clica "Simular" → cold pool → overhead de JIT incluído   │
-    │    no throughput → 38k mod/h reportado (vs. 85k real)               │
-    │                                                                      │
-    │  Com pre-warm via inicializador (v2.18–v2.25):                      │
-    │    GUI abre → workers spawnam → _numba_init_worker (35 s JIT frio)  │
-    │    → pool "pronto" após 35 s; saída da app durante init = HANG      │
-    │                                                                      │
-    │  Com pre-warm via Future N workers (v2.26 — BUG):                  │
-    │    GUI abre → N futures simultâneos → N×LLVM saturando CPU          │
-    │    → cada compilação 3–4× mais lenta → 110+ s total (regressão!)   │
-    │                                                                      │
-    │  Com pre-warm via Future 1 worker (v2.27):                          │
-    │    GUI abre → 1 future → 1 worker compila JIT (~35 s frio / <2 s   │
-    │    quente) e grava cache em disco → workers 2..N carregam cache     │
-    │    (<2 s) no 1º chunk → saída limpa; sem saturação LLVM             │
-    └──────────────────────────────────────────────────────────────────────┘
-
-    Ordenamento da fila de futures que garante t0_sim correto:
-
-      PoolWarmupThread submete:   [warm_1, warm_2, ..., warm_N]
-      SimulationThread submete:   [noop_1, noop_2, ..., noop_N, chunk_1, ...]
-                                  └── ficam atrás dos warms na fila FIFO ──┘
-      Quando noop_N retorna → todos os warms já concluíram → t0_sim correto.
-
-    Signals:
-        warmup_done(elapsed_s, n_workers, n_threads): Pool e JIT prontos.
-        warmup_error(msg): Falha não-fatal (warmup secundário em run_numba_chunk).
-
-    Note:
-        Usa ``hankel_filter="werthmuller_201pt"`` (padrão) para pre-warm.
-        Se o filtro real for diferente, o pool é recriado na simulação
-        (custo único). Para a configuração padrão, o warm hit é garantido.
-    """
-
-    warmup_done = Signal(float, int, int)  # elapsed_s, n_workers, n_threads
-    warmup_error = Signal(str)
-
-    def __init__(
-        self,
-        n_workers: int,
-        n_threads: int,
-        hankel_filter: str = "werthmuller_201pt",
-        parent: Optional["QObject"] = None,
-    ) -> None:
-        super().__init__(parent)
-        self._n_workers = n_workers
-        self._n_threads = n_threads
-        self._hankel_filter = hankel_filter
-
-    def run(self) -> None:
-        """Cria pool, submete _run_numba_warmup_task a 1 worker e aguarda.
-
-        v2.27: warmup submetido a apenas 1 worker (não a n_workers simultâneos).
-
-        Diagnóstico da regressão v2.26:
-          Em v2.26 submetíamos ``n_workers`` futures de warmup simultaneamente.
-          Cada worker compilava ~22 funções JIT via LLVM. Com N processos
-          saturando a CPU com compilações LLVM concorrentes, cada compilação
-          levava 3–4× mais tempo do que em isolado:
-
-            1 worker  (v2.25 initializer, cache frio): ~35–38 s
-            4 workers (v2.26 futures simultâneos)    : ~110+ s  ← regressão
-
-          A raiz é a saturação do LLVM: cada worker usa LLVM multi-thread
-          internamente durante as passes de otimização. Com N workers
-          compilando ao mesmo tempo, N × LLVM_threads disputam os mesmos
-          cores físicos, triplicando o tempo total.
-
-        Solução v2.27:
-          Submeter 1 único future de warmup → 1 worker compila e grava o
-          bytecode no cache em disco (``__pycache__/*.nbi`` / ``*.nbc``).
-          Os workers restantes (2..N), quando receberem o 1º chunk real via
-          ``run_numba_chunk``, carregam o bytecode do cache em disco (< 2 s)
-          via warmup secundário, **sem** nova compilação LLVM.
-
-          Tempo total cold: ~35–38 s (1 worker só).
-          Tempo total warm: < 2 s (cache em disco já presente).
-        """
-        t0 = time.perf_counter()
-        try:
-            pool = _acquire_numba_pool(
-                self._n_workers, self._n_threads, self._hankel_filter
-            )
-            # ── v2.27: 1 worker compila JIT, outros carregam do cache em disco ──
-            # Submeter a N workers simultâneos causa saturação de LLVM (CPU):
-            # cada compilação leva 3–4× mais → 35 s/worker → 110+ s total.
-            # Com 1 worker: ~35 s frio (sem contenção); Workers 2..N carregam
-            # bytecode do cache (<2 s) no 1º run_numba_chunk.
-            fut = pool.submit(
-                _run_numba_warmup_task, self._n_threads, self._hankel_filter
-            )
-            result = fut.result(timeout=120)
-            if not result:
-                self.warmup_error.emit(
-                    "warmup JIT retornou False — cache pode estar corrompido "
-                    "ou simulate_multi levantou exceção. Workers 2..N farão "
-                    "warmup secundário via run_numba_chunk no 1º chunk."
-                )
-                return
-            self.warmup_done.emit(
-                time.perf_counter() - t0, self._n_workers, self._n_threads
-            )
-        except Exception as exc:
-            self.warmup_error.emit(str(exc))
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1402,13 +987,18 @@ class SaveArtifactsThread(QThread):
 
 
 class NumbaPrimer(QThread):
-    """Pré-aquece o cache Numba JIT em background no startup do GUI.
+    """Pré-aquece o cache Numba JIT em background no startup do GUI (v2.9).
 
     Executa ``simulate_multi`` com um modelo trivial no processo principal,
     escrevendo artefatos compilados (.nbi/.nbc) em disco via ``cache=True``.
     Quando a primeira simulação real iniciar, os workers subprocessos
     carregarão o cache do disco (~3–5 s) em vez de recompilar do zero
     (~90–110 s após atualização de ambiente Python/Numba).
+
+    Compatível com a arquitetura ephemeral v2.29 — popula o cache em disco
+    que workers spawned pelo `with ProcessPoolExecutor` leem no primeiro
+    `import numba`. NÃO é warmup background na GUI (não bloqueia simulações
+    nem cria pool persistente).
 
     Signals:
         primer_done(float): Tempo elapsed em segundos. Valor baixo (<15 s)
@@ -1418,11 +1008,11 @@ class NumbaPrimer(QThread):
             ``simulate_multi`` lançar exceção. O argumento é a msg de erro.
 
     Note:
-        O primer usa ``NUMBA_NUM_THREADS=1`` para não disputar CPU com a GUI.
-        Os workers de simulação usam ``n_threads`` configurado pelo usuário.
-        Após o primer concluir, o cache em disco é válido para qualquer
-        quantidade de threads (Numba compila por assinatura de tipos, não por
-        contagem de threads).
+        O primer usa ``num_threads=1`` via SimulationConfig para não disputar
+        CPU com a GUI. Os workers de simulação usam ``n_threads`` configurado
+        pelo usuário. Após o primer concluir, o cache em disco é válido para
+        qualquer quantidade de threads (Numba compila por assinatura de tipos,
+        não por contagem de threads).
     """
 
     primer_done = Signal(float)
@@ -1470,9 +1060,6 @@ __all__ = [
     "SaveArtifactsThread",
     "SimRequest",
     "SimulationThread",
-    "_acquire_numba_pool",
-    "_noop",
-    "release_numba_pool",
     "run_fortran_chunk",
     "run_numba_chunk",
 ]
