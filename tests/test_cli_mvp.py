@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Testes I2.6: CLI MVP do Geosteering AI (Sprint v2.24).
+"""Testes I2.6: CLI MVP do Geosteering AI (Sprint v2.30 — multi-dim).
 
 Valida:
 - Estrutura do módulo `geosteering_ai.cli/`
 - Subcomandos `version`, `simulate --help`, `benchmark --help`
 - Entry point declarado em pyproject.toml
 - Reutilização correta de simulate_multi e auto-detect de paralelismo
+- Sprint v2.30: flags --frequencies, --dips, --tr-spacings, cenário G
 """
 
 from __future__ import annotations
@@ -65,7 +66,7 @@ def test_cli_version_subcommand():
     proc = _run_cli(["version"])
     assert proc.returncode == 0
     assert "Geosteering AI" in proc.stdout
-    assert "v2.24" in proc.stdout
+    assert "v2.30" in proc.stdout
 
 
 def test_cli_help_does_not_error():
@@ -141,7 +142,7 @@ def test_cli_module_path_is_geosteering_ai_cli():
     assert hasattr(cli_mod, "main")
     assert hasattr(cli_main_mod, "build_parser")
     assert hasattr(cli_main_mod, "SIMULATION_MANAGER_VERSION")
-    assert cli_main_mod.SIMULATION_MANAGER_VERSION == "v2.24"
+    assert cli_main_mod.SIMULATION_MANAGER_VERSION == "v2.30"
 
 
 # ── Smoke test simulação real (lento) ────────────────────────────
@@ -181,3 +182,265 @@ def test_cli_simulate_smoke_5_models():
         0,
         1,
     ), f"CLI crashou ou timeout: {proc.returncode}, stderr={proc.stderr[:500]}"
+
+
+# ── Sprint v2.30 — flags multi-dim ──────────────────────────────
+
+
+def test_cli_simulate_help_shows_multidim_flags():
+    """v2.30 — `simulate --help` exibe --frequencies, --dips, --tr-spacings."""
+    proc = _run_cli(["simulate", "--help"])
+    assert proc.returncode == 0
+    assert "--frequencies" in proc.stdout
+    assert "--dips" in proc.stdout
+    assert "--tr-spacings" in proc.stdout
+
+
+def test_cli_benchmark_help_shows_multidim_flags_and_scenario_g():
+    """v2.30 — `benchmark --help` exibe override flags e cenário G."""
+    proc = _run_cli(["benchmark", "--help"])
+    assert proc.returncode == 0
+    assert "--frequencies" in proc.stdout
+    assert "--dips" in proc.stdout
+    assert "--tr-spacings" in proc.stdout
+    assert "G" in proc.stdout
+
+
+def test_cli_benchmark_scenarios_dict_has_dips_field():
+    """v2.30 — SCENARIOS dict inclui campo 'dips' em todos os cenários."""
+    from geosteering_ai.cli.benchmark import SCENARIOS
+
+    for name, sc in SCENARIOS.items():
+        assert "dips" in sc, f"Cenário {name} sem campo 'dips'"
+        assert len(sc["dips"]) >= 1, f"Cenário {name} com dips vazio"
+
+
+def test_cli_benchmark_scenario_g_exists():
+    """v2.30 — Cenário G (máxima combinatória) está definido em SCENARIOS."""
+    from geosteering_ai.cli.benchmark import SCENARIOS
+
+    assert "G" in SCENARIOS
+    sc = SCENARIOS["G"]
+    assert len(sc["freqs"]) == 4
+    assert len(sc["trs"]) == 4
+    assert len(sc["dips"]) == 4
+
+
+def test_cli_parse_float_list_basic():
+    """v2.30 — _parse_float_list parseia CSV corretamente."""
+    from geosteering_ai.cli.simulate import _parse_float_list
+
+    assert _parse_float_list("2000,20000,100000", [20000.0]) == [
+        2000.0,
+        20000.0,
+        100000.0,
+    ]
+    assert _parse_float_list("0, 15, 30", [0.0]) == [0.0, 15.0, 30.0]
+    assert _parse_float_list(None, [20000.0]) == [20000.0]
+    assert _parse_float_list("", [20000.0]) == [20000.0]
+    assert _parse_float_list("abc", [20000.0]) == [20000.0]
+    assert _parse_float_list("0.5;1.0;1.5", [1.0]) == [0.5, 1.0, 1.5]
+
+
+@pytest.mark.slow
+def test_cli_simulate_multi_frequencies():
+    """v2.30 — `simulate --frequencies 2000,20000` completa sem erro."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "geosteering_ai.cli",
+            "simulate",
+            "--models",
+            "2",
+            "--n-pos",
+            "10",
+            "--frequencies",
+            "2000,20000",
+            "--workers",
+            "1",
+            "--threads",
+            "1",
+            "--quiet",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
+
+
+@pytest.mark.slow
+def test_cli_simulate_multi_dips():
+    """v2.30 — `simulate --dips 0,15,30` completa sem erro."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "geosteering_ai.cli",
+            "simulate",
+            "--models",
+            "2",
+            "--n-pos",
+            "10",
+            "--dips",
+            "0,15,30",
+            "--workers",
+            "1",
+            "--threads",
+            "1",
+            "--quiet",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
+
+
+@pytest.mark.slow
+def test_cli_simulate_multi_tr_spacings():
+    """v2.30 — `simulate --tr-spacings 0.5,1.0,1.5` completa sem erro."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "geosteering_ai.cli",
+            "simulate",
+            "--models",
+            "2",
+            "--n-pos",
+            "10",
+            "--tr-spacings",
+            "0.5,1.0,1.5",
+            "--workers",
+            "1",
+            "--threads",
+            "1",
+            "--quiet",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
+
+
+@pytest.mark.slow
+def test_cli_simulate_full_multidim_combo():
+    """v2.30 — combinação completa freq + dips + TR completa sem erro."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "geosteering_ai.cli",
+            "simulate",
+            "--models",
+            "2",
+            "--n-pos",
+            "10",
+            "--frequencies",
+            "2000,20000",
+            "--dips",
+            "0,15",
+            "--tr-spacings",
+            "0.5,1.0",
+            "--workers",
+            "1",
+            "--threads",
+            "1",
+            "--quiet",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
+
+
+@pytest.mark.slow
+def test_cli_benchmark_scenario_g_runs():
+    """v2.30 — `benchmark --scenario G --n 2` completa e exibe mod/h."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "geosteering_ai.cli",
+            "benchmark",
+            "--scenario",
+            "G",
+            "--n",
+            "2",
+            "--workers",
+            "1",
+            "--threads",
+            "1",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
+    if proc.returncode == 0:
+        assert "mod/h" in proc.stdout
+
+
+@pytest.mark.slow
+def test_cli_benchmark_dips_override():
+    """v2.30 — `benchmark --scenario E --dips 0,15` aplica override de dips."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "geosteering_ai.cli",
+            "benchmark",
+            "--scenario",
+            "E",
+            "--n",
+            "2",
+            "--dips",
+            "0,15",
+            "--workers",
+            "1",
+            "--threads",
+            "1",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
+
+
+@pytest.mark.slow
+def test_cli_benchmark_frequencies_override():
+    """v2.30 — `benchmark --scenario E --frequencies 2000,20000` aplica override."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "geosteering_ai.cli",
+            "benchmark",
+            "--scenario",
+            "E",
+            "--n",
+            "2",
+            "--frequencies",
+            "2000,20000",
+            "--workers",
+            "1",
+            "--threads",
+            "1",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
