@@ -4,8 +4,8 @@
 # ║  ---------------------------------------------------------------------    ║
 # ║  Módulo      : Dispatcher principal da CLI (argparse top-level)           ║
 # ║  Projeto     : Geosteering AI v2.0                                        ║
-# ║  Subsistema  : CLI MVP (Sprint v2.24 — I2.6)                              ║
-# ║  Versão      : v2.24                                                      ║
+# ║  Subsistema  : CLI MVP (Sprint v2.30 — multi-dim)                         ║
+# ║  Versão      : v2.30                                                      ║
 # ║  Autor       : Daniel Leal                                                ║
 # ║  Criação     : 2026-05-10                                                 ║
 # ║  Status      : Produção — MVP                                             ║
@@ -40,7 +40,7 @@ import sys
 
 # Versão exibida pelo subcomando `version` — sincronizada manualmente
 # com CLAUDE.md linha 16 ao final de cada sprint.
-SIMULATION_MANAGER_VERSION = "v2.24"
+SIMULATION_MANAGER_VERSION = "v2.30"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -120,6 +120,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="semente do gerador aleatório (default: 42)",
     )
     p_sim.add_argument(
+        "--frequencies",
+        type=str,
+        default=None,
+        metavar="HZ",
+        help=(
+            "frequências EM em Hz separadas por vírgula "
+            "(ex: 2000,20000,100000). Default: 20000"
+        ),
+    )
+    p_sim.add_argument(
+        "--dips",
+        type=str,
+        default=None,
+        metavar="DEG",
+        help=(
+            "ângulos de inclinação em graus separados por vírgula "
+            "(ex: 0,15,30,45). Default: 0"
+        ),
+    )
+    p_sim.add_argument(
+        "--tr-spacings",
+        type=str,
+        default=None,
+        metavar="M",
+        help=(
+            "espaçamentos transmissor-receptor em metros separados por vírgula "
+            "(ex: 0.5,1.0,1.5,2.0). Default: 1.0"
+        ),
+    )
+    p_sim.add_argument(
         "--out",
         type=str,
         default=None,
@@ -138,9 +168,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bench.add_argument(
         "--scenario",
-        choices=["A", "B", "C", "D", "E", "F"],
+        choices=["A", "B", "C", "D", "E", "F", "G"],
         default="A",
-        help="cenário canônico (A=padrão, E=Inv0Dip)",
+        help=(
+            "cenário canônico (A=padrão, E=Inv0Dip, "
+            "G=máxima combinatória 4freq×4TR×4dips)"
+        ),
+    )
+    p_bench.add_argument(
+        "--frequencies",
+        type=str,
+        default=None,
+        metavar="HZ",
+        help=(
+            "sobrescreve frequências do cenário — Hz separados por vírgula "
+            "(ex: 2000,20000). Default: usa freqs do cenário"
+        ),
+    )
+    p_bench.add_argument(
+        "--dips",
+        type=str,
+        default=None,
+        metavar="DEG",
+        help=(
+            "sobrescreve ângulos de dip do cenário — graus separados por vírgula "
+            "(ex: 0,15,30). Default: usa dips do cenário"
+        ),
+    )
+    p_bench.add_argument(
+        "--tr-spacings",
+        type=str,
+        default=None,
+        metavar="M",
+        help=(
+            "sobrescreve espaçamentos T-R do cenário — metros separados por vírgula "
+            "(ex: 0.5,1.0,1.5). Default: usa TRs do cenário"
+        ),
     )
     p_bench.add_argument(
         "--n",

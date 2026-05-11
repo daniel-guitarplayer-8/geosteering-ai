@@ -4,8 +4,8 @@
 # ║  ---------------------------------------------------------------------    ║
 # ║  Módulo      : Subcomando `benchmark` da CLI                              ║
 # ║  Projeto     : Geosteering AI v2.0                                        ║
-# ║  Subsistema  : CLI MVP (Sprint v2.24 — I2.6)                              ║
-# ║  Versão      : v2.24                                                      ║
+# ║  Subsistema  : CLI MVP (Sprint v2.30 — multi-dim)                         ║
+# ║  Versão      : v2.30                                                      ║
 # ║  Autor       : Daniel Leal                                                ║
 # ║  Criação     : 2026-05-10                                                 ║
 # ║  Status      : Produção — MVP                                             ║
@@ -20,16 +20,17 @@
 # ║    históricos do projeto (``benchmarks/bench_v214_numba.py``).            ║
 # ║                                                                           ║
 # ║  CENÁRIOS                                                                 ║
-# ║    ┌────┬───────────────────────────┬──────┬────┬─────┐                  ║
-# ║    │ Id │  Característica           │ npos │ nf │ nTR │                  ║
-# ║    ├────┼───────────────────────────┼──────┼────┼─────┤                  ║
-# ║    │ A  │  Single-pos, 1 freq, 1 TR │   1  │  1 │  1  │                  ║
-# ║    │ B  │  Multi-pos, 1 freq        │ 100  │  1 │  1  │                  ║
-# ║    │ C  │  Multi-pos, multi-freq    │ 100  │  4 │  1  │                  ║
-# ║    │ D  │  Single-pos, multi-TR     │   1  │  1 │  4  │                  ║
-# ║    │ E  │  Inv0Dip 0° (default)     │ 600  │  1 │  1  │                  ║
-# ║    │ F  │  Multi-TR + multi-freq    │ 100  │  4 │  4  │                  ║
-# ║    └────┴───────────────────────────┴──────┴────┴─────┘                  ║
+# ║    ┌────┬─────────────────────────────────┬──────┬────┬─────┬──────┐     ║
+# ║    │ Id │  Característica                 │ npos │ nf │ nTR │ nAng │     ║
+# ║    ├────┼─────────────────────────────────┼──────┼────┼─────┼──────┤     ║
+# ║    │ A  │  Single-pos, 1 freq, 1 TR       │   1  │  1 │  1  │  1   │     ║
+# ║    │ B  │  Multi-pos, 1 freq              │ 100  │  1 │  1  │  1   │     ║
+# ║    │ C  │  Multi-pos, multi-freq          │ 100  │  4 │  1  │  1   │     ║
+# ║    │ D  │  Single-pos, multi-TR           │   1  │  1 │  4  │  1   │     ║
+# ║    │ E  │  Inv0Dip 0° (default)           │ 600  │  1 │  1  │  1   │     ║
+# ║    │ F  │  Multi-TR + multi-freq          │ 100  │  4 │  4  │  1   │     ║
+# ║    │ G  │  Máxima combinatória (v2.30)    │ 100  │  4 │  4  │  4   │     ║
+# ║    └────┴─────────────────────────────────┴──────┴────┴─────┴──────┘     ║
 # ║                                                                           ║
 # ║  EXPORTS                                                                  ║
 # ║    SCENARIOS: dict com configuração de cada cenário                       ║
@@ -43,14 +44,18 @@ históricos em ``benchmarks/bench_v214_numba.py`` e ``bench_v212_workers.py``.
 
 Cenários disponíveis:
 
-| Cenário | Característica           | n_pos | nf | nTR |
-|:-------:|:-------------------------|:-----:|:--:|:---:|
-| A       | Single-pos, 1 freq, 1 TR | 1     | 1  | 1   |
-| B       | Multi-pos, 1 freq        | 100   | 1  | 1   |
-| C       | Multi-pos, multi-freq    | 100   | 4  | 1   |
-| D       | Single-pos, multi-TR     | 1     | 1  | 4   |
-| E       | Inv0Dip 0° (default)     | 600   | 1  | 1   |
-| F       | Multi-TR + multi-freq    | 100   | 4  | 4   |
+| Cenário | Característica                  | n_pos | nf | nTR | nAng |
+|:-------:|:--------------------------------|:-----:|:--:|:---:|:----:|
+| A       | Single-pos, 1 freq, 1 TR        | 1     | 1  | 1   | 1    |
+| B       | Multi-pos, 1 freq               | 100   | 1  | 1   | 1    |
+| C       | Multi-pos, multi-freq           | 100   | 4  | 1   | 1    |
+| D       | Single-pos, multi-TR            | 1     | 1  | 4   | 1    |
+| E       | Inv0Dip 0° (default)            | 600   | 1  | 1   | 1    |
+| F       | Multi-TR + multi-freq           | 100   | 4  | 4   | 1    |
+| G       | Máxima combinatória (v2.30)     | 100   | 4  | 4   | 4    |
+
+Use ``--frequencies``, ``--dips``, ``--tr-spacings`` para sobrescrever
+os parâmetros de qualquer cenário diretamente na linha de comando.
 """
 
 from __future__ import annotations
@@ -64,17 +69,61 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-# Definição dos cenários canônicos (n_pos, frequencies_hz, tr_spacings_m)
+def _parse_float_list(text: str | None, default: list[float]) -> list[float]:
+    """Interpreta string CSV de floats; retorna ``default`` se None ou inválido.
+
+    Aceita vírgula ou ponto-e-vírgula como separador. Espaços são ignorados.
+    Mantida localmente para preservar lazy imports independentes entre
+    os subcomandos ``simulate`` e ``benchmark``.
+
+    Args:
+        text: string no formato ``"1.0,2.0,3.0"`` ou ``None``.
+        default: lista retornada quando ``text`` é None, vazio ou inválido.
+
+    Returns:
+        Lista de floats parseados, ou ``default`` em caso de erro.
+
+    Example:
+        >>> _parse_float_list("0, 15, 30", [0.0])
+        [0.0, 15.0, 30.0]
+    """
+    if not text or not text.strip():
+        return default
+    try:
+        parsed = [
+            float(v.strip()) for v in text.replace(";", ",").split(",") if v.strip()
+        ]
+        return parsed if parsed else default
+    except ValueError:
+        logger.warning(
+            "Valor inválido em lista de floats: %r — usando default %s", text, default
+        )
+        return default
+
+
+# Definição dos cenários canônicos (n_pos, frequencies_hz, tr_spacings_m, dip_degs)
 SCENARIOS = {
-    "A": {"n_pos": 1, "freqs": (20000.0,), "trs": (1.0,)},
-    "B": {"n_pos": 100, "freqs": (20000.0,), "trs": (1.0,)},
-    "C": {"n_pos": 100, "freqs": (2000.0, 20000.0, 100000.0, 400000.0), "trs": (1.0,)},
-    "D": {"n_pos": 1, "freqs": (20000.0,), "trs": (0.5, 1.0, 1.5, 2.0)},
-    "E": {"n_pos": 600, "freqs": (20000.0,), "trs": (1.0,)},
+    "A": {"n_pos": 1, "freqs": (20000.0,), "trs": (1.0,), "dips": (0.0,)},
+    "B": {"n_pos": 100, "freqs": (20000.0,), "trs": (1.0,), "dips": (0.0,)},
+    "C": {
+        "n_pos": 100,
+        "freqs": (2000.0, 20000.0, 100000.0, 400000.0),
+        "trs": (1.0,),
+        "dips": (0.0,),
+    },
+    "D": {"n_pos": 1, "freqs": (20000.0,), "trs": (0.5, 1.0, 1.5, 2.0), "dips": (0.0,)},
+    "E": {"n_pos": 600, "freqs": (20000.0,), "trs": (1.0,), "dips": (0.0,)},
     "F": {
         "n_pos": 100,
         "freqs": (2000.0, 20000.0, 100000.0, 400000.0),
         "trs": (0.5, 1.0, 1.5, 2.0),
+        "dips": (0.0,),
+    },
+    "G": {
+        "n_pos": 100,
+        "freqs": (2000.0, 20000.0, 100000.0, 400000.0),
+        "trs": (0.5, 1.0, 1.5, 2.0),
+        "dips": (0.0, 15.0, 30.0, 45.0),
     },
 }
 
@@ -130,10 +179,13 @@ def handle_benchmark(args: argparse.Namespace) -> int:
     Args:
         args: ``argparse.Namespace`` com campos:
 
-            - ``scenario`` (str): identificador do cenário (A..F)
+            - ``scenario`` (str): identificador do cenário (A..G)
             - ``n`` (int): número de modelos do benchmark
             - ``workers`` (int | None): workers paralelos
             - ``threads`` (int | None): threads Numba por worker
+            - ``frequencies`` (str | None): CSV Hz para sobrescrever cenário
+            - ``dips`` (str | None): CSV graus para sobrescrever cenário
+            - ``tr_spacings`` (str | None): CSV metros para sobrescrever cenário
 
     Returns:
         Exit code:
@@ -158,6 +210,12 @@ def handle_benchmark(args: argparse.Namespace) -> int:
 
             $ geosteering-cli benchmark --scenario A --n 100
             Cenário A — 1,180,000 mod/h
+
+            $ geosteering-cli benchmark --scenario G --n 20
+            Cenário G — 45,000 mod/h
+
+            $ geosteering-cli benchmark --scenario E --n 50 --dips 0,15,30
+            Cenário E — 52,000 mod/h
     """
     # Lazy imports — evita carregar numba em `--help`
     from geosteering_ai.simulation import simulate_multi
@@ -165,7 +223,21 @@ def handle_benchmark(args: argparse.Namespace) -> int:
 
     sc = SCENARIOS[args.scenario]
 
-    positions_z = np.linspace(-5.0, 5.0, sc["n_pos"]).astype(np.float64)
+    # Parâmetros base do cenário — overrideable via flags CLI (Sprint v2.30)
+    frequencies_hz: list[float] = list(sc["freqs"])  # type: ignore
+    tr_spacings_m: list[float] = list(sc["trs"])  # type: ignore
+    dip_degs: list[float] = list(sc["dips"])  # type: ignore
+
+    # Aplicar overrides fornecidos na linha de comando
+    if getattr(args, "frequencies", None):
+        frequencies_hz = _parse_float_list(args.frequencies, frequencies_hz)
+    if getattr(args, "dips", None):
+        dip_degs = _parse_float_list(args.dips, dip_degs)
+    if getattr(args, "tr_spacings", None):
+        tr_spacings_m = _parse_float_list(args.tr_spacings, tr_spacings_m)
+
+    n_pos: int = sc["n_pos"]  # type: ignore
+    positions_z = np.linspace(-5.0, 5.0, n_pos).astype(np.float64)
     models = _build_models(args.n)
 
     cfg = SimulationConfig(
@@ -174,36 +246,38 @@ def handle_benchmark(args: argparse.Namespace) -> int:
     )
 
     logger.info(
-        "Cenário %s: n=%d modelos, n_pos=%d, %d freq, %d TR — %dw × %dt",
+        "Cenário %s: n=%d modelos, n_pos=%d, %d freq, %d TR, %d dips — %dw × %dt",
         args.scenario,
         args.n,
         sc["n_pos"],
-        len(sc["freqs"]),
-        len(sc["trs"]),
+        len(frequencies_hz),
+        len(tr_spacings_m),
+        len(dip_degs),
         cfg.n_workers or 1,
         cfg.threads_per_worker or 1,
     )
 
-    # Warmup com shape COMPLETO do cenário (W2 code-review): inclui
-    # frequencies_hz e tr_spacings_m do cenário real para pré-aquecer
-    # especializações JIT de Cenários C/D/F (multi-freq/multi-TR).
+    # Warmup com shape COMPLETO (W2 code-review): pré-aquece todas as
+    # especializações JIT do cenário incluindo multi-freq, multi-TR e multi-dip.
     _ = simulate_multi(
         positions_z=positions_z,
         models=models[:1],
         cfg=cfg,
-        frequencies_hz=sc["freqs"],
-        tr_spacings_m=sc["trs"],
+        frequencies_hz=frequencies_hz,
+        tr_spacings_m=tr_spacings_m,
+        dip_degs=dip_degs,
     )
 
-    # Run cronometrado — passa apenas cfg (W5 do code-review)
+    # Run cronometrado
     t0 = time.perf_counter()
     try:
         _ = simulate_multi(
             positions_z=positions_z,
             models=models,
             cfg=cfg,
-            frequencies_hz=sc["freqs"],
-            tr_spacings_m=sc["trs"],
+            frequencies_hz=frequencies_hz,
+            tr_spacings_m=tr_spacings_m,
+            dip_degs=dip_degs,
         )
     except (ValueError, RuntimeError, OSError) as exc:
         logger.error("Erro durante benchmark: %s", exc, exc_info=True)
