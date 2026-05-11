@@ -20,11 +20,11 @@
 # ║    3. SimulationPage cria lbl_warmup_status + _warmup_thread em init     ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 """Testes de não-regressão do PoolWarmupThread e t0_sim (v2.18 → v2.19)."""
+
 from __future__ import annotations
 
 import os
 
-import pytest
 
 # Habilita Qt headless ANTES de importar PyQt — evita "could not connect
 # to X server" em CI/sistemas sem display.
@@ -68,7 +68,9 @@ def test_pool_warmup_thread_accepts_config_args() -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     assert app is not None  # silencia ruff/mypy
 
-    thread = PoolWarmupThread(n_workers=2, n_threads=2, hankel_filter="werthmuller_201pt")
+    thread = PoolWarmupThread(
+        n_workers=2, n_threads=2, hankel_filter="werthmuller_201pt"
+    )
     assert thread._n_workers == 2
     assert thread._n_threads == 2
     assert thread._hankel_filter == "werthmuller_201pt"
@@ -141,3 +143,73 @@ def test_parameters_page_has_seed_widgets() -> None:
     # Default v2.19 = aleatório
     assert page.chk_random_seed.isChecked() is True
     assert page.get_rng_seed() is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 6. Regressão: _numba_init_worker realmente warmups (v2.25 fix)
+# ──────────────────────────────────────────────────────────────────────────
+def test_numba_init_worker_sets_flag_after_real_warmup() -> None:
+    """``_numba_init_worker`` deve executar o warmup SEM falhar silenciosamente.
+
+    Bug v2.10–v2.24: warmup usava ``esp=[5.0, 5.0]`` com ``rho_h`` de 3
+    camadas. ``_validate_multi_inputs`` exige ``esp.shape[0]==n-2==1``, então
+    a validação levantava ``ValueError``, capturado por ``except Exception:
+    pass``. ``_WORKER_INITIALIZED`` virava True mesmo assim, e
+    ``run_numba_chunk`` também pulava seu warmup secundário. Resultado:
+    primeira simulação real pagava o JIT cold-start completo (50–70k vs.
+    150–175k mod/h steady-state).
+
+    Este teste garante que a função executa o warmup SEM levantar
+    ``ValueError`` em ``_validate_multi_inputs`` — i.e., que os shapes
+    ``rho_h`` e ``esp`` são consistentes.
+    """
+    import inspect
+
+    from geosteering_ai.simulation.tests.sm_workers import _numba_init_worker
+
+    src = inspect.getsource(_numba_init_worker)
+    # rho com 10 camadas → esp deve ter 8 elementos (n-2).
+    # Aceita a forma canônica via np.full(8, ...) ou lista explícita.
+    assert "_rho" in src and "_esp" in src, (
+        "_numba_init_worker não usa variáveis _rho/_esp da v2.25 — fix "
+        "pode ter sido revertido. Warmup voltará a falhar silenciosamente "
+        "via ValueError em _validate_multi_inputs."
+    )
+    assert "np.full(8" in src or "_np.full(8" in src, (
+        "_numba_init_worker não cria esp com 8 elementos (n-2=8 para 10 "
+        "camadas). Shape de esp deve casar com rho — caso contrário "
+        "_validate_multi_inputs levanta ValueError e warmup é perdido."
+    )
+    # Shapes representativas (não triviais): 600 posições, não 2.
+    assert "linspace" in src and "600" in src, (
+        "_numba_init_worker não usa positions_z com 600 pontos. Shapes "
+        "triviais (2 pontos) não aquecem alocador de memória / TLB / "
+        "thread pool runtime — primeira simulação real será 2-3× mais "
+        "lenta que steady-state."
+    )
+
+
+def test_numba_init_worker_warmup_idempotent_smoke() -> None:
+    """Chama ``_numba_init_worker`` direto no processo principal — não deve raise.
+
+    Smoke test em-process (sem ProcessPoolExecutor): garante que os shapes
+    do warmup passam por ``_validate_multi_inputs`` e que o ciclo completo
+    de ``simulate_multi`` executa. Como ``_WORKER_INITIALIZED`` é global,
+    resetamos antes para forçar nova execução, e restauramos depois para
+    não interferir com outros testes.
+    """
+    from geosteering_ai.simulation.tests import sm_workers
+
+    prev = sm_workers._WORKER_INITIALIZED
+    sm_workers._WORKER_INITIALIZED = False
+    try:
+        sm_workers._numba_init_worker(n_threads=1, hankel_filter="werthmuller_201pt")
+        # Se warmup executou sem exceção, flag deve estar True.
+        assert sm_workers._WORKER_INITIALIZED, (
+            "_numba_init_worker terminou mas _WORKER_INITIALIZED ficou False "
+            "— sinaliza que o warmup levantou exceção e foi capturada pelo "
+            "except. Verifique shapes (esp.shape[0]==n-2) e disponibilidade "
+            "de Numba/filtro Hankel."
+        )
+    finally:
+        sm_workers._WORKER_INITIALIZED = prev

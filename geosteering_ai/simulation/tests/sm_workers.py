@@ -39,17 +39,17 @@ O módulo expõe ``SimulationThread`` (subclasse ``QThread``) que orquestra
 um ``ProcessPoolExecutor`` com workers sandbox, além de funções
 ``run_numba_chunk`` e ``run_fortran_chunk`` (picklable para IPC).
 """
+
 from __future__ import annotations
 
 import multiprocessing as _mp
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -73,8 +73,23 @@ _PERSISTENT_POOL_CONFIG: Optional[Tuple[int, int, str]] = None
 def _numba_init_worker(n_threads: int, hankel_filter: str) -> None:
     """Inicializador do pool — roda UMA vez por worker ao spawnar.
 
-    Aquece o cache JIT Numba com modelos triviais (single-combo e multi-combo).
+    Aquece o cache JIT Numba e o alocador de runtime com shapes representativas
+    do uso de produção (positions_z=600, n_layers=10, single + multi combo).
     Após este ponto, ``run_numba_chunk`` pula a fase de warmup.
+
+    Histórico:
+        v2.10–v2.24: warmup usava ``esp=[5.0, 5.0]`` (shape 2) com ``rho_h``
+        de 3 camadas. ``_validate_multi_inputs`` exige ``esp.shape[0] == n-2``,
+        i.e. 1 elemento para 3 camadas. Validação falhava silenciosamente
+        (``except Exception: pass``), ``_WORKER_INITIALIZED`` era marcado True
+        mesmo assim, e ``run_numba_chunk`` também pulava seu warmup secundário.
+        Resultado: primeira simulação real pagava o custo total de JIT
+        cold-start (3× steady-state observado: 50–70k vs. 150–175k mod/h).
+
+        v2.25: corrige shape de ``esp`` E usa shapes representativas
+        (positions_z=600, n_layers=10) para aquecer alocadores de memória,
+        TLB e thread-pool runtime — não só o JIT bytecode. Executa o warmup
+        DUAS vezes para que o segundo já reflita o regime estacionário.
 
     Note:
         NÃO setamos ``NUMBA_NUM_THREADS`` aqui. Quando este inicializador
@@ -105,6 +120,7 @@ def _numba_init_worker(n_threads: int, hankel_filter: str) -> None:
     os.environ["OMP_NUM_THREADS"] = str(n_threads)
     os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
     os.environ.setdefault("KMP_WARNINGS", "FALSE")
+    warmup_failed = False
     try:
         import numpy as _np
 
@@ -113,32 +129,52 @@ def _numba_init_worker(n_threads: int, hankel_filter: str) -> None:
         _cfg = SimulationConfig(
             backend="numba", num_threads=n_threads, hankel_filter=hankel_filter
         )
-        # Warmup 1: single-combo → compila _simulate_positions_njit_cached
-        simulate_multi(
-            rho_h=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
-            rho_v=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
-            esp=_np.array([5.0, 5.0], dtype=_np.float64),
-            positions_z=_np.array([0.0, 5.0], dtype=_np.float64),
-            frequencies_hz=[20000.0],
-            tr_spacings_m=[1.0],
-            dip_degs=[0.0],
-            cfg=_cfg,
+        # Shapes representativas de produção: 10 camadas, 600 posições.
+        # Para n=10 camadas, esp deve ter shape (n-2,) = (8,).
+        _rho = _np.array(
+            [1.0, 10.0, 1.0, 50.0, 1.0, 100.0, 1.0, 5.0, 20.0, 1.0],
+            dtype=_np.float64,
         )
-        # Warmup 2: multi-combo → pré-compila _simulate_combined_prange para
-        # evitar JIT cold-start na primeira simulação real multi-TR/multi-ângulo.
-        simulate_multi(
-            rho_h=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
-            rho_v=_np.array([1.0, 10.0, 1.0], dtype=_np.float64),
-            esp=_np.array([5.0, 5.0], dtype=_np.float64),
-            positions_z=_np.array([0.0, 5.0], dtype=_np.float64),
-            frequencies_hz=[20000.0, 40000.0],
-            tr_spacings_m=[1.0, 2.0],
-            dip_degs=[0.0],
-            cfg=_cfg,
-        )
+        _esp = _np.full(8, 3.0, dtype=_np.float64)
+        _pos = _np.linspace(-5.0, 20.0, 600, dtype=_np.float64)
+        # 2 iterações para garantir regime estacionário (alocador, TLB, pool
+        # de threads do Numba). A primeira paga o JIT; a segunda confirma a
+        # cache de bytecode e dimensiona buffers internos de forma estável.
+        for _ in range(2):
+            # Warmup A — single-combo → _simulate_positions_njit_cached
+            simulate_multi(
+                rho_h=_rho,
+                rho_v=_rho,
+                esp=_esp,
+                positions_z=_pos,
+                frequencies_hz=[20000.0],
+                tr_spacings_m=[1.0],
+                dip_degs=[0.0],
+                cfg=_cfg,
+            )
+            # Warmup B — multi-combo → _simulate_combined_prange_flat
+            simulate_multi(
+                rho_h=_rho,
+                rho_v=_rho,
+                esp=_esp,
+                positions_z=_pos,
+                frequencies_hz=[20000.0, 40000.0],
+                tr_spacings_m=[1.0, 2.0],
+                dip_degs=[0.0],
+                cfg=_cfg,
+            )
     except Exception:
-        pass
-    _WORKER_INITIALIZED = True
+        # Mantém o worker utilizável mesmo se o warmup falhar (e.g., Numba
+        # ausente, hankel_filter inválido). O segundo nível de warmup em
+        # ``run_numba_chunk`` cobre esse cenário ao deixar
+        # _WORKER_INITIALIZED em False.
+        warmup_failed = True
+    # Só marcamos o worker como inicializado quando o warmup sobreviveu.
+    # Se falhou, mantém False para que ``run_numba_chunk`` execute seu
+    # próprio warmup descartável com o primeiro modelo do chunk real
+    # (custo pago fora de ``t0_sim``, sem distorcer throughput).
+    if not warmup_failed:
+        _WORKER_INITIALIZED = True
 
 
 def _noop() -> None:
@@ -891,7 +927,9 @@ class SimulationThread(QThread):
                             continue
                         if evt.get("event") == "warmup_done":
                             if not warmup_logged:
-                                self.log.emit("  JIT aquecido — iniciando processamento.")
+                                self.log.emit(
+                                    "  JIT aquecido — iniciando processamento."
+                                )
                                 warmup_logged = True
                             continue
                         if evt.get("event") == "block":
@@ -1035,7 +1073,9 @@ class SimulationThread(QThread):
                     dt = max(time.perf_counter() - t0, 1e-6)
                     throughput = done / dt * 3600.0
                     self.progress_update.emit(done, n_total, throughput)
-                    self.log.emit(f"  Worker {wid}: chunk processado em {elapsed_w:.2f}s")
+                    self.log.emit(
+                        f"  Worker {wid}: chunk processado em {elapsed_w:.2f}s"
+                    )
                 else:
                     for future in as_completed(futures):
                         # v2.11: pausa cooperativa Fortran path (paralelo).
