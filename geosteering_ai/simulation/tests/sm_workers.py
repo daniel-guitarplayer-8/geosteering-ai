@@ -71,55 +71,79 @@ _PERSISTENT_POOL_CONFIG: Optional[Tuple[int, int, str]] = None
 
 
 def _numba_init_worker(n_threads: int, hankel_filter: str) -> None:
-    """Inicializador do pool — roda UMA vez por worker ao spawnar.
+    """Inicializador leve do pool — roda UMA vez por worker ao spawnar.
 
-    Aquece o cache JIT Numba e o alocador de runtime com shapes representativas
-    do uso de produção (positions_z=600, n_layers=10, single + multi combo).
-    Após este ponto, ``run_numba_chunk`` pula a fase de warmup.
+    Configura variáveis de ambiente de threading (OMP/KMP) e retorna em
+    < 100 ms. O aquecimento do JIT Numba é feito por ``_run_numba_warmup_task``
+    (submetido como Future pelo ``PoolWarmupThread``), o que garante que o
+    warmup seja cancelável e não bloqueie o shutdown do aplicativo.
 
     Histórico:
-        v2.10–v2.24: warmup usava ``esp=[5.0, 5.0]`` (shape 2) com ``rho_h``
-        de 3 camadas. ``_validate_multi_inputs`` exige ``esp.shape[0] == n-2``,
-        i.e. 1 elemento para 3 camadas. Validação falhava silenciosamente
-        (``except Exception: pass``), ``_WORKER_INITIALIZED`` era marcado True
-        mesmo assim, e ``run_numba_chunk`` também pulava seu warmup secundário.
-        Resultado: primeira simulação real pagava o custo total de JIT
-        cold-start (3× steady-state observado: 50–70k vs. 150–175k mod/h).
+        v2.10–v2.24: warmup usava ``esp=[5.0, 5.0]`` (shape inválida) no
+        próprio inicializador. Falha silenciosa via ValueError →
+        ``_WORKER_INITIALIZED = True`` sem warmup real → cold-start em prod.
 
-        v2.25: corrige shape de ``esp`` E usa shapes representativas
-        (positions_z=600, n_layers=10) para aquecer alocadores de memória,
-        TLB e thread-pool runtime — não só o JIT bytecode. Executa o warmup
-        DUAS vezes para que o segundo já reflita o regime estacionário.
+        v2.25: corrigiu o shape mas manteve ``simulate_multi`` no
+        inicializador. Efeito colateral: inicializador levava 35–38 s (JIT
+        frio) ou 6 s (cache em disco) e NÃO podia ser cancelado. O handler
+        ``atexit`` do ``ProcessPoolExecutor`` chama ``shutdown(wait=True)``
+        em todos os pools rastreados — com workers presos no inicializador,
+        isso causa travamento garantido ao fechar o aplicativo.
+
+        v2.26: warmup movido para ``_run_numba_warmup_task`` (Future).
+        Inicializador retorna em < 100 ms; cancelamento via
+        ``cancel_futures=True`` é garantido; sem hang no shutdown.
 
     Note:
-        NÃO setamos ``NUMBA_NUM_THREADS`` aqui. Quando este inicializador
-        é chamado, ``geosteering_ai.simulation`` já foi importado como
-        efeito colateral do unpickle do próprio worker (Python importa o
-        pacote pai ``geosteering_ai.simulation.__init__`` para resolver o
-        módulo onde esta função está definida). Nesse ponto Numba já foi
-        inicializado com ``NUMBA_NUM_THREADS = os.cpu_count()`` (valor
-        padrão quando a env var não está presente no ambiente herdado).
-
-        Mudar ``os.environ["NUMBA_NUM_THREADS"]`` APÓS o import de Numba
-        faz com que ``reload_config()`` (chamado internamente pelo compilador
-        JIT durante a primeira compilação de funções ``prange``) detecte uma
-        discrepância entre a env var ("4") e o valor em
-        ``numba.config.NUMBA_NUM_THREADS`` (cpu_count) e lance
-        ``RuntimeError: Cannot set NUMBA_NUM_THREADS to a different value``.
-
-        A contagem ATIVA de threads é controlada exclusivamente via
-        ``numba.set_num_threads(n_threads)`` dentro de ``simulate_multi``
-        (através de ``SimulationConfig.num_threads``). Esse mecanismo
-        *mascara* threads (pool completo lançado, mas só n_threads ativas)
-        sem alterar o env var nem causar o erro de reconfiguração.
+        NÃO setamos ``NUMBA_NUM_THREADS`` aqui — ver docstring de
+        ``_acquire_numba_pool`` para a razão completa. ``OMP_NUM_THREADS``
+        (BLAS/MKL) é seguro setar porque não conflita com o config do Numba.
     """
-    global _WORKER_INITIALIZED
-    if _WORKER_INITIALIZED:
-        return
-    # OMP_NUM_THREADS controla BLAS/MKL — seguro setar após import de Numba.
     os.environ["OMP_NUM_THREADS"] = str(n_threads)
     os.environ.setdefault("OMP_MAX_ACTIVE_LEVELS", "2")
     os.environ.setdefault("KMP_WARNINGS", "FALSE")
+    # _WORKER_INITIALIZED permanece False até _run_numba_warmup_task concluir.
+
+
+def _run_numba_warmup_task(n_threads: int, hankel_filter: str) -> bool:
+    """Aquece o JIT Numba no worker — submetido como Future pelo PoolWarmupThread.
+
+    Ao contrário do inicializador, Futures são canceláveis via
+    ``cancel_futures=True`` no shutdown do pool — eliminando o travamento
+    ao fechar o aplicativo que ocorria quando o warmup ficava no
+    inicializador (v2.25).
+
+    Executa ``simulate_multi`` com shapes representativas e corretas:
+
+      ┌────────────────────────────────────────────────────────────────┐
+      │  n_layers = 10  →  esp.shape = (n-2,) = (8,)                 │
+      │  positions_z = 50 pontos (suficiente para ativar JIT)         │
+      │  Warmup A: single-combo (nTR×nAng = 1) → kernel cached       │
+      │  Warmup B: multi-combo  (nTR×nAng = 4) → FLAT prange         │
+      └────────────────────────────────────────────────────────────────┘
+
+    50 posições (vs. 600 em v2.25): JIT é ativado pela PRIMEIRA chamada,
+    não pelo tamanho do array. Arrays grandes só adicionam latência ao
+    warmup quente (~6 s → ~2 s com 50 posições) sem benefício de bytecode.
+
+    Histórico:
+        v2.10–v2.24: Bug de shape → ValueError silencioso → warm falso.
+        v2.25: shape correto, mas warmup no inicializador → hang no shutdown.
+        v2.26: warmup como Future, shape correto, 50 posições.
+
+    Args:
+        n_threads: Threads Numba (mascaramento via ``SimulationConfig``).
+        hankel_filter: Filtro Hankel — deve coincidir com o da simulação real
+            para garantir warm hit no primeiro uso.
+
+    Returns:
+        True se o warmup completou sem exceção; False caso contrário.
+        Quando False, ``run_numba_chunk`` executa o warmup secundário no
+        primeiro chunk real (fora de ``t0_sim``).
+    """
+    global _WORKER_INITIALIZED
+    if _WORKER_INITIALIZED:
+        return True
     warmup_failed = False
     try:
         import numpy as _np
@@ -129,56 +153,48 @@ def _numba_init_worker(n_threads: int, hankel_filter: str) -> None:
         _cfg = SimulationConfig(
             backend="numba", num_threads=n_threads, hankel_filter=hankel_filter
         )
-        # Shapes representativas de produção: 10 camadas, 600 posições.
-        # Para n=10 camadas, esp deve ter shape (n-2,) = (8,).
+        # n_layers=10 → esp.shape=(n-2,)=(8,) — correto para _validate_multi_inputs.
         _rho = _np.array(
             [1.0, 10.0, 1.0, 50.0, 1.0, 100.0, 1.0, 5.0, 20.0, 1.0],
             dtype=_np.float64,
         )
         _esp = _np.full(8, 3.0, dtype=_np.float64)
-        _pos = _np.linspace(-5.0, 20.0, 600, dtype=_np.float64)
-        # 2 iterações para garantir regime estacionário (alocador, TLB, pool
-        # de threads do Numba). A primeira paga o JIT; a segunda confirma a
-        # cache de bytecode e dimensiona buffers internos de forma estável.
-        for _ in range(2):
-            # Warmup A — single-combo → _simulate_positions_njit_cached
-            simulate_multi(
-                rho_h=_rho,
-                rho_v=_rho,
-                esp=_esp,
-                positions_z=_pos,
-                frequencies_hz=[20000.0],
-                tr_spacings_m=[1.0],
-                dip_degs=[0.0],
-                cfg=_cfg,
-            )
-            # Warmup B — multi-combo → _simulate_combined_prange_flat
-            simulate_multi(
-                rho_h=_rho,
-                rho_v=_rho,
-                esp=_esp,
-                positions_z=_pos,
-                frequencies_hz=[20000.0, 40000.0],
-                tr_spacings_m=[1.0, 2.0],
-                dip_degs=[0.0],
-                cfg=_cfg,
-            )
+        # 50 posições: ativa JIT (qualquer tamanho ≥ 1 serve) e aquece
+        # alocadores moderadamente sem overhead excessivo no path quente.
+        _pos = _np.linspace(-5.0, 20.0, 50, dtype=_np.float64)
+        # Warmup A — single-combo → _simulate_positions_njit_cached
+        simulate_multi(
+            rho_h=_rho,
+            rho_v=_rho,
+            esp=_esp,
+            positions_z=_pos,
+            frequencies_hz=[20000.0],
+            tr_spacings_m=[1.0],
+            dip_degs=[0.0],
+            cfg=_cfg,
+        )
+        # Warmup B — multi-combo → _simulate_combined_prange_flat
+        simulate_multi(
+            rho_h=_rho,
+            rho_v=_rho,
+            esp=_esp,
+            positions_z=_pos,
+            frequencies_hz=[20000.0, 40000.0],
+            tr_spacings_m=[1.0, 2.0],
+            dip_degs=[0.0],
+            cfg=_cfg,
+        )
     except Exception:
-        # Mantém o worker utilizável mesmo se o warmup falhar (e.g., Numba
-        # ausente, hankel_filter inválido). O segundo nível de warmup em
-        # ``run_numba_chunk`` cobre esse cenário ao deixar
-        # _WORKER_INITIALIZED em False.
+        # Mantém _WORKER_INITIALIZED=False para que run_numba_chunk execute
+        # o warmup secundário no primeiro chunk real (fora de t0_sim).
         warmup_failed = True
-    # Só marcamos o worker como inicializado quando o warmup sobreviveu.
-    # Se falhou, mantém False para que ``run_numba_chunk`` execute seu
-    # próprio warmup descartável com o primeiro modelo do chunk real
-    # (custo pago fora de ``t0_sim``, sem distorcer throughput).
     if not warmup_failed:
         _WORKER_INITIALIZED = True
+    return not warmup_failed
 
 
 def _noop() -> None:
-    """Função vazia usada para forçar spawn + init do worker sem carga real."""
+    """Função vazia usada para sincronizar o pool sem carga real."""
 
 
 def _acquire_numba_pool(
@@ -865,18 +881,18 @@ class SimulationThread(QThread):
                     f"Numba — {n_workers} workers × {req.n_threads} threads "
                     f"({n_total} modelos)."
                 )
-                # Pool persistente: workers já aquecidos pelo _numba_init_worker
-                # (pool initializer). Spawn/import/JIT só ocorrem na PRIMEIRA
-                # simulação ou quando n_workers/n_threads/hankel_filter mudam.
+                # Pool persistente: workers já aquecidos pelo _run_numba_warmup_task
+                # (Future submetido por PoolWarmupThread na abertura da GUI).
+                # Spawn/import/JIT só ocorrem na PRIMEIRA simulação ou quando
+                # n_workers/n_threads/hankel_filter mudam.
                 pool = _acquire_numba_pool(n_workers, req.n_threads, req.hankel_filter)
-                # ── Sprint 18.1 (v2.18): aguarda init dos workers, define t0_sim ──
-                # _noop só executa após _numba_init_worker completar no worker.
+                # ── Sprint 18.1 (v2.18) / v2.26: aguarda workers, define t0_sim ──
+                # Os _noop ficam na fila FIFO ATRÁS dos _run_numba_warmup_task já
+                # submetidos por PoolWarmupThread. Quando _noop retorna, todos os
+                # warmup futures já concluíram → JIT pronto → t0_sim correto.
                 # Pool warm (2.ª simulação mesma sessão) → retorna em ~0 ms.
-                # Pool frio (primeira abertura da GUI) → bloqueia até spawn +
-                # import geosteering_ai + 2× simulate_multi JIT warmup (~10–12 s
-                # em hardware 8C). t0_sim excluí esse overhead: throughput_mod_h
-                # passa a refletir a velocidade real de simulação (≈ 85k mod/h em
-                # 8C com 4 workers × 2 threads) em vez de ~38k que incluía setup.
+                # Pool frio (JIT ainda em andamento) → bloqueia até warmup futures
+                # concluírem, depois retorna imediatamente. t0_sim excluí overhead.
                 _init_futs = [pool.submit(_noop) for _ in range(n_workers)]
                 for _if in _init_futs:
                     try:
@@ -1132,24 +1148,35 @@ class PoolWarmupThread(QThread):
     """Pré-aquece o pool Numba persistente em background para eliminar cold-start.
 
     Quando ``SimulationPage`` é aberta, esta thread cria/reusa o pool com os
-    defaults recomendados e aguarda todos os workers completarem
-    ``_numba_init_worker`` (spawn + import + 2× JIT warmup ≈ 10–12 s no
-    primeiro uso). Na primeira simulação real, o pool já está pronto:
+    defaults recomendados e submete ``_run_numba_warmup_task`` como Future
+    para cada worker. Na primeira simulação real, o pool já está pronto:
 
     ┌──────────────────────────────────────────────────────────────────────┐
     │  Sem pre-warm (v2.17):                                              │
-    │    Usuário clica "Simular" → cold pool → 10–12 s overhead incluído  │
+    │    Usuário clica "Simular" → cold pool → overhead de JIT incluído   │
     │    no throughput → 38k mod/h reportado (vs. 85k real)               │
     │                                                                      │
-    │  Com pre-warm (v2.18):                                              │
-    │    GUI abre → PoolWarmupThread inicia (bg) → pool aquecido em ~12 s │
-    │    Usuário clica "Simular" → pool já pronto → t0_sim ≈ imediato     │
-    │    → throughput = 85k mod/h (velocidade real de simulação)          │
+    │  Com pre-warm via inicializador (v2.18–v2.25):                      │
+    │    GUI abre → workers spawnam → _numba_init_worker (35 s JIT frio)  │
+    │    → pool "pronto" após 35 s; saída da app durante init = HANG      │
+    │                                                                      │
+    │  Com pre-warm via Future (v2.26):                                   │
+    │    GUI abre → workers spawnam em < 1 s (init leve) → warmup future  │
+    │    submetido por worker → JIT ocorre no future (cancelável)          │
+    │    → saída limpa a qualquer momento (cancel_futures=True)            │
+    │    → t0_sim ainda excluí JIT (noops ficam na fila atrás dos warm.)  │
     └──────────────────────────────────────────────────────────────────────┘
 
+    Ordenamento da fila de futures que garante t0_sim correto:
+
+      PoolWarmupThread submete:   [warm_1, warm_2, ..., warm_N]
+      SimulationThread submete:   [noop_1, noop_2, ..., noop_N, chunk_1, ...]
+                                  └── ficam atrás dos warms na fila FIFO ──┘
+      Quando noop_N retorna → todos os warms já concluíram → t0_sim correto.
+
     Signals:
-        warmup_done(elapsed_s, n_workers, n_threads): Pool pronto.
-        warmup_error(msg): Falha não-fatal (pool será criado na simulação).
+        warmup_done(elapsed_s, n_workers, n_threads): Pool e JIT prontos.
+        warmup_error(msg): Falha não-fatal (warmup secundário em run_numba_chunk).
 
     Note:
         Usa ``hankel_filter="werthmuller_201pt"`` (padrão) para pre-warm.
@@ -1173,14 +1200,21 @@ class PoolWarmupThread(QThread):
         self._hankel_filter = hankel_filter
 
     def run(self) -> None:
-        """Adquire o pool e aguarda init de todos os workers via _noop."""
+        """Cria pool, submete _run_numba_warmup_task por worker e aguarda."""
         t0 = time.perf_counter()
         try:
             pool = _acquire_numba_pool(
                 self._n_workers, self._n_threads, self._hankel_filter
             )
-            # _noop só executa após _numba_init_worker completar no worker.
-            futs = [pool.submit(_noop) for _ in range(self._n_workers)]
+            # Submete warmup como Future — um por worker.
+            # Futures são canceláveis (cancel_futures=True no shutdown);
+            # o inicializador não é — essa é a diferença central v2.26.
+            futs = [
+                pool.submit(
+                    _run_numba_warmup_task, self._n_threads, self._hankel_filter
+                )
+                for _ in range(self._n_workers)
+            ]
             for f in futs:
                 f.result(timeout=120)
             self.warmup_done.emit(

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import os
 
-
 # Habilita Qt headless ANTES de importar PyQt — evita "could not connect
 # to X server" em CI/sistemas sem display.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -146,10 +145,10 @@ def test_parameters_page_has_seed_widgets() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 6. Regressão: _numba_init_worker realmente warmups (v2.25 fix)
+# 6. Regressão: _run_numba_warmup_task usa shapes corretos (v2.26 fix)
 # ──────────────────────────────────────────────────────────────────────────
-def test_numba_init_worker_sets_flag_after_real_warmup() -> None:
-    """``_numba_init_worker`` deve executar o warmup SEM falhar silenciosamente.
+def test_run_numba_warmup_task_has_correct_shapes() -> None:
+    """``_run_numba_warmup_task`` deve usar shapes que passem em ``_validate_multi_inputs``.
 
     Bug v2.10–v2.24: warmup usava ``esp=[5.0, 5.0]`` com ``rho_h`` de 3
     camadas. ``_validate_multi_inputs`` exige ``esp.shape[0]==n-2==1``, então
@@ -159,38 +158,47 @@ def test_numba_init_worker_sets_flag_after_real_warmup() -> None:
     primeira simulação real pagava o JIT cold-start completo (50–70k vs.
     150–175k mod/h steady-state).
 
-    Este teste garante que a função executa o warmup SEM levantar
-    ``ValueError`` em ``_validate_multi_inputs`` — i.e., que os shapes
-    ``rho_h`` e ``esp`` são consistentes.
+    v2.25: fix de shape no inicializador — mas warmup no inicializador
+    causava travamento ao fechar o app (não cancelável, 35–38 s JIT frio).
+
+    v2.26: warmup movido para ``_run_numba_warmup_task`` (Future cancelável).
+    Este teste garante que a função mantém shapes corretos na nova localização.
     """
     import inspect
 
-    from geosteering_ai.simulation.tests.sm_workers import _numba_init_worker
+    from geosteering_ai.simulation.tests.sm_workers import _run_numba_warmup_task
 
-    src = inspect.getsource(_numba_init_worker)
+    src = inspect.getsource(_run_numba_warmup_task)
+    # Extrai apenas o corpo do código (após a docstring) para evitar
+    # falsos positivos em menções históricas dentro da docstring.
+    _first = src.index('"""')
+    _close = src.index('"""', _first + 3)
+    code = src[_close + 3 :]
     # rho com 10 camadas → esp deve ter 8 elementos (n-2).
-    # Aceita a forma canônica via np.full(8, ...) ou lista explícita.
-    assert "_rho" in src and "_esp" in src, (
-        "_numba_init_worker não usa variáveis _rho/_esp da v2.25 — fix "
-        "pode ter sido revertido. Warmup voltará a falhar silenciosamente "
+    assert "_rho" in code and "_esp" in code, (
+        "_run_numba_warmup_task não usa variáveis _rho/_esp — fix de shape "
+        "v2.26 pode ter sido revertido. Warmup voltará a falhar silenciosamente "
         "via ValueError em _validate_multi_inputs."
     )
-    assert "np.full(8" in src or "_np.full(8" in src, (
-        "_numba_init_worker não cria esp com 8 elementos (n-2=8 para 10 "
+    assert "np.full(8" in code or "_np.full(8" in code, (
+        "_run_numba_warmup_task não cria esp com 8 elementos (n-2=8 para 10 "
         "camadas). Shape de esp deve casar com rho — caso contrário "
         "_validate_multi_inputs levanta ValueError e warmup é perdido."
     )
-    # Shapes representativas (não triviais): 600 posições, não 2.
-    assert "linspace" in src and "600" in src, (
-        "_numba_init_worker não usa positions_z com 600 pontos. Shapes "
-        "triviais (2 pontos) não aquecem alocador de memória / TLB / "
-        "thread pool runtime — primeira simulação real será 2-3× mais "
-        "lenta que steady-state."
+    # Posições suficientes para ativar JIT (qualquer tamanho ≥ 1).
+    assert "linspace" in code, (
+        "_run_numba_warmup_task não usa np.linspace para positions_z — "
+        "verificar que o warmup ainda cria posições representativas."
+    )
+    # Confirma que o código NÃO usa 600 posições (overhead desnecessário v2.25).
+    assert "600" not in code, (
+        "_run_numba_warmup_task ainda usa 600 posições (overhead v2.25). "
+        "v2.26 usa 50 posições — JIT ativa na 1ª chamada, tamanho não importa."
     )
 
 
-def test_numba_init_worker_warmup_idempotent_smoke() -> None:
-    """Chama ``_numba_init_worker`` direto no processo principal — não deve raise.
+def test_run_numba_warmup_task_smoke() -> None:
+    """Chama ``_run_numba_warmup_task`` direto no processo principal — não deve raise.
 
     Smoke test em-process (sem ProcessPoolExecutor): garante que os shapes
     do warmup passam por ``_validate_multi_inputs`` e que o ciclo completo
@@ -203,13 +211,43 @@ def test_numba_init_worker_warmup_idempotent_smoke() -> None:
     prev = sm_workers._WORKER_INITIALIZED
     sm_workers._WORKER_INITIALIZED = False
     try:
-        sm_workers._numba_init_worker(n_threads=1, hankel_filter="werthmuller_201pt")
-        # Se warmup executou sem exceção, flag deve estar True.
+        result = sm_workers._run_numba_warmup_task(
+            n_threads=1, hankel_filter="werthmuller_201pt"
+        )
+        assert result is True, (
+            "_run_numba_warmup_task retornou False — warmup levantou exceção "
+            "capturada pelo except. Verifique shapes (esp.shape[0]==n-2) e "
+            "disponibilidade de Numba/filtro Hankel."
+        )
         assert sm_workers._WORKER_INITIALIZED, (
-            "_numba_init_worker terminou mas _WORKER_INITIALIZED ficou False "
-            "— sinaliza que o warmup levantou exceção e foi capturada pelo "
-            "except. Verifique shapes (esp.shape[0]==n-2) e disponibilidade "
-            "de Numba/filtro Hankel."
+            "_run_numba_warmup_task retornou True mas _WORKER_INITIALIZED ficou "
+            "False — inconsistência interna na função."
         )
     finally:
         sm_workers._WORKER_INITIALIZED = prev
+
+
+def test_numba_init_worker_is_lightweight() -> None:
+    """``_numba_init_worker`` v2.26 NÃO deve conter ``simulate_multi``.
+
+    v2.26: warmup movido do inicializador para ``_run_numba_warmup_task``
+    (Future). O inicializador deve ser leve (< 100 ms) para evitar que o
+    handler ``atexit`` do ``ProcessPoolExecutor`` trave ao fechar o app quando
+    workers estão em compilação JIT Numba (35–38 s no cold-start).
+    """
+    import inspect
+
+    from geosteering_ai.simulation.tests.sm_workers import _numba_init_worker
+
+    src = inspect.getsource(_numba_init_worker)
+    # Extrai apenas o corpo do código (após a docstring) para não confundir
+    # menções históricas na docstring com chamadas reais.
+    _first = src.index('"""')
+    _close = src.index('"""', _first + 3)
+    code = src[_close + 3 :]
+    assert "simulate_multi" not in code, (
+        "_numba_init_worker ainda chama simulate_multi — warmup pesado no "
+        "inicializador causa travamento ao fechar o app (handler atexit do "
+        "ProcessPoolExecutor chama shutdown(wait=True) em todos os pools, "
+        "esperando indefinidamente por workers presos em JIT de 35+ s)."
+    )
