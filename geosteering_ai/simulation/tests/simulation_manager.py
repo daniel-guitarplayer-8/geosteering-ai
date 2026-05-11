@@ -95,7 +95,7 @@ if QT_AVAILABLE:
         ModelGenerationThread,
     )
     from .sm_phase_timer import PhaseTimer
-    from .sm_plot_cache import LRUPlotCache
+    from .sm_plot_cache import LRUPlotCache, default_max_bytes
     from .sm_plots import (
         COMPONENT_NAMES,
         PLOT_KINDS,
@@ -6392,6 +6392,9 @@ class PreferencesPage(QtWidgets.QWidget):
 
     paths_changed = Signal(dict)
     style_changed = Signal(object)
+    # v2.29.2: limite e snapshots máximos do cache LRU configuráveis.
+    # Argumentos: (max_mb: int, maxlen: int).
+    cache_settings_changed = Signal(int, int)
 
     def __init__(
         self,
@@ -6877,7 +6880,15 @@ class PreferencesPage(QtWidgets.QWidget):
                 role="section",
             )
         )
+        # ── v2.29.2 ─ Cache LRU de tensores ─────────────────────────────
+        # Tensores multi-freq × multi-angle (complex128) podem exceder
+        # facilmente 500 MB. Limite default agora é 10% RAM (piso 500 MB,
+        # teto 4 GB via psutil). Usuário pode ajustar livremente; valor
+        # persiste em QSettings ("cache/max_bytes_mb", "cache/maxlen").
+        grp_cache = self._build_cache_lru_group()
+
         root.addWidget(grp_paths)
+        root.addWidget(grp_cache)
         root.addWidget(grp_style)
         root.addLayout(row_btn)
         root.addStretch(1)
@@ -7046,6 +7057,118 @@ class PreferencesPage(QtWidgets.QWidget):
                 ok_py, "Interpretador válido." if ok_py else "Interpretador ausente."
             )
         )
+
+    # ── v2.29.2 — Cache LRU configurável ────────────────────────────────────
+    def _build_cache_lru_group(self) -> QtWidgets.QGroupBox:
+        """Constrói o ``QGroupBox`` "Cache LRU de Tensores".
+
+        Lê os valores persistidos em ``QSettings`` (``cache/max_bytes_mb`` e
+        ``cache/maxlen``); se ausentes, usa :func:`default_max_bytes`
+        (10% RAM, piso 500 MB, teto 4 GB via psutil).
+
+        Returns:
+            ``QGroupBox`` pronto para ser adicionado ao layout vertical
+            principal. Conecta os sinais ``valueChanged`` dos ``QSpinBox``
+            ao próprio :attr:`cache_settings_changed` da página.
+
+        Note:
+            O grupo expõe dois ``QSpinBox`` (limite em MB e snapshots
+            máximos) e um botão "Auto-detect" que reseta o limite ao
+            valor sugerido pela função :func:`default_max_bytes`. Não
+            grava em ``QSettings`` aqui — a persistência ocorre no
+            ``_on_save`` da página.
+        """
+        grp = QtWidgets.QGroupBox("Cache LRU de Tensores")
+        grp.setToolTip(
+            "Tensores multi-freq × multi-angle (complex128) podem exceder "
+            "facilmente 500 MB por simulação. Ajuste o limite conforme RAM "
+            "disponível (recomendado: 10% RAM)."
+        )
+        form = QtWidgets.QFormLayout(grp)
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+
+        qs = _qsettings()
+        default_mb_int = int(round(default_max_bytes() / 1e6))
+        try:
+            cur_mb = int(round(float(qs.value("cache/max_bytes_mb", default_mb_int))))
+        except (TypeError, ValueError):
+            cur_mb = default_mb_int
+        try:
+            cur_maxlen = int(qs.value("cache/maxlen", 3))
+        except (TypeError, ValueError):
+            cur_maxlen = 3
+
+        self.spin_cache_mb = QtWidgets.QSpinBox()
+        self.spin_cache_mb.setRange(100, 16384)  # 100 MB .. 16 GB
+        self.spin_cache_mb.setSingleStep(100)
+        self.spin_cache_mb.setSuffix(" MB")
+        self.spin_cache_mb.setValue(max(100, min(16384, cur_mb)))
+        _tooltip(
+            self.spin_cache_mb,
+            (
+                "<b>Limite do cache LRU (MB)</b><br/>"
+                f"Default auto-detect: <b>{default_mb_int} MB</b> "
+                f"(10% RAM com piso 500 MB e teto 4 GB).<br/><br/>"
+                "Tensor multi-freq × multi-angle típico "
+                "(1000 mod × 2 TR × 4 dips × 600 pos × 4 freq × 9 comp × "
+                "complex128 16 B/elem) consome ≈ <b>2.77 GB</b>. Aumente "
+                "se você re-abre simulações grandes do histórico."
+            ),
+        )
+
+        self.spin_cache_maxlen = QtWidgets.QSpinBox()
+        self.spin_cache_maxlen.setRange(1, 20)
+        self.spin_cache_maxlen.setValue(max(1, min(20, cur_maxlen)))
+        _tooltip(
+            self.spin_cache_maxlen,
+            (
+                "<b>Snapshots máximos</b><br/>"
+                "Número de simulações históricas armazenadas em memória. "
+                "Default 3. Eviction FIFO + limite duplo com o teto em MB acima."
+            ),
+        )
+
+        btn_auto = QtWidgets.QPushButton("Auto-detect")
+        btn_auto.setToolTip(
+            "Define o limite como 10% RAM (piso 500 MB, teto 4 GB), "
+            "via psutil quando disponível."
+        )
+        btn_auto.clicked.connect(
+            lambda: self.spin_cache_mb.setValue(int(round(default_max_bytes() / 1e6)))
+        )
+
+        info = QtWidgets.QLabel(
+            "<i>Auto-detect baseia-se em 10% da RAM total. Valores muito altos "
+            "podem causar pressão de memória; muito baixos forçam re-execução "
+            "das simulações ao re-abrir o histórico.</i>"
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#a5a5a5; font-size:11px;")
+
+        row_btn = QtWidgets.QHBoxLayout()
+        row_btn.addWidget(self.spin_cache_mb, 1)
+        row_btn.addWidget(btn_auto)
+
+        form.addRow("Limite total:", row_btn)
+        form.addRow("Snapshots máximos:", self.spin_cache_maxlen)
+        form.addRow("", info)
+
+        # Sinais para emit ao MainWindow (handler reinstancia o cache LRU)
+        self.spin_cache_mb.valueChanged.connect(self._emit_cache_settings_changed)
+        self.spin_cache_maxlen.valueChanged.connect(self._emit_cache_settings_changed)
+        return grp
+
+    def _emit_cache_settings_changed(self) -> None:
+        """Emite ``cache_settings_changed(max_mb, maxlen)`` e persiste em
+        ``QSettings``. Chamado a cada mudança dos ``QSpinBox`` do grupo
+        Cache LRU.
+        """
+        max_mb = int(self.spin_cache_mb.value())
+        maxlen = int(self.spin_cache_maxlen.value())
+        qs = _qsettings()
+        qs.setValue("cache/max_bytes_mb", max_mb)
+        qs.setValue("cache/maxlen", maxlen)
+        self.cache_settings_changed.emit(max_mb, maxlen)
 
     def _collect_style(self) -> PlotStyle:
         return PlotStyle(
@@ -7365,7 +7488,25 @@ class MainWindow(QtWidgets.QMainWindow):
         # v2.4c: cache LRU limita a 3 snapshots ou 500 MB — previne
         # travamento GUI quando user executa múltiplas simulações de
         # 1000+ modelos (H_stack pode atingir ~860 MB cada).
-        self._sim_history_cache: LRUPlotCache = LRUPlotCache(maxlen=3, max_bytes=500e6)
+        # v2.29.2: limite agora parametrizado via QSettings ("cache/max_bytes_mb"
+        # e "cache/maxlen") com auto-detect default (10% RAM, piso 500 MB,
+        # teto 4 GB). Configurável em Preferências → Cache LRU.
+        _cache_qs = _qsettings()
+        _user_mb = _cache_qs.value("cache/max_bytes_mb", None)
+        if _user_mb is None or str(_user_mb).strip() == "":
+            _cache_max_bytes: float = default_max_bytes()
+        else:
+            try:
+                _cache_max_bytes = max(100e6, float(_user_mb) * 1e6)
+            except (TypeError, ValueError):
+                _cache_max_bytes = default_max_bytes()
+        try:
+            _cache_maxlen = max(1, int(_cache_qs.value("cache/maxlen", 3)))
+        except (TypeError, ValueError):
+            _cache_maxlen = 3
+        self._sim_history_cache: LRUPlotCache = LRUPlotCache(
+            maxlen=_cache_maxlen, max_bytes=_cache_max_bytes
+        )
 
         self.page_sim.request_start.connect(self._start_simulation)
         self.page_sim.request_stop.connect(self._stop_simulation)
@@ -7382,6 +7523,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.page_bench.request_stop.connect(self._stop_benchmark)
         self.page_prefs.paths_changed.connect(self._apply_paths)
         self.page_prefs.style_changed.connect(self._apply_style)
+        # v2.29.2: cache LRU reativo a mudanças em Preferências
+        self.page_prefs.cache_settings_changed.connect(self._on_cache_settings_changed)
         # v2.4c: sinais da ResultsPage
         self.page_results.request_free_memory.connect(self._on_free_plot_memory)
         self.page_results.combo_experiment.currentIndexChanged.connect(
@@ -7934,6 +8077,67 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_style(self, style: PlotStyle) -> None:
         self._plot_style = style
         self.page_results.set_style(style)
+
+    # ── v2.29.2 ─ Cache LRU reativo às Preferências ──────────────────────────
+    def _on_cache_settings_changed(self, max_mb: int, maxlen: int) -> None:
+        """Reinstancia o cache LRU com novos limites e preserva snapshots.
+
+        Args:
+            max_mb: Novo limite em megabytes (``int`` validado pelo
+                ``QSpinBox`` no range [100, 16384]).
+            maxlen: Novo número máximo de snapshots (range [1, 20]).
+
+        Note:
+            Em vez de descartar os snapshots cacheados, re-popula o novo
+            cache via :meth:`LRUPlotCache.put` na ordem original.
+            ``LRUPlotCache`` aplica a política LRU automaticamente: o
+            novo limite pode evictar bundles antigos se forem grandes
+            demais ou se ``maxlen`` foi reduzido.
+        """
+        try:
+            new_max_bytes = max(100e6, float(max_mb) * 1e6)
+            new_maxlen = max(1, int(maxlen))
+        except (TypeError, ValueError):
+            return  # valores inválidos — ignorar
+
+        old_cache = self._sim_history_cache
+        new_cache = LRUPlotCache(maxlen=new_maxlen, max_bytes=new_max_bytes)
+        # Preserva snapshots existentes na ordem original (LRU re-aplica política).
+        for key in list(old_cache.keys()):
+            bundle = old_cache.get(key)
+            if bundle is not None:
+                new_cache.put(key, bundle)
+        self._sim_history_cache = new_cache
+
+        # Atualiza widgets dependentes: status bar (label cache), combo de
+        # experimentos em Resultados, e marca itens do histórico que foram
+        # evictados pela nova política como "fora de cache".
+        try:
+            self._update_cache_status()
+        except Exception:
+            pass
+        try:
+            self._refresh_results_experiment_combo()
+        except Exception:
+            pass
+        exp = getattr(self, "_experiment", None)
+        if exp is not None:
+            live_keys = set(self._sim_history_cache.keys())
+            for snap in getattr(exp, "simulations", []):
+                sid = getattr(snap, "snapshot_id", None)
+                if sid is not None and sid not in live_keys:
+                    try:
+                        self.page_sim.mark_history_out_of_cache(sid)
+                    except Exception:
+                        pass
+
+        tm = getattr(self, "_toast_manager", None)
+        if tm is not None:
+            tm.show(
+                f"Cache LRU: {max_mb} MB · {maxlen} snapshots",
+                "success",
+                2500,
+            )
 
     def _fortran_binary(self) -> str:
         return self._paths.get("tatu_binary", "")
@@ -8597,14 +8801,16 @@ class MainWindow(QtWidgets.QMainWindow):
             # v2.5: mensagem espec\u00edfica para auto-eviction (tensor maior
             # que max_bytes do cache) vs. cache miss comum (LRU/sess\u00e3o).
             if self._sim_history_cache.was_too_big(snapshot_id):
+                # v2.29.2: limite din\u00e2mico (era hardcoded 500 MB at\u00e9 v2.29.1).
+                _cur_mb = self._sim_history_cache.max_bytes / 1e6
                 title = "Tensor grande demais para cache"
                 msg = (
                     "Esta simula\u00e7\u00e3o multi-freq\u00d7multi-angle gerou um tensor "
-                    "que excedeu o limite do cache LRU (500 MB).<br/><br/>"
+                    f"que excedeu o limite do cache LRU ({_cur_mb:.0f} MB).<br/><br/>"
                     "Para visualiz\u00e1-la, op\u00e7\u00f5es:<br/>"
                     "&nbsp;\u2022 Re-execute (ela voltar\u00e1 a ser a 'Simula\u00e7\u00e3o atual')<br/>"
                     "&nbsp;\u2022 Reduza n_models, nTR, n\u03b8 ou nf<br/>"
-                    "&nbsp;\u2022 Aumente o limite de cache em Prefer\u00eancias (futuro)"
+                    "&nbsp;\u2022 Aumente o limite em <b>Prefer\u00eancias \u2192 Cache LRU</b>"
                 )
             else:
                 title = "Tensor n\u00e3o dispon\u00edvel"
@@ -10386,19 +10592,21 @@ def _run_smoke_test() -> int:
             callable(getattr(st, "request_cancel", None)),
             "v2.11 T23: SimulationThread.request_cancel é chamável",
         )
+        # v2.29.2 fix: is_paused/is_cancelled tornaram-se métodos em v2.29
+        # (antes eram propriedades). Smoke test agora invoca-os corretamente.
         check(
-            st.is_paused is False and st.is_cancelled is False,
+            st.is_paused() is False and st.is_cancelled() is False,
             "v2.11 T23: SimulationThread inicializa is_paused/is_cancelled = False",
         )
         # Pause/resume idempotência cooperativa (sem rodar a thread).
         st.request_pause()
         check(
-            st.is_paused is True,
+            st.is_paused() is True,
             "v2.11 T23: request_pause atualiza is_paused = True",
         )
         st.request_resume()
         check(
-            st.is_paused is False,
+            st.is_paused() is False,
             "v2.11 T23: request_resume restaura is_paused = False",
         )
         # MainWindow handlers
