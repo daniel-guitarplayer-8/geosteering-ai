@@ -7,6 +7,90 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.29.2] — 2026-05-11 — Cache LRU configurável + varredura GUI
+
+### Causa-raiz
+
+O `LRUPlotCache` tinha limite **hardcoded** de 500 MB em duas localizações
+(`sm_plot_cache.py:73` e `simulation_manager.py:7368`). Em simulações
+multi-frequência × multi-ângulo com `complex128`, o tensor histórico
+facilmente excede 5× esse limite (cálculo empírico: 1000 mod × 2 TR ×
+4 dips × 600 pos × 4 freq × 9 comp × 16 B = **2.77 GB**).
+
+Ao re-abrir o experimento pelo histórico, o usuário recebia o diálogo:
+
+> "Esta simulação multi-freq×multi-angle gerou um tensor que excedeu o limite
+> do cache LRU (500 MB). [...] • Aumente o limite de cache em Preferências
+> (futuro)"
+
+A feature prometida "(futuro)" estava pendurada desde v2.5. Esta sprint
+implementa.
+
+Adicionalmente, smoke test do SM tinha 3 falhas pré-existentes desde v2.29:
+`SimulationThread.is_paused` e `is_cancelled` viraram métodos em "Back to
+Basics", mas o teste ainda os comparava como properties (`st.is_paused is False`
+→ sempre False).
+
+### Solução v2.29.2
+
+**Auto-detect default baseado em RAM** ([sm_plot_cache.py:50](../../geosteering_ai/simulation/tests/sm_plot_cache.py#L50)):
+
+| RAM Total | 10% RAM | Após piso 500 MB / teto 4 GB |
+|:---------:|:-------:|:----------------------------:|
+| 4 GB | 400 MB | **500 MB** (piso) |
+| 16 GB | 1.6 GB | **1.6 GB** |
+| 32 GB | 3.2 GB | 3.2 GB |
+| 64 GB | 6.4 GB | **4 GB** (teto) |
+
+Fallback 500 MB se `psutil` ausente ou `virtual_memory()` falhar (qualquer
+`Exception`, não apenas `ImportError`).
+
+**Persistência QSettings**: `cache/max_bytes_mb` e `cache/maxlen`.
+
+**UI Preferências — "Cache LRU de Tensores"**: 2× `QSpinBox` (limite MB,
+snapshots máximos) + botão "Auto-detect" + label informativo. Signal
+`cache_settings_changed(int, int)` reinstancia o cache preservando snapshots
+existentes (re-put no novo cache) e atualiza widgets dependentes
+(`_update_cache_status`, `_refresh_results_experiment_combo`,
+`mark_history_out_of_cache` para itens evictados).
+
+**Mensagem dinâmica**: agora mostra o limite ATUAL (não "500 MB" hardcoded)
+e linka para "Preferências → Cache LRU" em vez de "(futuro)".
+
+**Fix smoke test pré-existente**: `st.is_paused()` em vez de `st.is_paused`,
+idem `is_cancelled()`.
+
+### Arquivos modificados
+
+- `geosteering_ai/simulation/tests/sm_plot_cache.py`: +`default_max_bytes()`,
+  `max_bytes: Optional[float] = None` aceito
+- `geosteering_ai/simulation/tests/simulation_manager.py`: QSettings reader
+  + UI Preferences group + signal/handler + fix smoke test
+- `tests/test_simulation_lru_cache.py`: **NOVO**, 7 testes
+- `docs/reports/v2.29.2_2026-05-11.md`: relatório técnico completo
+
+### Validação
+
+| Suite | Resultado |
+|:------|:----------|
+| `test_simulation_lru_cache.py` (NOVO) | **7/7 PASS** |
+| `test_simulation_workers_ephemeral.py` | 9/9 PASS |
+| `test_simulation_compare_fortran.py` | **10/10 PASS — paridade <1e-12 PRESERVADA** |
+| `test_simulation_workers_threading.py` | 3/3 PASS |
+| `test_simulation_v223_fastmath_threads.py` | 7/7 PASS |
+| `test_simulation_parameters_seed.py` | 1/1 PASS |
+| Smoke test SM (`--smoke-test`) | **0 falhas** (era 3 falhas pré-existentes) |
+| CodeRabbit (`coderabbit review --agent`) | **0 findings** (após 4 fixes da 1ª passada) |
+
+### Adaptação Sprint v2.21 → atual
+
+Investigação confirmou que a **estrutura GUI v2.21 já está integralmente
+adaptada** no código atual. As 12 classes principais (`MainWindow`,
+`SimulationParametersPage`, `BenchmarkPage`, `ResultsPage`, `PreferencesPage`,
+`PlotComposerDialog`, etc.) estão preservadas. **Nada precisa adaptar**.
+
+---
+
 ## [v2.29.1] — 2026-05-11 — Fix `NUMBA_NUM_THREADS` no PAI + restauração de 150k mod/h
 
 ### Causa-raiz
