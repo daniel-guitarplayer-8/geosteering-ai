@@ -7,6 +7,88 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.29] — 2026-05-11 — Back to Basics: reversão arquitetural
+
+### Causa-raiz da regressão persistente v2.18–v2.28
+
+Após 4 tentativas (v2.25–v2.28), throughput permaneceu em 75–107k mod/h (esperado >150k),
+warmup visível ~33s, Python travava ao fechar. Análise comparativa com
+`old_geosteering_ai/simulation/tests/sm_workers.py` (869 LOC, funciona) revelou que a
+**arquitetura v2.18+** (pool persistente + PoolWarmupThread + t0_sim) é incompatível
+com o cold-start JIT do Numba.
+
+| Aspecto | OLD (funciona) | v2.18–v2.28 (problemas) |
+|:--------|:---------------|:------------------------|
+| Pool | Efêmero (`with ProcessPoolExecutor`) | Persistente global |
+| Inicializador | Nenhum | `_numba_init_worker` |
+| Warmup background GUI | **Nenhum** | `PoolWarmupThread` |
+| Warmup task | INLINE com dados REAIS (`chunk[0]`) | Sintético (`n_layers=10` hardcoded) |
+| Medição | `t0` único | `t0_sim` pós-NOOPs |
+| Shutdown | Implícito via `with` | `release_numba_pool()` + atexit |
+| LOC | 869 | 1478 |
+
+**Bugs cumulativos v2.18–v2.28**:
+1. Warmup sintético não cobre paths para `n_layers` variável
+2. Pool persistente recriado se hankel_filter difere → warmup descartado
+3. `release_numba_pool` não cancela workers em LLVM → hang
+4. Race condition em `_PERSISTENT_POOL_CONFIG`
+
+### Solução v2.29 — Back to Basics
+
+Reverteu para arquitetura OLD (`old_geosteering_ai/`) com 3 melhorias v2.x preservadas:
+- `NumbaPrimer` (v2.9) — popula cache JIT em disco no startup, compatível com ephemeral
+- `os.environ["NUMBA_NUM_THREADS"]` setup no worker (v2.16)
+- `detect_cpu_topology` log no `run()` (v2.17)
+- Pause/cancel cooperativo (v2.11)
+
+**Removidos**:
+- `_PERSISTENT_POOL`, `_PERSISTENT_POOL_CONFIG`
+- `_numba_init_worker`, `_run_numba_warmup_task`, `_noop`
+- `_acquire_numba_pool`, `release_numba_pool`
+- `PoolWarmupThread` (+ GUI: `lbl_warmup_status`, `_warmup_thread`,
+  `_start_background_warmup`, `_on_warmup_done`, `_on_warmup_error`,
+  `_on_backend_changed_warmup`)
+- `_prewarm_numba_pool` (MainWindow)
+- `_WORKER_INITIALIZED` global
+- `t0_sim` e sincronização via NOOPs
+
+**Mudanças**:
+- `run_numba_chunk`: warmup INLINE incondicional com dados reais de `chunk[0]`,
+  `t0 = time.perf_counter()` APÓS warmup (modelo OLD linha 174)
+- `SimulationThread.run()`: `with ProcessPoolExecutor(max_workers=n_workers) as pool:`
+  efêmero, mensagem honesta ao usuário sobre warmup esperado
+
+**Performance** (esperada, modelo OLD):
+- Throughput 1ª execução cold cache: **>150k mod/h**
+- Throughput 2ª execução warm cache: **>500k mod/h**
+- Sem warmup visível
+- Hang no shutdown **resolvido por design** (context manager `__exit__`)
+
+### Testes (v2.29)
+
+```
+tests/test_simulation_workers_ephemeral.py    — 6/6 PASS (novo)
+tests/test_simulation_parameters_seed.py      — 1/1 PASS (realocação)
+tests/test_simulation_compare_fortran.py      — 10/10 PASS [paridade <1e-12]
+tests/test_simulation_v223_fastmath_threads.py — 7/7 PASS
+tests/test_simulation_workers_threading.py    — 3/3 PASS
+```
+
+**Deletado**: `tests/test_simulation_pool_warmup.py` (12 testes obsoletos —
+infraestrutura testada foi totalmente removida).
+
+### Arquivos
+
+- `geosteering_ai/simulation/tests/sm_workers.py`: 1478 → 1062 LOC (-416)
+- `geosteering_ai/simulation/tests/simulation_manager.py`: -100 LOC
+- `docs/reports/v2.29_2026-05-11.md`: relatório técnico completo
+
+### Relatório detalhado
+
+Ver: [`docs/reports/v2.29_2026-05-11.md`](reports/v2.29_2026-05-11.md)
+
+---
+
 ## [v2.28] — 2026-05-11 — Fix warmup incompleto: Warmups C+D para cobertura total
 
 ### Causa-raiz diagnosticada
