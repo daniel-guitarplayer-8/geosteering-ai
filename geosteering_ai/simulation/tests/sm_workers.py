@@ -115,21 +115,40 @@ def _run_numba_warmup_task(n_threads: int, hankel_filter: str) -> bool:
 
     Executa ``simulate_multi`` com shapes representativas e corretas:
 
-      ┌────────────────────────────────────────────────────────────────┐
-      │  n_layers = 10  →  esp.shape = (n-2,) = (8,)                 │
-      │  positions_z = 50 pontos (suficiente para ativar JIT)         │
-      │  Warmup A: single-combo (nTR×nAng = 1) → kernel cached       │
-      │  Warmup B: multi-combo  (nTR×nAng = 4) → FLAT prange         │
-      └────────────────────────────────────────────────────────────────┘
+      ┌────────────────────────────────────────────────────────────────────┐
+      │  n_layers = 10  →  esp.shape = (n-2,) = (8,)                     │
+      │  positions_z = 50 pontos (suficiente para ativar JIT)             │
+      │  Warmup A: single-combo, isotrópico, dip=0° → kernel cached      │
+      │  Warmup B: multi-combo,  isotrópico, dip=0° → FLAT prange        │
+      │  Warmup C: single-combo, anisotrópico (rho_v≠rho_h), dip=0°     │
+      │            → ativa common_arrays / common_factors nas             │
+      │               especializações de tipo reais (v2.28)              │
+      │  Warmup D: single-combo, anisotrópico, dip=30°                   │
+      │            → ativa find_layers_tr / _sanitize_profile_kernel /   │
+      │               precompute_common_arrays_cache path inclinado       │
+      │               (v2.28)                                             │
+      └────────────────────────────────────────────────────────────────────┘
 
     50 posições (vs. 600 em v2.25): JIT é ativado pela PRIMEIRA chamada,
     não pelo tamanho do array. Arrays grandes só adicionam latência ao
     warmup quente (~6 s → ~2 s com 50 posições) sem benefício de bytecode.
 
+    Bug v2.27: Warmups A+B usavam ``rho_h == rho_v`` (isotrópico) e
+    ``dip_degs=[0.0]``. Funções JIT chamadas APENAS em paths anisotrópicos
+    ou de dip≠0 não eram compiladas durante o warmup. Workers 1..N as
+    compilavam inline durante a simulação real, após ``t0_sim`` — causando
+    ~35 s de JIT cold inline contado como tempo de simulação (~55k mod/h).
+    Fix v2.28: Warmups C+D cobrem esses paths, populando o cache em disco
+    durante o warmup (Worker 0) antes de ``t0_sim``. Workers 1..N carregam
+    do cache em disco (< 2 s) em vez de recompilar.
+
     Histórico:
         v2.10–v2.24: Bug de shape → ValueError silencioso → warm falso.
         v2.25: shape correto, mas warmup no inicializador → hang no shutdown.
         v2.26: warmup como Future, shape correto, 50 posições.
+        v2.27: 1 future (não n_workers) — elimina saturação LLVM. Mas
+               Warmups A+B apenas (isotrópico+dip=0) → cache incompleto.
+        v2.28: Warmups C+D adicionados — cobertura completa de paths.
 
     Args:
         n_threads: Threads Numba (mascaramento via ``SimulationConfig``).
@@ -182,6 +201,36 @@ def _run_numba_warmup_task(n_threads: int, hankel_filter: str) -> bool:
             frequencies_hz=[20000.0, 40000.0],
             tr_spacings_m=[1.0, 2.0],
             dip_degs=[0.0],
+            cfg=_cfg,
+        )
+        # Warmup C — anisotrópico (rho_v ≠ rho_h): ativa common_arrays e
+        # common_factors nas especializações reais. Em A+B rho_h==rho_v
+        # (isotrópico) pode gerar especializações de tipo distintas das
+        # usadas nas simulações reais onde rho_v < rho_h (TIV típico).
+        _rho_v = _rho * 0.3  # resistividade vertical ≠ horizontal
+        simulate_multi(
+            rho_h=_rho,
+            rho_v=_rho_v,
+            esp=_esp,
+            positions_z=_pos,
+            frequencies_hz=[20000.0],
+            tr_spacings_m=[1.0],
+            dip_degs=[0.0],
+            cfg=_cfg,
+        )
+        # Warmup D — dip≠0 + anisotrópico: ativa find_layers_tr,
+        # _sanitize_profile_kernel e precompute_common_arrays_cache
+        # no path de formação inclinada (hordist > 0). Esses JIT foram
+        # compilados inline durante a simulação real em v2.27 (após
+        # t0_sim), causando regressão de throughput (~55k mod/h).
+        simulate_multi(
+            rho_h=_rho,
+            rho_v=_rho_v,
+            esp=_esp,
+            positions_z=_pos,
+            frequencies_hz=[20000.0],
+            tr_spacings_m=[1.0],
+            dip_degs=[30.0],
             cfg=_cfg,
         )
     except Exception:
