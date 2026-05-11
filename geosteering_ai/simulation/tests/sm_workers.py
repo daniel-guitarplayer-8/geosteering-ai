@@ -368,11 +368,13 @@ def run_numba_chunk(
         num_threads=n_threads,
     )
 
-    # ── Warmup JIT (1 chamada descartada por processo) ───────────────────
-    # Pulado quando _numba_init_worker já executou o warmup via pool initializer
-    # (pool persistente). Em modo legado (ProcessPoolExecutor efêmero) ou em
-    # workers criados sem initializer, _WORKER_INITIALIZED permanece False e o
-    # warmup ocorre normalmente aqui.
+    # ── Warmup JIT secundário (1 chamada descartada por processo) ───────────
+    # Pulado quando _run_numba_warmup_task já aqueceu este worker (flag True).
+    # v2.27: PoolWarmupThread aquece apenas 1 worker; os outros (Workers 1..N)
+    # carregam bytecode compilado do cache em disco (< 2 s) neste bloco.
+    # _WORKER_INITIALIZED é setado True aqui para evitar warmup redundante em
+    # todos os chunks subsequentes deste worker na mesma sessão.
+    global _WORKER_INITIALIZED
     if chunk and not _WORKER_INITIALIZED:
         m0 = chunk[0]
         _ = simulate_multi(
@@ -386,6 +388,7 @@ def run_numba_chunk(
             cfg=cfg,
             hankel_filter=hankel_filter,
         )
+        _WORKER_INITIALIZED = True
     # Publica evento de warmup concluído — sempre, para que o master
     # atualize o log independentemente do caminho tomado acima.
     if progress_q is not None:
@@ -1149,7 +1152,7 @@ class PoolWarmupThread(QThread):
 
     Quando ``SimulationPage`` é aberta, esta thread cria/reusa o pool com os
     defaults recomendados e submete ``_run_numba_warmup_task`` como Future
-    para cada worker. Na primeira simulação real, o pool já está pronto:
+    para **1 worker**. Na primeira simulação real, o pool já está pronto:
 
     ┌──────────────────────────────────────────────────────────────────────┐
     │  Sem pre-warm (v2.17):                                              │
@@ -1160,11 +1163,14 @@ class PoolWarmupThread(QThread):
     │    GUI abre → workers spawnam → _numba_init_worker (35 s JIT frio)  │
     │    → pool "pronto" após 35 s; saída da app durante init = HANG      │
     │                                                                      │
-    │  Com pre-warm via Future (v2.26):                                   │
-    │    GUI abre → workers spawnam em < 1 s (init leve) → warmup future  │
-    │    submetido por worker → JIT ocorre no future (cancelável)          │
-    │    → saída limpa a qualquer momento (cancel_futures=True)            │
-    │    → t0_sim ainda excluí JIT (noops ficam na fila atrás dos warm.)  │
+    │  Com pre-warm via Future N workers (v2.26 — BUG):                  │
+    │    GUI abre → N futures simultâneos → N×LLVM saturando CPU          │
+    │    → cada compilação 3–4× mais lenta → 110+ s total (regressão!)   │
+    │                                                                      │
+    │  Com pre-warm via Future 1 worker (v2.27):                          │
+    │    GUI abre → 1 future → 1 worker compila JIT (~35 s frio / <2 s   │
+    │    quente) e grava cache em disco → workers 2..N carregam cache     │
+    │    (<2 s) no 1º chunk → saída limpa; sem saturação LLVM             │
     └──────────────────────────────────────────────────────────────────────┘
 
     Ordenamento da fila de futures que garante t0_sim correto:
@@ -1200,23 +1206,55 @@ class PoolWarmupThread(QThread):
         self._hankel_filter = hankel_filter
 
     def run(self) -> None:
-        """Cria pool, submete _run_numba_warmup_task por worker e aguarda."""
+        """Cria pool, submete _run_numba_warmup_task a 1 worker e aguarda.
+
+        v2.27: warmup submetido a apenas 1 worker (não a n_workers simultâneos).
+
+        Diagnóstico da regressão v2.26:
+          Em v2.26 submetíamos ``n_workers`` futures de warmup simultaneamente.
+          Cada worker compilava ~22 funções JIT via LLVM. Com N processos
+          saturando a CPU com compilações LLVM concorrentes, cada compilação
+          levava 3–4× mais tempo do que em isolado:
+
+            1 worker  (v2.25 initializer, cache frio): ~35–38 s
+            4 workers (v2.26 futures simultâneos)    : ~110+ s  ← regressão
+
+          A raiz é a saturação do LLVM: cada worker usa LLVM multi-thread
+          internamente durante as passes de otimização. Com N workers
+          compilando ao mesmo tempo, N × LLVM_threads disputam os mesmos
+          cores físicos, triplicando o tempo total.
+
+        Solução v2.27:
+          Submeter 1 único future de warmup → 1 worker compila e grava o
+          bytecode no cache em disco (``__pycache__/*.nbi`` / ``*.nbc``).
+          Os workers restantes (2..N), quando receberem o 1º chunk real via
+          ``run_numba_chunk``, carregam o bytecode do cache em disco (< 2 s)
+          via warmup secundário, **sem** nova compilação LLVM.
+
+          Tempo total cold: ~35–38 s (1 worker só).
+          Tempo total warm: < 2 s (cache em disco já presente).
+        """
         t0 = time.perf_counter()
         try:
             pool = _acquire_numba_pool(
                 self._n_workers, self._n_threads, self._hankel_filter
             )
-            # Submete warmup como Future — um por worker.
-            # Futures são canceláveis (cancel_futures=True no shutdown);
-            # o inicializador não é — essa é a diferença central v2.26.
-            futs = [
-                pool.submit(
-                    _run_numba_warmup_task, self._n_threads, self._hankel_filter
+            # ── v2.27: 1 worker compila JIT, outros carregam do cache em disco ──
+            # Submeter a N workers simultâneos causa saturação de LLVM (CPU):
+            # cada compilação leva 3–4× mais → 35 s/worker → 110+ s total.
+            # Com 1 worker: ~35 s frio (sem contenção); Workers 2..N carregam
+            # bytecode do cache (<2 s) no 1º run_numba_chunk.
+            fut = pool.submit(
+                _run_numba_warmup_task, self._n_threads, self._hankel_filter
+            )
+            result = fut.result(timeout=120)
+            if not result:
+                self.warmup_error.emit(
+                    "warmup JIT retornou False — cache pode estar corrompido "
+                    "ou simulate_multi levantou exceção. Workers 2..N farão "
+                    "warmup secundário via run_numba_chunk no 1º chunk."
                 )
-                for _ in range(self._n_workers)
-            ]
-            for f in futs:
-                f.result(timeout=120)
+                return
             self.warmup_done.emit(
                 time.perf_counter() - t0, self._n_workers, self._n_threads
             )

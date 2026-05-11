@@ -7,6 +7,66 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.27] — 2026-05-10 — Fix warmup LLVM saturation (1 worker → cache compartilhado)
+
+### Causa-raiz diagnosticada
+
+Bug v2.26: `PoolWarmupThread.run()` submetia `n_workers` futures de warmup
+**simultaneamente**. Cada worker compilava ~22 funções JIT via LLVM. Com N
+processos saturando as CPUs com compilações LLVM concorrentes, cada compilação
+levava 3–4× mais tempo do que em isolado:
+
+| Versão | Abordagem | Tempo cold JIT | Problema |
+|:-------|:----------|:--------------|:---------|
+| v2.25 | initializer (`simulate_multi` 4×) | ~35–38 s | Hang no shutdown; OOM/SIGKILL mascarava 110+s |
+| v2.26 | N futures simultâneos | **110+ s** | Saturação LLVM: N × LLVM_threads vs. N cores |
+| v2.27 | **1 future** + cache em disco | **~35–38 s frio / < 2 s quente** | ✅ Correto |
+
+### Mudanças implementadas
+
+- **`PoolWarmupThread.run()` — 1 future** (era N futures):
+  - Submete warmup a 1 único worker → esse worker compila JIT e grava cache
+    em disco (`__pycache__/*.nbi`/`*.nbc`).
+  - Workers 2..N carregam bytecode do disco (< 2 s) via warmup secundário em
+    `run_numba_chunk` — sem nova compilação LLVM.
+  - Docstring refatorada com tabela histórica explicando a regressão v2.26.
+
+- **`run_numba_chunk()` — `_WORKER_INITIALIZED = True`** após warmup secundário:
+  - Bug implícito: o flag nunca era setado no warmup secundário, fazendo-o
+    rodar em **todos** os chunks subsequentes para workers 2..N (descartava
+    1 modelo por chunk desnecessariamente).
+  - Fix: `global _WORKER_INITIALIZED; _WORKER_INITIALIZED = True` após o bloco.
+
+- **`PoolWarmupThread` docstring** — diagrama atualizado com linha v2.27
+  explicando a diferença vs. v2.26 (N futures → saturação LLVM).
+
+### Testes
+
+- **2 novos testes** em `tests/test_simulation_pool_warmup.py` (total: 10):
+  - `test_pool_warmup_thread_submits_one_future_not_n_workers` — garante que
+    `PoolWarmupThread.run` não usa `range(self._n_workers)` (bug v2.26).
+  - `test_run_numba_chunk_sets_worker_initialized_after_secondary_warmup` —
+    garante que `_WORKER_INITIALIZED = True` está no código de `run_numba_chunk`.
+- **10/10 PASS** na suite de warmup.
+- **Paridade Fortran <1e-12 PRESERVADA** — 10/10 testes Fortran.
+- **v2.23 não-regressão** — 7/7 PASS.
+
+### Fora do Simulation Manager?
+
+O problema ocorre apenas dentro do SM (via `PoolWarmupThread`). O `simulate_multi`
+chamado diretamente (testes, CLI, benchmarks) nunca cria workers paralelos durante
+warmup — ele usa o JIT inline no processo principal, sem contenção LLVM.
+
+### Configuração pequena (1 modelo) ajudaria?
+
+**Não.** O tempo de warmup é dominado pela compilação LLVM, não pela execução.
+LLVM compila o bytecode das funções independentemente do tamanho dos arrays de
+entrada. Usar `n_layers=1` em vez de `n_layers=10` não reduz o tempo de
+compilação. A solução correta é reduzir o **número de compilações paralelas**
+(1 worker), não o tamanho do input.
+
+---
+
 ## [v2.24] — 2026-05-10 — Débitos Técnicos + I2.5 + I2.6 (Multi-Agent)
 
 ### Sprint v2.24 — Débitos Técnicos (Frente 1)

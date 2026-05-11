@@ -251,3 +251,68 @@ def test_numba_init_worker_is_lightweight() -> None:
         "ProcessPoolExecutor chama shutdown(wait=True) em todos os pools, "
         "esperando indefinidamente por workers presos em JIT de 35+ s)."
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 9. Regressão v2.27: PoolWarmupThread submete 1 future, não n_workers
+# ──────────────────────────────────────────────────────────────────────────
+def test_pool_warmup_thread_submits_one_future_not_n_workers() -> None:
+    """``PoolWarmupThread.run`` v2.27 deve submeter 1 future, não ``n_workers``.
+
+    Bug v2.26: ``n_workers`` futures de warmup eram submetidos simultaneamente.
+    Cada worker compilava ~22 funções JIT via LLVM. N compilações LLVM
+    concorrentes saturam a CPU — cada compilação leva 3–4× mais tempo:
+
+      1 worker  (v2.25 initializer, cache frio): ~35–38 s
+      4 workers (v2.26 futures simultâneos)    : ~110+ s  ← saturação LLVM
+
+    v2.27: 1 único future → 1 worker compila JIT e grava cache em disco.
+    Workers 2..N carregam bytecode do cache (< 2 s) no primeiro chunk real
+    via warmup secundário em ``run_numba_chunk``.
+    """
+    import inspect
+
+    from geosteering_ai.simulation.tests.sm_workers import PoolWarmupThread
+
+    src = inspect.getsource(PoolWarmupThread.run)
+    _first = src.index('"""')
+    _close = src.index('"""', _first + 3)
+    code = src[_close + 3 :]
+
+    assert "for _ in range(self._n_workers)" not in code, (
+        "PoolWarmupThread.run ainda usa list comprehension range(n_workers) — "
+        "bug v2.26: N futures simultâneos → saturação LLVM → 35 s/worker → "
+        "110+ s total. v2.27: submeter apenas 1 future por invocação."
+    )
+    assert (
+        "pool.submit(" in code
+    ), "PoolWarmupThread.run não chama pool.submit — warmup não é executado."
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 10. Regressão v2.27: run_numba_chunk seta _WORKER_INITIALIZED após warmup
+# ──────────────────────────────────────────────────────────────────────────
+def test_run_numba_chunk_sets_worker_initialized_after_secondary_warmup() -> None:
+    """``run_numba_chunk`` v2.27 deve setar ``_WORKER_INITIALIZED = True``.
+
+    Bug implícito v2.26: ``_WORKER_INITIALIZED`` nunca era setado em
+    ``run_numba_chunk`` após o warmup secundário. Como v2.27 aquece apenas
+    1 worker via ``PoolWarmupThread``, os workers 2..N tinham
+    ``_WORKER_INITIALIZED = False`` permanentemente — o bloco de warmup
+    secundário rodava em **todo** chunk subsequente, descartando o resultado
+    de 1 modelo a cada chamada (overhead desnecessário).
+
+    v2.27: ``_WORKER_INITIALIZED = True`` é setado após o warmup secundário,
+    evitando warmup redundante em todos os chunks seguintes do mesmo worker.
+    """
+    import inspect
+
+    from geosteering_ai.simulation.tests.sm_workers import run_numba_chunk
+
+    src = inspect.getsource(run_numba_chunk)
+    assert "_WORKER_INITIALIZED = True" in src, (
+        "run_numba_chunk não seta _WORKER_INITIALIZED=True após warmup "
+        "secundário. v2.27 fix: workers que não receberam o future de warmup "
+        "(PoolWarmupThread usa 1 worker) precisam marcar o flag após o warmup "
+        "em run_numba_chunk para evitar warmup redundante a cada chunk."
+    )
