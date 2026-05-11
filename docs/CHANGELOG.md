@@ -7,6 +7,100 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.29.3] — 2026-05-11 — Investigação de regressão + infraestrutura anti-regressão
+
+### Contexto
+
+Usuário reportou regressão de throughput após v2.29.2 na configuração padrão
+(Cenário E n=2000). Esta sprint investigou empiricamente a regressão e
+implementou infraestrutura de prevenção.
+
+### Veredito Empírico
+
+**NÃO há regressão por v2.29.2.** Benchmarks lado-a-lado:
+
+| Run | v2.29.1 (24fba72) | v2.29.2 (e3a0617) | Δ |
+|:---:|:-----------------:|:-----------------:|:-:|
+| Cold | 91,620 mod/h | 94,563 mod/h | +3.2% |
+| Warm 1 | 93,510 mod/h | 96,737 mod/h | +3.5% |
+| Warm 2 | 88,732 mod/h | 95,124 mod/h | +7.2% |
+| **Mediana** | **91,620** | **95,124** | **+3.8%** |
+
+v2.29.2 é **+3.8% MELHOR** que v2.29.1. Análise estática (2 Explore agents)
+confirma: todas as 4 mudanças v2.29.2 são periféricas ao caminho crítico
+Numba JIT.
+
+### Mudanças Aplicadas
+
+**1. Fix `is_paused()` em `_resume_simulation`** ([simulation_manager.py:8472](../geosteering_ai/simulation/tests/simulation_manager.py#L8472)):
+
+`sim.is_paused` (referência ao método, sempre truthy) → `sim.is_paused()`.
+Não afeta throughput (idempotência de `request_resume()`), apenas comportamento
+lógico correto.
+
+**2. Hook anti-regressão** [`check-perf-regression.sh`](../.claude/hooks/check-perf-regression.sh):
+
+Roda Cenário E n=200 e compara contra `.claude/perf_baseline.json`.
+WARN-only (não bloqueia). Config via env vars (`SCENARIO`, `N_MODELS`,
+`THRESHOLD_PCT`, `VERSION`).
+
+**3. Baseline documentado** [`docs/PERFORMANCE_BASELINE.md`](PERFORMANCE_BASELINE.md):
+
+Tabela canônica de cenários (A, B, C, D, E, F, multi-freq+dip) + notas
+sobre variabilidade + processo de atualização (3 runs + mediana).
+
+**4. Skill `geosteering-perf-baseline`**:
+
+Reviewer especializado em validar não-regressão de throughput. Trigger
+para PRs que modifiquem `geosteering_ai/simulation/`.
+
+### Aprimoramentos Arquiteturais (Prevenção)
+
+5 níveis de defesa:
+
+1. **Hooks Claude Code** — `check-perf-regression.sh` + 5 hooks pré-existentes
+2. **Documentação baseline numérico** — `PERFORMANCE_BASELINE.md` + JSON
+3. **Skills reviewers** — `geosteering-perf-baseline` + 5 reviewers pré-existentes
+4. **Testes regressão** — 37 testes incluindo paridade Fortran <1e-12
+5. **Processo humano** — benchmark obrigatório antes de mudanças em simulator
+
+### Respostas às 4 Perguntas Conceituais
+
+1. **Workers**: `sm_workers.py` (Qt GUI) + `_workers.py` (core reusável) — duas
+   camadas complementares
+2. **CLI**: `pip install -e .` + `geosteering-cli {simulate,benchmark,version}`
+3. **Refactor**: simulador Python OK; SM v3.0+ vale MVC mas precisa pytest-qt antes
+4. **Mitigação**: 5 níveis de defesa documentados
+
+### Arquivos modificados
+
+- `geosteering_ai/simulation/tests/simulation_manager.py`: fix `is_paused()`
+- `.claude/hooks/check-perf-regression.sh`: NOVO
+- `.claude/perf_baseline.json`: NOVO
+- `.claude/commands/geosteering-perf-baseline.md`: NOVO
+- `docs/PERFORMANCE_BASELINE.md`: NOVO
+- `docs/reports/v2.29.3_2026-05-11.md`: relatório completo
+- `docs/CHANGELOG.md`, `docs/ROADMAP.md`, `CLAUDE.md`: entradas v2.29.3
+
+### Validação
+
+| Suite | Resultado |
+|:------|:----------|
+| 37 testes (LRU + ephemeral + paridade + threading + fastmath + seed) | **37/37 PASS** |
+| Paridade Fortran <1e-12 | **10/10 PASS** |
+| Smoke test SM | **0 falhas** |
+| CodeRabbit (1ª passada: 4 hook + 2 skill) | Todos fixes aplicados |
+| Hook `check-perf-regression.sh` | PASS (162% baseline) |
+
+### Limitações
+
+- **150k mod/h não atingido** em medições atuais (~95k em n=2000). Investigar
+  em Sprint v2.30+: condições de medição, thermal monitor, isolation
+- **Sem pytest-qt golden path** — gap planejado v2.27
+- Hook anti-regressão é **WARN-only** (não bloqueia)
+
+---
+
 ## [v2.29.2] — 2026-05-11 — Cache LRU configurável + varredura GUI
 
 ### Causa-raiz
