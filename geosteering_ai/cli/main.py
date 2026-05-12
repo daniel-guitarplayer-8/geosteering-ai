@@ -36,11 +36,43 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+import tempfile
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint v2.31 — Mitigação cold-start LLVM via NUMBA_CACHE_DIR em tmpfs
+# ──────────────────────────────────────────────────────────────────────────────
+# `cache=True` em @njit armazena LLVM bitcode (.nbc), não código de máquina.
+# Cada novo processo Python ainda recompila o bitcode → assembly nativo no
+# backend LLVM (~111 s para 16 .nbc no projeto). Apontar NUMBA_CACHE_DIR
+# para /tmp (tmpfs no macOS/Linux) mantém os .nbc em memória após a primeira
+# leitura, reduzindo o I/O em invocações subsequentes do mesmo processo
+# Python e em forks rápidos. Impacto: −10-30 s em SSD; mais em HDD.
+#
+# Este setup ocorre ANTES de qualquer import pesado (numba, simulação) para
+# garantir que o env var seja honrado pelo Numba na inicialização. Pode ser
+# sobrescrito pelo usuário via `export NUMBA_CACHE_DIR=/caminho/customizado`.
+if "NUMBA_CACHE_DIR" not in os.environ:
+    _default_numba_cache_dir = os.path.join(
+        tempfile.gettempdir(), "geosteering_numba_cache"
+    )
+    try:
+        # Permissões 0o700: somente o dono lê/escreve/executa — evita que
+        # outros usuários em sistemas multi-tenant injetem .nbc maliciosos
+        # (CodeRabbit major finding v2.31). chmod explícito após makedirs
+        # blinda contra `umask` ou diretório pré-existente com permissões
+        # frouxas (compat: mantém o cache se já existe e ajusta o modo).
+        os.makedirs(_default_numba_cache_dir, mode=0o700, exist_ok=True)
+        os.chmod(_default_numba_cache_dir, 0o700)
+        os.environ["NUMBA_CACHE_DIR"] = _default_numba_cache_dir
+    except OSError:
+        # Falha rara (permissões em /tmp) — Numba cai no default $CWD/__pycache__
+        pass
 
 # Versão exibida pelo subcomando `version` — sincronizada manualmente
 # com CLAUDE.md linha 16 ao final de cada sprint.
-SIMULATION_MANAGER_VERSION = "v2.30"
+SIMULATION_MANAGER_VERSION = "v2.31"
 
 
 def build_parser() -> argparse.ArgumentParser:
