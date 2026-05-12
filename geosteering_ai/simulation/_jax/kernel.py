@@ -59,10 +59,10 @@ Expõe :func:`fields_in_freqs_jax_batch` que calcula o tensor H para
 múltiplas posições do poço em uma única chamada, usando ``jax.vmap``
 para vetorização automática (CPU/GPU).
 """
+
 from __future__ import annotations
 
 import math
-from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -70,19 +70,47 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from geosteering_ai.simulation._jax.propagation import (
+# Imports pós-config: jax.config.update precisa preceder importações JAX/Numba
+# para que enable_x64 seja honrado. ruff E402 silenciado intencionalmente.
+from geosteering_ai.simulation._jax.propagation import (  # noqa: E402
     common_arrays_jax,
     common_factors_jax,
 )
-from geosteering_ai.simulation._jax.rotation import rotate_tensor
-from geosteering_ai.simulation._numba.dipoles import hmd_tiv, vmd
-from geosteering_ai.simulation._numba.geometry import (
+from geosteering_ai.simulation._jax.rotation import rotate_tensor  # noqa: E402
+from geosteering_ai.simulation._numba.dipoles import hmd_tiv, vmd  # noqa: E402
+from geosteering_ai.simulation._numba.geometry import (  # noqa: E402
     _sanitize_profile_kernel,
     find_layers_tr,
 )
 
 # Constante física — permeabilidade magnética do vácuo
 _MU_0: float = 4.0e-7 * math.pi
+
+
+def _to_writeable(arr) -> np.ndarray:
+    """Converte para ``np.ndarray`` contíguo e writeable (Sprint v2.31).
+
+    Arrays vindos de ``jax.pure_callback`` chegam com ``writeable=False``
+    (JAX trata buffers como imutáveis). O Numba trata ``mutable=False``
+    como tipo distinto de ``mutable=True``, gerando **especialização
+    duplicada** dos kernels ``hmd_tiv``/``vmd`` no cache em disco
+    (``.1.nbc`` + ``.2.nbc``), inflando o cold-start em 20-40 s.
+
+    Esta helper força ``mutable=True`` via cópia explícita quando
+    necessário, garantindo que apenas 1 especialização seja compilada
+    independente do caminho de entrada (Numba puro vs JAX callback).
+
+    Args:
+        arr: Array-like (numpy, jax, ou qualquer convertível via
+            ``np.asarray``).
+
+    Returns:
+        ``np.ndarray`` contíguo em C-order com ``flags.writeable=True``.
+    """
+    out = np.ascontiguousarray(arr)
+    if not out.flags.writeable:
+        out = out.copy()
+    return out
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -131,6 +159,10 @@ def _dipoles_numba_host(
     Convertido para numpy arrays antes de chamar Numba. Retorna matH
     3x3 complex128, que JAX converte de volta para jnp.array.
     """
+    # Sprint v2.31: _to_writeable garante mutable=True (1 especialização Numba).
+    # Arrays JAX chegam readonly (writeable=False); np.asarray preservava esse
+    # flag, fazendo Numba gerar uma 2ª especialização .nbc por mutabilidade.
+    u_np = _to_writeable(u)
     Hx_hmd, Hy_hmd, Hz_hmd = hmd_tiv(
         float(Tx),
         float(Ty),
@@ -139,28 +171,28 @@ def _dipoles_numba_host(
         int(camad_r),
         int(camad_t),
         int(npt_int),
-        np.asarray(krJ0J1),
-        np.asarray(wJ0),
-        np.asarray(wJ1),
-        np.asarray(h_arr),
-        np.asarray(prof_arr),
+        _to_writeable(krJ0J1),
+        _to_writeable(wJ0),
+        _to_writeable(wJ1),
+        _to_writeable(h_arr),
+        _to_writeable(prof_arr),
         complex(zeta_c),
-        np.asarray(eta),
+        _to_writeable(eta),
         float(cx),
         float(cy),
         float(cz),
-        np.asarray(u),
-        np.asarray(s),
-        np.asarray(uh),
-        np.asarray(sh),
-        np.asarray(RTEdw),
-        np.asarray(RTEup),
-        np.asarray(RTMdw),
-        np.asarray(RTMup),
-        np.asarray(Mxdw),
-        np.asarray(Mxup),
-        np.asarray(Eudw),
-        np.asarray(Euup),
+        u_np,
+        _to_writeable(s),
+        _to_writeable(uh),
+        _to_writeable(sh),
+        _to_writeable(RTEdw),
+        _to_writeable(RTEup),
+        _to_writeable(RTMdw),
+        _to_writeable(RTMup),
+        _to_writeable(Mxdw),
+        _to_writeable(Mxup),
+        _to_writeable(Eudw),
+        _to_writeable(Euup),
     )
     Hx_vmd, Hy_vmd, Hz_vmd = vmd(
         float(Tx),
@@ -170,22 +202,22 @@ def _dipoles_numba_host(
         int(camad_r),
         int(camad_t),
         int(npt_int),
-        np.asarray(krJ0J1),
-        np.asarray(wJ0),
-        np.asarray(wJ1),
-        np.asarray(h_arr),
-        np.asarray(prof_arr),
+        _to_writeable(krJ0J1),
+        _to_writeable(wJ0),
+        _to_writeable(wJ1),
+        _to_writeable(h_arr),
+        _to_writeable(prof_arr),
         complex(zeta_c),
         float(cx),
         float(cy),
         float(cz),
-        np.asarray(u),
-        np.asarray(uh),
-        np.asarray(np.asarray(u) / complex(zeta_c)),  # AdmInt recalc
-        np.asarray(RTEdw),
-        np.asarray(RTEup),
-        np.asarray(FEdwz),
-        np.asarray(FEupz),
+        u_np,
+        _to_writeable(uh),
+        _to_writeable(u_np / complex(zeta_c)),  # AdmInt recalc
+        _to_writeable(RTEdw),
+        _to_writeable(RTEup),
+        _to_writeable(FEdwz),
+        _to_writeable(FEupz),
     )
 
     matH = np.empty((3, 3), dtype=np.complex128)
