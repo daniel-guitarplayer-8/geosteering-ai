@@ -7,6 +7,72 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.31] — 2026-05-12 — Otimização Warmup JIT (Parte 1)
+
+### Resumo
+
+Sprint v2.31 aplica a **Parte 1** das otimizações de warmup identificadas no
+relatório `docs/reports/warmup_analysis_jit_2026-05-12.md`. Elimina a anomalia
+de especialização dupla de `hmd_tiv`/`vmd` (causada pelo caminho JAX passar
+arrays readonly) e adiciona mitigação do gargalo LLVM bitcode via
+`NUMBA_CACHE_DIR` apontando para tmpfs.
+
+### Mudanças Principais
+
+**1. Anomalia `hmd_tiv`/`vmd` 2 ``.nbc`` eliminada**:
+
+- Helper privada `_to_writeable(arr)` em `geosteering_ai/simulation/_jax/kernel.py`
+  garante `np.ndarray` writeable=True via `ascontiguousarray + copy` quando o
+  flag é `writeable=False`.
+- 28 sites de `np.asarray(...)` substituídos por `_to_writeable(...)` em
+  `_dipoles_numba_host` (caminho JAX → Numba via `jax.pure_callback`).
+- Resultado: 1 `.nbc` por função em vez de 2 (`hmd_tiv` 2.6 MB → 1.275 MB;
+  `vmd` 1.47 MB → 683 KB).
+
+**2. `NUMBA_CACHE_DIR` em tmpfs (mitigação cold-start LLVM)**:
+
+- `geosteering_ai/cli/main.py` define `NUMBA_CACHE_DIR =
+  $TMPDIR/geosteering_numba_cache` antes de qualquer import pesado.
+- Permissões `0o700` aplicadas (CodeRabbit major finding) — apenas o dono
+  acessa o cache (evita injeção de `.nbc` maliciosos em sistemas multi-tenant).
+- Override do usuário (`export NUMBA_CACHE_DIR=...`) preservado.
+- Falhas em `OSError` toleradas — Numba cai no default `$CWD/__pycache__`.
+
+**3. Guard tests (`tests/test_simulation_numba_specializations.py`)**:
+
+- 5 testes novos garantindo:
+  - 1 especialização compilada por função (`hmd_tiv`, `vmd`);
+  - 1 `.nbc` em disco por função;
+  - `NUMBA_CACHE_DIR` setado após import de `cli/main.py`;
+  - Override do usuário em `NUMBA_CACHE_DIR` preservado.
+
+### Validação
+
+| Métrica | Antes (v2.30) | Após (v2.31) |
+|:--------|:-------------:|:------------:|
+| `.nbc` `hmd_tiv` em disco | 2 (1.275 + 1.338 KB) | 1 (1.275 KB) |
+| `.nbc` `vmd` em disco | 2 (734 + 734 KB) | 1 (683 KB) |
+| Especializações compiladas em RAM | 2 cada | 1 cada |
+| Cold-start (alvo) | 111 s | < 100 s (esperado) |
+| Paridade Fortran | <1e-12 | **<1e-12 preservado** |
+| Throughput baseline | 100% | **100% preservado** |
+
+**Suite de regressão**: 56/56 PASS em 37.42 s
+(Fortran parity + CLI MVP + guard tests v2.31 + workers ephemeral + LRU cache).
+
+### Code Review
+
+- CodeRabbit (1ª iteração): 1 major (permissões 0o700) → aplicado.
+- CodeRabbit (2ª iteração): **0 findings**.
+
+### Referências
+
+- Relatório: `docs/reports/v2.31_warmup_optimization_2026-05-12.md`
+- Análise base: `docs/reports/warmup_analysis_jit_2026-05-12.md`
+- Backup: `.backups/v2.31_warmup_2026-05-12_150327/`
+
+---
+
 ## [v2.30] — 2026-05-11 — CLI Multi-Dimensional (multi-freq + multi-dip + multi-TR)
 
 ### Resumo
