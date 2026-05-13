@@ -4,8 +4,8 @@
 # ║  ---------------------------------------------------------------------    ║
 # ║  Módulo      : Dispatcher principal da CLI (argparse top-level)           ║
 # ║  Projeto     : Geosteering AI v2.0                                        ║
-# ║  Subsistema  : CLI MVP (Sprint v2.30 — multi-dim)                         ║
-# ║  Versão      : v2.30                                                      ║
+# ║  Subsistema  : CLI MVP (Sprint v2.31 — warmup bg thread)                  ║
+# ║  Versão      : v2.31                                                      ║
 # ║  Autor       : Daniel Leal                                                ║
 # ║  Criação     : 2026-05-10                                                 ║
 # ║  Status      : Produção — MVP                                             ║
@@ -39,6 +39,7 @@ import logging
 import os
 import sys
 import tempfile
+import threading
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Sprint v2.31 — Mitigação cold-start LLVM via NUMBA_CACHE_DIR em tmpfs
@@ -73,6 +74,60 @@ if "NUMBA_CACHE_DIR" not in os.environ:
 # Versão exibida pelo subcomando `version` — sincronizada manualmente
 # com CLAUDE.md linha 16 ao final de cada sprint.
 SIMULATION_MANAGER_VERSION = "v2.31"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint v2.31 Part 2 — Background warmup thread para LLVM Tier 2 offline
+# ──────────────────────────────────────────────────────────────────────────────
+def _warmup_numba_tier2_background() -> None:
+    """Aquece Tier 2 LLVM offline via JAX callback path.
+
+    Dispara simulação sintética rápida (3 pontos de profundidade, 1 frequência,
+    isotropia) para forçar compilação JIT de `hmd_tiv`/`vmd` e acionamento do
+    otimizador Tier 2 do LLVM backend em background. Roda em thread daemon
+    para não bloquear CLI.
+
+    Note:
+        Sprint v2.31 Part 2 — Mitigação para oscilação Run 2 observada em
+        5 runs empíricos. Tier 2 (PGO) roda background durante Run 2,
+        contendendo com computação user + macOS thermal throttle. Pre-aquecendo
+        Tier 2 offline permite que optimize sem contenda.
+
+        Impacto esperado: Run 1 mantém ~65-75s (Tier 1 inevitable), mas Run 2+
+        beneficiam de Tier 2 pré-otimizado → consistência desde início.
+    """
+    try:
+        import numpy as np
+
+        from geosteering_ai.simulation._jax.kernel import fields_in_freqs_jax_batch
+        from geosteering_ai.simulation.filters import FilterLoader
+
+        filt = FilterLoader().load("werthmuller_201pt")
+        rho_h = np.array([10.0] * 5)
+        rho_v = np.array([10.0] * 5)
+        esp = np.array([5.0] * 3)
+        positions_z = np.linspace(-1.0, 6.0, 3)
+        freqs_hz = np.array([20000.0])
+
+        # Dispara JAX callback path (aquece Numba + Tier 2 LLVM)
+        fields_in_freqs_jax_batch(
+            positions_z=positions_z,
+            dz_half=0.5,
+            r_half=0.0,
+            dip_rad=0.0,
+            n=5,
+            rho_h=rho_h,
+            rho_v=rho_v,
+            esp=esp,
+            freqs_hz=freqs_hz,
+            krJ0J1=filt.abscissas,
+            wJ0=filt.weights_j0,
+            wJ1=filt.weights_j1,
+            use_native_dipoles=False,
+        )
+    except Exception:
+        # Silent fail — warmup é best-effort, não crítico para CLI
+        pass
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -302,6 +357,10 @@ def main(argv: list[str] | None = None) -> int:
     # handlers — evita reconfigurar logger raiz quando handlers forem
     # importados como biblioteca por código externo.
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s")
+
+    # Sprint v2.31 Part 2 — Inicializar background warmup thread (daemon)
+    # para pré-aquecer LLVM Tier 2 offline, reduzindo contenda com user work
+    threading.Thread(target=_warmup_numba_tier2_background, daemon=True).start()
 
     parser = build_parser()
     args = parser.parse_args(argv)

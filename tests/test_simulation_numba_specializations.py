@@ -31,10 +31,15 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+# Registrado pela fixture jax_path_triggered para filtrar .nbc de sessões
+# anteriores ao fix _to_writeable (v2.31) que persistem no NUMBA_CACHE_DIR tmpfs
+_jax_trigger_time: float = 0.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -49,6 +54,7 @@ def jax_path_triggered():
     signatures separadas). O JAX callback é o único caminho de produção
     que chama os dipolos Numba como ponto de entrada Python.
     """
+    global _jax_trigger_time
     pytest.importorskip("jax", reason="JAX necessário para testar callback path")
 
     from geosteering_ai.simulation._jax.kernel import fields_in_freqs_jax_batch
@@ -62,7 +68,10 @@ def jax_path_triggered():
     positions_z = np.linspace(-1.0, 6.0, 3)
     freqs_hz = np.array([20000.0])
 
-    _ = fields_in_freqs_jax_batch(
+    # Registrar timestamp ANTES da compilação para filtrar .nbc de sessões antigas
+    _jax_trigger_time = time.time()
+
+    fields_in_freqs_jax_batch(
         positions_z=positions_z,
         dz_half=0.5,
         r_half=0.0,
@@ -126,26 +135,49 @@ class TestSingleSpecialization:
         )
 
     def test_single_nbc_file_per_function(self, jax_path_triggered) -> None:
-        """Apenas 1 ``.nbc`` por função no cache em disco após compilação.
+        """Nenhuma 2ª especialização ``.nbc`` gerada nesta sessão (anti-regressão).
 
-        Antes da v2.31: 2 ``.nbc`` (``.1.nbc`` + ``.2.nbc``).
-        Após v2.31: 1 ``.nbc``.
+        Antes do fix ``_to_writeable`` (v2.31): JAX callback criava 2ª
+        especialização (mutable=False) → Numba gravava ``.2.nbc`` além do
+        ``.1.nbc`` já existente.
+        Após o fix: apenas 1 especialização em memória; ``.2.nbc`` não é
+        gerado nesta sessão.
+
+        Verificação por timestamp (``_jax_trigger_time``) ignora ``.2.nbc``
+        legados de sessões anteriores ao fix no NUMBA_CACHE_DIR tmpfs
+        persistente. Numba não recria ``.nbc`` existentes, então só
+        arquivos NEW (regressão) teriam timestamp >= trigger.
         """
-        from geosteering_ai.simulation._numba.dipoles import hmd_tiv
+        from geosteering_ai.simulation._numba.dipoles import hmd_tiv, vmd
 
         assert jax_path_triggered
-        # Numba expõe o cache via _cache._cache_path (privado, mas estável)
         cache_dir = Path(hmd_tiv._cache._cache_path)
-        hmd_nbcs = sorted(cache_dir.glob("dipoles.hmd_tiv-*.nbc"))
-        vmd_nbcs = sorted(cache_dir.glob("dipoles.vmd-*.nbc"))
-        assert len(hmd_nbcs) == 1, (
-            f"hmd_tiv tem {len(hmd_nbcs)} .nbc em disco: {hmd_nbcs} — "
-            "Sprint v2.31 esperava 1 (era 2 antes do fix _to_writeable)"
+
+        # Verificar que nenhum .2.nbc foi CRIADO nesta sessão
+        # (.2.nbc = 2ª especialização = sintoma da regressão pré-fix)
+        new_hmd_v2 = [
+            f
+            for f in cache_dir.glob("dipoles.hmd_tiv-*.2.nbc")
+            if f.stat().st_mtime >= _jax_trigger_time
+        ]
+        new_vmd_v2 = [
+            f
+            for f in cache_dir.glob("dipoles.vmd-*.2.nbc")
+            if f.stat().st_mtime >= _jax_trigger_time
+        ]
+        assert len(new_hmd_v2) == 0, (
+            f"hmd_tiv gerou 2ª especialização nesta sessão: {new_hmd_v2} — "
+            "Regressão v2.31? Verificar _to_writeable em _jax/kernel.py"
         )
-        assert len(vmd_nbcs) == 1, (
-            f"vmd tem {len(vmd_nbcs)} .nbc em disco: {vmd_nbcs} — "
-            "Sprint v2.31 esperava 1 (era 2 antes do fix _to_writeable)"
+        assert len(new_vmd_v2) == 0, (
+            f"vmd gerou 2ª especialização nesta sessão: {new_vmd_v2} — "
+            "Regressão v2.31? Verificar _to_writeable em _jax/kernel.py"
         )
+        # Confirmação em memória (diagnóstico complementar)
+        n_hmd = len(hmd_tiv.signatures)
+        n_vmd = len(vmd.signatures)
+        assert n_hmd == 1, f"hmd_tiv tem {n_hmd} especializações (esperado 1)"
+        assert n_vmd == 1, f"vmd tem {n_vmd} especializações (esperado 1)"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
