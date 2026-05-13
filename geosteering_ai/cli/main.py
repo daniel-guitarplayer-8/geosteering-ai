@@ -42,18 +42,23 @@ import tempfile
 import threading
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sprint v2.31 — Mitigação cold-start LLVM via NUMBA_CACHE_DIR em tmpfs
+# Sprint v2.31 — Variáveis de ambiente: NUMBA_CACHE_DIR + JAX_PLATFORMS
 # ──────────────────────────────────────────────────────────────────────────────
-# `cache=True` em @njit armazena LLVM bitcode (.nbc), não código de máquina.
-# Cada novo processo Python ainda recompila o bitcode → assembly nativo no
-# backend LLVM (~111 s para 16 .nbc no projeto). Apontar NUMBA_CACHE_DIR
-# para /tmp (tmpfs no macOS/Linux) mantém os .nbc em memória após a primeira
-# leitura, reduzindo o I/O em invocações subsequentes do mesmo processo
-# Python e em forks rápidos. Impacto: −10-30 s em SSD; mais em HDD.
-#
-# Este setup ocorre ANTES de qualquer import pesado (numba, simulação) para
-# garantir que o env var seja honrado pelo Numba na inicialização. Pode ser
-# sobrescrito pelo usuário via `export NUMBA_CACHE_DIR=/caminho/customizado`.
+# JAX_PLATFORMS=cpu: impede que o JAX 0.4+ sonde backends ausentes (ROCM, TPU,
+# CUDA) durante a inicialização. Sem este env var, cada processo Python emite
+# mensagens INFO "Unable to initialize backend 'rocm'" e "Unable to initialize
+# backend 'tpu'" no stderr — ruído para usuários CLI sem GPU ROCM/TPU.
+# Deve ser setado ANTES de qualquer `import jax` (inclusive via importação
+# transitiva — e.g. `_jax/kernel.py`). `setdefault` preserva override manual
+# do usuário via `export JAX_PLATFORMS=cuda` ou `JAX_PLATFORMS=metal`.
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
+# NUMBA_CACHE_DIR em tmpfs: `cache=True` em @njit armazena LLVM bitcode (.nbc),
+# não código de máquina. Cada novo processo Python ainda recompila o bitcode →
+# assembly nativo no backend LLVM (~111 s para 16 .nbc no projeto). Apontar
+# NUMBA_CACHE_DIR para /tmp (tmpfs no macOS/Linux) mantém os .nbc em memória
+# após a primeira leitura, reduzindo I/O em invocações subsequentes. Impacto:
+# −10-30 s em SSD; mais em HDD. Pode ser sobrescrito via `export NUMBA_CACHE_DIR=`.
 if "NUMBA_CACHE_DIR" not in os.environ:
     _default_numba_cache_dir = os.path.join(
         tempfile.gettempdir(), "geosteering_numba_cache"
@@ -357,6 +362,12 @@ def main(argv: list[str] | None = None) -> int:
     # handlers — evita reconfigurar logger raiz quando handlers forem
     # importados como biblioteca por código externo.
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s")
+
+    # Evita duplicação de mensagens do logger 'jax': o JAX instala um
+    # StreamHandler próprio; com propagate=True (padrão), cada mensagem seria
+    # emitida pelo handler do 'jax' E pelo handler raiz do basicConfig — 2×.
+    # Desabilitar propagate corta o segundo caminho sem suprimir o primeiro.
+    logging.getLogger("jax").propagate = False
 
     # Sprint v2.31 Part 2 — Inicializar background warmup thread (daemon)
     # para pré-aquecer LLVM Tier 2 offline, reduzindo contenda com user work
