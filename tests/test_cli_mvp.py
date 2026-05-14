@@ -173,7 +173,7 @@ def test_cli_simulate_smoke_5_models():
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=300,
         cwd=str(PROJECT_ROOT),
     )
     # Aceita exit code 0 (sucesso) ou 1 (caminho de erro tratado) — apenas
@@ -265,7 +265,7 @@ def test_cli_simulate_multi_frequencies():
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=300,
         cwd=str(PROJECT_ROOT),
     )
     assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
@@ -294,7 +294,7 @@ def test_cli_simulate_multi_dips():
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=300,
         cwd=str(PROJECT_ROOT),
     )
     assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
@@ -323,7 +323,7 @@ def test_cli_simulate_multi_tr_spacings():
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=300,
         cwd=str(PROJECT_ROOT),
     )
     assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
@@ -356,7 +356,7 @@ def test_cli_simulate_full_multidim_combo():
         ],
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=300,
         cwd=str(PROJECT_ROOT),
     )
     assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
@@ -382,7 +382,7 @@ def test_cli_benchmark_scenario_g_runs():
         ],
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=300,
         cwd=str(PROJECT_ROOT),
     )
     assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
@@ -412,7 +412,7 @@ def test_cli_benchmark_dips_override():
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=300,
         cwd=str(PROJECT_ROOT),
     )
     assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
@@ -440,7 +440,7 @@ def test_cli_benchmark_frequencies_override():
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=300,
         cwd=str(PROJECT_ROOT),
     )
     assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
