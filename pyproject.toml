@@ -62,6 +62,8 @@ dev = [
 [project.scripts]
 # Sprint v2.24 — I2.6 — CLI MVP
 geosteering-cli = "geosteering_ai.cli:main"
+# Sprint v2.32 — Warmup CLI entry point (síncrono)
+geosteering-warmup = "geosteering_ai.cli.warmup:main"
 
 [tool.setuptools.packages.find]
 include = ["geosteering_ai*"]
