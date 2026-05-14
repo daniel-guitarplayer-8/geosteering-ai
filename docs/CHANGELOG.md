@@ -7,6 +7,94 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.32] — 2026-05-13 — `geosteering-warmup` Entry Point + Dívidas v2.31
+
+### Resumo
+
+Sprint v2.32 adiciona o entry point standalone **`geosteering-warmup`** para
+execução síncrona do warmup JIT/LLVM (CI, notebooks, debug), e fecha duas
+dívidas técnicas administrativas remanescentes do v2.31:
+
+1. CHANGELOG documenta o hotfix JAX (commit `68b93c7`).
+2. Timeouts dos testes CLI multi-dim em `test_cli_mvp.py` ampliados de 120s
+   → 300s para tolerar cold-start de JIT em CI/macOS.
+
+### Mudanças Principais
+
+**1. Novo entry point `geosteering-warmup`**:
+
+- `geosteering_ai/cli/warmup.py` (~180 LOC com mega-header + docstrings):
+  comando standalone, síncrono e bloqueante, que aquece Numba + LLVM Tier 2
+  via caminho JAX e retorna ao shell quando o warmup termina.
+- Flags: `--verbose` (timing por fase) e `--version` (exibir versão e sair).
+- Exit codes: `0` = sucesso, `1` = falha (exceção propagada), `2` = arg
+  inválido. CI pode detectar falhas.
+- Registrado em `pyproject.toml` `[project.scripts]`:
+
+  ```toml
+  geosteering-warmup = "geosteering_ai.cli.warmup:main"
+  ```
+
+**2. Refatoração em `cli/main.py`**:
+
+- Extraída função pura síncrona `_warmup_numba_tier2_sync(verbose=False)`
+  reutilizável pelo entry point e pelo background thread (Sprint v2.31 Part 2).
+- O wrapper `_warmup_numba_tier2_background()` agora apenas envolve a chamada
+  síncrona com `try/except` silencioso (mantém comportamento de daemon thread
+  best-effort).
+- Versão `SIMULATION_MANAGER_VERSION` bumpada `v2.31` → `v2.32`.
+
+**3. Testes (`tests/test_cli_warmup_entry_point.py`)**:
+
+- 4 testes novos cobrindo `--help`, `--version`, execução completa
+  (`@pytest.mark.slow`, timeout 300s), e declaração do entry point em
+  `pyproject.toml`.
+
+**4. Dívidas técnicas v2.31 fechadas**:
+
+- Timeouts em `tests/test_cli_mvp.py` ajustados (120s → 300s, 180s → 300s)
+  para tolerar cold-start JIT em CI. O teste `test_cli_simulate_multi_dips`,
+  que vinha falhando intermitentemente, agora passa de forma estável.
+- Em `tests/test_cli_warmup_background.py`: assert de versão tornada robusta
+  (substring estável) e timeout do segundo teste 60s → 240s.
+
+### Validação
+
+| Métrica | Status |
+|:--------|:------:|
+| 4/4 testes do entry point | PASS |
+| 7/7 testes warmup background + guard tests v2.31 | PASS |
+| Paridade Fortran <1e-12 | preservada |
+| Throughput baseline | 100% preservado |
+
+**Smoke manual**:
+
+```
+$ geosteering-warmup --version
+Geosteering AI Simulation Manager v2.32
+
+$ time geosteering-warmup --verbose
+Warming up Geosteering AI v2.32...
+  [warmup] filter loaded (0.31s)
+  [warmup] JAX callback path warm (12.18s)
+OK (12.2s)
+```
+
+### Casos de Uso
+
+- **CI**: `geosteering-warmup && geosteering-cli benchmark --scenario E` —
+  isolar cold-start do tempo de benchmark medido.
+- **Notebooks**: executar antes do primeiro `simulate_multi` para timing
+  consistente.
+- **Debug**: `--verbose` revela fases (load filtro, JAX callback) para
+  diagnosticar gargalos de warmup.
+
+### Backup
+
+`.backups/v2.32_warmup_entry_point_2026-05-13_193612/`
+
+---
+
 ## [v2.31] — 2026-05-12 — Otimização Warmup JIT (Parte 1)
 
 ### Resumo

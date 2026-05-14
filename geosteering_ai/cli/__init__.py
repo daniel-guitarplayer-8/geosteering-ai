@@ -4,8 +4,8 @@
 # ║  ---------------------------------------------------------------------    ║
 # ║  Módulo      : CLI MVP — fachada pública                                  ║
 # ║  Projeto     : Geosteering AI v2.0                                        ║
-# ║  Subsistema  : Interface de Linha de Comando (Sprint v2.24 — I2.6)        ║
-# ║  Versão      : v2.24                                                      ║
+# ║  Subsistema  : Interface de Linha de Comando (Sprint v2.32 — warmup ep)   ║
+# ║  Versão      : v2.32                                                      ║
 # ║  Autor       : Daniel Leal                                                ║
 # ║  Criação     : 2026-05-10                                                 ║
 # ║  Status      : Produção — MVP                                             ║
@@ -29,13 +29,18 @@ Interface de linha de comando para tornar o simulador acessível sem
 escrever código Python. Subcomandos:
 
 - ``geosteering-cli simulate``  — gera modelos sintéticos via ``simulate_multi``
-- ``geosteering-cli benchmark`` — executa cenários A/B/C/D/E/F e reporta mod/h
+- ``geosteering-cli benchmark`` — executa cenários A/B/C/D/E/F/G e reporta mod/h
 - ``geosteering-cli version``   — exibe versão atual do Simulation Manager
+
+Entry point relacionado (Sprint v2.32, módulo separado):
+
+- ``geosteering-warmup`` — aquece sincronicamente o cache JIT/LLVM. Útil em
+  CI/notebooks antes de medir throughput. Ver ``geosteering_ai/cli/warmup.py``.
 
 Uso típico::
 
     $ geosteering-cli version
-    Geosteering AI Simulation Manager v2.24
+    Geosteering AI Simulation Manager v2.32
 
     $ geosteering-cli simulate --models 100 --workers 4 --out /tmp/sim
     Simulando 100 modelos com 4 workers...
