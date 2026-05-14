@@ -71,6 +71,38 @@ arrays readonly) e adiciona mitigação do gargalo LLVM bitcode via
 - Análise base: `docs/reports/warmup_analysis_jit_2026-05-12.md`
 - Backup: `.backups/v2.31_warmup_2026-05-12_150327/`
 
+### Hotfix (commit 68b93c7) — Eliminação de ruído INFO no stderr
+
+Após o release v2.31, observou-se que cada invocação `geosteering-cli ...`
+emitia 4 mensagens INFO espúrias no stderr:
+
+```
+INFO: Unable to initialize backend 'rocm': ... (not found)
+INFO: Unable to initialize backend 'tpu': ... (not found)
+INFO: Unable to initialize backend 'rocm': ... (not found)
+INFO: Unable to initialize backend 'tpu': ... (not found)
+```
+
+Duas causas-raiz independentes:
+
+1. **JAX 0.4+ sonda todos os backends** (ROCM/TPU/CUDA) na inicialização.
+   Em CPUs sem essas plataformas, cada probe falha com INFO no stderr.
+2. **Logger `jax` propaga para a raiz**: o JAX instala seu próprio
+   `StreamHandler`, mas com `propagate=True` (default Python), cada mensagem
+   também atravessa o handler raiz do `basicConfig` → 2× emissões.
+
+Correções aplicadas em `geosteering_ai/cli/main.py`:
+
+- `os.environ.setdefault("JAX_PLATFORMS", "cpu")` no escopo do módulo
+  (antes de qualquer `import jax`, inclusive transitivo via
+  `_jax/kernel.py`). `setdefault` preserva override do usuário
+  (`export JAX_PLATFORMS=cuda` para quem tem GPU CUDA).
+- `logging.getLogger("jax").propagate = False` em `main()` (após
+  `basicConfig`) corta a propagação que duplicava as mensagens.
+
+Resultado: `geosteering-cli version` produz stderr limpo. Sem impacto em
+funcionalidade — `JAX_PLATFORMS=cpu` já é o caminho atual do simulador.
+
 ---
 
 ## [v2.30] — 2026-05-11 — CLI Multi-Dimensional (multi-freq + multi-dip + multi-TR)
