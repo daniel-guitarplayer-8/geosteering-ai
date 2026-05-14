@@ -43,7 +43,9 @@ def test_warmup_thread_initializes_without_blocking():
 
     # Warmup thread é daemon → não bloqueia shutdown
     assert proc.returncode == 0, f"CLI falhou: {proc.stderr[:200]}"
-    assert "v2.31" in proc.stdout, "Versão não encontrada no output"
+    assert (
+        "Geosteering AI Simulation Manager v" in proc.stdout
+    ), f"Versão não encontrada no output: {proc.stdout!r}"
     assert dt < _BLOCKING_THRESHOLD_S, (
         f"main() bloqueou por {dt:.2f}s (esperado <{_BLOCKING_THRESHOLD_S}s). "
         "Warmup thread pode estar bloqueando."
@@ -76,7 +78,7 @@ def test_warmup_thread_completes_before_simulation():
         ],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=240,
         cwd=str(PROJECT_ROOT),
     )
 

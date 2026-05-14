@@ -66,7 +66,7 @@ def test_cli_version_subcommand():
     proc = _run_cli(["version"])
     assert proc.returncode == 0
     assert "Geosteering AI" in proc.stdout
-    assert "v2.31" in proc.stdout
+    assert "v2.32" in proc.stdout
 
 
 def test_cli_help_does_not_error():
@@ -142,7 +142,7 @@ def test_cli_module_path_is_geosteering_ai_cli():
     assert hasattr(cli_mod, "main")
     assert hasattr(cli_main_mod, "build_parser")
     assert hasattr(cli_main_mod, "SIMULATION_MANAGER_VERSION")
-    assert cli_main_mod.SIMULATION_MANAGER_VERSION == "v2.31"
+    assert cli_main_mod.SIMULATION_MANAGER_VERSION == "v2.32"
 
 
 # ── Smoke test simulação real (lento) ────────────────────────────
