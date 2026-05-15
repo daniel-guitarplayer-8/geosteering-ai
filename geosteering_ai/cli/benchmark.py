@@ -135,13 +135,14 @@ SCENARIOS = {
     },
     # Cenário H (Sprint v2.35) — estresse multi-core: 8×8×8 = 512 combos.
     # Frequências em escala log para cobrir bandas LWD reais (1 kHz–200 kHz).
-    # TRs ampliados de 0.25–2.5 m. Dips em 0°–105° (15° step) cobrem zenitais
-    # típicas de geosteering horizontal/desviado.
+    # TRs ampliados de 0.25–2.5 m. Dips em 0°–90° (12.5° step) dentro do
+    # range válido [0, 90]° (paridade Fortran — multi_forward.py linha 254).
+    # Fix v2.36 D2: 105° → 90° (105° disparava ValueError no worker).
     "H": {
         "n_pos": 100,
         "freqs": (1e3, 2e3, 5e3, 1e4, 2e4, 5e4, 1e5, 2e5),
         "trs": (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5),
-        "dips": (0.0, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 105.0),
+        "dips": (0.0, 12.5, 25.0, 37.5, 50.0, 62.5, 75.0, 90.0),
     },
 }
 

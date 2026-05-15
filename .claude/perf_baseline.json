@@ -8,14 +8,21 @@
       "notes": "Baseline cold-start (sem warmup explícito). Mantido para comparação histórica."
     },
     "E_n200_warm": {
-      "throughput_mod_h": null,
-      "measured_at": null,
-      "version": "v2.34",
+      "throughput_mod_h": 105423,
+      "measured_at": "2026-05-15T20:00:00Z",
+      "version": "v2.36",
       "type": "warm",
-      "notes": "Baseline pós geosteering-warmup. Placeholder — a ser ajustado empiricamente na primeira run pós-merge do Sprint v2.34. Esperado: ≥110% do baseline cold (cache JIT/LLVM quente)."
+      "notes": "Baseline pós geosteering-warmup em Intel i9-9980HK. Mediana de 5 runs. Threshold 90% = 94.881 mod/h."
+    },
+    "H_n2_stress": {
+      "throughput_mod_h": 772,
+      "measured_at": "2026-05-15T20:00:00Z",
+      "version": "v2.36",
+      "type": "warm",
+      "notes": "Estresse multi-core 8×8×8=512 combos, n=2, --workers 2 --threads 2. Intel i9-9980HK. Threshold 90% = 695 mod/h."
     }
   },
   "threshold_pct": 90,
-  "version": "v2.34",
+  "version": "v2.36",
   "notes": "Atualize manualmente após otimizações intencionais (>+5%). E_n200_warm exige medição pós-warmup explícito via 'geosteering-warmup --verbose'."
 }
