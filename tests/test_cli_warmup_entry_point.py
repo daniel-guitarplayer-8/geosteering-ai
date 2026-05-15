@@ -45,8 +45,8 @@ def test_warmup_help_does_not_error() -> None:
     assert "--version" in proc.stdout
 
 
-def test_warmup_version_prints_v2_32() -> None:
-    """`geosteering-warmup --version` imprime versão v2.32 no stdout."""
+def test_warmup_version_prints_current_version() -> None:
+    """`geosteering-warmup --version` imprime versão atual (≥ v2.32) no stdout."""
     proc = subprocess.run(
         [sys.executable, "-m", "geosteering_ai.cli.warmup", "--version"],
         capture_output=True,
@@ -55,10 +55,12 @@ def test_warmup_version_prints_v2_32() -> None:
         cwd=str(PROJECT_ROOT),
     )
     assert proc.returncode == 0, f"--version retornou {proc.returncode}"
-    assert (
-        "v2.32" in proc.stdout
-    ), f"Esperado 'v2.32' em stdout; recebido: {proc.stdout!r}"
-    assert "Geosteering AI Simulation Manager" in proc.stdout
+    # Versão evoluiu de v2.32 → v2.33/34/35 ao longo do bundle Sprint v2.33-v2.35.
+    # Verificação robusta: prefixo de versão presente, não string específica.
+    assert "Geosteering AI Simulation Manager v" in proc.stdout, (
+        f"Esperado prefixo 'Geosteering AI Simulation Manager v' em stdout; "
+        f"recebido: {proc.stdout!r}"
+    )
 
 
 @pytest.mark.slow

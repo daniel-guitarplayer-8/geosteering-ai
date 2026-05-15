@@ -62,11 +62,11 @@ def _run_cli(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def test_cli_version_subcommand():
-    """I2.6 — `version` retorna versão atual."""
+    """I2.6 — `version` retorna versão atual (v2.35 — bundle Sprints v2.33/34/35)."""
     proc = _run_cli(["version"])
     assert proc.returncode == 0
     assert "Geosteering AI" in proc.stdout
-    assert "v2.32" in proc.stdout
+    assert "v2.35" in proc.stdout
 
 
 def test_cli_help_does_not_error():
@@ -142,7 +142,7 @@ def test_cli_module_path_is_geosteering_ai_cli():
     assert hasattr(cli_mod, "main")
     assert hasattr(cli_main_mod, "build_parser")
     assert hasattr(cli_main_mod, "SIMULATION_MANAGER_VERSION")
-    assert cli_main_mod.SIMULATION_MANAGER_VERSION == "v2.32"
+    assert cli_main_mod.SIMULATION_MANAGER_VERSION == "v2.35"
 
 
 # ── Smoke test simulação real (lento) ────────────────────────────
@@ -204,6 +204,32 @@ def test_cli_benchmark_help_shows_multidim_flags_and_scenario_g():
     assert "--dips" in proc.stdout
     assert "--tr-spacings" in proc.stdout
     assert "G" in proc.stdout
+
+
+def test_cli_benchmark_help_includes_scenario_h():
+    """v2.35 — `benchmark --help` exibe cenário H (estresse multi-core)."""
+    proc = _run_cli(["benchmark", "--help"])
+    assert proc.returncode == 0
+    assert "H" in proc.stdout
+    # menção textual ao escopo do cenário H deve aparecer no help
+    assert (
+        "8" in proc.stdout
+    ), "Help text não menciona 8 (esperado em '8freq×8TR×8dips')"
+
+
+def test_cli_benchmark_scenario_h_exists():
+    """v2.35 — Cenário H (estresse multi-core) definido em SCENARIOS."""
+    from geosteering_ai.cli.benchmark import SCENARIOS
+
+    assert "H" in SCENARIOS
+    sc = SCENARIOS["H"]
+    assert len(sc["freqs"]) == 8
+    assert len(sc["trs"]) == 8
+    assert len(sc["dips"]) == 8
+    # Validar combinatória 8×8×8 = 512 combos
+    assert len(sc["freqs"]) * len(sc["trs"]) * len(sc["dips"]) == 512
+    # Validar n_pos canônico (alinhado a G)
+    assert sc["n_pos"] == 100
 
 
 def test_cli_benchmark_scenarios_dict_has_dips_field():
@@ -383,6 +409,39 @@ def test_cli_benchmark_scenario_g_runs():
         capture_output=True,
         text=True,
         timeout=300,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"
+    if proc.returncode == 0:
+        assert "mod/h" in proc.stdout
+
+
+@pytest.mark.slow
+def test_cli_benchmark_scenario_h_runs():
+    """v2.35 — `benchmark --scenario H --n 2` completa e exibe mod/h.
+
+    Cenário H tem 8×8×8 = 512 combos (8× G em combinatória total). Smoke
+    run usa ``--workers 2 --threads 2 --n 2`` para limitar tempo em CI a
+    <10 min. Timeout estendido para 600s (cold-start JIT + 512 combos).
+    """
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "geosteering_ai.cli",
+            "benchmark",
+            "--scenario",
+            "H",
+            "--n",
+            "2",
+            "--workers",
+            "2",
+            "--threads",
+            "2",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
         cwd=str(PROJECT_ROOT),
     )
     assert proc.returncode in (0, 1), f"Falha inesperada: {proc.stderr[:500]}"

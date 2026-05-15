@@ -79,7 +79,7 @@ if "NUMBA_CACHE_DIR" not in os.environ:
 
 # Versão exibida pelo subcomando `version` — sincronizada manualmente
 # com CLAUDE.md linha 16 ao final de cada sprint.
-SIMULATION_MANAGER_VERSION = "v2.32"
+SIMULATION_MANAGER_VERSION = "v2.35"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -293,11 +293,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bench.add_argument(
         "--scenario",
-        choices=["A", "B", "C", "D", "E", "F", "G"],
+        choices=["A", "B", "C", "D", "E", "F", "G", "H"],
         default="A",
         help=(
             "cenário canônico (A=padrão, E=Inv0Dip, "
-            "G=máxima combinatória 4freq×4TR×4dips)"
+            "G=máxima combinatória 4freq×4TR×4dips, "
+            "H=estresse multi-core 8freq×8TR×8dips)"
         ),
     )
     p_bench.add_argument(

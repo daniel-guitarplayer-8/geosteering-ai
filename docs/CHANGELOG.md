@@ -7,6 +7,188 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.35] — 2026-05-15 — Cenário H (estresse multi-core 8×8×8 = 512 combos)
+
+### Resumo
+
+Sprint v2.35 amplia o catálogo de benchmarks do `geosteering-cli benchmark`
+com o **Cenário H**, complementando os 7 cenários A–G existentes. H foi
+desenhado como stress-test para CPUs multi-core: **8 frequências × 8 TRs ×
+8 dips = 512 combos** por posição, contra os 64 combos do Cenário G.
+
+### Mudanças Principais
+
+**1. Cenário H adicionado a `SCENARIOS`**:
+
+- `geosteering_ai/cli/benchmark.py` — entrada `"H"` no dict:
+  - **n_pos**: 100 posições (alinhado a G)
+  - **freqs**: `(1e3, 2e3, 5e3, 1e4, 2e4, 5e4, 1e5, 2e5)` Hz (8 valores
+    em escala log cobrindo bandas LWD reais 1 kHz–200 kHz)
+  - **trs**: `(0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5)` m (8 espaçamentos)
+  - **dips**: `(0.0, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 105.0)` ° (zenitais
+    típicas de geosteering horizontal/desviado)
+
+**2. CLI argparse**:
+
+- `geosteering_ai/cli/main.py`: `choices` do `--scenario` estendido para
+  `["A", "B", "C", "D", "E", "F", "G", "H"]`.
+- Help text atualizado com nota "H=estresse multi-core 8freq×8TR×8dips".
+
+**3. Testes (3 novos em `tests/test_cli_mvp.py`)**:
+
+| Teste | Cobertura |
+|:------|:----------|
+| `test_cli_benchmark_help_includes_scenario_h` | `--help` exibe "H" + "8" |
+| `test_cli_benchmark_scenario_h_exists` | Dict tem 8×8×8 = 512 combos |
+| `test_cli_benchmark_scenario_h_runs` (slow) | Smoke `--n 2 --workers 2 --threads 2` em <600s |
+
+**4. Documentação**:
+
+- Mega-header e docstring de `cli/benchmark.py` atualizados com linha H + nota
+  sobre desempenho esperado em CPUs multi-core (M-series 8C/16T).
+- `docs/ROADMAP.md` marca Sprint v2.35 como done.
+- `CLAUDE.md` linha "Simulation Manager" v2.34 → v2.35.
+
+### Considerações de Desempenho
+
+- **5.12M forward calls** com `--n 100 --n_pos 100` (100 modelos × 100 pos
+  × 512 combos) — alvo de stress-test, não de uso rotineiro.
+- **Recomendado**: `--workers 4 --threads 2` ou superior. Em single-thread,
+  pode ultrapassar 5 min.
+- **CI**: smoke usa `--n 2 --workers 2 --threads 2` com timeout 600s.
+
+### Decisões Intencionais
+
+- **Sem persistência CSV/MD**: o handler atual apenas imprime stdout (D9
+  exception). Atualização do `sm_output/benchmark_summary.csv` adiada para
+  Sprint v2.36 (escopo creep evitado).
+- **Paridade Fortran**: nenhum arquivo de simulação core foi modificado;
+  paridade <1e-12 preservada por construção.
+
+### Bump de Versão
+
+`SIMULATION_MANAGER_VERSION` em `cli/main.py`: **v2.34 → v2.35**.
+
+---
+
+## [v2.34] — 2026-05-15 — `geosteering-warmup` integrado no CI/CD
+
+### Resumo
+
+Sprint v2.34 integra o entry point `geosteering-warmup` (introduzido em
+v2.32) ao workflow GitHub Actions, isolando o cold-start JIT/LLVM do tempo
+medido em benchmarks de CI. Estabelece também uma métrica de baseline
+"warm cache" para detecção de regressões pós-merge.
+
+### Mudanças Principais
+
+**1. `.github/workflows/ci.yml`**:
+
+- Novo step `Warm up JIT/LLVM cache (Sprint v2.32+)` antes do pytest:
+  ```yaml
+  - name: Warm up JIT/LLVM cache (Sprint v2.32+)
+    run: geosteering-warmup --verbose
+    timeout-minutes: 5
+  ```
+- Novo step `Benchmark smoke (cenário E n=200)` pós-pytest com
+  `continue-on-error: true` (observabilidade, não gating).
+
+**2. `docs/PERFORMANCE_BASELINE.md`**:
+
+- Nova seção "Warm-Cache Baseline (CI)" explicando como interpretar o
+  baseline `E_n200_warm` (medido pós-warmup, isolado do cold-start).
+- Bump da seção de versão para v2.34.
+
+**3. `.claude/perf_baseline.json`**:
+
+- Novo campo `scenarios.E_n200_warm` com placeholder a ser ajustado
+  empiricamente na primeira run do CI pós-merge.
+- Campo `version` bumped para `"v2.34"`.
+
+**4. `CLAUDE.md`**:
+
+- Linha "Simulation Manager" atualizada v2.33 → v2.34.
+
+### Decisões Intencionais
+
+- **Sem `actions/cache` para `NUMBA_CACHE_DIR`**: cache em `/tmp` é efêmero
+  por design. Warm-up explícito é mais robusto e determinístico que cache
+  hit/miss aleatório entre jobs.
+- **`continue-on-error: true` no benchmark**: o objetivo é observabilidade
+  histórica via log. Gating de regressão é responsabilidade local do
+  `check-perf-regression.sh` para devs.
+
+### Bump de Versão
+
+`SIMULATION_MANAGER_VERSION` em `cli/main.py`: **v2.33 → v2.34**.
+
+---
+
+## [v2.33] — 2026-05-15 — pytest-qt Suite para GUI Simulation Manager
+
+### Resumo
+
+Sprint v2.33 adiciona **cobertura automatizada da GUI** do Simulation
+Manager via pytest-qt. Antes: ~10.7k linhas de Qt sem nenhum teste
+automatizado — bugs UI só descobertos manualmente. Agora: suite com 15+
+testes cobrindo abertura de janela, sinais, slots e validação de
+parâmetros.
+
+### Mudanças Principais
+
+**1. Dependência nova**:
+
+- `pyproject.toml`: `pytest-qt>=4.4` adicionado a `[project.optional-dependencies] dev`.
+
+**2. Fixtures Qt (`tests/conftest_qt.py` NOVO)**:
+
+- `qt_app`: fixture session-scoped que cria um QApplication único
+  (singleton) com `QT_QPA_PLATFORM=offscreen` para suporte headless.
+- `mock_simulation_thread`: fixture que substitui `SimulationThread` por
+  `MagicMock` configurável, emitindo sinais sintéticos (`progress_update`,
+  `finished_all`, `error`) via `QTimer.singleShot`.
+
+**3. Suite de testes (`tests/test_simulation_manager_gui.py` NOVO)**:
+
+15+ testes cobrindo:
+
+- T1: MainWindow abre sem warnings/criticals
+- T2: `SimulatorPage.btn_start.click()` emite `request_start`
+- T3: `btn_pause` toggle (checkable) muda estado
+- T4: `btn_cancel.click()` emite `request_cancel`
+- T5–T7: mock `SimulationThread` emite sinais → UI atualiza progress/erro
+- T8: `ParametersPage.to_dict/from_dict` roundtrip preserva valores
+- T9: `Preferences` salva/restaura QSettings (cache LRU v2.29.2)
+- Demais testes cobrem WelcomeWidget → tab switch, error path, sinais
+  `simulation_complete`/`error`/`progress_update`.
+
+**4. `.github/workflows/ci.yml`**:
+
+- Novo step `Run GUI tests (xvfb headless)`:
+  ```yaml
+  - name: Run GUI tests (pytest-qt + xvfb)
+    run: xvfb-run -a pytest tests/test_simulation_manager_gui.py -v
+    timeout-minutes: 10
+  ```
+- xvfb instalado via `apt-get` no Ubuntu runner.
+
+**5. `CLAUDE.md`**:
+
+- Linha "Simulation Manager" atualizada v2.32 → v2.33 com nota sobre
+  cobertura GUI.
+
+### Padrões Reutilizados
+
+- `sm_qt_compat.QT_BINDING` para imports agnósticos PyQt6/PySide6.
+- `SimulationThread` mockado via `MagicMock` (não roda simulação real
+  em testes GUI — mantém suite rápida <1min).
+
+### Bump de Versão
+
+`SIMULATION_MANAGER_VERSION` em `cli/main.py`: **v2.32 → v2.33**.
+
+---
+
 ## [v2.32] — 2026-05-13 — `geosteering-warmup` Entry Point + Dívidas v2.31
 
 ### Resumo

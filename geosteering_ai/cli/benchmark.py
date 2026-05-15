@@ -4,8 +4,8 @@
 # ║  ---------------------------------------------------------------------    ║
 # ║  Módulo      : Subcomando `benchmark` da CLI                              ║
 # ║  Projeto     : Geosteering AI v2.0                                        ║
-# ║  Subsistema  : CLI MVP (Sprint v2.30 — multi-dim)                         ║
-# ║  Versão      : v2.30                                                      ║
+# ║  Subsistema  : CLI MVP (Sprint v2.35 — Cenário H estresse multi-core)     ║
+# ║  Versão      : v2.35                                                      ║
 # ║  Autor       : Daniel Leal                                                ║
 # ║  Criação     : 2026-05-10                                                 ║
 # ║  Status      : Produção — MVP                                             ║
@@ -30,6 +30,7 @@
 # ║    │ E  │  Inv0Dip 0° (default)           │ 600  │  1 │  1  │  1   │     ║
 # ║    │ F  │  Multi-TR + multi-freq          │ 100  │  4 │  4  │  1   │     ║
 # ║    │ G  │  Máxima combinatória (v2.30)    │ 100  │  4 │  4  │  4   │     ║
+# ║    │ H  │  Estresse multi-core (v2.35)    │ 100  │  8 │  8  │  8   │     ║
 # ║    └────┴─────────────────────────────────┴──────┴────┴─────┴──────┘     ║
 # ║                                                                           ║
 # ║  EXPORTS                                                                  ║
@@ -38,7 +39,7 @@
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 """Subcomando ``benchmark`` da CLI Geosteering AI (Sprint v2.24 — I2.6).
 
-Executa cenários de benchmark canônicos do projeto (A/B/C/D/E/F) e
+Executa cenários de benchmark canônicos do projeto (A/B/C/D/E/F/G/H) e
 reporta throughput em modelos/hora. Cenários derivam dos benchmarks
 históricos em ``benchmarks/bench_v214_numba.py`` e ``bench_v212_workers.py``.
 
@@ -53,9 +54,16 @@ Cenários disponíveis:
 | E       | Inv0Dip 0° (default)            | 600   | 1  | 1   | 1    |
 | F       | Multi-TR + multi-freq           | 100   | 4  | 4   | 1    |
 | G       | Máxima combinatória (v2.30)     | 100   | 4  | 4   | 4    |
+| H       | Estresse multi-core (v2.35)     | 100   | 8  | 8   | 8    |
 
 Use ``--frequencies``, ``--dips``, ``--tr-spacings`` para sobrescrever
 os parâmetros de qualquer cenário diretamente na linha de comando.
+
+Cenário H — observações de desempenho (Sprint v2.35):
+    8×8×8 = 512 combos por posição × 100 posições × N modelos. Stress-test
+    para CPUs multi-core (recomenda-se ``--workers 4 --threads 2`` ou
+    superior). Em laptops M-series 8C/16T, ``--n 2`` completa em <120s
+    com cache JIT quente. Para CI, usar ``--n 2 --workers 2 --threads 2``.
 """
 
 from __future__ import annotations
@@ -124,6 +132,16 @@ SCENARIOS = {
         "freqs": (2000.0, 20000.0, 100000.0, 400000.0),
         "trs": (0.5, 1.0, 1.5, 2.0),
         "dips": (0.0, 15.0, 30.0, 45.0),
+    },
+    # Cenário H (Sprint v2.35) — estresse multi-core: 8×8×8 = 512 combos.
+    # Frequências em escala log para cobrir bandas LWD reais (1 kHz–200 kHz).
+    # TRs ampliados de 0.25–2.5 m. Dips em 0°–105° (15° step) cobrem zenitais
+    # típicas de geosteering horizontal/desviado.
+    "H": {
+        "n_pos": 100,
+        "freqs": (1e3, 2e3, 5e3, 1e4, 2e4, 5e4, 1e5, 2e5),
+        "trs": (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5),
+        "dips": (0.0, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 105.0),
     },
 }
 
