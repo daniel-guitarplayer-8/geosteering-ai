@@ -3,8 +3,8 @@
 | Campo | Valor |
 |:------|:------|
 | **Documento** | Baseline canônico de throughput do simulador |
-| **Versão atual** | v2.29.3 |
-| **Última atualização** | 2026-05-11 |
+| **Versão atual** | v2.34 |
+| **Última atualização** | 2026-05-15 |
 | **Hook anti-regressão** | [`.claude/hooks/check-perf-regression.sh`](../.claude/hooks/check-perf-regression.sh) |
 | **Baseline JSON** | [`.claude/perf_baseline.json`](../.claude/perf_baseline.json) |
 
@@ -53,6 +53,51 @@ Throughput **NÃO é constante**: depende fortemente de:
 **Conclusão**: variabilidade de ±10% entre execuções consecutivas é normal.
 Regressão é considerada apenas se throughput cair **<90% do baseline** de
 forma consistente (3 medições).
+
+---
+
+## 2.1. Warm-Cache Baseline (CI — Sprint v2.34)
+
+A partir do **Sprint v2.34**, o workflow GitHub Actions executa um step
+explícito de warmup (`geosteering-warmup --verbose`) antes do step de
+benchmark. Isso **isola o cold-start JIT/LLVM do tempo medido** e produz uma
+métrica `E_n200_warm` comparável entre PRs.
+
+**Por que duas métricas (cold vs warm)?**
+
+| Métrica | Quando medir | Propósito |
+|:--------|:-------------|:----------|
+| `E_n200` (cold) | Sem warmup prévio | Baseline histórico do hook local de devs |
+| `E_n200_warm` (warm, CI) | Pós `geosteering-warmup` | Detectar regressões pós-merge sem ruído de cold-start |
+
+**Interpretação**:
+
+- `E_n200_warm` ≥ 110% de `E_n200` (cold) é esperado (cache JIT/LLVM quente).
+- Queda > 10% em `E_n200_warm` entre runs consecutivas do CI indica
+  regressão real no caminho hot do simulador (não em I/O de warmup).
+- O hook local (`check-perf-regression.sh`) continua usando `E_n200` (cold)
+  porque devs raramente rodam warmup antes de medir localmente.
+
+**Onde fica registrada a métrica warm**: `.claude/perf_baseline.json` campo
+`scenarios.E_n200_warm`. Placeholder atual (`null`) deve ser substituído pela
+mediana de 3 runs do CI pós-merge do Sprint v2.34.
+
+**Step do CI** (em `.github/workflows/ci.yml`):
+
+```yaml
+- name: Warm up JIT/LLVM cache (Sprint v2.32+)
+  run: geosteering-warmup --verbose
+  timeout-minutes: 5
+
+- name: Benchmark smoke (cenário E n=200)
+  run: python -m geosteering_ai.cli benchmark --scenario E --n 200 | tee benchmark_ci.log
+  timeout-minutes: 10
+  continue-on-error: true
+```
+
+`continue-on-error: true` é intencional: o objetivo é **observabilidade
+histórica**, não gating. Regressões reais são caçadas via comparação manual
+do log entre runs consecutivas no GitHub Actions.
 
 ---
 

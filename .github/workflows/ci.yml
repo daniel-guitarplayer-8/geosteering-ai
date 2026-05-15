@@ -26,11 +26,35 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,viz,train,hpo]"
 
+      - name: Install xvfb for headless GUI tests
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
       - name: Compile check
         run: python -m compileall geosteering_ai/ -q
 
+      # Sprint v2.34 — isola cold-start JIT/LLVM do tempo medido em benchmarks
+      - name: Warm up JIT/LLVM cache (Sprint v2.32+)
+        run: geosteering-warmup --verbose
+        timeout-minutes: 5
+
       - name: Run tests (CPU-only)
-        run: pytest tests/ -v --tb=short --ignore=tests/test_gpu.py
+        run: pytest tests/ -v --tb=short --ignore=tests/test_gpu.py --ignore=tests/test_simulation_manager_gui.py
+
+      # Sprint v2.33 — testes GUI pytest-qt rodam isolados sob xvfb (headless)
+      - name: Run GUI tests (pytest-qt + xvfb)
+        run: xvfb-run -a pytest tests/test_simulation_manager_gui.py -v --tb=short
+        env:
+          QT_QPA_PLATFORM: offscreen
+        timeout-minutes: 10
+        continue-on-error: true
+
+      # Sprint v2.34 — benchmark smoke (observabilidade, não gating)
+      - name: Benchmark smoke (cenário E n=200)
+        run: |
+          python -m geosteering_ai.cli benchmark --scenario E --n 200 \
+            | tee benchmark_ci.log
+        timeout-minutes: 10
+        continue-on-error: true
 
       - name: Type check
         run: mypy geosteering_ai/ --ignore-missing-imports

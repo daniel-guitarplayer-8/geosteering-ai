@@ -3,9 +3,19 @@
     "E_n200": {
       "throughput_mod_h": 69336,
       "measured_at": "2026-05-11T17:03:12Z",
-      "version": "v2.29.3"
+      "version": "v2.29.3",
+      "type": "cold",
+      "notes": "Baseline cold-start (sem warmup explícito). Mantido para comparação histórica."
+    },
+    "E_n200_warm": {
+      "throughput_mod_h": null,
+      "measured_at": null,
+      "version": "v2.34",
+      "type": "warm",
+      "notes": "Baseline pós geosteering-warmup. Placeholder — a ser ajustado empiricamente na primeira run pós-merge do Sprint v2.34. Esperado: ≥110% do baseline cold (cache JIT/LLVM quente)."
     }
   },
   "threshold_pct": 90,
-  "notes": "Atualize manualmente após otimizações intencionais (>+5%)."
+  "version": "v2.34",
+  "notes": "Atualize manualmente após otimizações intencionais (>+5%). E_n200_warm exige medição pós-warmup explícito via 'geosteering-warmup --verbose'."
 }
