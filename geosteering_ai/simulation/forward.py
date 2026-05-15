@@ -333,6 +333,134 @@ def _simulate_positions_njit_cached(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# _simulate_positions_njit_cached_tiled — Sprint v2.36 O2 (tile/block opt-in)
+# ──────────────────────────────────────────────────────────────────────────────
+# Variante tile-aware de `_simulate_positions_njit_cached`: agrupa as N posições
+# em blocos de `tile_size` posições antes de lançar o prange interno.
+#
+# Motivação: os arrays de cache (u_cache, s_cache, …) dependem apenas de
+# (hordist, freq), não de z_mid → ficam quentes em L2/L3 enquanto o prange
+# interno processa as `tile_size` posições do tile.
+#
+# Paridade bit-exata garantida por construção: mesmo kernel, mesmos inputs,
+# mesmos índices de escrita → resultado idêntico ao caminho não-tiled.
+#
+# Ativado via `cfg.use_tiled_positions=True` em `multi_forward.py`.
+
+
+@njit(parallel=True, cache=True, nogil=True)
+def _simulate_positions_njit_cached_tiled(
+    positions_z: np.ndarray,
+    dz_half: float,
+    r_half: float,
+    dip_rad: float,
+    n: int,
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    esp: np.ndarray,
+    h_arr: np.ndarray,
+    prof_arr: np.ndarray,
+    eta: np.ndarray,
+    freqs_hz: np.ndarray,
+    krJ0J1: np.ndarray,
+    wJ0: np.ndarray,
+    wJ1: np.ndarray,
+    u_cache: np.ndarray,
+    s_cache: np.ndarray,
+    uh_cache: np.ndarray,
+    sh_cache: np.ndarray,
+    RTEdw_cache: np.ndarray,
+    RTEup_cache: np.ndarray,
+    RTMdw_cache: np.ndarray,
+    RTMup_cache: np.ndarray,
+    AdmInt_cache: np.ndarray,
+    H_tensor: np.ndarray,
+    z_obs: np.ndarray,
+    rho_h_at_obs: np.ndarray,
+    rho_v_at_obs: np.ndarray,
+    tile_size: int,
+) -> None:
+    """Loop paralelo @njit com cache de common_arrays e agrupamento em tiles.
+
+    Variante tile-aware de :func:`_simulate_positions_njit_cached` (Sprint v2.36 O2).
+    Agrupa as N posições em blocos de `tile_size` antes de lançar o prange
+    interno — melhora a localidade de cache dos arrays pré-computados.
+
+    Args:
+        positions_z, dz_half, r_half, dip_rad: Geometria do loop.
+        n, rho_h, rho_v, esp, h_arr, prof_arr, eta: Perfil geológico.
+        freqs_hz, krJ0J1, wJ0, wJ1: Frequências e filtro Hankel.
+        u_cache, ..., AdmInt_cache: Arrays pré-computados por
+            :func:`precompute_common_arrays_cache`.
+        H_tensor, z_obs, rho_h_at_obs, rho_v_at_obs: Saídas pré-alocadas.
+        tile_size: Número de posições por tile. Heurística via
+            :func:`geosteering_ai.simulation.config.recommend_tile_size`
+            quando ``cfg.tile_size_auto=True``.
+
+    Note:
+        Paridade bit-exata com :func:`_simulate_positions_njit_cached`:
+        mesmo kernel, mesmos inputs, mesmos índices de escrita.
+        Sprint v2.37 F2: tile_size calculado automaticamente via
+        ``recommend_tile_size(n_positions)`` quando ``cfg.tile_size_auto=True``.
+    """
+    n_positions = positions_z.shape[0]
+    n_tiles = (n_positions + tile_size - 1) // tile_size
+
+    for i_tile in range(n_tiles):
+        tile_start = i_tile * tile_size
+        tile_end = tile_start + tile_size
+        if tile_end > n_positions:
+            tile_end = n_positions
+        tile_len = tile_end - tile_start
+
+        for jj in _prange(tile_len):  # type: ignore[misc]
+            j = tile_start + jj
+            z_mid = positions_z[j]
+
+            Tz = z_mid + dz_half
+            cz = z_mid - dz_half
+            Tx = r_half
+            cx = -r_half
+            Ty = 0.0
+            cy = 0.0
+
+            cH = _fields_in_freqs_kernel_cached(
+                Tx,
+                Ty,
+                Tz,
+                cx,
+                cy,
+                cz,
+                dip_rad,
+                n,
+                rho_h,
+                rho_v,
+                h_arr,
+                prof_arr,
+                eta,
+                freqs_hz,
+                krJ0J1,
+                wJ0,
+                wJ1,
+                u_cache,
+                s_cache,
+                uh_cache,
+                sh_cache,
+                RTEdw_cache,
+                RTEup_cache,
+                RTMdw_cache,
+                RTMup_cache,
+                AdmInt_cache,
+            )
+            H_tensor[j, :, :] = cH
+
+            z_obs_j, rh_j, rv_j = _compute_zrho_kernel(Tz, cz, n, rho_h, rho_v, esp)
+            z_obs[j] = z_obs_j
+            rho_h_at_obs[j] = rh_j
+            rho_v_at_obs[j] = rv_j
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # _simulate_combined_prange — Sprint 13.3: prange(nTR*nAngles*n_pos) flat
 # ──────────────────────────────────────────────────────────────────────────────
 # Colapsa o dispatcher serial Python `for i_tr: for i_ang:` em uma única
@@ -842,7 +970,7 @@ def simulate(
         cfg=cfg_eff,
         hankel_filter=hankel_filter,
     )
-    return multi_result.to_single()
+    return multi_result.to_single()  # type: ignore[union-attr, no-any-return]
 
 
 __all__ = ["SimulationResult", "simulate"]

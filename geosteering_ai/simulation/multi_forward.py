@@ -988,6 +988,7 @@ def simulate_multi(
         _simulate_combined_prange,
         _simulate_combined_prange_flat,
         _simulate_positions_njit_cached,
+        _simulate_positions_njit_cached_tiled,
     )
 
     # ── Sprint 15.1 (v2.16): mascaramento de threads observável ──────────────
@@ -1076,7 +1077,16 @@ def simulate_multi(
         # Sprint v2.22: quando `cfg.use_flat_prange=True`, paraleliza
         # também a dimensão `nf` (4D flat). Default False mantém o
         # comportamento v2.21 (nf serial dentro do kernel cached).
-        if cfg.use_flat_prange:
+        #
+        # Sprint v2.37 F1 — Heurística adaptativa: para single-combo
+        # (n_combos × nf == 1, ex. Cenário E), o caminho FLAT 4D paga
+        # overhead de decodificação sem ganho. v2.36 D5 confirmou
+        # regressão de −15% (157k vs 184k mod/h). A heurística força
+        # não-FLAT quando n_effective_combos < cfg.flat_prange_min_combos.
+        n_effective_combos = n_combos * len(freqs_hz)
+        flat_min = max(1, cfg.flat_prange_min_combos)
+        use_flat_effective = cfg.use_flat_prange and n_effective_combos >= flat_min
+        if use_flat_effective:
             _simulate_combined_prange_flat(
                 dz_halfs,
                 r_halfs,
@@ -1184,29 +1194,69 @@ def simulate_multi(
                     z_obs_filled[i_ang] = True
 
                 if cfg.parallel and HAS_NUMBA and n_pos > 1:
-                    # Caminho paralelo preferido (Sprint 2.10: prange + cache)
-                    _simulate_positions_njit_cached(
-                        positions_z,
-                        dz_half,
-                        r_half,
-                        dip_rad,
-                        n,
-                        rho_h,
-                        rho_v,
-                        esp,
-                        h_arr_static,
-                        prof_arr_static,
-                        eta_static,
-                        freqs_hz,
-                        krJ0J1,
-                        wJ0,
-                        wJ1,
-                        *cache_tuple,
-                        H_slice,
-                        z_tmp,
-                        rh_tmp,
-                        rv_tmp,
-                    )
+                    # Sprint v2.36 O2 — Tile/block opt-in (path single-TR legado).
+                    # use_tiled_positions=True ativa `_simulate_positions_njit_cached_tiled`,
+                    # que agrupa posições em blocos antes do prange.
+                    # Sprint v2.37 F2: quando tile_size_auto=True, calcula
+                    # tile_size via heurística `recommend_tile_size(n_pos)`;
+                    # caso contrário usa o valor explícito `cfg.tile_size`.
+                    # Paridade bit-exata vs versão não-tiled por construção.
+                    if cfg.use_tiled_positions:
+                        if cfg.tile_size_auto:
+                            from geosteering_ai.simulation.config import (
+                                recommend_tile_size,
+                            )
+
+                            _effective_tile = recommend_tile_size(n_pos)
+                        else:
+                            _effective_tile = cfg.tile_size
+                        _simulate_positions_njit_cached_tiled(
+                            positions_z,
+                            dz_half,
+                            r_half,
+                            dip_rad,
+                            n,
+                            rho_h,
+                            rho_v,
+                            esp,
+                            h_arr_static,
+                            prof_arr_static,
+                            eta_static,
+                            freqs_hz,
+                            krJ0J1,
+                            wJ0,
+                            wJ1,
+                            *cache_tuple,
+                            H_slice,
+                            z_tmp,
+                            rh_tmp,
+                            rv_tmp,
+                            _effective_tile,
+                        )
+                    else:
+                        # Caminho paralelo preferido (Sprint 2.10: prange + cache)
+                        _simulate_positions_njit_cached(
+                            positions_z,
+                            dz_half,
+                            r_half,
+                            dip_rad,
+                            n,
+                            rho_h,
+                            rho_v,
+                            esp,
+                            h_arr_static,
+                            prof_arr_static,
+                            eta_static,
+                            freqs_hz,
+                            krJ0J1,
+                            wJ0,
+                            wJ1,
+                            *cache_tuple,
+                            H_slice,
+                            z_tmp,
+                            rh_tmp,
+                            rv_tmp,
+                        )
                 else:
                     # Caminho serial (debug ou Numba ausente)
                     for j in range(n_pos):
