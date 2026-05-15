@@ -27,7 +27,7 @@ def test_cli_module_exists():
     """I2.6 — geosteering_ai/cli/ existe com arquivos esperados."""
     cli_dir = PROJECT_ROOT / "geosteering_ai" / "cli"
     assert cli_dir.is_dir()
-    expected = ["__init__.py", "__main__.py", "main.py", "simulate.py", "benchmark.py"]
+    expected = ["__init__.py", "__main__.py", "_main.py", "simulate.py", "benchmark.py"]
     for name in expected:
         assert (cli_dir / name).exists(), f"Arquivo CLI ausente: {name}"
 
@@ -62,11 +62,11 @@ def _run_cli(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def test_cli_version_subcommand():
-    """I2.6 — `version` retorna versão atual (v2.35 — bundle Sprints v2.33/34/35)."""
+    """I2.6 — `version` retorna versão atual (v2.37)."""
     proc = _run_cli(["version"])
     assert proc.returncode == 0
     assert "Geosteering AI" in proc.stdout
-    assert "v2.35" in proc.stdout
+    assert "v2.37" in proc.stdout
 
 
 def test_cli_help_does_not_error():
@@ -137,12 +137,12 @@ def test_cli_module_path_is_geosteering_ai_cli():
     import importlib
 
     cli_mod = importlib.import_module("geosteering_ai.cli")
-    cli_main_mod = importlib.import_module("geosteering_ai.cli.main")
+    cli_main_mod = importlib.import_module("geosteering_ai.cli._main")
 
     assert hasattr(cli_mod, "main")
     assert hasattr(cli_main_mod, "build_parser")
     assert hasattr(cli_main_mod, "SIMULATION_MANAGER_VERSION")
-    assert cli_main_mod.SIMULATION_MANAGER_VERSION == "v2.35"
+    assert cli_main_mod.SIMULATION_MANAGER_VERSION == "v2.37"
 
 
 # ── Smoke test simulação real (lento) ────────────────────────────

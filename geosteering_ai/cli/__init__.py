@@ -55,6 +55,6 @@ Padrão de design:
     - reutiliza ``simulate_multi`` e ``recommend_default_parallelism``
 """
 
-from geosteering_ai.cli.main import main
+from geosteering_ai.cli._main import main
 
 __all__ = ["main"]

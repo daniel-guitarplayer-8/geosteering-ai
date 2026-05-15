@@ -21,7 +21,7 @@
 
 import sys
 
-from geosteering_ai.cli.main import main
+from geosteering_ai.cli._main import main
 
 if __name__ == "__main__":
     sys.exit(main())

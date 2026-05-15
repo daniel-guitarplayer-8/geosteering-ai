@@ -171,28 +171,6 @@ def test_all_njit_decorators_have_cache_true():
     )
 
 
-# ── Frente 1.4 — use_fastmath documentado ────────────────────────
-
-
-def test_use_fastmath_field_remains_false_by_default():
-    """v2.24 1.4 — use_fastmath continua False (documental)."""
-    from geosteering_ai.simulation.config import SimulationConfig
-
-    cfg = SimulationConfig()
-    assert (
-        cfg.use_fastmath is False
-    ), "Sprint v2.24 mantém use_fastmath=False — dispatcher real deferido para v2.25"
-
-
-def test_use_fastmath_docstring_mentions_documental_status():
-    """v2.24 1.4 — docstring de use_fastmath esclarece status documental."""
-    config_file = PROJECT_ROOT / "geosteering_ai" / "simulation" / "config.py"
-    content = config_file.read_text(encoding="utf-8")
-
-    # Procura por docstring/comentário que mencione status documental
-    assert (
-        "documental" in content.lower()
-    ), "Docstring de use_fastmath deve esclarecer status documental"
-    assert (
-        "v2.25" in content or "deferido" in content.lower()
-    ), "Docstring deve mencionar deferimento do dispatcher real"
+# ── Frente 1.4 — use_fastmath removido em v2.36 D4 ───────────────
+# Testes obsoletos removidos em v2.36 D4 (campo era puramente documental
+# com 0 leituras dinâmicas — removido para limpar a API pública).

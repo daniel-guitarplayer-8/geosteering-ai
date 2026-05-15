@@ -79,7 +79,7 @@ if "NUMBA_CACHE_DIR" not in os.environ:
 
 # Versão exibida pelo subcomando `version` — sincronizada manualmente
 # com CLAUDE.md linha 16 ao final de cada sprint.
-SIMULATION_MANAGER_VERSION = "v2.35"
+SIMULATION_MANAGER_VERSION = "v2.37"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

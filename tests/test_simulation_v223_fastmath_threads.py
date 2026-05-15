@@ -19,13 +19,6 @@ from geosteering_ai.simulation.config import SimulationConfig
 # ── A.1 Fastmath ───────────────────────────────────────────────────
 
 
-def test_simulation_config_use_fastmath_default_false():
-    """Sprint v2.23 A.1 — campo use_fastmath existe e default é False."""
-    cfg = SimulationConfig()
-    assert hasattr(cfg, "use_fastmath"), "Campo use_fastmath ausente"
-    assert cfg.use_fastmath is False, "Default deve ser False (opt-in)"
-
-
 def test_geometry_fastmath_decorator_applied():
     """Sprint v2.23 A.1 — find_layers_tr e layer_at_depth têm fastmath=True."""
     for fname in ("find_layers_tr", "layer_at_depth"):

@@ -187,8 +187,8 @@ class TestNumbaCacheDir:
     """Garante que cli/main.py configure NUMBA_CACHE_DIR em tmpfs."""
 
     def _reimport_cli_main(self) -> None:
-        """Força reimport de geosteering_ai.cli.main para reexecutar setup."""
-        mod_name = "geosteering_ai.cli.main"
+        """Força reimport de geosteering_ai.cli._main para reexecutar setup."""
+        mod_name = "geosteering_ai.cli._main"
         if mod_name in sys.modules:
             del sys.modules[mod_name]
         importlib.import_module(mod_name)

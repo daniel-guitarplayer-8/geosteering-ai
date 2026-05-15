@@ -205,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     # Import lazy — só após env vars estarem setadas
-    from geosteering_ai.cli.main import SIMULATION_MANAGER_VERSION
+    from geosteering_ai.cli._main import SIMULATION_MANAGER_VERSION
 
     if args.version:
         # Contrato CLI: stdout limpo (D9 exception documentada)
@@ -215,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Warming up Geosteering AI {SIMULATION_MANAGER_VERSION}...")
     t0 = time.perf_counter()
 
-    from geosteering_ai.cli.main import _warmup_numba_tier2_sync
+    from geosteering_ai.cli._main import _warmup_numba_tier2_sync
 
     try:
         _warmup_numba_tier2_sync(verbose=args.verbose)
