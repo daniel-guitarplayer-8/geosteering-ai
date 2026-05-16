@@ -88,7 +88,7 @@ _MU_0: float = 4.0e-7 * math.pi
 
 
 def _to_writeable(arr) -> np.ndarray:
-    """Converte para ``np.ndarray`` contíguo e writeable (Sprint v2.31).
+    """Converte para ``np.ndarray`` contíguo e writeable (Sprint v2.31, refinado v2.38).
 
     Arrays vindos de ``jax.pure_callback`` chegam com ``writeable=False``
     (JAX trata buffers como imutáveis). O Numba trata ``mutable=False``
@@ -100,6 +100,12 @@ def _to_writeable(arr) -> np.ndarray:
     necessário, garantindo que apenas 1 especialização seja compilada
     independente do caminho de entrada (Numba puro vs JAX callback).
 
+    **Uso seletivo (v2.38)**: aplicar APENAS em arrays que chegam writeable
+    no caminho Numba direto (h_arr, prof_arr, eta, u, s, ...). Filtros
+    de Hankel (``krJ0J1``, ``wJ0``, ``wJ1``) são ``setflags(write=False)``
+    pelo ``FilterLoader`` — passe-os via :func:`_to_readonly_contig` para
+    preservar ``readonly`` e convergir com a especialização Numba direta.
+
     Args:
         arr: Array-like (numpy, jax, ou qualquer convertível via
             ``np.asarray``).
@@ -110,6 +116,31 @@ def _to_writeable(arr) -> np.ndarray:
     out = np.ascontiguousarray(arr)
     if not out.flags.writeable:
         out = out.copy()
+    return out
+
+
+def _to_readonly_contig(arr) -> np.ndarray:
+    """Converte para ``np.ndarray`` contíguo preservando ``readonly`` (v2.38).
+
+    Complementa :func:`_to_writeable`. Usado para os filtros de Hankel
+    (``krJ0J1``, ``wJ0``, ``wJ1``) que vêm do ``FilterLoader`` com
+    ``setflags(write=False)`` no caminho Numba direto. Forçá-los para
+    writeable no caminho JAX criaria uma 2ª especialização Numba
+    (``readonly array`` vs ``array``) — exatamente o sintoma que o fix
+    v2.31 pretendia eliminar.
+
+    Args:
+        arr: Array-like (numpy, jax, ou convertível).
+
+    Returns:
+        ``np.ndarray`` contíguo em C-order. ``writeable=False`` se o
+        input já era readonly (ou após cópia, marcado readonly para
+        casar com FilterLoader).
+    """
+    out = np.ascontiguousarray(arr)
+    if out.flags.writeable:
+        out = out.copy()
+        out.setflags(write=False)
     return out
 
 
@@ -159,9 +190,17 @@ def _dipoles_numba_host(
     Convertido para numpy arrays antes de chamar Numba. Retorna matH
     3x3 complex128, que JAX converte de volta para jnp.array.
     """
-    # Sprint v2.31: _to_writeable garante mutable=True (1 especialização Numba).
-    # Arrays JAX chegam readonly (writeable=False); np.asarray preservava esse
-    # flag, fazendo Numba gerar uma 2ª especialização .nbc por mutabilidade.
+    # Sprint v2.31 (fix v2.38): convergir UMA especialização Numba.
+    # Numba trata `readonly array` e `array` como tipos distintos. O caminho
+    # Numba direto recebe filtros readonly (FilterLoader.setflags(write=False))
+    # e demais arrays writeable (construídos localmente). O caminho JAX chega
+    # com tudo readonly via jax.pure_callback. Para convergir, espelhamos
+    # exatamente as mutabilidades do caminho direto:
+    #   - filtros (krJ0J1, wJ0, wJ1): _to_readonly_contig (preserva readonly)
+    #   - demais arrays: _to_writeable (força mutable=True)
+    kr_ro = _to_readonly_contig(krJ0J1)
+    w0_ro = _to_readonly_contig(wJ0)
+    w1_ro = _to_readonly_contig(wJ1)
     u_np = _to_writeable(u)
     Hx_hmd, Hy_hmd, Hz_hmd = hmd_tiv(
         float(Tx),
@@ -171,9 +210,9 @@ def _dipoles_numba_host(
         int(camad_r),
         int(camad_t),
         int(npt_int),
-        _to_writeable(krJ0J1),
-        _to_writeable(wJ0),
-        _to_writeable(wJ1),
+        kr_ro,
+        w0_ro,
+        w1_ro,
         _to_writeable(h_arr),
         _to_writeable(prof_arr),
         complex(zeta_c),
@@ -202,9 +241,9 @@ def _dipoles_numba_host(
         int(camad_r),
         int(camad_t),
         int(npt_int),
-        _to_writeable(krJ0J1),
-        _to_writeable(wJ0),
-        _to_writeable(wJ1),
+        kr_ro,
+        w0_ro,
+        w1_ro,
         _to_writeable(h_arr),
         _to_writeable(prof_arr),
         complex(zeta_c),
