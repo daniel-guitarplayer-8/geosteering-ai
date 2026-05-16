@@ -482,7 +482,7 @@ class SimulationConfig:
 
     Sprint v2.37 F2: quando `tile_size_auto=True` (default), este
     valor é IGNORADO em favor da heurística
-    `recommend_tile_size(n_positions, npt, n_layers)`.
+    `recommend_tile_size(n_positions)`.
     """
 
     # ── Sprint v2.37 F2 — Auto-detect tile_size ───────────────────────
