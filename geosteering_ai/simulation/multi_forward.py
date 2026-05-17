@@ -338,12 +338,14 @@ def get_jit_cache_info() -> Dict[str, Any]:
         from geosteering_ai.simulation.forward import (
             _simulate_combined_prange,
             _simulate_combined_prange_flat,
+            _simulate_combined_prange_flat_tiled,
             _simulate_positions_njit,
             _simulate_positions_njit_cached,
         )
 
         for fn in (
             _simulate_combined_prange_flat,
+            _simulate_combined_prange_flat_tiled,
             _simulate_combined_prange,
             _simulate_positions_njit,
             _simulate_positions_njit_cached,
@@ -987,6 +989,7 @@ def simulate_multi(
     from geosteering_ai.simulation.forward import (
         _simulate_combined_prange,
         _simulate_combined_prange_flat,
+        _simulate_combined_prange_flat_tiled,
         _simulate_positions_njit_cached,
         _simulate_positions_njit_cached_tiled,
     )
@@ -1087,34 +1090,75 @@ def simulate_multi(
         flat_min = max(1, cfg.flat_prange_min_combos)
         use_flat_effective = cfg.use_flat_prange and n_effective_combos >= flat_min
         if use_flat_effective:
-            _simulate_combined_prange_flat(
-                dz_halfs,
-                r_halfs,
-                dip_rads_flat,
-                cache_indices,
-                nAngles,
-                u_unique,
-                s_unique,
-                uh_unique,
-                sh_unique,
-                RTEdw_unique,
-                RTEup_unique,
-                RTMdw_unique,
-                RTMup_unique,
-                AdmInt_unique,
-                positions_z,
-                n,
-                rho_h,
-                rho_v,
-                h_arr_static,
-                prof_arr_static,
-                eta_static,
-                freqs_hz,
-                krJ0J1,
-                wJ0,
-                wJ1,
-                H_tensor,
-            )
+            # Sprint F10 (v2.39): quando use_tiled_positions=True, usa
+            # _simulate_combined_prange_flat_tiled (tile/block no hot path FLAT).
+            # Cada tarefa prange processa tile_size posições com as mesmas slices
+            # de cache, mantendo-as quentes em L2. Paridade bit-exata garantida.
+            if cfg.use_tiled_positions and n_pos > 1:
+                if cfg.tile_size_auto:
+                    from geosteering_ai.simulation.config import recommend_tile_size
+
+                    _flat_tile = recommend_tile_size(n_pos)
+                else:
+                    _flat_tile = cfg.tile_size
+                _simulate_combined_prange_flat_tiled(
+                    dz_halfs,
+                    r_halfs,
+                    dip_rads_flat,
+                    cache_indices,
+                    nAngles,
+                    u_unique,
+                    s_unique,
+                    uh_unique,
+                    sh_unique,
+                    RTEdw_unique,
+                    RTEup_unique,
+                    RTMdw_unique,
+                    RTMup_unique,
+                    AdmInt_unique,
+                    positions_z,
+                    n,
+                    rho_h,
+                    rho_v,
+                    h_arr_static,
+                    prof_arr_static,
+                    eta_static,
+                    freqs_hz,
+                    krJ0J1,
+                    wJ0,
+                    wJ1,
+                    H_tensor,
+                    _flat_tile,
+                )
+            else:
+                _simulate_combined_prange_flat(
+                    dz_halfs,
+                    r_halfs,
+                    dip_rads_flat,
+                    cache_indices,
+                    nAngles,
+                    u_unique,
+                    s_unique,
+                    uh_unique,
+                    sh_unique,
+                    RTEdw_unique,
+                    RTEup_unique,
+                    RTMdw_unique,
+                    RTMup_unique,
+                    AdmInt_unique,
+                    positions_z,
+                    n,
+                    rho_h,
+                    rho_v,
+                    h_arr_static,
+                    prof_arr_static,
+                    eta_static,
+                    freqs_hz,
+                    krJ0J1,
+                    wJ0,
+                    wJ1,
+                    H_tensor,
+                )
         else:
             _simulate_combined_prange(
                 dz_halfs,

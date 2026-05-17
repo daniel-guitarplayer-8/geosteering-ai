@@ -461,14 +461,30 @@ class SimulationConfig:
     # Default OFF — promover True somente após validação empírica
     # (paridade <1e-12 vs versão não-tiled + ganho ≥5%).
     use_tiled_positions: bool = False
-    """Sprint v2.36 O2 — ativa `_simulate_positions_njit_cached_tiled`.
+    """Sprint v2.36 O2 / Sprint F10 (v2.39) — ativa tile/block nos dois paths.
 
-    Quando True (e `use_flat_prange=False`), o caminho não-FLAT em
-    `multi_forward.py` agrupa posições em tiles de tamanho `tile_size`
-    antes do `prange`. Default False porque a melhoria depende do
-    tamanho de cache da máquina e do número de posições — não é
-    universalmente positiva. Sprint v2.36 introduziu como prova de
-    conceito isolada no path single-TR legado (compatível com KB-013).
+    Quando True, agrupa posições em tiles de tamanho ``tile_size`` (ou
+    ``recommend_tile_size(n_pos)`` quando ``tile_size_auto=True``) antes
+    do loop paralelo Numba, mantendo as slices de cache quentes em L2.
+
+    Cobertura por path:
+      - **Não-FLAT** (``use_flat_prange=False``): ativa
+        ``_simulate_positions_njit_cached_tiled`` (Sprint v2.36 O2) —
+        loop serial externo sobre tiles, prange interno sobre posições
+        do tile. Benchmark v2.36: +20–47% para n_pos ≥ 100 (i9-9980HK).
+      - **FLAT** (``use_flat_prange=True``): ativa
+        ``_simulate_combined_prange_flat_tiled`` (Sprint F10, v2.39).
+        **Benchmark F10 (i9-9980HK, 2026-05-16)**: tiling reduz tarefas
+        prange em tile_size× (ex. 600→75 tasks para nf=3, n_pos=200),
+        prejudicando o balanceamento de carga mais do que a localidade
+        de cache beneficia. Resultado: −1% a −38% vs FLAT não-tiled.
+        Hipótese: o benefício emerge apenas quando slice de cache
+        (npt × n × 9 × 16B) excede L2 por core — requer n ≫ 22 camadas
+        ou filtro Anderson 801pt. Default False preserva comportamento ótimo.
+
+    Default False — promover True somente após benchmark dedicado
+    (paridade <1e-12 vs versão não-tiled + ganho ≥5%).
+    KB-013 preservado: ``prange`` somente no nível outer em ambos os paths.
     """
 
     tile_size: int = 4

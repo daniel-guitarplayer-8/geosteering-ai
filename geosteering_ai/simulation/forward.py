@@ -771,6 +771,220 @@ def _simulate_combined_prange_flat(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# _simulate_combined_prange_flat_tiled — Sprint F10: tile/block no path FLAT
+# ──────────────────────────────────────────────────────────────────────────────
+# Variante tile-aware de `_simulate_combined_prange_flat` (v2.22): cada tarefa
+# prange processa um bloco de `tile_size` posições consecutivas para um par
+# (i_combo, i_f) fixo, mantendo as slices de cache `u_unique[ci, i_f]` quentes
+# em L2 durante todo o tile.
+#
+# Motivação de cache (Intel i9-9980HK: L1=32kB, L2=256kB, L3=16MB):
+#   • Cada slice u_unique[ci, i_f] tem shape (npt, n) = (201, 10) → ~31.4 kB
+#   • 9 slices de cache totais → ~280 kB por (ci, i_f)
+#   • Com FLAT não-tiled: prange distribui k aleatoriamente → slices diferentes
+#     competem por L2 entre threads → alta taxa de cache miss.
+#   • Com tile_size=8: cada thread processa 8 posições com as MESMAS slices →
+#     280 kB quentes em L2 por tile → ~8× menos fetch de main memory por posição.
+#
+# Decomposição de índice (k → i_combo, i_tile, i_f):
+#   n_tile_f  = n_tiles * nf
+#   i_combo   = k // n_tile_f
+#   rem       = k %  n_tile_f
+#   i_tile    = rem // nf
+#   i_f       = rem %  nf
+#   i_tr      = i_combo // nAngles
+#   i_ang     = i_combo % nAngles
+#
+# Garantias:
+#   • H_tensor[i_tr, i_ang, j, i_f, :] WRITE EXCLUSIVO por (k, jj) — sem race
+#   • Paridade bit-exata com _simulate_combined_prange_flat: mesma física,
+#     mesma ordem de operações, apenas o agrupamento externo mudou.
+#   • KB-013 preservado: prange apenas no nível outer (k), inner loop serial.
+#
+# Ativado via `cfg.use_tiled_positions=True` e `cfg.use_flat_prange=True`.
+# Sprint F10 (v2.39) — maior payoff de performance no hot path de produção.
+
+
+@njit(parallel=True, cache=True, nogil=True)
+def _simulate_combined_prange_flat_tiled(
+    # Geometria flat [n_combos = nTR * nAngles]
+    dz_halfs: np.ndarray,
+    r_halfs: np.ndarray,
+    dip_rads_flat: np.ndarray,
+    cache_indices: np.ndarray,
+    nAngles: int,
+    # Caches empilhados [n_unique, nf, npt, n]
+    u_unique: np.ndarray,
+    s_unique: np.ndarray,
+    uh_unique: np.ndarray,
+    sh_unique: np.ndarray,
+    RTEdw_unique: np.ndarray,
+    RTEup_unique: np.ndarray,
+    RTMdw_unique: np.ndarray,
+    RTMup_unique: np.ndarray,
+    AdmInt_unique: np.ndarray,
+    # Dados estáticos do modelo
+    positions_z: np.ndarray,
+    n: int,
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    h_arr: np.ndarray,
+    prof_arr: np.ndarray,
+    eta: np.ndarray,
+    freqs_hz: np.ndarray,
+    krJ0J1: np.ndarray,
+    wJ0: np.ndarray,
+    wJ1: np.ndarray,
+    # Output pré-alocado [nTR, nAngles, n_pos, nf, 9]
+    H_tensor: np.ndarray,
+    # Tamanho do tile (posições por bloco)
+    tile_size: int,
+) -> None:
+    """Prange flat 4D com tile/block sobre posições — Sprint F10 (v2.39).
+
+    Variante tile-aware de :func:`_simulate_combined_prange_flat` (v2.22).
+    Cada tarefa prange processa ``tile_size`` posições consecutivas para um
+    par (combo, freq) fixo, mantendo as slices de cache quentes em L2.
+
+    Arquitetura do paralelismo:
+      ┌──────────────────────────────────────────────────────────────────┐
+      │  v2.22 (FLAT não-tiled):                                         │
+      │    prange(n_combos × n_pos × nf)         [1 pos por task]        │
+      │       └── _fields_at_single_freq (1 freq, 1 pos)                │
+      │                                                                  │
+      │  F10 (FLAT tiled):                                               │
+      │    prange(n_combos × n_tiles × nf)        [tile_size pos por task]│
+      │       └── range(tile_len) serial → _fields_at_single_freq       │
+      │           ← cache slices [ci, i_f] REUTILIZADOS por todo tile → │
+      └──────────────────────────────────────────────────────────────────┘
+
+    Args:
+        dz_halfs, r_halfs, dip_rads_flat: Geometria flat [n_combos].
+        cache_indices: int64[n_combos] — índice na stack de caches únicos.
+        nAngles: número de ângulos (decomposição i_tr/i_ang).
+        u_unique, ..., AdmInt_unique: Caches empilhados [n_unique, nf, npt, n].
+        positions_z: Profundidades ponto-médio [n_pos].
+        n, rho_h, rho_v, h_arr, prof_arr, eta: Dados geológicos estáticos.
+        freqs_hz: Frequências [nf].
+        krJ0J1, wJ0, wJ1: Filtro Hankel.
+        H_tensor: Output pré-alocado [nTR, nAngles, n_pos, nf, 9].
+        tile_size: Posições por tile. Calculado via
+            :func:`geosteering_ai.simulation.config.recommend_tile_size`
+            quando ``cfg.tile_size_auto=True``.
+
+    Note:
+        Paridade bit-exata com :func:`_simulate_combined_prange_flat`:
+        mesma física, mesma ordem de operações por (i_tr, i_ang, j, i_f).
+        KB-013 preservado: ``prange`` apenas no nível outer (k);
+        ``range(tile_len)`` é serial.
+
+        Sprint F10 (v2.39) — tile/block no hot path FLAT de produção.
+    """
+    n_combos = dz_halfs.shape[0]
+    n_pos = positions_z.shape[0]
+    nf = freqs_hz.shape[0]
+
+    # n_tiles = ceil(n_pos / tile_size) — inteiro, sem divisão float
+    n_tiles = (n_pos + tile_size - 1) // tile_size
+    n_tile_f = n_tiles * nf
+    n_total = n_combos * n_tile_f
+
+    for k in _prange(n_total):  # type: ignore[misc]
+        # ── Decomposição de índice: k → (i_combo, i_tile, i_f) ─────────
+        # Ordem do agrupamento escolhida para maximizar localidade:
+        # maior stride (combos) no outer, menor (freqs) no inner.
+        # Mesmo (i_combo, i_f) → mesmas slices de cache para o tile inteiro.
+        i_combo = k // n_tile_f
+        rem = k % n_tile_f
+        i_tile = rem // nf
+        i_f = rem % nf
+
+        i_tr = i_combo // nAngles
+        i_ang = i_combo % nAngles
+
+        # Parâmetros geométricos para este combo (constantes no tile)
+        dz_half = dz_halfs[i_combo]
+        r_half = r_halfs[i_combo]
+        dip_rad = dip_rads_flat[i_combo]
+
+        # Índice na stack de caches únicos (deduplicação por hordist)
+        ci = cache_indices[i_combo]
+
+        # ── Slices de cache para (ci, i_f) — VIEWS, sem cópia ──────────
+        # Estas views ficam quentes em L2 durante todo o tile:
+        # shape [npt, n] = (201, 10) → ~31 kB por slice; 9 slices → ~280 kB.
+        # Intel i9-9980HK L2=256kB por core → cabe ~90% do set de cache.
+        u_sl = u_unique[ci, i_f]
+        s_sl = s_unique[ci, i_f]
+        uh_sl = uh_unique[ci, i_f]
+        sh_sl = sh_unique[ci, i_f]
+        RTEdw_sl = RTEdw_unique[ci, i_f]
+        RTEup_sl = RTEup_unique[ci, i_f]
+        RTMdw_sl = RTMdw_unique[ci, i_f]
+        RTMup_sl = RTMup_unique[ci, i_f]
+        AdmInt_sl = AdmInt_unique[ci, i_f]
+
+        freq_k = freqs_hz[i_f]
+
+        # ── Loop serial sobre posições do tile ──────────────────────────
+        # KB-013: prange SOMENTE no outer (k). Loop inner é range() serial.
+        # Tile delimita o bloco: [tile_start, tile_end) com tile_end ≤ n_pos.
+        tile_start = i_tile * tile_size
+        tile_end = tile_start + tile_size
+        if tile_end > n_pos:
+            tile_end = n_pos
+
+        for jj in range(tile_end - tile_start):
+            j = tile_start + jj
+            z_mid = positions_z[j]
+
+            # Coordenadas T/R — Convenção Fortran (PerfilaAnisoOmp.f08:677-679)
+            Tz = z_mid + dz_half
+            cz = z_mid - dz_half
+            Tx = r_half
+            cx = -r_half
+            Ty = 0.0
+            cy = 0.0
+
+            # find_layers_tr é O(log n) ≈ 50ns (bisseção) — overhead
+            # redundância (chamado nf vezes p/ mesma posição j) = 0.025%
+            camad_t, camad_r = find_layers_tr(n, Tz, cz, prof_arr)
+
+            out_9 = _fields_at_single_freq(
+                Tx,
+                Ty,
+                Tz,
+                cx,
+                cy,
+                cz,
+                dip_rad,
+                n,
+                h_arr,
+                prof_arr,
+                eta,
+                freq_k,
+                krJ0J1,
+                wJ0,
+                wJ1,
+                u_sl,
+                s_sl,
+                uh_sl,
+                sh_sl,
+                RTEdw_sl,
+                RTEup_sl,
+                RTMdw_sl,
+                RTMup_sl,
+                AdmInt_sl,
+                camad_t,
+                camad_r,
+            )
+
+            # Write exclusivo por (i_tr, i_ang, j, i_f) — sem race
+            for c in range(9):
+                H_tensor[i_tr, i_ang, j, i_f, c] = out_9[c]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # _simulate_positions_parallel — Pool de threads sobre posições (Sprint 2.8)
 # ──────────────────────────────────────────────────────────────────────────────
 # LEGADO da Sprint 2.8 — kept como fallback/debug. A Sprint 2.9 tornou
