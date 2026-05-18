@@ -256,8 +256,22 @@ def setup_mixed_precision_policy(config: "PipelineConfig") -> None:
     """
     import tensorflow as tf  # lazy import
 
+    # Idempotência (Sprint v2.40.1 — Code #2): evita poluição de logs INFO
+    # em Optuna multi-trial onde esta função é chamada N× com mesmo target.
+    # Sem este check, treino com 100 trials × 50 épocas emite 5000+ logs
+    # redundantes. Quando policy já está no alvo, downgrade para DEBUG.
+    target = "mixed_float16" if config.use_mixed_precision else "float32"
+    current = tf.keras.mixed_precision.global_policy().name
+    if current == target:
+        logger.debug(
+            "Mixed precision policy já está em '%s' — chamada idempotente "
+            "ignorada (evita log spam em Optuna multi-trial).",
+            target,
+        )
+        return
+
+    tf.keras.mixed_precision.set_global_policy(target)
     if config.use_mixed_precision:
-        tf.keras.mixed_precision.set_global_policy("mixed_float16")
         logger.info(
             "Mixed precision ATIVADO (módulo-level): policy='mixed_float16'. "
             "Compute fp16, master weights fp32. Camadas BN/LN mantidas em fp32. "
@@ -266,7 +280,6 @@ def setup_mixed_precision_policy(config: "PipelineConfig") -> None:
     else:
         # Reset defensivo: garante que policy anterior (de outro teste/run)
         # não contamine este treinamento.
-        tf.keras.mixed_precision.set_global_policy("float32")
         logger.info(
             "Mixed precision DESATIVADO (módulo-level): policy='float32' "
             "(reset defensivo)."

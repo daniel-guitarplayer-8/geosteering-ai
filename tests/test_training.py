@@ -1018,3 +1018,86 @@ class TestBuildModelWithMpPolicyV240:
             ), f"compute_dtype esperado 'float16', obtido '{model.compute_dtype}'"
         finally:
             tf.keras.mixed_precision.set_global_policy("float32")
+
+    def test_no_circular_import_registry_to_training(self):
+        """Guard regression: importar registry NÃO deve disparar import circular.
+
+        Sprint v2.40.1 Code #5 — build_model_with_mp_policy faz lazy import
+        de setup_mixed_precision_policy DENTRO da função (não no module level)
+        para evitar ciclo potencial:
+
+            models.registry → training.loop → (volta para registry?)
+
+        Este teste prova que ambas as ordens de import funcionam:
+        (1) registry primeiro → training; (2) training primeiro → registry.
+        Ausência de ImportError/ModuleNotFoundError em ambas é a garantia.
+        """
+        import sys
+
+        # ── Cenário 1: registry PRIMEIRO ─────────────────────────────────
+        for mod_name in list(sys.modules.keys()):
+            if mod_name.startswith("geosteering_ai.models") or mod_name.startswith(
+                "geosteering_ai.training"
+            ):
+                del sys.modules[mod_name]
+
+        from geosteering_ai.models import registry  # noqa: E402
+
+        assert "build_model_with_mp_policy" in registry.__all__
+        assert callable(registry.build_model_with_mp_policy)
+
+        from geosteering_ai.training import loop  # noqa: E402
+
+        assert hasattr(loop, "setup_mixed_precision_policy")
+        assert callable(loop.setup_mixed_precision_policy)
+
+        # ── Cenário 2: training PRIMEIRO ─────────────────────────────────
+        for mod_name in list(sys.modules.keys()):
+            if mod_name.startswith("geosteering_ai.models") or mod_name.startswith(
+                "geosteering_ai.training"
+            ):
+                del sys.modules[mod_name]
+
+        from geosteering_ai.training import loop as loop2  # noqa: E402, F811
+
+        assert callable(loop2.setup_mixed_precision_policy)
+
+        from geosteering_ai.models import registry as registry2  # noqa: E402, F811
+
+        assert callable(registry2.build_model_with_mp_policy)
+
+        # ── F2 hardening (v2.40.1): aciona o lazy-import REAL ─────────────
+        # Sem este check, o teste apenas prova que ambos os módulos importam
+        # isoladamente. Se alguém mover `from training.loop import ...` para
+        # module-level em registry.py (introduzindo ciclo real), o teste
+        # acima continuaria passando. Chamar build_model_with_mp_policy força
+        # o execute do lazy import dentro do corpo da função — pega a
+        # regressão. Skip se TF não disponível (config válido ainda exige TF
+        # para construir o modelo); apenas valida que a função foi callable.
+        try:
+            import tensorflow  # noqa: F401
+        except ImportError:
+            return  # Sem TF: import-chain já validado acima é suficiente.
+
+        from geosteering_ai.config import PipelineConfig  # noqa: E402
+
+        cfg = PipelineConfig(
+            model_type="ResNet_18",
+            use_mixed_precision=False,  # Não muda policy global (idempotente).
+            sequence_length=10,
+        )
+        # NÃO instancia o modelo (custoso) — apenas prova que a chamada
+        # alcança o lazy `from geosteering_ai.training.loop import ...`
+        # sem ImportError. Suficiente como guard de regressão circular.
+        # (Wrap em try para garantir que falha eventual de build_model
+        # não seja confundida com falha de circular import.)
+        try:
+            registry2.build_model_with_mp_policy(cfg)
+        except ImportError as e:
+            raise AssertionError(
+                f"Lazy import circular detectado em build_model_with_mp_policy: {e}"
+            ) from e
+        except Exception:
+            # Outras exceções (ValueError, TF init issues) não nos interessam:
+            # o objetivo é apenas executar a linha do lazy import.
+            pass
