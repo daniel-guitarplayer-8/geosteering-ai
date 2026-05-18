@@ -21,6 +21,10 @@ constraints:
   - "≤30% prosa"
   - "Nunca substituir CHANGELOG; sempre append"
   - "Nunca tocar código fonte (.py); apenas docs/markdown"
+  - "ADR-0001 (v2.40.2): SEMPRE atualizar docs/ROADMAP.md ao gerar report — mover itens de backlog para histórico, atualizar status de items concluídos"
+  - "ADR-0001 R1: NUNCA cunhar definição de versão futura em report — referenciar docs/ROADMAP.md"
+  - "ADR-0001 R2: Não atribuir versão vX.Y a item de backlog ainda não-committed; usar code (e.g., C-noise-35)"
+  - "Após merge de sprint: renomear docs/sprints/CURRENT.md → docs/sprints/v2.X.md (snapshot imutável) + criar novo CURRENT.md vazio"
 ---
 
 # Documentador Geosteering AI 2.0
@@ -60,6 +64,55 @@ SE arquivo edita docstrings sem acentuação correta:
 
 SE arquivo novo sem mega-header D1:
   → Adicionar header em commit subsequente
+```
+
+---
+
+## Fluxo de Atualização de ROADMAP (ADR-0001 — obrigatório)
+
+Toda execução desta skill DEVE seguir este fluxo de sincronização:
+
+```text
+1. Ao iniciar relatório de sprint completada:
+   → LER docs/ROADMAP.md §0 Backlog
+   → Identificar o item (`code`) que foi executado nesta sprint
+   → REMOVER o item do backlog (mover para "Sprints Recentes")
+   → Atualizar a tabela "Marcos recentes do Simulation Manager"
+
+2. Ao detectar próximos passos no relatório:
+   → NUNCA cunhar "Sprint vX.Y = <tema>" (regra-dura R2 ADR-0001)
+   → APENAS referenciar items do backlog usando seus `code`
+   → Se o item ainda não existe, ADICIONAR ao backlog ROADMAP §0
+     com Status=BACKLOG (não atribuir versão)
+
+3. Ao detectar conclusão de sprint (merge na main + tag):
+   → RENOMEAR docs/sprints/CURRENT.md → docs/sprints/v2.X.md
+     (substituir X pela versão real atribuída no commit da sprint)
+   → CRIAR novo docs/sprints/CURRENT.md vazio (template padrão)
+   → APPEND entry em docs/CHANGELOG.md (cronológico reverso)
+   → ATUALIZAR docs/INDEX.md se a hierarquia mudou
+
+4. Ao detectar decisão arquitetural (escolha entre 2+ opções):
+   → SUGERIR criação de ADR em docs/decisions/ADR-XXXX.md
+   → NÃO documentar a decisão dispersa em report
+```
+
+**Exemplos PROIBIDOS** (NUNCA fazer):
+
+```markdown
+## Próximos Passos
+| Sprint | Esforço | Tema |
+| v2.41 | 4-6h | SurrogateNet Training  ← ❌ PROIBIDO (cunha versão futura)
+```
+
+**Exemplos CORRETOS**:
+
+```markdown
+## Próximos Passos
+Ver [docs/ROADMAP.md §0](../ROADMAP.md#0-backlog-priorizado-ssot). Esta sprint
+desbloqueou os items:
+- `C-surrogate-train` (Prioridade P1, agora CANDIDATE)
+- `E-api-simulate` (Prioridade P2, dependências resolvidas)
 ```
 
 ---

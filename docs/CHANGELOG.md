@@ -111,8 +111,8 @@ agora callable ANTES de `build_model()` (era depois — camadas fp32 mesmo com f
 |:---|:---|:---|
 | **(a)** Template Colab via MCP | ✅ Implementado | `validate_jax_gpu_v240.ipynb` |
 | **(c parcial)** Marker pytest `gpu` | ✅ Implementado | 109 testes JAX + skip CPU automático |
-| **(b)** Endpoint `/simulate` na API | ⏳ v2.41+ | Schema novo, sprint dedicada |
-| **(d)** GitHub Actions GPU runner | ⏳ v2.42+ | Orçamento dedicado |
+| **(b)** Endpoint `/simulate` na API | 📌 backlog | Schema novo, sprint dedicada — ver [ROADMAP.md](ROADMAP.md) |
+| **(d)** GitHub Actions GPU runner | 📌 backlog | Orçamento dedicado — ver [ROADMAP.md](ROADMAP.md) |
 
 ### Conformidade com Restrições do Projeto
 
@@ -130,15 +130,21 @@ agora callable ANTES de `build_model()` (era depois — camadas fp32 mesmo com f
 - `SKIP=mypy` em 1 commit — 6 erros pré-existentes em `apply_feature_view` kwargs
   unpacking (linhas 527-529, 619, 669, 674 de pipeline.py — dívida fora de escopo).
 
-### Próximos Passos Desbloqueados
+### Itens de Backlog Desbloqueados por v2.40
 
-| Sprint | Esforço | Tema |
-|:---|:---:|:---|
-| **v2.41** | 4-6h | F4.3 SurrogateNet Training (Colab A100 mp16) |
-| v2.41+ | 6-8h | Endpoint `POST /simulate` (D3 caminho b) |
-| v2.41+ | 8-10h | Catálogo de Ruído 35 tipos (Trilha C Fase II) |
-| v2.42+ | 1-2h | F5 — `use_tiled_positions=True` default |
-| v2.42+ | 4-5h | DTB + Parser Geológico (Trilha D Fase III) |
+Ver **[docs/ROADMAP.md](ROADMAP.md)** para os itens canônicos do backlog
+(prioridade, trilha, dependências). v2.40 desbloqueou em específico:
+
+| Code | Trilha | Tema | Esforço |
+|:--|:--:|:--|:--:|
+| **C-surrogate-train** | C | F4.3 SurrogateNet Training (Colab A100 mp16) | 4-6h |
+| **E-api-simulate** | E | Endpoint `POST /simulate` (D3 caminho b) | 6-8h |
+| **C-noise-35** | C | Catálogo de Ruído 35 tipos (Trilha C Fase II) | 8-10h |
+| **B-flat-prange-default** | B | `use_flat_prange=True` como default | 1-2h |
+| **D-dtb-parser** | D | DTB + Parser Geológico (Trilha D Fase III) | 4-5h |
+
+> Versões `vX.Y` serão atribuídas no commit da sprint (ADR-0001 — uma sprint
+> por item committed).
 
 ---
 
