@@ -411,7 +411,31 @@ APOS implementar:
 
 ---
 
-## Hierarquia de Consulta
+## Hierarquia de Planejamento (ADR-0001 — v2.40.2)
+
+Para **descobrir o que fazer a seguir** (sprints, features, prioridades),
+siga esta hierarquia ESTRITA. Outros documentos podem inspirar, mas estes
+são os ÚNICOS canônicos:
+
+| # | Documento | Pergunta que responde |
+|:-:|:----------|:----------------------|
+| 1 | **`docs/INDEX.md`** | "Onde encontro X?" — porta de entrada |
+| 2 | **`docs/ROADMAP.md` §0** | "Qual o backlog priorizado?" — SSoT do futuro |
+| 3 | **`docs/sprints/CURRENT.md`** | "Qual sprint está em execução?" |
+| 4 | **`docs/sprints/v2.X.md`** | "Como foi a sprint X?" (snapshot imutável) |
+| 5 | **`docs/CHANGELOG.md`** | "Quais releases existem?" (Keep-a-Changelog) |
+| 6 | **`docs/decisions/ADR-XXXX.md`** | "Por que essa decisão arquitetural?" |
+
+**Regra-dura R1 (ADR-0001)**: Nenhum outro arquivo do projeto (reports,
+skills, hooks, code comments) pode definir o que é uma versão futura.
+Devem **referenciar** `docs/ROADMAP.md`. O hook
+`.claude/hooks/check-version-references.sh` enforça automaticamente.
+
+**Regra-dura R2 (ADR-0001)**: Versões `vX.Y` são atribuídas no **primeiro
+commit da sprint**, não antes. Antes disso, itens vivem no backlog
+identificados apenas por **code** (e.g., `C-noise-35`).
+
+## Hierarquia de Consulta (arquitetura/código)
 
 | Prioridade | Documento | Quando Consultar |
 |:----------:|:----------|:----------------|
