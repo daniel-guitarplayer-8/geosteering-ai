@@ -48,13 +48,13 @@
 | **v2.26** | **2026-05-10** | **Move warmup do inicializador para Future (elimina hang no shutdown)**: `_numba_init_worker` simplificado para apenas env vars (< 100 ms). Novo `_run_numba_warmup_task` com shapes corretos (n=10, esp 8 elem, 50 posições) submetido como Future cancelável. `PoolWarmupThread.run()` aguarda futures. `release_numba_pool(cancel_futures=True)` efetivo (workers não travados em init). 3 novos testes + paridade Fortran <1e-12. | 3 novos | `main` |
 | **v2.25** | **2026-05-10** | **Fix warmup silencioso em `_numba_init_worker` (regressão 50k→150k)**: corrigiu shape `esp=[5.0, 5.0]` (inválida para 3 camadas) → ValueError silencioso → `_WORKER_INITIALIZED=True` falso → cold-start em produção. Fix: shape correto (n=10, esp 8 elem). Warmup com 600 posições + 4 combos em inicializador. | — | `main` |
 | **v2.24** | **2026-05-10** | **Débitos Técnicos + I2.5 + I2.6** (multi-agente): **Frente 1**: 1.1 `scripts/count_pytest_pass.py` automatiza contagem PASS (M2 recorrente fechado). 1.2 `setup-environment.sh` totalmente em PT-BR acentuado (11+ ocorrências). 1.3 `cache=True` explícito em 13 decoradores `@njit` em `_numba/` (propagation 2 + dipoles 2 + rotation 2 + hankel 4 + geometry 3 — incluindo `_sanitize_profile_kernel` que já tinha cache=True desde v2.23). 1.4 `use_fastmath` documentado como status documental (dispatcher real **deferido v2.25** e substituído por estratégia superior `fastmath` seletivo + pairwise summation — ver Sprint v2.25 PLANEJADA). **I2.5**: hooks `check-ptbr-accentuation.sh` (catálogo `.claude/ptbr-words.txt` 60+ pares, registrado em settings.json PostToolUse) + `generate-pr-description.sh` (template `.claude/templates/pr_description_template.md`). **I2.6**: CLI MVP `geosteering-cli` (subcomandos `simulate`/`benchmark`/`version`) em `geosteering_ai/cli/` + entry point `pyproject.toml`. Lazy imports nos handlers para `--help` rápido. Reutiliza `simulate_multi` + `recommend_default_parallelism`. Paridade Fortran <1e-12 PRESERVADA em 7 modelos canônicos (10/10 testes). | 41 novos (11 v2.24 + 17 I2.5 + 13 CLI) | `feat/sprint-v2.24-debits-i25-i26` |
-| **v2.25 (PLANEJADO)** | TBD | **O3 Seguro (Selective Fastmath + Pairwise Summation) + Alta-ρ Canônicos + KB-020 + Kong 61pt CLI** (alinhado §7.4, §7.6, §8.3, §8.5 do `analise_cenarios_otimizacao_simulador_numba.md`). **Decisão técnica** (auditoria 2026-05-10): substituir proposta original (dispatcher dual-mode `hmd_tiv_fast`/`hmd_tiv_safe`) por **`fastmath={'nnan','ninf','contract','arcp','afn'}`** (5 flags SEGUROS — exclui `reassoc` e `nsz` que causam cancelamento catastrófico em alta ρ) + **pairwise summation manual** em 7 reduções `np.sum` de `hmd_tiv` (linhas 665-671) e 2 reduções de `vmd` (linhas 961-962). Erro O(ε·log 201) ≈ O(ε·7.65) vs O(ε·201) naive. **Defesa em profundidade**: 3 modelos canônicos alta ρ (`carbonato_seco_5c` 5kΩ·m, `evaporita_3c` 100kΩ·m, `gas_seco_8c` 10kΩ·m) adicionados ao gate Fortran <1e-12 (`tests/test_simulation_high_resistivity_parity.py`). **KB-020** documenta proibição de `reassoc`/`nsz` em `dipoles.py`. **DEPRECATE** flag `use_fastmath` com `DeprecationWarning` (remoção v2.27). **Kong 61pt CLI**: flag `--filter {werthmuller,kong,anderson}` em `geosteering-cli simulate/benchmark` (§8.5 doc análise; +230% mod/h projetado para geração de treinamento). **Ganho esperado**: +6-10% global (hmd_tiv+vmd) preservando paridade <1e-12 inclusive em ρ=10⁵ Ω·m. **Multi-agente**: physics-reviewer (Opus 4.7) valida gate alta-ρ + perf-reviewer (Haiku 4.5) valida +6-10% + code-reviewer (Sonnet 4.6) valida pairwise. **Limpeza Numba cache automatizada** em `setup-environment.sh` (ressalva physics-reviewer v2.24). | TBD (~30 novos: 3 high-ρ + ~10 pairwise unit + ~5 selective fastmath + ~5 Kong CLI + ~5 deprecation + ~2 cache cleanup) | TBD |
-| **v2.26 (PLANEJADO)** | TBD | **O1 Adaptive Thread Count Dinâmico + 3 modelos alta-ρ adicionais (opcional)** (§8.1 doc análise). Adiciona `cfg.adaptive_threads: bool = False` (opt-in) e `cfg.adaptive_min_tasks_per_thread: int = 4`. Helper `_apply_adaptive_thread_mask(cfg, n_combos, n_pos, nf)` em `multi_forward.py:1010` computa `effective_tasks = n_combos*n_pos*nf` (FLAT mode) ou `n_combos*n_pos` (legacy) e ajusta `numba.set_num_threads(min(max_threads, max(1, effective_tasks // min_tasks)))`. `try/finally` para restaurar estado anterior. Bypass para `n_pos ≤ 1`. **Ganho esperado**: +30-60% em Cenário 1 com `n_pos=10` (evita 6 threads ociosas em CPU 8C); ~0% em cenários já saturados (`n_pos ≥ 100`). 5 novos testes (default OFF preserva paridade bit-exata, redução para n_pos baixo, cap em cfg.num_threads, restore on exception, paridade Fortran <1e-12 com adaptive ON). Esforço ~1.5-2 dias. **NÃO** ativar default — após validação em CI por 1 sprint, considerar promoção em v2.27. | TBD (~5 novos) | TBD |
-| **v2.27 (PLANEJADO)** | TBD | **O4 Cache Contexto + O6 F7 einsum + GUI testing (pytest-qt) + Remoção `use_fastmath`** (§8.4, §8.6 doc análise). O4: cache LRU de `precompute_common_arrays_cache` por `(hordist, freq, rho_h, rho_v, esp, filter_name)` — beneficia inversão iterativa e geosteering em tempo real (+30% projetado para esses casos). O6: vetorização `apply_tilted_antennas` via `np.einsum` (+3× em F7 para `n_tilted > 5`, <2% impacto global). **GUI testing**: `pytest-qt` integrado + "Golden Path" smoke test do Simulation Manager (`cmb_scenario=E`, `spn_n_models=10`, `btn_run` → `qtbot.waitSignal(simulation_finished, timeout=60s)` → throughput ≥ 50k mod/h). **Remoção `use_fastmath`** flag (já deprecated em v2.25). Consolida overhead do hook `check-ptbr-accentuation.sh` (105 greps → 1 `grep -f`, ressalva perf-reviewer v2.24). | TBD (~12 novos: 4 O4 + 3 O6 + 5 GUI smoke) | TBD |
-| **v2.28 (PLANEJADO)** | TBD | **Adapter opt-in para Datasets LWD Reais** (validação suplementar antecipada): `geosteering_ai/data/loaders/real_data_adapter.py` + SDAR/SPWLA canonical models + Volve/Teapot suplementares. **NÃO-BLOQUEANTE** — prioridade primária permanece simuladores 1D→2D→2.5D→3D (§21). | — | TBD |
-| **v2.29 (PLANEJADO)** | TBD | **Métodos Alternativos de Inversão**: Occam regularizado + Look-up Table + Tikhonov + benchmark comparativo (§74 doc arquitetura). Baseline científico para paper de validação. | — | TBD |
-| **v2.30 (PLANEJADO)** | TBD | **Framework-Agnostic Core (Tier 2)**: `BaseInversionModel` + adapters TF/PyTorch/ONNX (§75 doc arquitetura). TF default exclusivo no pipeline; PyTorch opt-in via adapter para pesquisa; ONNX para deploy em campo. Hook `validate-no-pytorch.sh` ATIVO desde v2.22.7-docs. | — | TBD |
-| **v2.31 (PLANEJADO)** | TBD | **Backend-Agnostic Code Hygiene (Tier 1 — §75.10)**: auditoria `tf.*` → `keras.ops.*` em modelos custom + losses (excluindo PINNs com GradientTape, que permanecem TF-specific por design). Habilita JAX backend naturalmente e prepara terreno para Tier 3 (multi-backend) condicional. **Sem mudança de default** — TF continua exclusivo no pipeline de produção. | — | TBD |
+
+> **Nota v2.40.2 (refactor doc):** as entradas `(PLANEJADO)` para v2.25-v2.31
+> foram removidas — eram especulativas e divergiram do que foi efetivamente
+> executado (v2.25-v2.27 viraram fixes de warmup, não O3/O1/O4). O backlog
+> de trabalho futuro vive agora em **[docs/INDEX.md](INDEX.md)** + as
+> entradas de backlog priorizadas mais abaixo nesta página. Versões só são
+> atribuídas ao **commit** da sprint (regra ADR-0001).
 
 Documentação detalhada em `docs/reports/v2.{N}_2026-04-{D}.md` e
 `docs/CHANGELOG.md`. Relatório técnico Fase 1 completa em
@@ -62,13 +62,11 @@ Documentação detalhada em `docs/reports/v2.{N}_2026-04-{D}.md` e
 Pré-mortem inaugural em
 `docs/reports/premortem_geosteering_ai_2026-05-09.md`.
 
-**Planejamento técnico das Sprints v2.25-v2.27** (alinhamento com
-`docs/reference/analise_cenarios_otimizacao_simulador_numba.md`):
-ver `docs/reference/sprints_v2_25_v2_27_planning.md` — define escopo,
-critérios de aceitação e estratégia técnica para fechar 6/6 otimizações
-(O1-O6) do documento de análise, incluindo a decisão multi-agente
-(2026-05-10) de substituir o dispatcher dual-mode `use_fastmath` por
-estratégia superior `fastmath` seletivo + pairwise summation manual.
+**Análise técnica histórica das otimizações Numba (O1-O6)**: ver
+`docs/reference/analise_cenarios_otimizacao_simulador_numba.md` e
+`docs/reference/sprints_v2_25_v2_27_planning.md` (documentos de
+referência preservados; **escopo divergiu** do que foi executado em
+v2.25-v2.27 — itens reaberto re-priorizados no backlog).
 
 **Cadência transversal (F-cross — fase cross-cutting de governança)**:
 Pré-mortem trimestral via skill `geosteering-premortem-analyst` (Opus 4.7,
@@ -81,6 +79,7 @@ fase F).
 
 ## Sumário
 
+0. [**Backlog Priorizado (SSoT)**](#0-backlog-priorizado-ssot) ⭐ — fonte canônica do trabalho futuro
 1. [Status Atual do Projeto](#1-status-atual-do-projeto-abril-2026)
 2. [Embasamento Científico](#2-embasamento-científico-literatura-2024-2026)
 3. [Roadmap de Desenvolvimento (F1-F6)](#3-roadmap-de-desenvolvimento-fases-f1-f6)
@@ -89,6 +88,81 @@ fase F).
 6. [Próximos Passos](#6-próximos-passos-requisições-futuras)
 7. [Referências Bibliográficas](#7-referências-bibliográficas)
 8. [Arquivos Críticos](#8-arquivos-críticos-para-consulta)
+
+---
+
+## 0. Backlog Priorizado (SSoT)
+
+> **Esta é a única fonte canônica de trabalho futuro do projeto** (regra dura
+> ADR-0001). Nenhum outro documento (reports, skills, hooks, code comments)
+> pode definir o que será feito em uma versão futura — devem referenciar
+> esta seção. Versões `vX.Y` são atribuídas apenas no **commit** da sprint,
+> não antes.
+
+### Decomposição em 6 Trilhas
+
+| Trilha | Tema | Diretório |
+|:--:|:--|:--|
+| **A** | Simulador (Numba/JAX + paridade Fortran <1e-12) | `geosteering_ai/simulation/`, `Fortran_Gerador/` |
+| **B** | Performance (tiling, threading, FLAT prange, cache) | `multi_forward.py`, hooks perf |
+| **C** | Deep Learning (noise, curriculum, mp16, SurrogateNet, PINNs) | `geosteering_ai/{models,losses,training,noise}/` |
+| **D** | Geological (DTB, Picasso, real LWD adapters, datasets) | `geosteering_ai/{evaluation,visualization,data/loaders}/` |
+| **E** | Infrastructure (CLI, API REST, Docker, MCP Colab) | `geosteering_ai/{cli,api}/`, `Dockerfile.cpu` |
+| **F** | Governance (hooks, skills, ADRs, documentação) | `.claude/`, `docs/` |
+
+### Backlog Ativo (priorizado)
+
+Status: `BACKLOG` (não-priorizado) | `CANDIDATE` (próximo na fila) | `IN_PROGRESS` (sprint ativa)
+| `BLOCKED` (dependência não-satisfeita)
+
+| Code | Trilha | Item | Esforço | Prioridade | Status | Dependências |
+|:--|:--:|:--|:--:|:--:|:--:|:--|
+| `C-surrogate-train` | C | F4.3 SurrogateNet Training (TCN 127M + ModernTCN 204M) em Colab Pro+ A100 com mp16 | 4-8h GPU + 4-6h prep | P1 | CANDIDATE | Desbloqueado por v2.40 (mp16 fix) |
+| `E-api-simulate` | E | Endpoint `POST /simulate` na API REST (expor simulador JAX via HTTP) | 6-8h | P2 | BACKLOG | Desbloqueado por v2.39 (API) |
+| `C-noise-35` | C | Catálogo de Ruído 35 tipos (eccentricity, invasion, mandrel, etc.) | 8-10h | P2 | BACKLOG | — |
+| `B-flat-prange-default` | B | Promover `use_flat_prange=True` como default (após validar root-cause da regressão F10) | 1-2h | P2 | BACKLOG | Re-bench 5 runs Cenário E |
+| `D-dtb-parser` | D | DTB + Parser Geológico (LAS/DLIS) — `evaluate_dtb()` + integração Picasso | 4-5h | P2 | BACKLOG | — |
+| `E-api-hardening` | E | Hardening pré-produção API REST (X-API-Key, rate limit, headers segurança, pip-audit CI) | 8-10h | P2 | BACKLOG | Antes de Studio ALPHA |
+| `B-numba-O3` | B | Selective Fastmath + Pairwise Summation (5 flags seguros, modelos canônicos alta-ρ) | 4-6h | P3 | BACKLOG | KB-020 reabrir |
+| `B-numba-O1` | B | Adaptive Thread Count dinâmico (`cfg.adaptive_threads`) | 1.5-2 dias | P3 | BACKLOG | — |
+| `B-numba-O4-O6` | B | Cache Contexto LRU + F7 einsum + GUI pytest-qt | 2-3 dias | P3 | BACKLOG | — |
+| `D-real-data` | D | Adapter opt-in para Datasets LWD reais (SDAR/Volve/Teapot) | 2-3 dias | P3 | BACKLOG | Sprint pré-mortem 2026-05-09 |
+| `C-inversion-alt` | C | Métodos alternativos: Occam regularizado + LUT + Tikhonov (baseline paper) | 1 semana | P3 | BACKLOG | Pesquisa científica |
+| `C-framework-agnostic` | C | Framework-Agnostic Core: BaseInversionModel + adapters TF/PyTorch/ONNX | 1 semana | P4 | BACKLOG | Pré-mortem §75 |
+| `C-keras-ops` | C | Backend-Agnostic Code Hygiene: auditoria `tf.*` → `keras.ops.*` | 3-4 dias | P4 | BACKLOG | — |
+| `E-github-gpu` | E | GitHub Actions GPU runner (Trilha E pesquisa) | 1 semana | P4 | BACKLOG | Orçamento dedicado |
+| `F-mvc-split` | F | MVC split físico do Simulation Manager (refator package) | 2-3 sprints | P4 | BACKLOG | Ver `docs/reports/mvc_simulation_manager_studio_analysis_*.md` |
+
+### Sprint em Execução
+
+Ver **[docs/sprints/CURRENT.md](sprints/CURRENT.md)** para o plano detalhado
+da sprint ativa (se houver). Se vazio, próximo candidato é o item P1 com
+todas as dependências satisfeitas.
+
+### Sprints Recentes Completadas
+
+Ver tabela [Marcos recentes do Simulation Manager](#marcos-recentes-do-simulation-manager)
+abaixo. Sprints v2.40+ têm também snapshot em `docs/sprints/v2.X.md`.
+
+### Priorização
+
+| Prioridade | Critério |
+|:--:|:--|
+| **P1** | Bloqueia outras frentes OU compromisso explícito do usuário OU desbloqueado e alto-impacto |
+| **P2** | Alto valor mas não bloqueia; pode esperar a próxima janela |
+| **P3** | Otimização ou feature aspiracional; entra quando capacidade permite |
+| **P4** | Pesquisa de longo prazo; precisa de ADR antes de promover a CANDIDATE |
+
+### Como Promover Item para Sprint
+
+```text
+1. Validar dependências (todos resolvidos?)
+2. Mover Status: BACKLOG → CANDIDATE neste arquivo
+3. Criar plano em docs/sprints/CURRENT.md (template lá)
+4. Primeiro commit da sprint atribui vX.Y (não antes)
+5. Status: CANDIDATE → IN_PROGRESS
+6. Ao merge: snapshot em docs/sprints/v2.X.md + remover do backlog
+```
 
 ---
 
