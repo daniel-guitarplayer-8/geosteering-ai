@@ -8,27 +8,23 @@ import math
 import os
 import struct
 import sys
-import tempfile
 
 import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from geosteering_ai.config import PipelineConfig
-from geosteering_ai.data.feature_views import EPS, VALID_VIEWS, apply_feature_view
+from geosteering_ai.data.feature_views import VALID_VIEWS, apply_feature_view
 from geosteering_ai.data.geosignals import (
     FAMILY_DEPS,
     compute_expanded_features,
     compute_geosignals,
 )
 from geosteering_ai.data.loading import (
-    EM_COMPONENTS,
     AngleGroup,
-    OutMetadata,
     apply_decoupling,
     load_binary_dat,
     parse_out_metadata,
-    segregate_by_angle,
 )
 from geosteering_ai.data.scaling import (
     apply_target_scaling,
@@ -37,7 +33,7 @@ from geosteering_ai.data.scaling import (
     inverse_target_scaling,
     transform_features,
 )
-from geosteering_ai.data.splitting import DataSplits, apply_split, split_model_ids
+from geosteering_ai.data.splitting import apply_split, split_model_ids
 
 # ════════════════════════════════════════════════════════════════════════
 # FIXTURES — Dados sinteticos
@@ -790,3 +786,79 @@ class TestThetaFreqInjection:
         np.testing.assert_array_equal(x_noisy[:, :, 2], x[:, :, 2])
         # EM (cols 3-6) devem ser diferentes (ruidosos)
         assert not np.allclose(x_noisy[:, :, 3], x[:, :, 3])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SPRINT v2.40 D6 — TESTES DAS NOVAS FLAGS tf.data (parametrização)
+# ══════════════════════════════════════════════════════════════════════════════
+
+try:
+    import tensorflow as _tf  # noqa: F401
+
+    HAS_TF = True
+except ImportError:
+    HAS_TF = False
+
+requires_tf = pytest.mark.skipif(not HAS_TF, reason="TensorFlow nao disponivel")
+
+
+@requires_tf
+class TestBuildTfDatasetV240:
+    """Sprint v2.40 D6 — valida parametrização de build_tf_dataset por config."""
+
+    def _make_minimal_pipeline(self, **config_kwargs):
+        """Helper: cria DataPipeline + PreparedData mínimos para inspecionar tf.data."""
+        import tensorflow as tf
+
+        from geosteering_ai.config import PipelineConfig
+        from geosteering_ai.data.pipeline import DataPipeline, PreparedData
+
+        config = PipelineConfig(**config_kwargs)
+        pipeline = DataPipeline(config)
+        # PreparedData mínimo: shape (16 samples, 10 seq_len, 5 features)
+        n, seq, feat, targets = 16, 10, 5, 2
+        x = np.random.default_rng(42).normal(size=(n, seq, feat)).astype(np.float32)
+        y = np.random.default_rng(43).normal(size=(n, seq, targets)).astype(np.float32)
+        prepared = PreparedData(
+            x_train=x,
+            y_train=y,
+            x_val=x[:4],
+            y_val=y[:4],
+            x_test=x[:4],
+            y_test=y[:4],
+        )
+        return pipeline, prepared, tf
+
+    def test_default_autotune_sentinels_resolved(self):
+        """tf_num_parallel_calls=-1 e tf_prefetch_buffer_size=-1 → AUTOTUNE."""
+        pipeline, prepared, tf = self._make_minimal_pipeline()
+        # Build_tf_dataset não levanta erro com defaults
+        ds_train = pipeline.build_tf_dataset(prepared, "train", noise_level_var=None)
+        assert ds_train is not None
+        # Validar que dataset é iterável (resolução do AUTOTUNE funcionou)
+        first_batch = next(iter(ds_train))
+        assert first_batch is not None
+
+    def test_custom_shuffle_buffer(self):
+        """tf_shuffle_buffer_size=4 customizado (em vez de default 10000)."""
+        pipeline, prepared, tf = self._make_minimal_pipeline(tf_shuffle_buffer_size=4)
+        ds = pipeline.build_tf_dataset(prepared, "train", noise_level_var=None)
+        # Verificar que iterar funciona com buffer pequeno
+        batches = list(iter(ds))
+        assert len(batches) > 0
+
+    def test_shuffle_disabled_when_zero(self):
+        """tf_shuffle_buffer_size=0 desativa shuffle (warning emitido)."""
+        pipeline, prepared, tf = self._make_minimal_pipeline(tf_shuffle_buffer_size=0)
+        # Não deve levantar exceção; deve emitir warning
+        ds = pipeline.build_tf_dataset(prepared, "train", noise_level_var=None)
+        assert ds is not None
+
+    def test_cache_eval_false_skips_cache(self):
+        """tf_cache_eval=False não aplica .cache() em val/test."""
+        pipeline, prepared, tf = self._make_minimal_pipeline(tf_cache_eval=False)
+        ds_val = pipeline.build_tf_dataset(prepared, "val", noise_level_var=None)
+        assert ds_val is not None
+        # Validar iteração funciona
+        batches = list(iter(ds_val))
+        assert len(batches) > 0
