@@ -1,0 +1,98 @@
+# syntax=docker/dockerfile:1.7
+# ═══════════════════════════════════════════════════════════════════════════════
+# Dockerfile.cpu — Geosteering AI v2.39
+# ───────────────────────────────────────────────────────────────────────────────
+# Imagem CPU-only para a API REST (geosteering_ai.api).
+# NÃO inclui Fortran (`tatu.x`): MVP apenas para inferência DL.
+# Para simulação numérica, use `Dockerfile.fortran` (futuro Sprint v2.40+).
+#
+# Build:
+#     docker build -f Dockerfile.cpu -t geosteering-ai:cpu .
+# Run:
+#     docker run --rm -p 8000:8000 \
+#         -e GEOSTEERING_MODEL_PATH=/models/resnet18 \
+#         -v /caminho/local/modelo:/models/resnet18:ro \
+#         geosteering-ai:cpu
+# Health:
+#     curl -fsS http://localhost:8000/health
+#
+# Tamanho final esperado: ~2.5-3 GB (TensorFlow domina).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Stage 1: BUILDER — instala dependências em /opt/venv
+# ───────────────────────────────────────────────────────────────────────────────
+FROM python:3.13-slim-bookworm AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Build deps mínimos para wheels que possam precisar compilar (numpy/scipy
+# costumam ter wheels pré-compilados; mantemos build-essential como fallback).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cria venv isolado em /opt/venv (não polui o sistema)
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+WORKDIR /build
+
+# Copia metadados primeiro para aproveitar cache de layer do pip
+COPY pyproject.toml README.md ./
+COPY geosteering_ai/ ./geosteering_ai/
+
+# Instala o pacote com extras [api] + [all] (inclui TF, joblib, etc.)
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install -e ".[api,all]"
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Stage 2: RUNTIME — imagem final com venv + código
+# ───────────────────────────────────────────────────────────────────────────────
+FROM python:3.13-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:${PATH}" \
+    GEOSTEERING_API_DOCS_ENABLED=1
+
+# Runtime deps mínimos: curl para HEALTHCHECK
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 geosteering \
+    && useradd --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin geosteering
+
+# Copia venv do builder
+COPY --from=builder /opt/venv /opt/venv
+
+# Copia código-fonte (necessário para o pacote instalado em modo editable)
+WORKDIR /app
+COPY --from=builder /build/geosteering_ai/ /app/geosteering_ai/
+COPY --from=builder /build/pyproject.toml /app/pyproject.toml
+COPY --from=builder /build/README.md /app/README.md
+
+# Reinstala em modo não-editable no destino final (mais robusto)
+RUN pip install --no-deps --no-cache-dir /app
+
+# Sem privilégios (princípio de menor privilégio)
+USER geosteering
+
+EXPOSE 8000
+
+# Healthcheck via /health (sem custo de TF, <1ms)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS http://localhost:8000/health || exit 1
+
+# Comando padrão: uvicorn servindo a app
+CMD ["uvicorn", "geosteering_ai.api.app:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--log-level", "info"]
