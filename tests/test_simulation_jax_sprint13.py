@@ -22,6 +22,7 @@
 # ║    • Sprint 14.3 (v2.15): observability via get_jit_cache_info()        ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 """Testes do JIT cache observability v2.15 (Sprint 14.3)."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -34,6 +35,9 @@ from geosteering_ai.simulation._jax.forward_pure import (  # noqa: E402
     clear_unified_jit_cache,
     get_jit_cache_info,
 )
+
+# Marker GPU (Sprint v2.40 D9) — skipado em CPU via conftest.py
+pytestmark = pytest.mark.gpu
 
 
 def _canonical_3layer():

@@ -15,6 +15,7 @@
 # ║    4. Diferenciabilidade via jax.grad (autodiff)                         ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 """Testes de Sprint 3.2 — paridade _jax/propagation vs _numba/propagation."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -22,9 +23,14 @@ import pytest
 
 from geosteering_ai.simulation._jax import HAS_JAX
 
-pytestmark = pytest.mark.skipif(
-    not HAS_JAX, reason="JAX não instalado — Sprint 3.2 requer `pip install jax[cpu]`"
-)
+# Skip global se JAX não instalado + marker GPU (Sprint v2.40 D9)
+pytestmark = [
+    pytest.mark.skipif(
+        not HAS_JAX,
+        reason="JAX não instalado — Sprint 3.1 requer `pip install jax[cpu]`",
+    ),
+    pytest.mark.gpu,
+]
 
 if HAS_JAX:
     import jax.numpy as jnp

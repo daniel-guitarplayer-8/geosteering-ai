@@ -22,12 +22,16 @@ Note:
     Paridade end-to-end (`forward_pure_jax` com unified) é testada em
     `test_simulation_jax_sprint10_e2e.py` (futuro).
 """
+
 from __future__ import annotations
 
 import pytest
 
+# Marker GPU (Sprint v2.40 D9) — skipado em CPU via conftest.py
+pytestmark = pytest.mark.gpu
+
 try:
-    import jax
+    import jax  # noqa: F401  # imported only to detect availability
 
     HAS_JAX = True
 except ImportError:

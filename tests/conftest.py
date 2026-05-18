@@ -64,3 +64,48 @@ if "QT_API" not in os.environ:
 # ``tests/conftest_qt.py`` mas executado mais cedo no ciclo de carga.
 if "DISPLAY" not in os.environ and "QT_QPA_PLATFORM" not in os.environ:
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
+
+# ── Skip automático de testes @pytest.mark.gpu sem GPU física (Sprint v2.40 D9) ──
+# Detecta GPU via TF list_physical_devices ou JAX devices, lazily (sem import
+# eager pesado). Aplica skip ao tempo de coleta — testes não-GPU continuam
+# rodando normalmente.
+def _detect_gpu_available() -> bool:
+    """Retorna True se TF ou JAX detectam GPU física.
+
+    Lazy: imports só acontecem na 1ª chamada. Falhas de import são tratadas
+    como ausência de GPU (skip seguro em ambientes CPU-only).
+    """
+    try:
+        import tensorflow as tf  # type: ignore[import-untyped]
+
+        if tf.config.list_physical_devices("GPU"):
+            return True
+    except Exception:
+        pass
+    try:
+        import jax  # type: ignore[import-untyped]
+
+        if any(d.platform == "gpu" for d in jax.devices()):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def pytest_collection_modifyitems(config, items):
+    """Adiciona skip a testes ``@pytest.mark.gpu`` quando GPU não está disponível.
+
+    Hook nativo pytest. Reusa marker ``gpu`` definido em
+    ``pyproject.toml::tool.pytest.ini_options``. Aplica antes da execução
+    para que ``pytest -m gpu`` em CPU mostre todos como SKIPPED (não
+    collected vazio — mantém visibilidade do escopo).
+    """
+    import pytest
+
+    if _detect_gpu_available():
+        return
+    skip_gpu = pytest.mark.skip(reason="GPU física não disponível (Sprint v2.40)")
+    for item in items:
+        if "gpu" in item.keywords:
+            item.add_marker(skip_gpu)
