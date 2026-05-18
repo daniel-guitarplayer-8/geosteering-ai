@@ -1018,3 +1018,50 @@ class TestBuildModelWithMpPolicyV240:
             ), f"compute_dtype esperado 'float16', obtido '{model.compute_dtype}'"
         finally:
             tf.keras.mixed_precision.set_global_policy("float32")
+
+    def test_no_circular_import_registry_to_training(self):
+        """Guard regression: importar registry NÃO deve disparar import circular.
+
+        Sprint v2.40.1 Code #5 — build_model_with_mp_policy faz lazy import
+        de setup_mixed_precision_policy DENTRO da função (não no module level)
+        para evitar ciclo potencial:
+
+            models.registry → training.loop → (volta para registry?)
+
+        Este teste prova que ambas as ordens de import funcionam:
+        (1) registry primeiro → training; (2) training primeiro → registry.
+        Ausência de ImportError/ModuleNotFoundError em ambas é a garantia.
+        """
+        import sys
+
+        # ── Cenário 1: registry PRIMEIRO ─────────────────────────────────
+        for mod_name in list(sys.modules.keys()):
+            if mod_name.startswith("geosteering_ai.models") or mod_name.startswith(
+                "geosteering_ai.training"
+            ):
+                del sys.modules[mod_name]
+
+        from geosteering_ai.models import registry  # noqa: E402
+
+        assert "build_model_with_mp_policy" in registry.__all__
+        assert callable(registry.build_model_with_mp_policy)
+
+        from geosteering_ai.training import loop  # noqa: E402
+
+        assert hasattr(loop, "setup_mixed_precision_policy")
+        assert callable(loop.setup_mixed_precision_policy)
+
+        # ── Cenário 2: training PRIMEIRO ─────────────────────────────────
+        for mod_name in list(sys.modules.keys()):
+            if mod_name.startswith("geosteering_ai.models") or mod_name.startswith(
+                "geosteering_ai.training"
+            ):
+                del sys.modules[mod_name]
+
+        from geosteering_ai.training import loop as loop2  # noqa: E402, F811
+
+        assert callable(loop2.setup_mixed_precision_policy)
+
+        from geosteering_ai.models import registry as registry2  # noqa: E402, F811
+
+        assert callable(registry2.build_model_with_mp_policy)
