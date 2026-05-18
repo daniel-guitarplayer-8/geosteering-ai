@@ -202,6 +202,77 @@ _CAUSAL_FINETUNE_EPOCHS: int = 10
 # ────────────────────────────────────────────────────────────────────────
 
 
+# ════════════════════════════════════════════════════════════════════════
+# SPRINT v2.40 (D5): MIXED PRECISION POLICY — Função módulo-level
+#
+# Fix do bug de ordem: hoje TrainingLoop._setup_mixed_precision() é
+# chamado DENTRO de run(), DEPOIS de build_model() já ter ocorrido.
+# Resultado: camadas ficam fp32 mesmo com use_mixed_precision=True.
+#
+# Esta função permite que o consumidor (notebook Colab, script de
+# treinamento, helper build_model_with_mp_policy) chame setup ANTES
+# de construir o modelo, garantindo que camadas sejam criadas com
+# o dtype correto (fp16 ou fp32).
+#
+# O método _setup_mixed_precision() privado é mantido como wrapper
+# retrocompatível (chamado de run()) para não quebrar APIs existentes.
+# ════════════════════════════════════════════════════════════════════════
+
+
+def setup_mixed_precision_policy(config: "PipelineConfig") -> None:
+    """Configura a policy global de Mixed Precision do Keras ANTES de build_model.
+
+    Sprint v2.40 D5 — fix do bug de ordem em ``TrainingLoop.run()`` onde
+    a policy era setada DEPOIS do modelo ser construído, resultando em
+    camadas fp32 mesmo com ``config.use_mixed_precision=True``.
+
+    Args:
+        config: PipelineConfig com flag ``use_mixed_precision`` (bool).
+
+    Raises:
+        ImportError: se TensorFlow não está instalado.
+
+    Note:
+        DEVE ser chamado ANTES de qualquer ``build_model``/``ModelRegistry.build()``
+        ou ``model.build()`` para que as camadas sejam instanciadas com o
+        dtype correto. Após esta chamada, ``tf.keras.mixed_precision.global_policy()``
+        retorna a policy ativa.
+
+        Uso típico::
+
+            from geosteering_ai.training.loop import setup_mixed_precision_policy
+            from geosteering_ai.models.registry import ModelRegistry
+
+            setup_mixed_precision_policy(config)  # PRIMEIRO
+            model = ModelRegistry().build(config)  # camadas com dtype correto
+
+        Ou via helper unificado::
+
+            from geosteering_ai.models.registry import build_model_with_mp_policy
+            model = build_model_with_mp_policy(config)
+
+        Ref: docs/ARCHITECTURE_v2.md §6 (Mixed Precision).
+        Ref: Micikevicius et al. (ICLR 2018) — fp16 compute + fp32 master weights.
+    """
+    import tensorflow as tf  # lazy import
+
+    if config.use_mixed_precision:
+        tf.keras.mixed_precision.set_global_policy("mixed_float16")
+        logger.info(
+            "Mixed precision ATIVADO (módulo-level): policy='mixed_float16'. "
+            "Compute fp16, master weights fp32. Camadas BN/LN mantidas em fp32. "
+            "Chamado ANTES de build_model — camadas terão compute_dtype=float16."
+        )
+    else:
+        # Reset defensivo: garante que policy anterior (de outro teste/run)
+        # não contamine este treinamento.
+        tf.keras.mixed_precision.set_global_policy("float32")
+        logger.info(
+            "Mixed precision DESATIVADO (módulo-level): policy='float32' "
+            "(reset defensivo)."
+        )
+
+
 class TrainingLoop:
     """Orquestrador de treinamento: compile, fit, e causal finetuning.
 
@@ -378,9 +449,11 @@ class TrainingLoop:
             "Optimizer criado: %s (LR=%.2e, clip=%s)",
             opt_name,
             lr,
-            f"{self.config.gradient_clip_norm:.2f}"
-            if self.config.use_gradient_clipping
-            else "off",
+            (
+                f"{self.config.gradient_clip_norm:.2f}"
+                if self.config.use_gradient_clipping
+                else "off"
+            ),
         )
         return optimizer
 
@@ -460,30 +533,10 @@ class TrainingLoop:
             o modelo deste pipeline. Reset defensivo em use_mixed_precision=False
             garante que testes unitarios nao herdem policy de testes anteriores.
         """
-        import tensorflow as tf  # lazy import
-
-        if self.config.use_mixed_precision:
-            # ── Ativar mixed_float16 ───────────────────────────────────
-            # Compute em fp16, master weights em fp32.
-            # Camadas de normalizacao (BatchNorm, LayerNorm) sao
-            # automaticamente mantidas em fp32 pelo Keras.
-            # Requer GPU com Tensor Cores para aceleracao real.
-            tf.keras.mixed_precision.set_global_policy("mixed_float16")
-            logger.info(
-                "Mixed precision ATIVADO: policy='mixed_float16'. "
-                "Compute em fp16, master weights em fp32. "
-                "GPU com Tensor Cores recomendada para aceleracao."
-            )
-        else:
-            # ── Reset defensivo para float32 ───────────────────────────
-            # Garante que nenhuma policy anterior (de testes ou runs
-            # anteriores) contamine este treinamento.
-            # Necessario porque set_global_policy() e global e persistente.
-            tf.keras.mixed_precision.set_global_policy("float32")
-            logger.info(
-                "Mixed precision DESATIVADO: policy='float32'. "
-                "Todas as operacoes em precisao completa (32 bits)."
-            )
+        # Sprint v2.40 D5: delegar à função módulo-level
+        # ``setup_mixed_precision_policy(config)`` que é callable
+        # ANTES de build_model. Wrapper preservado para retrocompat.
+        setup_mixed_precision_policy(self.config)
 
     # ──────────────────────────────────────────────────────────────────
     # SECAO: COMPILE — Compilacao do modelo Keras
@@ -686,7 +739,8 @@ class TrainingLoop:
         verbose_level = 1 if self.config.verbose else 0
 
         logger.info(
-            "Iniciando fit: epochs=%d (initial_epoch=%d), batch_size=%d, " "callbacks=%d",
+            "Iniciando fit: epochs=%d (initial_epoch=%d), batch_size=%d, "
+            "callbacks=%d",
             n_epochs,
             initial_epoch,
             self.config.batch_size,
@@ -912,12 +966,27 @@ class TrainingLoop:
         # set_global_policy() para que as camadas sejam fp16. Se construido
         # antes, usar build_tf_dataset + ModelRegistry.build() dentro de run().
         self._setup_mixed_precision()
+        # Sprint v2.40 D5: warning ativo se o modelo foi construído com
+        # policy errada (camadas fp32 mas use_mixed_precision=True).
+        # Detecta a inconsistência em vez de só avisar genericamente.
         if self.config.use_mixed_precision:
-            logger.warning(
-                "use_mixed_precision=True: o modelo passado para run() deve "
-                "ter sido construido APOS set_global_policy('mixed_float16'). "
-                "Se construido antes, as camadas nao serao fp16."
-            )
+            model_dtype = getattr(model, "compute_dtype", None)
+            if model_dtype is not None and str(model_dtype) != "float16":
+                logger.warning(
+                    "use_mixed_precision=True mas model.compute_dtype=%s. "
+                    "O modelo foi construído ANTES de "
+                    "setup_mixed_precision_policy(config) — camadas estão "
+                    "em fp32 e NÃO haverá ganho de mp16. Fix: use "
+                    "build_model_with_mp_policy(config) ou chame "
+                    "setup_mixed_precision_policy(config) ANTES de "
+                    "build_model.",
+                    model_dtype,
+                )
+            else:
+                logger.info(
+                    "Mixed precision OK: model.compute_dtype=%s (camadas fp16).",
+                    model_dtype,
+                )
 
         # ── Passo 1: Compile ─────────────────────────────────────────
         self.compile(model, loss_fn, metrics_list)

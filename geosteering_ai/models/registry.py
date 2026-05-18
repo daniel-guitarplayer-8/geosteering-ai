@@ -63,6 +63,8 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
+    import tensorflow as tf  # noqa: F401 — forward ref para "tf.keras.Model"
+
     from geosteering_ai.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -483,7 +485,8 @@ def build_model(config: "PipelineConfig") -> "tf.keras.Model":
 
     if model_type not in _FAMILIES:
         raise ValueError(
-            f"model_type '{model_type}' invalido. " f"Validos: {list_available_models()}"
+            f"model_type '{model_type}' invalido. "
+            f"Validos: {list_available_models()}"
         )
 
     if config.use_causal_mode and not is_causal_compatible(model_type):
@@ -525,11 +528,77 @@ def build_model(config: "PipelineConfig") -> "tf.keras.Model":
     logger.info(
         "Modelo '%s' construido: %d params treinaveis, injection='%s'",
         model_type,
-        sum(int(v.numpy().size) for v in model.trainable_weights)
-        if hasattr(model, "trainable_weights")
-        else -1,
+        (
+            sum(int(v.numpy().size) for v in model.trainable_weights)
+            if hasattr(model, "trainable_weights")
+            else -1
+        ),
         config.static_injection_mode,
     )
+    return model
+
+
+# ════════════════════════════════════════════════════════════════════════
+# SPRINT v2.40 (D5): HELPER UNIFICADO — setup MP policy + build_model
+#
+# Resolve o bug de ordem do TrainingLoop: garante que policy global de
+# Mixed Precision (mixed_float16 ou float32) é setada ANTES de
+# build_model() para que camadas Keras sejam criadas com dtype correto.
+# ════════════════════════════════════════════════════════════════════════
+
+
+def build_model_with_mp_policy(config: "PipelineConfig") -> "tf.keras.Model":
+    """Constroi o modelo APÓS configurar a Mixed Precision policy.
+
+    Sprint v2.40 D5 — helper unificado que garante ordem correta:
+    ``setup_mixed_precision_policy(config)`` → ``build_model(config)``.
+    Usar em vez de ``build_model(config)`` quando ``use_mixed_precision=True``.
+
+    Args:
+        config: PipelineConfig com ``model_type`` e ``use_mixed_precision``.
+
+    Returns:
+        tf.keras.Model: modelo Keras com camadas no dtype correto
+        (compute_dtype='float16' se ``use_mixed_precision=True``,
+        'float32' caso contrario).
+
+    Raises:
+        ValueError: Se model_type não existe ou é incompatível com
+            ``use_causal_mode`` (delegado para ``build_model``).
+        ImportError: Se TensorFlow não está instalado (delegado para
+            ``setup_mixed_precision_policy``).
+
+    Note:
+        Equivalente a::
+
+            from geosteering_ai.training.loop import setup_mixed_precision_policy
+            setup_mixed_precision_policy(config)
+            model = build_model(config)
+
+        Mas em uma única chamada, evitando esquecer a ordem.
+
+        Validação automática após build: emite ``logger.warning`` se
+        ``config.use_mixed_precision=True`` mas ``model.compute_dtype != 'float16'``
+        — sinalizaria bug interno (não deveria acontecer).
+
+        Ref: docs/ARCHITECTURE_v2.md §6 (Mixed Precision).
+        Ref: training/loop.py: setup_mixed_precision_policy (D5).
+    """
+    # Lazy import para evitar circular (registry → training → registry)
+    from geosteering_ai.training.loop import setup_mixed_precision_policy
+
+    setup_mixed_precision_policy(config)
+    model = build_model(config)
+
+    # Validação pós-build: deve estar fp16 se flag ativa
+    if config.use_mixed_precision:
+        model_dtype = getattr(model, "compute_dtype", None)
+        if model_dtype is not None and str(model_dtype) != "float16":
+            logger.warning(
+                "build_model_with_mp_policy: use_mixed_precision=True mas "
+                "model.compute_dtype=%s (esperado 'float16'). Bug interno?",
+                model_dtype,
+            )
     return model
 
 
@@ -810,6 +879,7 @@ class ModelRegistry:
 __all__ = [
     "ModelRegistry",
     "build_model",
+    "build_model_with_mp_policy",  # Sprint v2.40 D5
     "get_model_info",
     "list_available_models",
     "is_causal_compatible",

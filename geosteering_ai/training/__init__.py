@@ -27,6 +27,7 @@ Uso tipico:
     >>> loop = TrainingLoop(config)
     >>> result = loop.run(model, loss_fn, build_metrics(config), train_ds, val_ds, cbs)
 """
+
 from geosteering_ai.training.adaptation import AdaptationResult, DomainAdapter
 from geosteering_ai.training.callbacks import (
     BestEpochTracker,
@@ -51,7 +52,11 @@ from geosteering_ai.training.callbacks import (
     make_step_schedule,
     make_warmup_cosine_schedule,
 )
-from geosteering_ai.training.loop import TrainingLoop, TrainingResult
+from geosteering_ai.training.loop import (
+    TrainingLoop,
+    TrainingResult,
+    setup_mixed_precision_policy,
+)
 from geosteering_ai.training.metrics import (
     AnisotropyRatioError,
     PerComponentMetric,
@@ -65,6 +70,7 @@ __all__ = [
     # ── Loop ──────────────────────────────────────────────────────────────
     "TrainingLoop",
     "TrainingResult",
+    "setup_mixed_precision_policy",  # Sprint v2.40 D5
     # ── N-Stage ───────────────────────────────────────────────────────────
     "NStageTrainer",
     "NStageResult",
