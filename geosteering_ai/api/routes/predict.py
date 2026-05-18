@@ -122,7 +122,7 @@ async def predict(request: PredictRequest) -> PredictResponse:
     except (ValueError, TypeError) as exc:
         logger.warning("Falha ao converter raw_data para ndarray: %s", exc)
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
                 f"raw_data inválido: não foi possível converter para tensor "
                 f"3D float32. Detalhe: {exc}"
@@ -147,7 +147,7 @@ async def predict(request: PredictRequest) -> PredictResponse:
     except ValueError as exc:
         logger.warning("Pipeline rejeitou shape: %s", exc)
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
 
