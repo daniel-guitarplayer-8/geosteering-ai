@@ -214,3 +214,86 @@ mas n=2000 reflete melhor o uso real.
   da investigação de regressão pós-v2.29.2 (não confirmada)
 - [`reports/v2.29.1_2026-05-11.md`](reports/v2.29.1_2026-05-11.md): fix
   NUMBA_NUM_THREADS no pai (recuperou 150k em reprodutor)
+
+---
+
+## 8. TF Training Throughput (Sprint v2.40)
+
+**Adicionado em**: v2.40 (2026-05-18) — I2.2 MCP colab-bridge + tf.data + Mixed Precision
+
+Esta seção complementa as métricas do simulador Numba (Cenários A–H) com
+**throughput de treinamento TensorFlow** em GPU Colab Pro+. Diferentemente
+do simulador (CPU Mac M1/Intel), os benchmarks de treinamento são executados
+**remotamente** via notebook `notebooks/colab_templates/benchmark_tfdata_mp16.ipynb`,
+disparado pelo MCP `colab-mcp`.
+
+### 8.1 Métrica e Metodologia
+
+| Item | Valor |
+|:---|:---|
+| Métrica primária | `samples/sec` (mediana de 5 runs) |
+| Modelo | ResNet_18 (default validado) |
+| Dataset sintético | 1024 samples × seq_len=10 × 5 features |
+| Batch size | 64 |
+| Épocas por run | 3 (apenas para medir throughput; sem convergência) |
+| Warmup | 1 epoch descartada (compilação XLA + cache GPU) |
+| Reject threshold | stdev/mediana > 5% → re-run |
+| Hardware Colab | T4 (free tier) ou A100 (Pro+ se disponível) |
+
+### 8.2 Configurações Comparadas (4 cells)
+
+| Config | `use_mixed_precision` | `use_xla` | tf.data tuning |
+|:---|:---:|:---:|:---|
+| **C1 baseline** | False | False | defaults |
+| **C2 mp16** | True | False | defaults |
+| **C3 mp16+XLA** | True | True | defaults |
+| **C4 mp16+XLA+tf.data** | True | True | `tf_shuffle_buffer_size=4096`, `tf_num_parallel_calls=8`, `tf_prefetch_buffer_size=4` |
+
+### 8.3 Baseline Esperado (a preencher via notebook)
+
+| Config | T4 (samples/sec) | A100 (samples/sec) | Speedup vs C1 |
+|:---|:---:|:---:|:---:|
+| C1 baseline fp32 | _placeholder_ | _placeholder_ | 1.00x |
+| C2 mp16 | _placeholder_ | _placeholder_ | _esperado ≥1.15x_ |
+| C3 mp16+XLA | _placeholder_ | _placeholder_ | _esperado ≥1.30x_ |
+| C4 mp16+XLA+tf.data | _placeholder_ | _placeholder_ | _esperado ≥1.40x_ |
+
+JSON exportado por cada run: `docs/perf_baselines/v2.40_tf_training_{device}_{timestamp}.json`.
+
+### 8.4 Gate de Aceitação Sprint v2.40
+
+- **C2 (mp16)** deve ter speedup ≥ **1.15x** vs C1 em T4 (gate mínimo)
+- Stdev/mediana < 5% em todas configs (qualidade da medição)
+- Modelo construído com `build_model_with_mp_policy(config)` (D5 do plano)
+  garantindo camadas em `compute_dtype='float16'` quando flag ativa
+
+### 8.5 Configuração `PipelineConfig` (Sprint v2.40 D6)
+
+4 campos novos parametrizam tf.data sem hardcodes:
+
+```python
+config = PipelineConfig(
+    # Mixed Precision (já existia, agora com ordem correta de setup)
+    use_mixed_precision=True,
+    use_xla=True,
+    # tf.data tuning (NOVOS em v2.40)
+    tf_shuffle_buffer_size=10000,   # default; 0 desativa, max 100000
+    tf_num_parallel_calls=-1,       # -1 = AUTOTUNE em runtime
+    tf_prefetch_buffer_size=-1,     # -1 = AUTOTUNE em runtime
+    tf_cache_eval=True,             # cache val/test (default legado)
+)
+```
+
+### 8.6 Workflow de Re-medição
+
+```bash
+# Via MCP colab-bridge (manual ou via Claude Code)
+# 1. Disparar via prompt natural: "Rode benchmark_tfdata_mp16 em Colab T4"
+# 2. Skill geosteering-colab-mcp invoca MCP colab-mcp
+# 3. Notebook executa 4 configs × 5 runs
+# 4. JSON salvo em Drive
+# 5. Download manual + commit em docs/perf_baselines/
+
+# Ou manual (sem MCP):
+# Upload benchmark_tfdata_mp16.ipynb para Colab → Runtime GPU → Run all
+```

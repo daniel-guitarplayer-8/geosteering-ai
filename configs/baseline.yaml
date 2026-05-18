@@ -12,3 +12,11 @@ loss_type: "rmse"
 learning_rate: 1.0e-4
 epochs: 400
 early_stopping_patience: 60
+
+# ──── tf.data tuning (Sprint v2.40 D6) ──────────────────────────────────
+# Substituem hardcodes em DataPipeline.build_tf_dataset.
+# Defaults preservam comportamento legado 100% — alterar apenas em Colab.
+tf_shuffle_buffer_size: 10000       # buffer shuffle inter-batch (0 = desativar; max 100000)
+tf_num_parallel_calls: -1           # -1 = AUTOTUNE em runtime
+tf_prefetch_buffer_size: -1         # -1 = AUTOTUNE em runtime
+tf_cache_eval: true                 # aplicar .cache() em val/test
