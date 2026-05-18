@@ -360,7 +360,8 @@ class PipelineConfig:
     #   Reduzir para datasets grandes que excedem RAM (e.g. 5000 em T4).
     #   Setar para 0 desativa shuffle (apenas para benchmark/debug — quebra
     #   randomizacao inter-batch crucial para SGD).
-    #   Cap 100000 anti-OOM em GPU T4 (validado em __post_init__).
+    #   Cap 100000 anti-OOM em GPU T4 (assertado em __post_init__;
+    #   valor heurístico — não medido empiricamente).
     #
     # tf_num_parallel_calls: paralelismo do .map(noise+FV+GS+scale).
     #   Default -1 (sentinela) resolve para tf.data.AUTOTUNE em runtime.
@@ -1089,7 +1090,8 @@ class PipelineConfig:
             )
 
         # ── Validacao tf.data flags (Sprint v2.40 D6) ────────────────────
-        # tf_shuffle_buffer_size: 0 = desativar shuffle, ate 100000 (anti-OOM T4).
+        # tf_shuffle_buffer_size: 0 = desativar shuffle, ate 100000
+        # (cap heurístico anti-OOM T4 — não medido empiricamente).
         assert 0 <= self.tf_shuffle_buffer_size <= 100000, (
             f"tf_shuffle_buffer_size={self.tf_shuffle_buffer_size} fora do "
             f"range [0, 100000]. Use 0 para desativar shuffle (apenas "
