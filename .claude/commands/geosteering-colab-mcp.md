@@ -146,6 +146,24 @@ do `~/.config/gcloud/access_tokens.db` antes de qualquer Bash com
 
 ### 3. Expor API REST local via ngrok (apenas para `train_v240_mp16`)
 
+> ⚠️ **AVISO DE SEGURANÇA — ngrok expõe sua API publicamente**
+>
+> URLs `*.ngrok.app` são acessíveis a **QUALQUER** pessoa que descubra ou
+> receba a URL. **Não há autenticação por padrão**. Implicações operacionais:
+>
+> 1. **Não use conta ngrok pessoal para produção** — use uma conta dedicada
+>    (corporativa, segregada por projeto). Conta pessoal vincula seu nome
+>    a tunnels que ficam logados nos painéis do ngrok.
+> 2. **Considere ngrok auth tokens** (planos pagos) para restringir acesso
+>    via OAuth ou IP allowlist — `ngrok http 8000 --basic-auth user:pass`
+>    é o mínimo aceitável; OAuth Google/GitHub é o ideal.
+> 3. **Nunca exponha endpoints com dados sensíveis** sem `X-API-Key` (header
+>    de autenticação planejado para Sprint v2.45+) ou rate limiting.
+> 4. **Mate o tunnel** (`Ctrl+C` em ngrok) ao terminar — URLs ativas
+>    indefinidamente são alvo de scanners automáticos.
+> 5. **Monitore o painel ngrok** (`http://localhost:4040`) durante a sessão
+>    para detectar requests de origens inesperadas (IPs, User-Agents).
+
 ```bash
 # Terminal 1: API REST local
 source ~/Geosteering_AI_venv/bin/activate
