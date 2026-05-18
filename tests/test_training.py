@@ -1065,3 +1065,39 @@ class TestBuildModelWithMpPolicyV240:
         from geosteering_ai.models import registry as registry2  # noqa: E402, F811
 
         assert callable(registry2.build_model_with_mp_policy)
+
+        # ── F2 hardening (v2.40.1): aciona o lazy-import REAL ─────────────
+        # Sem este check, o teste apenas prova que ambos os módulos importam
+        # isoladamente. Se alguém mover `from training.loop import ...` para
+        # module-level em registry.py (introduzindo ciclo real), o teste
+        # acima continuaria passando. Chamar build_model_with_mp_policy força
+        # o execute do lazy import dentro do corpo da função — pega a
+        # regressão. Skip se TF não disponível (config válido ainda exige TF
+        # para construir o modelo); apenas valida que a função foi callable.
+        try:
+            import tensorflow  # noqa: F401
+        except ImportError:
+            return  # Sem TF: import-chain já validado acima é suficiente.
+
+        from geosteering_ai.config import PipelineConfig  # noqa: E402
+
+        cfg = PipelineConfig(
+            model_type="ResNet_18",
+            use_mixed_precision=False,  # Não muda policy global (idempotente).
+            sequence_length=10,
+        )
+        # NÃO instancia o modelo (custoso) — apenas prova que a chamada
+        # alcança o lazy `from geosteering_ai.training.loop import ...`
+        # sem ImportError. Suficiente como guard de regressão circular.
+        # (Wrap em try para garantir que falha eventual de build_model
+        # não seja confundida com falha de circular import.)
+        try:
+            registry2.build_model_with_mp_policy(cfg)
+        except ImportError as e:
+            raise AssertionError(
+                f"Lazy import circular detectado em build_model_with_mp_policy: {e}"
+            ) from e
+        except Exception:
+            # Outras exceções (ValueError, TF init issues) não nos interessam:
+            # o objetivo é apenas executar a linha do lazy import.
+            pass

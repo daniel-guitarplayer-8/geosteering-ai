@@ -154,15 +154,23 @@ do `~/.config/gcloud/access_tokens.db` antes de qualquer Bash com
 > 1. **Não use conta ngrok pessoal para produção** — use uma conta dedicada
 >    (corporativa, segregada por projeto). Conta pessoal vincula seu nome
 >    a tunnels que ficam logados nos painéis do ngrok.
-> 2. **Considere ngrok auth tokens** (planos pagos) para restringir acesso
->    via OAuth ou IP allowlist — `ngrok http 8000 --basic-auth user:pass`
->    é o mínimo aceitável; OAuth Google/GitHub é o ideal.
+> 2. **Use ngrok authtoken (FREE) para identificar sua conta** — `ngrok
+>    config add-authtoken <token>` é gratuito e habilita logs no dashboard.
+>    Para restrição efetiva de acesso (OAuth Google/GitHub, IP allowlist,
+>    mTLS) você precisa de **Edge Policies (planos pagos $20+/mês)**.
+>    O `--basic-auth user:pass` foi DEPRECATED no agent v3 — use
+>    `--basic-auth-user user --basic-auth-pass pass` ou edge policies.
 > 3. **Nunca exponha endpoints com dados sensíveis** sem `X-API-Key` (header
 >    de autenticação planejado para Sprint v2.45+) ou rate limiting.
 > 4. **Mate o tunnel** (`Ctrl+C` em ngrok) ao terminar — URLs ativas
 >    indefinidamente são alvo de scanners automáticos.
 > 5. **Monitore o painel ngrok** (`http://localhost:4040`) durante a sessão
 >    para detectar requests de origens inesperadas (IPs, User-Agents).
+> 6. **Trate a URL como segredo de curta duração** — não cole em commits,
+>    prints públicos, screenshots compartilhados ou notebooks versionados.
+>    URLs `*.ngrok.app` ficam expostas em: (a) histórico do Chrome, (b)
+>    logs do Colab quando pasted em código, (c) clipboard managers, (d)
+>    relatórios automáticos. Considere já expirada após sessão pública.
 
 ```bash
 # Terminal 1: API REST local
