@@ -1,0 +1,124 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# .github/workflows/docker.yml — Geosteering AI v2.39 (Sprint I2.8)
+# ───────────────────────────────────────────────────────────────────────────────
+# Workflow CI para o Dockerfile.cpu:
+#   1. Build da imagem com docker buildx (com cache GHA)
+#   2. Run em container detached
+#   3. Polling do /health até 30s
+#   4. Cleanup (stop container)
+#
+# Triggers: PR + push em main/develop, apenas quando arquivos relevantes mudam
+# (caminho-filter para evitar builds desnecessários).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: Docker CPU Build & Smoke
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "Dockerfile.cpu"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "geosteering_ai/api/**"
+      - ".github/workflows/docker.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "Dockerfile.cpu"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "geosteering_ai/api/**"
+      - ".github/workflows/docker.yml"
+
+# Cancela runs anteriores no mesmo PR (poupa minutos do GH Actions)
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke:
+    name: Build Dockerfile.cpu + smoke /health
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Build ────────────────────────────────────────────────────
+      # load=true mantém a imagem no daemon local para 'docker run' depois.
+      # Cache GHA acelera builds subsequentes (cache hit ≈ 30s vs 5-10min).
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.cpu
+          tags: geosteering-ai:ci
+          load: true
+          cache-from: type=gha,scope=docker-cpu
+          cache-to: type=gha,scope=docker-cpu,mode=max
+
+      # ── Run detached + smoke /health ────────────────────────────
+      - name: Start container
+        run: |
+          docker run -d --rm \
+            --name gs-ci \
+            -p 8000:8000 \
+            geosteering-ai:ci
+
+      - name: Wait for /health (max 60s)
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health > /tmp/health.json; then
+              echo "/health OK na tentativa $i:"
+              cat /tmp/health.json
+              exit 0
+            fi
+            echo "Tentativa $i/30 falhou; aguardando 2s..."
+            sleep 2
+          done
+          echo "ERRO: /health não respondeu em 60s"
+          echo "--- container logs ---"
+          docker logs gs-ci || true
+          exit 1
+
+      - name: Validate /health payload
+        run: |
+          set -euo pipefail
+          STATUS=$(jq -r '.status' /tmp/health.json)
+          MODEL_LOADED=$(jq -r '.model_loaded' /tmp/health.json)
+          VERSION=$(jq -r '.version' /tmp/health.json)
+          echo "status=$STATUS model_loaded=$MODEL_LOADED version=$VERSION"
+          test "$STATUS" = "ok"
+          test "$MODEL_LOADED" = "false"  # sem GEOSTEERING_MODEL_PATH na CI
+          test -n "$VERSION"
+
+      - name: Smoke /predict (deve retornar 503 sem modelo)
+        run: |
+          set -euo pipefail
+          HTTP_CODE=$(curl -s -o /tmp/predict.json -w "%{http_code}" \
+            -X POST http://localhost:8000/predict \
+            -H "Content-Type: application/json" \
+            -d '{"raw_data": [[[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]]}')
+          echo "HTTP=$HTTP_CODE body:"
+          cat /tmp/predict.json
+          test "$HTTP_CODE" = "503"
+          TYPE=$(jq -r '.type' /tmp/predict.json)
+          test "$TYPE" = "model_not_loaded"
+
+      # ── Cleanup ──────────────────────────────────────────────────
+      - name: Stop container
+        if: always()
+        run: docker stop gs-ci || true
+
+      - name: Show image size
+        if: always()
+        run: docker images geosteering-ai:ci

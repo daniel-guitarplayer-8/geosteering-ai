@@ -1,0 +1,102 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# .dockerignore — Geosteering AI v2.39
+# ───────────────────────────────────────────────────────────────────────────────
+# Reduz o contexto de build do Docker (acelera builds + reduz imagem).
+# Aplica-se a TODOS os Dockerfiles do repo (Dockerfile.cpu, futuros .gpu/.fortran).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── VCS e ambiente de desenvolvimento ────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+.claude/
+.pre-commit-config.yaml
+
+# ── Caches Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ── Virtualenvs locais ───────────────────────────────────────────────────────
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# ── Testes e documentação (não vão para a imagem) ────────────────────────────
+tests/
+docs/
+notebooks/
+Tex_Projects/
+*.ipynb_checkpoints/
+
+# ── Código Fortran (não necessário para a API CPU) ───────────────────────────
+Fortran_Gerador/
+old_geosteering_ai/
+*.f08
+*.f90
+*.f
+*.mod
+tatu.x
+
+# ── Backups, dumps, dados ────────────────────────────────────────────────────
+.backups/
+*.bak
+*.swp
+*.dump
+*.tar
+*.tar.gz
+*.zip
+
+# ── Modelos treinados e datasets grandes (montar via volume!) ────────────────
+models/
+checkpoints/
+weights/
+data/
+datasets/
+*.dat
+*.out
+*.las
+*.h5
+*.keras
+*.joblib
+
+# ── Sistema operacional ──────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+desktop.ini
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Configurações locais (.env, etc.) ────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Próprio Docker (não recursivo) ───────────────────────────────────────────
+Dockerfile*
+.dockerignore
+docker-compose*.yml

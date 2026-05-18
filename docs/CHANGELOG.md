@@ -7,6 +7,83 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.39] — 2026-05-18 — API REST MVP + Dockerfile.cpu + CI Docker
+
+### Resumo
+
+Sprint v2.39 entrega **I2.7 (API REST MVP)** + **I2.8 (Dockerfile.cpu + CI build)**,
+desbloqueando a transição Fase 2 → Fase 3 do roadmap. O pacote `geosteering_ai/`
+passa de "consumível apenas via CLI" para "exposição HTTP completa", habilitando
+integração com Geosteering AI Studio ALPHA, MCP `colab-bridge` e Fase 3 (MLOps).
+
+### Mudanças Principais
+
+**1. Novo pacote `geosteering_ai/api/`** — FastAPI + Pydantic v2:
+
+- `__init__.py` — `__version__ = "2.39.0"`
+- `app.py` — App factory, CORS condicional, lifespan, 3 middlewares
+  (request_id, latency, body size limit), 4 exception handlers
+- `cli.py` — Entry point `geosteering-api` (wrapper sobre `uvicorn.run`)
+- `dependencies.py` — Settings dataclass + singleton thread-safe + exceções
+  tipadas `ModelNotLoadedError` / `ModelLoadFailedError`
+- `schemas.py` — `PredictRequest`, `PredictResponse`, `HealthResponse`,
+  `ErrorResponse` (todos Pydantic v2 com `extra="forbid"`)
+- `routes/health.py` — `GET /health` (custo <1 ms, sem TF)
+- `routes/predict.py` — `POST /predict` (lazy load TF no 1º request)
+
+**2. Containerização**:
+
+- `Dockerfile.cpu` — multi-stage Python 3.13-slim, user non-root,
+  HEALTHCHECK, imagem final ~3.7 GB (TF wheel domina)
+- `.dockerignore` — exclui caches, testes, docs, Fortran, modelos
+- `.github/workflows/docker.yml` — build + smoke `/health` + smoke
+  `/predict 503` em CI, com cache GHA e `paths-filter`
+
+**3. `pyproject.toml`**:
+
+- Novo extra `[api]`: `fastapi>=0.110`, `pydantic>=2.5`, `uvicorn[standard]>=0.27`
+- `httpx>=0.27` em `[dev]` para `TestClient`
+- Novo entry point `geosteering-api = "geosteering_ai.api.cli:main"`
+
+### Hardenings de Segurança (Pós-Review)
+
+Após implementação, despachei 2 reviewers em paralelo (code-reviewer +
+security-auditor). 9 findings (2 CRÍTICO + 4 ALTO + 3 MÉDIO) foram corrigidos
+no commit `eec45a6`:
+
+- **C1**: asserts removíveis por `python -O` → `isinstance`/`raise`
+- **C2/MED-1**: middleware `enforce_body_size` (DoS via JSON bomb)
+- **A1/MED-3**: exceções tipadas + mensagens sanitizadas (sem vazar paths/env)
+- **A2/ALTO-1**: CORS `allow_credentials` condicional (spec CORS compliance)
+- **A4/MED-7**: Dockerfile sem `pip install -e` (frágil cross-stage)
+- **MED-2**: bounds `MAX_N_SAMPLES=1024`, `MAX_SEQUENCE_LENGTH=10000`
+- **M1**: removido `ENV GEOSTEERING_API_DOCS_ENABLED=1` hardcoded
+- **M3**: `request_id` propagado para responses de erro
+- **Misc**: `HTTP_413` deprecation, `AsyncGenerator` corretos
+
+### Validação
+
+- **Testes novos**: 41/41 PASS em 1.98 s (15 schemas + 9 health + 17 predict)
+- **Suite parcial**: 133/133 PASS (api + inference + config) — sem regressão
+- **Pre-commit hooks**: TODOS PASS em 12 commits (ruff, mypy, anti-patterns)
+- **Smoke Docker local**: imagem buildada, `/health` 200, `/predict` 503
+- **Paridade Fortran <1e-12**: PRESERVADA (não tocamos `simulation/`)
+
+### Próximos Passos
+
+1. Merge da branch + tag `v2.39`
+2. **I2.2** — MCP `colab-bridge` (4–6 h)
+3. **tf.data + Mixed Precision** (3–4 h)
+4. Sprint v2.40 — hardening pré-produção (auth, rate limit, headers)
+
+### Detalhes
+
+Relatório completo: `docs/reports/v2.39_api_rest_dockerfile_2026-05-18.md`.
+
+Branch: `feature/v2.39-api-rest-mvp` (12 commits, ~2.300 LOC).
+
+---
+
 ## [v2.35] — 2026-05-15 — Cenário H (estresse multi-core 8×8×8 = 512 combos)
 
 ### Resumo
