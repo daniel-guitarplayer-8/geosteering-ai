@@ -32,6 +32,7 @@
 # ║    • magneticdipoles.f08:310-383 — referência Fortran                   ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 """Testes da ETAPA 5 nativa em JAX (6 casos via `lax.switch`)."""
+
 from __future__ import annotations
 
 import time
@@ -54,6 +55,9 @@ from geosteering_ai.simulation._jax.dipoles_native import (  # noqa: E402
     compute_case_index_jax,
     decoupling_factors_jax,
 )
+
+# Marker GPU (Sprint v2.40 D9) — skipado em CPU via conftest.py
+pytestmark = pytest.mark.gpu
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures — inputs sintéticos realistas
@@ -330,8 +334,12 @@ class TestHighResistivityStability:
             out = _call_case(case_fn, inp)
             for arr in out:
                 arr_np = np.asarray(arr)
-                assert np.all(np.isfinite(arr_np.real)), f"NaN/Inf real em ρ={rho_scale}"
-                assert np.all(np.isfinite(arr_np.imag)), f"NaN/Inf imag em ρ={rho_scale}"
+                assert np.all(
+                    np.isfinite(arr_np.real)
+                ), f"NaN/Inf real em ρ={rho_scale}"
+                assert np.all(
+                    np.isfinite(arr_np.imag)
+                ), f"NaN/Inf imag em ρ={rho_scale}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -444,7 +452,6 @@ class TestNativeFlag:
 
     def test_native_flag_info_and_works(self, caplog) -> None:
         """Flag use_native_dipoles=True emite info e produz resultado correto."""
-        from geosteering_ai.simulation import SimulationConfig, simulate
 
         # Não há forma direta de passar use_native_dipoles através de
         # simulate() na Sprint 3.3.2 (PR #11 integrará). Aqui testamos o

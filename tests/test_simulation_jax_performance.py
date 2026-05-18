@@ -10,12 +10,16 @@ Cobertura:
 
 Requer ``JAX_ENABLE_X64=True``.
 """
+
 from __future__ import annotations
 
 import time
 
 import numpy as np
 import pytest
+
+# Marker GPU (Sprint v2.40 D9) — skipado em CPU via conftest.py
+pytestmark = pytest.mark.gpu
 
 pytest.importorskip("jax")
 
@@ -184,8 +188,13 @@ def test_jit_cache_populates_after_forward() -> None:
     esp = np.array([5.0])
     z = np.linspace(-2.0, 7.0, 50)
     ctx = build_static_context(
-        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
-        tr_spacing_m=1.0, dip_deg=0.0,
+        rho_h,
+        rho_v,
+        esp,
+        z,
+        freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0,
+        dip_deg=0.0,
     )
     H = forward_pure_jax(ctx.rho_h_jnp, ctx.rho_v_jnp, ctx)
     H.block_until_ready()
@@ -207,8 +216,13 @@ def test_jit_cache_eviction_lru() -> None:
     m = get_canonical_model("oklahoma_28")
     z = np.linspace(m.min_depth - 2, m.max_depth + 2, 100)
     ctx = build_static_context(
-        m.rho_h, m.rho_v, m.esp, z,
-        freqs_hz=np.array([20000.0]), tr_spacing_m=1.0, dip_deg=0.0,
+        m.rho_h,
+        m.rho_v,
+        m.esp,
+        z,
+        freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0,
+        dip_deg=0.0,
     )
     H = forward_pure_jax(ctx.rho_h_jnp, ctx.rho_v_jnp, ctx)
     H.block_until_ready()
@@ -236,8 +250,13 @@ def test_jit_cache_parity_after_eviction() -> None:
     m = get_canonical_model("oklahoma_5")
     z = np.linspace(m.min_depth - 2, m.max_depth + 2, 80)
     ctx = build_static_context(
-        m.rho_h, m.rho_v, m.esp, z,
-        freqs_hz=np.array([20000.0]), tr_spacing_m=1.0, dip_deg=0.0,
+        m.rho_h,
+        m.rho_v,
+        m.esp,
+        z,
+        freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0,
+        dip_deg=0.0,
     )
     H_jax = np.asarray(forward_pure_jax(ctx.rho_h_jnp, ctx.rho_v_jnp, ctx))
 
@@ -248,9 +267,9 @@ def test_jit_cache_parity_after_eviction() -> None:
         H_n = H_n[:, np.newaxis, :]
 
     max_abs = float(np.max(np.abs(H_jax - H_n)))
-    assert max_abs < 1e-10, (
-        f"Paridade regrediu após eviction LRU: max_abs={max_abs:.2e}"
-    )
+    assert (
+        max_abs < 1e-10
+    ), f"Paridade regrediu após eviction LRU: max_abs={max_abs:.2e}"
     set_jit_cache_maxsize(64)
     clear_jit_cache()
 
@@ -278,8 +297,13 @@ def test_warmup_all_buckets_returns_bucket_count() -> None:
     esp = np.array([5.0])
     z = np.linspace(-2.0, 7.0, 50)
     ctx = build_static_context(
-        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
-        tr_spacing_m=1.0, dip_deg=0.0,
+        rho_h,
+        rho_v,
+        esp,
+        z,
+        freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0,
+        dip_deg=0.0,
     )
     n = warmup_all_buckets(ctx)
     assert n >= 1
@@ -300,17 +324,20 @@ def test_forward_pure_jax_chunked_parity() -> None:
     esp = np.array([4.0])
     z = np.linspace(-1.0, 8.0, 64)
     ctx = build_static_context(
-        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
-        tr_spacing_m=1.0, dip_deg=0.0,
+        rho_h,
+        rho_v,
+        esp,
+        z,
+        freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0,
+        dip_deg=0.0,
     )
     H_default = np.asarray(forward_pure_jax(ctx.rho_h_jnp, ctx.rho_v_jnp, ctx))
     H_chunk = np.asarray(
         forward_pure_jax_chunked(ctx.rho_h_jnp, ctx.rho_v_jnp, ctx, chunk_size=16)
     )
     max_diff = float(np.max(np.abs(H_default - H_chunk)))
-    assert max_diff < 1e-13, (
-        f"chunked diverge do default: max_diff={max_diff:.2e}"
-    )
+    assert max_diff < 1e-13, f"chunked diverge do default: max_diff={max_diff:.2e}"
     clear_jit_cache()
 
 
@@ -325,8 +352,13 @@ def test_forward_pure_jax_chunked_small_passes_through() -> None:
     esp = np.array([5.0])
     z = np.linspace(-2.0, 7.0, 10)
     ctx = build_static_context(
-        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
-        tr_spacing_m=1.0, dip_deg=0.0,
+        rho_h,
+        rho_v,
+        esp,
+        z,
+        freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0,
+        dip_deg=0.0,
     )
     H = forward_pure_jax_chunked(ctx.rho_h_jnp, ctx.rho_v_jnp, ctx, chunk_size=64)
     assert H.shape == (10, 1, 9)
@@ -344,8 +376,13 @@ def test_forward_pure_jax_chunked_validates_chunk_size() -> None:
     esp = np.array([5.0])
     z = np.linspace(-2.0, 7.0, 20)
     ctx = build_static_context(
-        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
-        tr_spacing_m=1.0, dip_deg=0.0,
+        rho_h,
+        rho_v,
+        esp,
+        z,
+        freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0,
+        dip_deg=0.0,
     )
     with pytest.raises(ValueError):
         forward_pure_jax_chunked(ctx.rho_h_jnp, ctx.rho_v_jnp, ctx, chunk_size=0)
@@ -367,8 +404,13 @@ def test_forward_pure_jax_pmap_single_device() -> None:
     esp = np.array([5.0])
     z = np.linspace(-2.0, 7.0, 20)
     ctx = build_static_context(
-        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
-        tr_spacing_m=1.0, dip_deg=0.0,
+        rho_h,
+        rho_v,
+        esp,
+        z,
+        freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0,
+        dip_deg=0.0,
     )
     # Cria batch com shape (n_devices, n_layers).
     rho_h_batch = jax.numpy.stack([ctx.rho_h_jnp] * n_devices, axis=0)
@@ -389,8 +431,13 @@ def test_forward_pure_jax_pmap_mismatch_raises() -> None:
     esp = np.array([5.0])
     z = np.linspace(-2.0, 7.0, 10)
     ctx = build_static_context(
-        rho_h, rho_v, esp, z, freqs_hz=np.array([20000.0]),
-        tr_spacing_m=1.0, dip_deg=0.0,
+        rho_h,
+        rho_v,
+        esp,
+        z,
+        freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0,
+        dip_deg=0.0,
     )
     # Batch deliberadamente com shape[0]=n_devices+1 → deve raise.
     wrong = jax.numpy.stack([ctx.rho_h_jnp] * (n_devices + 1), axis=0)

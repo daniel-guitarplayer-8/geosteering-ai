@@ -641,3 +641,78 @@ class TestStaticInjectionMode:
         )
         # Em dual_input, theta/freq NAO sao injetados como prefixo
         assert config.n_prefix == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SPRINT v2.40 — TESTES DOS NOVOS CAMPOS tf.data (D6)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestTfDataFlagsV240:
+    """Sprint v2.40 D6 — valida 4 novos campos PipelineConfig de tf.data tuning."""
+
+    def test_tf_shuffle_buffer_size_default(self):
+        """Default tf_shuffle_buffer_size = 10000 (comportamento legado)."""
+        config = PipelineConfig()
+        assert config.tf_shuffle_buffer_size == 10000
+
+    def test_tf_num_parallel_calls_default_autotune(self):
+        """Default tf_num_parallel_calls = -1 (sentinela AUTOTUNE em runtime)."""
+        config = PipelineConfig()
+        assert config.tf_num_parallel_calls == -1
+
+    def test_tf_prefetch_buffer_size_default_autotune(self):
+        """Default tf_prefetch_buffer_size = -1 (sentinela AUTOTUNE em runtime)."""
+        config = PipelineConfig()
+        assert config.tf_prefetch_buffer_size == -1
+
+    def test_tf_cache_eval_default_true(self):
+        """Default tf_cache_eval = True (comportamento legado de cache val/test)."""
+        config = PipelineConfig()
+        assert config.tf_cache_eval is True
+
+    def test_tf_shuffle_buffer_zero_disables_shuffle(self):
+        """tf_shuffle_buffer_size = 0 e valido (desativa shuffle)."""
+        config = PipelineConfig(tf_shuffle_buffer_size=0)
+        assert config.tf_shuffle_buffer_size == 0
+
+    def test_tf_shuffle_buffer_at_cap(self):
+        """tf_shuffle_buffer_size = 100000 (cap anti-OOM T4) e valido."""
+        config = PipelineConfig(tf_shuffle_buffer_size=100000)
+        assert config.tf_shuffle_buffer_size == 100000
+
+    def test_tf_shuffle_buffer_negative_rejected(self):
+        """tf_shuffle_buffer_size = -1 deve gerar AssertionError."""
+        import pytest
+
+        with pytest.raises(AssertionError, match="tf_shuffle_buffer_size"):
+            PipelineConfig(tf_shuffle_buffer_size=-1)
+
+    def test_tf_shuffle_buffer_above_cap_rejected(self):
+        """tf_shuffle_buffer_size > 100000 deve gerar AssertionError."""
+        import pytest
+
+        with pytest.raises(AssertionError, match="tf_shuffle_buffer_size"):
+            PipelineConfig(tf_shuffle_buffer_size=100001)
+
+    def test_tf_num_parallel_calls_explicit_value(self):
+        """tf_num_parallel_calls = 4 (valor explicito) e valido."""
+        config = PipelineConfig(tf_num_parallel_calls=4)
+        assert config.tf_num_parallel_calls == 4
+
+    def test_tf_num_parallel_calls_zero_rejected(self):
+        """tf_num_parallel_calls = 0 deve gerar AssertionError (semantica indefinida)."""
+        import pytest
+
+        with pytest.raises(AssertionError, match="tf_num_parallel_calls"):
+            PipelineConfig(tf_num_parallel_calls=0)
+
+    def test_tf_prefetch_buffer_zero_valid(self):
+        """tf_prefetch_buffer_size = 0 desativa prefetch (valido, raramente util)."""
+        config = PipelineConfig(tf_prefetch_buffer_size=0)
+        assert config.tf_prefetch_buffer_size == 0
+
+    def test_tf_prefetch_buffer_explicit_value(self):
+        """tf_prefetch_buffer_size = 2 (valor explicito) e valido."""
+        config = PipelineConfig(tf_prefetch_buffer_size=2)
+        assert config.tf_prefetch_buffer_size == 2

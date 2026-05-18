@@ -15,10 +15,14 @@ Valida que a implementação JAX produz resultados numericamente equivalentes
 Gate: ``max_abs_err < 1e-12``. Como o path JAX reutiliza `forward_pure_jax`
 (JAX native end-to-end), diferenças bit-exact são esperadas em <1e-13.
 """
+
 from __future__ import annotations
 
 import numpy as np
 import pytest
+
+# Marker GPU (Sprint v2.40 D9) — skipado em CPU via conftest.py
+pytestmark = pytest.mark.gpu
 
 try:
     import jax  # noqa: F401

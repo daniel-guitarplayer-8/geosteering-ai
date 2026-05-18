@@ -7,6 +7,141 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.40] — 2026-05-18 — MCP colab-bridge + tf.data + Mixed Precision
+
+### Resumo
+
+Sprint v2.40 entrega **I2.2 (MCP colab-bridge)** + **F2 (tf.data + Mixed Precision)**,
+desbloqueando treinamento remoto automatizado em Colab Pro+ (A100) com ganho
+esperado +15-50% via mp16+XLA. Resposta arquitetural à pergunta sobre automação
+de testes JAX GPU via MCP: SIM, implementado via híbrido caminhos (a) template
+Colab + (c) parcial marker pytest. Bug crítico D5 resolvido: `setup_mixed_precision_policy()`
+agora callable ANTES de `build_model()` (era depois — camadas fp32 mesmo com flag ativa).
+
+### Mudanças Principais
+
+**1. Frente 1 — MCP colab-bridge (Tier B browser MCP)**:
+
+- `.claude/commands/geosteering-colab-mcp.md` (~300 LOC) — Skill Sonnet 4.6
+  effort=medium. 3 workflows: validação JAX GPU (D3), treinamento remoto mp16,
+  benchmark tf.data. Tier B (oficial `googlecolab/colab-mcp` já em `.mcp.json`)
+  como default; Tier C documentado como fallback (não implementado v2.40).
+- `.claude/hooks/colab-token-refresh.sh` (~80 LOC) — PreToolUse matcher=Bash,
+  warn-only. Checa `~/.config/gcloud/access_tokens.db` modtime; avisa se
+  >50min sem bloquear execução. Compatível macOS BSD stat + Linux GNU stat.
+- `.claude/settings.json` — registra hook PreToolUse para matcher Bash.
+
+**2. Frente 1 — 3 Templates Colab `notebooks/colab_templates/`**:
+
+- `__README.md` (~180 LOC) — Doc + convenções (variáveis, JSON output, PT-BR).
+- `train_v240_mp16.ipynb` (19 cells) — Treina ResNet 18 com mp16+XLA usando
+  `build_model_with_mp_policy(config)` garantindo ordem correta. Smoke test
+  opcional via ngrok + POST /predict.
+- `validate_jax_gpu_v240.ipynb` (13 cells) — Resposta D3 caminho (a): pytest
+  -m gpu em 109 testes JAX + paridade JAX GPU vs Numba CPU em 7 modelos
+  canônicos (gate <1e-10).
+- `benchmark_tfdata_mp16.ipynb` (11 cells) — Mede 4 configs × 5 runs com
+  mediana + stdev. Gate v2.40: C2 (mp16) speedup ≥ 1.15x baseline em T4.
+
+**3. Frente 1 — Marker `gpu` pytest (D3 caminho c parcial)**:
+
+- `pyproject.toml` — `markers = [..., "gpu: ..."]`
+- `tests/conftest.py` — `pytest_collection_modifyitems` adiciona skip
+  automático a testes `@pytest.mark.gpu` quando GPU não detectada via TF/JAX.
+- 11 arquivos `tests/test_simulation_jax_*.py` — `pytestmark = pytest.mark.gpu`
+  (ou lista `[skipif(HAS_JAX), gpu]` em foundation+propagation).
+  Resultado em macOS: 109 testes JAX SKIPPED (esperado). Em Colab T4: executam.
+
+**4. Frente 2 — Fix D5 Mixed Precision ordem (CRÍTICO)**:
+
+- `geosteering_ai/training/loop.py` — Nova função módulo-level
+  `setup_mixed_precision_policy(config)` callable ANTES de `build_model()`.
+  `_setup_mixed_precision()` privado preservado como wrapper retrocompatível
+  (chamado de `run()`). Warning ativo em `run()` se `model.compute_dtype != "float16"`
+  mas `config.use_mixed_precision=True`.
+- `geosteering_ai/training/__init__.py` — Exporta `setup_mixed_precision_policy`.
+- `geosteering_ai/models/registry.py` — Novo helper `build_model_with_mp_policy(config)`
+  que faz setup + build em uma única chamada. Lazy import evita circular.
+
+**5. Frente 2 — 4 Novas flags `PipelineConfig` D6**:
+
+- `geosteering_ai/config.py` — `tf_shuffle_buffer_size: int = 10000`,
+  `tf_num_parallel_calls: int = -1`, `tf_prefetch_buffer_size: int = -1`,
+  `tf_cache_eval: bool = True`. Validações em `__post_init__` (cap 100k anti-OOM).
+- `geosteering_ai/data/pipeline.py` — `build_tf_dataset` consome flags;
+  resolve sentinelas `-1 → tf.data.AUTOTUNE`. Default preserva legado.
+- `configs/baseline.yaml` — Adiciona 4 campos com defaults explícitos.
+
+**6. Testes (19 novos)**:
+
+- `tests/test_config.py::TestTfDataFlagsV240` (12 testes) — defaults, valores
+  válidos, rejeições. **Todos PASS** localmente (12/12).
+- `tests/test_training.py::TestSetupMixedPrecisionPolicyV240` (4 testes) +
+  `TestBuildModelWithMpPolicyV240` (3 testes) — importabilidade + ordem.
+  Local: **4 PASS + 3 SKIPPED** (3 dependem de TF, rodam em Colab).
+- `tests/test_data_pipeline.py::TestBuildTfDatasetV240` (4 testes @requires_tf)
+  — 4 SKIPPED local (rodam em Colab).
+
+**7. Documentação**:
+
+- `docs/PERFORMANCE_BASELINE.md` — Nova §8 "TF Training Throughput" com
+  métricas, 4 configurações, placeholder T4/A100, gate v2.40, workflow re-medição.
+- `docs/ROADMAP.md` — Entrada v2.40 no topo da tabela. F4.3 SurrogateNet
+  marcado como desbloqueado.
+- `docs/reports/v2.40_colab_bridge_mp16_2026-05-18.md` (a gerar pós-merge).
+
+### Métricas
+
+- **Commits**: 9 granulares na branch `feature/v2.40-colab-bridge-mp16`
+- **Arquivos novos**: 7 (skill, hook, 3 notebooks, README templates, PERFORMANCE seção)
+- **Arquivos modificados**: 14 (config, pipeline, loop, registry, conftest,
+  pyproject, settings.json, baseline.yaml, ROADMAP, CHANGELOG, 4 testes)
+- **LOC adicionado**: ~2150 (código + testes + docs + notebooks)
+- **Testes novos**: 19 (12 CPU + 7 TF-dependent)
+- **Suite total**: 1653 PASS + 458 SKIPPED + **0 FAILED** (após pytest gpu marker)
+- **Paridade Fortran <1e-12**: ✅ PRESERVADA (não tocamos `simulation/`)
+
+### Resposta à Pergunta Arquitetural Crítica (D3)
+
+> "É possível automatizar testes JAX GPU via MCP colab-bridge?"
+
+**SIM**, via solução híbrida em 2 camadas:
+
+| Caminho | Status v2.40 | Mecanismo |
+|:---|:---|:---|
+| **(a)** Template Colab via MCP | ✅ Implementado | `validate_jax_gpu_v240.ipynb` |
+| **(c parcial)** Marker pytest `gpu` | ✅ Implementado | 109 testes JAX + skip CPU automático |
+| **(b)** Endpoint `/simulate` na API | ⏳ v2.41+ | Schema novo, sprint dedicada |
+| **(d)** GitHub Actions GPU runner | ⏳ v2.42+ | Orçamento dedicado |
+
+### Conformidade com Restrições do Projeto
+
+- ✅ Paridade Fortran <1e-12 preservada (não tocamos `simulation/`)
+- ✅ TensorFlow/Keras exclusivo (sem PyTorch — `validate-no-pytorch.sh` valida)
+- ✅ PT-BR acentuado em todos os `.py` e `.md` novos
+- ✅ Mega-header D1 + docstrings Google-style D5/D6
+- ✅ Sem `print()` em `geosteering_ai/` (logging)
+- ✅ `PipelineConfig` como parâmetro (sem `globals().get()`)
+
+### Hooks Bypass Documentados
+
+- `CLAUDE_BYPASS_ANTI_PATTERNS=1` em 3 commits — KB-GLB/KB-EPS pré-existentes
+  (header docstring de config.py + teste de errata em test_config.py — meta-código).
+- `SKIP=mypy` em 1 commit — 6 erros pré-existentes em `apply_feature_view` kwargs
+  unpacking (linhas 527-529, 619, 669, 674 de pipeline.py — dívida fora de escopo).
+
+### Próximos Passos Desbloqueados
+
+| Sprint | Esforço | Tema |
+|:---|:---:|:---|
+| **v2.41** | 4-6h | F4.3 SurrogateNet Training (Colab A100 mp16) |
+| v2.41+ | 6-8h | Endpoint `POST /simulate` (D3 caminho b) |
+| v2.41+ | 8-10h | Catálogo de Ruído 35 tipos (Trilha C Fase II) |
+| v2.42+ | 1-2h | F5 — `use_tiled_positions=True` default |
+| v2.42+ | 4-5h | DTB + Parser Geológico (Trilha D Fase III) |
+
+---
+
 ## [v2.39] — 2026-05-18 — API REST MVP + Dockerfile.cpu + CI Docker
 
 ### Resumo

@@ -16,6 +16,7 @@ Estrutura:
         TestBuildCallbacks — build_callbacks retorna lista com EarlyStopping
         TestTrainingLoopCompile — TrainingLoop._create_optimizer
 """
+
 import dataclasses
 import math
 
@@ -33,14 +34,15 @@ requires_tf = pytest.mark.skipif(not HAS_TF, reason="TensorFlow nao disponivel")
 
 # ── Imports CPU-safe ──────────────────────────────────────────────────────────
 # Importa direto dos modulos para evitar TF-dependent imports no __init__.py
-from geosteering_ai.config import PipelineConfig
-from geosteering_ai.training.callbacks import (
+# E402 silenciado: ordem importa para evitar import circular de tensorflow.
+from geosteering_ai.config import PipelineConfig  # noqa: E402
+from geosteering_ai.training.callbacks import (  # noqa: E402
     make_cosine_schedule,
     make_step_schedule,
     make_warmup_cosine_schedule,
 )
-from geosteering_ai.training.loop import TrainingResult
-from geosteering_ai.training.nstage import NStageResult, NStageTrainer
+from geosteering_ai.training.loop import TrainingResult  # noqa: E402
+from geosteering_ai.training.nstage import NStageResult, NStageTrainer  # noqa: E402
 
 # ════════════════════════════════════════════════════════════════════════════
 # HELPERS
@@ -384,7 +386,6 @@ class TestBuildCallbacks:
 
     def test_returns_list_with_early_stopping(self):
         """build_callbacks inclui EarlyStopping."""
-        import tensorflow as tf
 
         from geosteering_ai.training.callbacks import build_callbacks
 
@@ -402,7 +403,6 @@ class TestTrainingLoopCompile:
 
     def test_create_optimizer_adam(self):
         """_create_optimizer('adam') retorna Adam optimizer."""
-        import tensorflow as tf
 
         from geosteering_ai.training.loop import TrainingLoop
 
@@ -524,7 +524,6 @@ class TestBuildTfDataset:
 
     def test_train_batch_shape(self):
         """Batch de train tem shape correto (batch, 600, 5)."""
-        import tensorflow as tf
 
         from geosteering_ai.data.pipeline import DataPipeline
 
@@ -880,7 +879,6 @@ class TestAddGradientMonitor:
         import tensorflow as tf
 
         from geosteering_ai.training.callbacks import (
-            GradientMonitor,
             add_gradient_monitor,
         )
 
@@ -928,3 +926,95 @@ class TestGradientMonitorConfig:
                 gradient_vanishing_threshold=200.0,
                 gradient_explosion_threshold=100.0,
             )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SPRINT v2.40 D5 — TESTES DA REFATORAÇÃO Mixed Precision Policy módulo-level
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSetupMixedPrecisionPolicyV240:
+    """Sprint v2.40 D5 — valida função módulo-level setup_mixed_precision_policy."""
+
+    def test_module_level_function_importable(self):
+        """setup_mixed_precision_policy deve ser importavel de training/loop ou training/__init__."""
+        from geosteering_ai.training import setup_mixed_precision_policy as f1
+        from geosteering_ai.training.loop import setup_mixed_precision_policy as f2
+
+        assert f1 is f2, "Mesma função deve ser exportada de ambos os caminhos"
+        assert callable(f1)
+
+    def test_signature_accepts_config(self):
+        """Função aceita PipelineConfig como único parâmetro."""
+        import inspect
+
+        from geosteering_ai.training.loop import setup_mixed_precision_policy
+
+        sig = inspect.signature(setup_mixed_precision_policy)
+        params = list(sig.parameters)
+        assert params == ["config"], f"Esperado ['config'], obtido {params}"
+
+    @requires_tf
+    def test_setup_with_mixed_precision_false_sets_float32(self):
+        """use_mixed_precision=False define policy='float32' (reset defensivo)."""
+        import tensorflow as tf
+
+        from geosteering_ai.config import PipelineConfig
+        from geosteering_ai.training.loop import setup_mixed_precision_policy
+
+        config = PipelineConfig(use_mixed_precision=False)
+        setup_mixed_precision_policy(config)
+        assert tf.keras.mixed_precision.global_policy().name == "float32"
+
+    @requires_tf
+    def test_setup_with_mixed_precision_true_sets_mixed_float16(self):
+        """use_mixed_precision=True define policy='mixed_float16'."""
+        import tensorflow as tf
+
+        from geosteering_ai.config import PipelineConfig
+        from geosteering_ai.training.loop import setup_mixed_precision_policy
+
+        config = PipelineConfig(use_mixed_precision=True)
+        try:
+            setup_mixed_precision_policy(config)
+            assert tf.keras.mixed_precision.global_policy().name == "mixed_float16"
+        finally:
+            # Reset defensivo para não contaminar testes seguintes
+            tf.keras.mixed_precision.set_global_policy("float32")
+
+
+class TestBuildModelWithMpPolicyV240:
+    """Sprint v2.40 D5 — valida helper unificado build_model_with_mp_policy."""
+
+    def test_helper_importable(self):
+        """build_model_with_mp_policy deve ser exportado de models.registry."""
+        from geosteering_ai.models.registry import build_model_with_mp_policy
+
+        assert callable(build_model_with_mp_policy)
+
+    def test_helper_in_all(self):
+        """build_model_with_mp_policy deve estar em __all__ de registry."""
+        from geosteering_ai.models import registry
+
+        assert "build_model_with_mp_policy" in registry.__all__
+
+    @requires_tf
+    def test_helper_produces_float16_layers_when_flag_true(self):
+        """use_mixed_precision=True + helper → model.compute_dtype == 'float16'."""
+        import tensorflow as tf
+
+        from geosteering_ai.config import PipelineConfig
+        from geosteering_ai.models.registry import build_model_with_mp_policy
+
+        config = PipelineConfig(
+            model_type="ResNet_18",
+            use_mixed_precision=True,
+            sequence_length=10,  # Modelo mínimo p/ teste rápido
+        )
+        try:
+            model = build_model_with_mp_policy(config)
+            assert (
+                str(model.compute_dtype) == "float16"
+            ), f"compute_dtype esperado 'float16', obtido '{model.compute_dtype}'"
+        finally:
+            tf.keras.mixed_precision.set_global_policy("float32")

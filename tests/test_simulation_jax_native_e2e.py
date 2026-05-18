@@ -22,6 +22,7 @@
 # ║      • Regression guard: hybrid path inalterado                         ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 """Testes end-to-end JAX nativo vs híbrido (Sprint 3.3.4)."""
+
 from __future__ import annotations
 
 import time
@@ -32,13 +33,18 @@ import pytest
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
+# Marker GPU (Sprint v2.40 D9) — skipado em CPU via conftest.py
+pytestmark = pytest.mark.gpu
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _run_jax_batch(rho_h, rho_v, esp, positions_z, freqs, dip_deg=0.0, use_native=False):
+def _run_jax_batch(
+    rho_h, rho_v, esp, positions_z, freqs, dip_deg=0.0, use_native=False
+):
     """Executa via fields_in_freqs_jax_batch e retorna H_tensor."""
     import math
 

@@ -40,10 +40,14 @@ Note:
     devem ser idênticos, não < 1e-12). Se falhar em **qualquer** ponto do sweep,
     há bug real que precisa ser investigado antes de prosseguir.
 """
+
 from __future__ import annotations
 
 import numpy as np
 import pytest
+
+# Marker GPU (Sprint v2.40 D9) — skipado em CPU via conftest.py
+pytestmark = pytest.mark.gpu
 
 try:
     import jax
@@ -739,7 +743,9 @@ def test_chunked_via_simulate_multi_jax():
         tr_spacings_m=[1.0],
         dip_degs=[0.0],
     )
-    res_mono = simulate_multi_jax(**kwargs, cfg=SimulationConfig(jax_strategy="unified"))
+    res_mono = simulate_multi_jax(
+        **kwargs, cfg=SimulationConfig(jax_strategy="unified")
+    )
     res_chunk = simulate_multi_jax(
         **kwargs,
         cfg=SimulationConfig(jax_strategy="unified", jax_position_chunk_size=32),

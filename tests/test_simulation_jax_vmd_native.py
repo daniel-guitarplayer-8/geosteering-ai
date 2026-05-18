@@ -34,6 +34,7 @@
 # ║    • magneticdipoles.f08:527-623 — referência Fortran                   ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 """Testes da ETAPA 5 nativa do VMD em JAX (6 casos via `lax.switch`)."""
+
 from __future__ import annotations
 
 import time
@@ -55,6 +56,9 @@ from geosteering_ai.simulation._jax.dipoles_native import (  # noqa: E402
     _vmd_kernel_case6_jax,
     compute_case_index_jax,
 )
+
+# Marker GPU (Sprint v2.40 D9) — skipado em CPU via conftest.py
+pytestmark = pytest.mark.gpu
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures — inputs sintéticos realistas
@@ -197,7 +201,9 @@ class TestVmdCaseParity:
     def test_parity_case(self, vmd_synth_inputs, case_id, case_fn) -> None:
         KtezJ0_j, KtedzzJ1_j = _call_vmd_case(case_fn, vmd_synth_inputs)
         KtezJ0_n, KtedzzJ1_n = _numpy_vmd_case(case_id, vmd_synth_inputs)
-        np.testing.assert_allclose(np.asarray(KtezJ0_j), KtezJ0_n, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(
+            np.asarray(KtezJ0_j), KtezJ0_n, rtol=1e-12, atol=1e-14
+        )
         np.testing.assert_allclose(
             np.asarray(KtedzzJ1_j), KtedzzJ1_n, rtol=1e-12, atol=1e-14
         )

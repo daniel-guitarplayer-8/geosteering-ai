@@ -351,6 +351,35 @@ class PipelineConfig:
     #   Performance" — benchmarks em GPUs V100/A100.
     # Nota: v2.0.1 (2026-03 — GPU completeness, opt-in)
     use_xla: bool = False
+    # ── Parametrizacao tf.data (Sprint v2.40 D6) ────────────────────────
+    # Substitui valores hardcoded em DataPipeline.build_tf_dataset.
+    # Permite tuning per-Colab (T4 vs A100) e per-dataset (small vs large).
+    #
+    # tf_shuffle_buffer_size: tamanho do buffer de shuffle inter-batch.
+    #   Default 10000 = comportamento legado (min(N, 10000)).
+    #   Reduzir para datasets grandes que excedem RAM (e.g. 5000 em T4).
+    #   Setar para 0 desativa shuffle (apenas para benchmark/debug — quebra
+    #   randomizacao inter-batch crucial para SGD).
+    #   Cap 100000 anti-OOM em GPU T4 (validado em __post_init__).
+    #
+    # tf_num_parallel_calls: paralelismo do .map(noise+FV+GS+scale).
+    #   Default -1 (sentinela) resolve para tf.data.AUTOTUNE em runtime.
+    #   Setar valor explicito (e.g. 4) para reproducibilidade entre runs
+    #   ou para tuning manual em CPU com cores limitados.
+    #
+    # tf_prefetch_buffer_size: numero de batches em prefetch (sobreposicao CPU/GPU).
+    #   Default -1 (sentinela) resolve para tf.data.AUTOTUNE em runtime.
+    #   Setar valor explicito (e.g. 2) reduz RAM em datasets pequenos.
+    #
+    # tf_cache_eval: aplica .cache() em val/test datasets (imutaveis).
+    #   Default True (comportamento legado). False reduz RAM mas refaz
+    #   processamento a cada epoca — util quando val/test enormes.
+    #
+    # Nota: v2.40 (2026-05 — Sprint I2.2 + tf.data + mp16)
+    tf_shuffle_buffer_size: int = 10000
+    tf_num_parallel_calls: int = -1
+    tf_prefetch_buffer_size: int = -1
+    tf_cache_eval: bool = True
     use_tensorboard: bool = True
     use_csv_logger: bool = True
     # ── GradientMonitor — monitoramento de gradientes reais via GradientTape
@@ -748,9 +777,9 @@ class PipelineConfig:
 
         _meta_found = _input_set & _FORBIDDEN_METADATA
         assert not _meta_found, (
-            f"INPUT_FEATURES contem indice de metadata (col 0 = meds): "
-            f"formato antigo 9-col detectado. Use formato 22-col com baseline "
-            f"[1,4,5,20,21]"
+            "INPUT_FEATURES contem indice de metadata (col 0 = meds): "
+            "formato antigo 9-col detectado. Use formato 22-col com baseline "
+            "[1,4,5,20,21]"
         )
 
         _missing_baseline = _BASELINE_REQUIRED - _input_set
@@ -764,7 +793,10 @@ class PipelineConfig:
             f"Recebido: {self.input_features}"
         )
 
-        assert self.output_targets == [2, 3], "OUTPUT_TARGETS 22-col: [2,3] (NUNCA [1,2])"
+        assert self.output_targets == [
+            2,
+            3,
+        ], "OUTPUT_TARGETS 22-col: [2,3] (NUNCA [1,2])"
         assert _input_set & set(self.output_targets) == set(), (
             f"Features e targets NAO podem ter overlap. "
             f"Overlap: {sorted(_input_set & set(self.output_targets))}"
@@ -1055,6 +1087,28 @@ class PipelineConfig:
                 f"'{self.model_type}'. Arquiteturas incompativeis com FiLM: "
                 f"{sorted(_FILM_INCOMPATIBLE)}. Use 'dual_input' ou 'broadcast'."
             )
+
+        # ── Validacao tf.data flags (Sprint v2.40 D6) ────────────────────
+        # tf_shuffle_buffer_size: 0 = desativar shuffle, ate 100000 (anti-OOM T4).
+        assert 0 <= self.tf_shuffle_buffer_size <= 100000, (
+            f"tf_shuffle_buffer_size={self.tf_shuffle_buffer_size} fora do "
+            f"range [0, 100000]. Use 0 para desativar shuffle (apenas "
+            f"benchmark/debug — quebra randomizacao inter-batch). Cap 100000 "
+            f"evita OOM em GPU T4 com batch grande."
+        )
+        # tf_num_parallel_calls: -1 = AUTOTUNE, >=1 = valor explicito.
+        assert self.tf_num_parallel_calls == -1 or self.tf_num_parallel_calls >= 1, (
+            f"tf_num_parallel_calls={self.tf_num_parallel_calls} invalido. "
+            f"Use -1 (AUTOTUNE) ou inteiro >= 1 (paralelismo explicito). "
+            f"0 nao tem semantica definida em tf.data.Dataset.map."
+        )
+        # tf_prefetch_buffer_size: -1 = AUTOTUNE, >=0 = valor explicito.
+        assert (
+            self.tf_prefetch_buffer_size == -1 or self.tf_prefetch_buffer_size >= 0
+        ), (
+            f"tf_prefetch_buffer_size={self.tf_prefetch_buffer_size} invalido. "
+            f"Use -1 (AUTOTUNE) ou inteiro >= 0 (0 desativa prefetch — raramente util)."
+        )
 
     # ══════════════════════════════════════════════════════════════════
     # SECAO 17: PROPRIEDADES DERIVADAS
@@ -1538,7 +1592,7 @@ class PipelineConfig:
 
     def __repr__(self) -> str:
         """Representacao legivel com campos principais."""
-        lines = [f"PipelineConfig("]
+        lines = ["PipelineConfig("]
         lines.append(f"  model_type='{self.model_type}',")
         lines.append(f"  inference_mode='{self.inference_mode}',")
         lines.append(f"  use_noise={self.use_noise}, noise_max={self.noise_level_max},")
@@ -1552,6 +1606,8 @@ class PipelineConfig:
             f"  lr={self.learning_rate}, epochs={self.epochs}, bs={self.batch_size},"
         )
         lines.append(f"  loss='{self.loss_type}',")
-        lines.append(f"  n_features={self.n_features}, output_ch={self.output_channels},")
-        lines.append(f")")
+        lines.append(
+            f"  n_features={self.n_features}, output_ch={self.output_channels},"
+        )
+        lines.append(")")
         return "\n".join(lines)

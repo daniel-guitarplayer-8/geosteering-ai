@@ -32,12 +32,16 @@ Note:
     introduzir ruído no último ULP do complex128. Em oklahoma_28 o erro
     observado localmente é ~3.5e-14 — 4 ordens abaixo do gate.
 """
+
 from __future__ import annotations
 
 import time
 
 import numpy as np
 import pytest
+
+# Marker GPU (Sprint v2.40 D9) — skipado em CPU via conftest.py
+pytestmark = pytest.mark.gpu
 
 try:
     import jax

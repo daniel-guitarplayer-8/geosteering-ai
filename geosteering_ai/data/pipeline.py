@@ -73,10 +73,13 @@ Referencia: docs/ARCHITECTURE_v2.md secao 4.3.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import tensorflow as tf  # noqa: F401 — forward ref para "tf.Variable"
 
 from geosteering_ai.config import PipelineConfig
 from geosteering_ai.data.boundaries import compute_dtb_for_dataset
@@ -87,7 +90,6 @@ from geosteering_ai.data.geosignals import (
     compute_geosignals_tf,
 )
 from geosteering_ai.data.loading import (
-    AngleGroup,
     OutMetadata,
     load_dataset,
     parse_out_metadata,
@@ -107,9 +109,7 @@ from geosteering_ai.data.second_order import (
 )
 from geosteering_ai.data.splitting import (
     DataSplits,
-    apply_split,
     split_angle_group,
-    split_model_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -440,7 +440,9 @@ class DataPipeline:
             splits.y_train = apply_target_scaling(
                 splits.y_train, self.config.target_scaling
             )
-            splits.y_val = apply_target_scaling(splits.y_val, self.config.target_scaling)
+            splits.y_val = apply_target_scaling(
+                splits.y_val, self.config.target_scaling
+            )
             splits.y_test = apply_target_scaling(
                 splits.y_test, self.config.target_scaling
             )
@@ -511,7 +513,9 @@ class DataPipeline:
     #   FV → (GS) → fit_scaler(train) → scale(todos)
     # ──────────────────────────────────────────────────────────────────
 
-    def _prepare_offline(self, splits: DataSplits, metadata: OutMetadata) -> PreparedData:
+    def _prepare_offline(
+        self, splits: DataSplits, metadata: OutMetadata
+    ) -> PreparedData:
         """Modo offline: FV+GS+scale aplicados estaticamente.
 
         Usado quando noise=off OU FV=identity sem GS.
@@ -540,7 +544,9 @@ class DataPipeline:
                 x_train, self._h1_cols, self._h2_cols
             )
             so_val = compute_second_order_features(x_val, self._h1_cols, self._h2_cols)
-            so_test = compute_second_order_features(x_test, self._h1_cols, self._h2_cols)
+            so_test = compute_second_order_features(
+                x_test, self._h1_cols, self._h2_cols
+            )
             x_train = np.concatenate([x_train, so_train], axis=-1)
             x_val = np.concatenate([x_val, so_val], axis=-1)
             x_test = np.concatenate([x_test, so_test], axis=-1)
@@ -675,7 +681,9 @@ class DataPipeline:
             self.config.use_second_order_features
             and self.config.second_order_mode == "postprocess"
         ):
-            so_val = compute_second_order_features(x_val_fv, self._h1_cols, self._h2_cols)
+            so_val = compute_second_order_features(
+                x_val_fv, self._h1_cols, self._h2_cols
+            )
             so_test = compute_second_order_features(
                 x_test_fv, self._h1_cols, self._h2_cols
             )
@@ -778,7 +786,8 @@ class DataPipeline:
 
         # ── Closure vars para second-order postprocess on-the-fly ─────────
         _use_so_postprocess = (
-            config.use_second_order_features and config.second_order_mode == "postprocess"
+            config.use_second_order_features
+            and config.second_order_mode == "postprocess"
         )
         _so_h1 = self._h1_cols
         _so_h2 = self._h2_cols
@@ -989,7 +998,9 @@ class DataPipeline:
         elif split == "test":
             x, y = prepared.x_test, prepared.y_test
         else:
-            raise ValueError(f"Split '{split}' invalido. Opcoes: 'train', 'val', 'test'.")
+            raise ValueError(
+                f"Split '{split}' invalido. Opcoes: 'train', 'val', 'test'."
+            )
 
         # ── Construir dataset base ─────────────────────────────────────
         # from_tensor_slices cria um elemento por amostra (modelo geologico).
@@ -1004,16 +1015,37 @@ class DataPipeline:
             self.config.batch_size,
         )
 
+        # ── Sprint v2.40 D6: resolver sentinelas -1 → tf.data.AUTOTUNE ──
+        # Campos novos em PipelineConfig substituem hardcodes anteriores.
+        # Default preserva comportamento legado (min(N, 10000), AUTOTUNE).
+        parallel_calls = (
+            tf.data.AUTOTUNE
+            if self.config.tf_num_parallel_calls == -1
+            else self.config.tf_num_parallel_calls
+        )
+        prefetch_buffer = (
+            tf.data.AUTOTUNE
+            if self.config.tf_prefetch_buffer_size == -1
+            else self.config.tf_prefetch_buffer_size
+        )
+
         if split == "train":
             # ── Train: shuffle → batch → map → prefetch ───────────────
             # Shuffle ANTES de batch: randomiza ordem das amostras para
             # que cada batch contenha modelos geologicos diversos.
-            # Buffer = min(N, 10000) para RAM finita em datasets grandes.
-            buffer_size = min(n_samples, 10000)
-            ds = ds.shuffle(
-                buffer_size=buffer_size,
-                seed=self.config.global_seed,
-            )
+            # Buffer = min(N, config.tf_shuffle_buffer_size).
+            # tf_shuffle_buffer_size=0 desativa shuffle (debug only).
+            if self.config.tf_shuffle_buffer_size > 0:
+                buffer_size = min(n_samples, self.config.tf_shuffle_buffer_size)
+                ds = ds.shuffle(
+                    buffer_size=buffer_size,
+                    seed=self.config.global_seed,
+                )
+            else:
+                logger.warning(
+                    "build_tf_dataset: tf_shuffle_buffer_size=0 — shuffle "
+                    "desativado (apenas debug; quebra randomizacao inter-batch)."
+                )
 
             # Batch ANTES de map: map_fn processa tensores batched
             # (shape [batch, seq_len, features]), consistente com
@@ -1022,28 +1054,30 @@ class DataPipeline:
 
             # Map: cadeia on-the-fly noise → FV → GS → scale (se ativo)
             # noise_level_var controla intensidade via curriculum callback.
-            # AUTOTUNE paraleliza map across CPU cores.
+            # tf_num_parallel_calls=-1 (AUTOTUNE) paraleliza por CPU cores.
             if noise_level_var is not None:
                 map_fn = self.build_train_map_fn(noise_level_var)
-                ds = ds.map(map_fn, num_parallel_calls=tf.data.AUTOTUNE)
+                ds = ds.map(map_fn, num_parallel_calls=parallel_calls)
 
             # Prefetch: sobrepoe preprocessing do proximo batch com
             # treinamento GPU do batch atual (pipeline CPU/GPU).
-            ds = ds.prefetch(tf.data.AUTOTUNE)
+            # tf_prefetch_buffer_size=-1 (AUTOTUNE) dinamico.
+            ds = ds.prefetch(prefetch_buffer)
 
         else:
-            # ── Val/Test: batch → cache → prefetch ─────────────────────
+            # ── Val/Test: batch → cache (opcional) → prefetch ──────────
             # Sem shuffle (avaliacao deve ser deterministica).
             # Sem map (FV+GS+scale ja aplicados offline em prepare()).
             ds = ds.batch(self.config.batch_size)
 
             # Cache: armazena batches processados na RAM apos primeira
             # iteracao. Seguro para val/test (dados imutaveis entre epocas).
-            # Economia: evita re-batching a cada epoca de validacao.
-            ds = ds.cache()
+            # tf_cache_eval=False reduz RAM mas refaz processamento por epoca.
+            if self.config.tf_cache_eval:
+                ds = ds.cache()
 
             # Prefetch: sobreposicao CPU/GPU para avaliacao rapida.
-            ds = ds.prefetch(tf.data.AUTOTUNE)
+            ds = ds.prefetch(prefetch_buffer)
 
         return ds
 
