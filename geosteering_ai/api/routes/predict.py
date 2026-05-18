@@ -154,18 +154,24 @@ async def predict(request: PredictRequest) -> PredictResponse:
     # ── Passo 4: Desempacotar resposta (com ou sem incerteza) ────
     # Narrowing manual para satisfazer mypy: a assinatura de predict()
     # retorna np.ndarray | tuple[np.ndarray, np.ndarray].
+    # NÃO usar `assert isinstance` em produção: `python -O` remove asserts
+    # e o handler genérico em app.py vira 500 com mensagem inútil (C1 audit).
     y_pred: np.ndarray
     uncertainty_list: Optional[list] = None
     if request.return_uncertainty:
-        assert isinstance(
-            result, tuple
-        ), "predict() deve retornar tuple quando return_uncertainty=True"
+        if not isinstance(result, tuple):
+            raise RuntimeError(
+                "InferencePipeline.predict() retornou tipo inesperado "
+                "quando return_uncertainty=True (esperado tuple)."
+            )
         y_pred, y_std = result
         uncertainty_list = y_std.tolist()
     else:
-        assert isinstance(
-            result, np.ndarray
-        ), "predict() deve retornar ndarray quando return_uncertainty=False"
+        if not isinstance(result, np.ndarray):
+            raise RuntimeError(
+                "InferencePipeline.predict() retornou tipo inesperado "
+                "quando return_uncertainty=False (esperado np.ndarray)."
+            )
         y_pred = result
 
     # ── Passo 5: Construir PredictResponse ───────────────────────

@@ -73,6 +73,15 @@ FREQ_MAX_HZ: float = 1_000_000.0
 MC_SAMPLES_MIN: int = 2
 MC_SAMPLES_MAX: int = 200
 
+# ────────────────────────────────────────────────────────────────────────
+# D10: Bounds de payload (DoS protection — MED-2 do audit v2.39)
+# ────────────────────────────────────────────────────────────────────────
+# Caps absolutos para evitar JSON bomb / quadratic memory em raw_data.
+# Calibrados para cobrir uso real (LWD: 1 poço ≈ 1000-2000 medições) com
+# folga, mas rejeitar payloads abusivos antes de alocar np.asarray.
+MAX_N_SAMPLES: int = 1024
+MAX_SEQUENCE_LENGTH: int = 10000
+
 
 # ════════════════════════════════════════════════════════════════════════
 # PREDICT REQUEST — Entrada do endpoint POST /predict
@@ -184,16 +193,27 @@ class PredictRequest(BaseModel):
         if not v:
             raise ValueError("raw_data não pode ser vazio (≥1 amostra).")
 
-        # ── Verifica 1º eixo (n_samples ≥ 1) ──────────────────────
+        # ── Verifica 1º eixo: n_samples ∈ [1, MAX_N_SAMPLES] ─────
+        # Cap defensivo (MED-2 audit v2.39) — evita JSON bomb DoS.
         n_samples = len(v)
         if n_samples == 0:
             raise ValueError("raw_data deve ter ≥1 amostra.")
+        if n_samples > MAX_N_SAMPLES:
+            raise ValueError(
+                f"raw_data tem {n_samples} amostras; máximo permitido por "
+                f"chamada é {MAX_N_SAMPLES}. Divida em batches menores."
+            )
 
-        # ── Verifica 2º eixo (sequence_length ≥ 1) e ──────────────
-        # ── 3º eixo (n_columns == 22) em todas as amostras ────────
+        # ── Verifica 2º eixo (1 ≤ seq_len ≤ MAX_SEQUENCE_LENGTH) ─
+        # ── 3º eixo (n_columns == 22) em todas as amostras ───────
         for i, sample in enumerate(v):
             if not sample:
                 raise ValueError(f"raw_data[{i}] tem sequence_length=0; mínimo é 1.")
+            if len(sample) > MAX_SEQUENCE_LENGTH:
+                raise ValueError(
+                    f"raw_data[{i}] tem sequence_length={len(sample)}; "
+                    f"máximo permitido é {MAX_SEQUENCE_LENGTH}."
+                )
             for j, row in enumerate(sample):
                 if len(row) != N_COLUMNS:
                     raise ValueError(
@@ -363,4 +383,6 @@ __all__ = [
     "FREQ_MAX_HZ",
     "MC_SAMPLES_MIN",
     "MC_SAMPLES_MAX",
+    "MAX_N_SAMPLES",
+    "MAX_SEQUENCE_LENGTH",
 ]

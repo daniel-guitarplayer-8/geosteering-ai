@@ -171,12 +171,18 @@ class TestPredictErrors:
     """Casos de erro do POST /predict."""
 
     def test_predict_503_when_model_not_loaded(self, client: TestClient) -> None:
-        """Sem GEOSTEERING_MODEL_PATH, deve retornar 503 model_not_loaded."""
+        """Sem GEOSTEERING_MODEL_PATH, deve retornar 503 model_not_loaded.
+
+        Mensagem é sanitizada — NÃO vaza nome de env var nem paths
+        internos (hardening MED-3 audit v2.39).
+        """
         r = client.post("/predict", json={"raw_data": [[[0.0] * N_COLUMNS]]})
         assert r.status_code == 503
         body = r.json()
         assert body["type"] == "model_not_loaded"
-        assert "GEOSTEERING_MODEL_PATH" in body["detail"]
+        # Mensagem não deve conter detalhes internos (env vars, paths)
+        assert "GEOSTEERING_MODEL_PATH" not in body["detail"]
+        assert "/" not in body["detail"]
 
     def test_predict_422_wrong_n_columns(self, client: TestClient) -> None:
         """Shape com último eixo != 22 deve dar 422 (Pydantic)."""
@@ -250,3 +256,108 @@ class TestHealthAfterMockLoad:
         body = client.get("/health").json()
         assert body["model_loaded"] is True
         assert body["model_path"] == "/mock/path"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Testes — Hardenings (audit v2.39)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestHardening:
+    """Valida fixes do audit de revisão v2.39."""
+
+    def test_model_load_failed_returns_specific_type(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ModelLoadFailedError (A1/MED-3) → 503 type=model_load_failed."""
+        from geosteering_ai.api.dependencies import ModelLoadFailedError
+
+        def _raise_load_fail() -> Any:
+            raise ModelLoadFailedError("Pipeline corrompido (mock).")
+
+        monkeypatch.setattr(
+            "geosteering_ai.api.routes.predict.get_pipeline", _raise_load_fail
+        )
+        r = client.post("/predict", json={"raw_data": [[[0.0] * N_COLUMNS]]})
+        assert r.status_code == 503
+        body = r.json()
+        assert body["type"] == "model_load_failed"  # distinto de model_not_loaded
+
+    def test_payload_too_large_returns_413(self, client: TestClient) -> None:
+        """C2/MED-1: Content-Length acima do limite → 413."""
+        # Forjar Content-Length grande sem corpo real
+        r = client.post(
+            "/predict",
+            content=b"{}",
+            headers={"content-length": str(100 * 1024 * 1024)},  # 100 MiB
+        )
+        assert r.status_code == 413
+        assert r.json()["type"] == "payload_too_large"
+
+    def test_max_n_samples_rejected(self, client: TestClient) -> None:
+        """MED-2: raw_data com >MAX_N_SAMPLES amostras → 422."""
+        from geosteering_ai.api.schemas import MAX_N_SAMPLES
+
+        # MAX_N_SAMPLES + 1 amostras (cada uma com 1 medição × 22 col)
+        too_many = [[[0.0] * N_COLUMNS]] * (MAX_N_SAMPLES + 1)
+        r = client.post("/predict", json={"raw_data": too_many})
+        assert r.status_code == 422
+        assert "amostras" in r.text
+
+    def test_max_sequence_length_rejected(self, client: TestClient) -> None:
+        """MED-2: raw_data com >MAX_SEQUENCE_LENGTH medições → 422."""
+        from geosteering_ai.api.schemas import MAX_SEQUENCE_LENGTH
+
+        # 1 amostra com MAX_SEQUENCE_LENGTH+1 medições
+        too_long = [[[0.0] * N_COLUMNS] * (MAX_SEQUENCE_LENGTH + 1)]
+        r = client.post("/predict", json={"raw_data": too_long})
+        assert r.status_code == 422
+        assert "sequence_length" in r.text
+
+
+class TestCORSHardening:
+    """Valida A2/ALTO-1 — CORS allow_credentials condicional."""
+
+    def test_cors_wildcard_disables_credentials(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Com cors_origins=['*'], allow_credentials deve ser False."""
+        from geosteering_ai.api import dependencies as deps
+        from geosteering_ai.api.app import create_app
+
+        monkeypatch.delenv("GEOSTEERING_API_CORS_ORIGINS", raising=False)
+        deps.get_settings.cache_clear()
+        # Reconstrói a app com defaults (cors_origins == ["*"])
+        new_app = create_app()
+        # Inspeciona a stack de middleware para encontrar CORSMiddleware
+        cors_options = None
+        for m in new_app.user_middleware:
+            if m.cls.__name__ == "CORSMiddleware":
+                # m.kwargs (Starlette ≥0.41) ou m.options (versões antigas)
+                cors_options = getattr(m, "kwargs", None) or getattr(m, "options", {})
+                break
+        assert cors_options is not None
+        assert cors_options.get("allow_credentials") is False
+        assert cors_options.get("allow_origins") == ["*"]
+
+    def test_cors_explicit_origins_keeps_credentials(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Com origens explícitas, allow_credentials deve ser True."""
+        from geosteering_ai.api import dependencies as deps
+        from geosteering_ai.api.app import create_app
+
+        monkeypatch.setenv(
+            "GEOSTEERING_API_CORS_ORIGINS",
+            "https://studio.example.com,https://app.example.com",
+        )
+        deps.get_settings.cache_clear()
+        new_app = create_app()
+        cors_options = None
+        for m in new_app.user_middleware:
+            if m.cls.__name__ == "CORSMiddleware":
+                cors_options = getattr(m, "kwargs", None) or getattr(m, "options", {})
+                break
+        assert cors_options is not None
+        assert cors_options.get("allow_credentials") is True
+        assert "https://studio.example.com" in cors_options.get("allow_origins", [])

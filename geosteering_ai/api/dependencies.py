@@ -75,7 +75,31 @@ __all__ = [
     "get_settings",
     "Settings",
     "reset_pipeline_cache",
+    "ModelNotLoadedError",
+    "ModelLoadFailedError",
 ]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# D10: Exceções tipadas — facilitam tratamento no app.py handler
+# ────────────────────────────────────────────────────────────────────────
+
+
+class ModelNotLoadedError(RuntimeError):
+    """GEOSTEERING_MODEL_PATH não está setada — modelo nunca foi configurado.
+
+    Caso esperado em containers recém-iniciados sem volume montado.
+    Resolve-se setando a env var ou montando volume com pipeline serializado.
+    """
+
+
+class ModelLoadFailedError(RuntimeError):
+    """Tentativa de carregar pipeline falhou (path inválido, arquivo corrompido).
+
+    Indica problema operacional: caminho aponta para diretório errado,
+    pipeline incompleto (faltando model.keras/scalers.joblib/config.yaml),
+    ou config.yaml não-parseable.
+    """
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -216,10 +240,12 @@ def get_pipeline() -> "InferencePipeline":
 
     settings = get_settings()
     if not settings.model_path:
-        raise RuntimeError(
-            f"Variável de ambiente {ENV_MODEL_PATH} não setada. "
-            "Configure-a apontando para o diretório do pipeline serializado "
-            "(model.keras + scalers.joblib + config.yaml)."
+        # Mensagem genérica ao cliente (não vaza nome de env nem detalhe interno).
+        # O nome da env var fica em log INFO (operadores precisam saber).
+        logger.info("Pipeline não carregado: %s não configurada.", ENV_MODEL_PATH)
+        raise ModelNotLoadedError(
+            "Modelo de inferência não está disponível. "
+            "Configure o serviço com um pipeline válido."
         )
 
     with _pipeline_lock:
@@ -239,14 +265,20 @@ def get_pipeline() -> "InferencePipeline":
             _pipeline_instance = InferencePipeline.load(settings.model_path)
             _pipeline_loaded_path = settings.model_path
         except FileNotFoundError as exc:
-            raise RuntimeError(
-                f"Arquivo do pipeline não encontrado em {settings.model_path}: {exc}"
+            # Path interno em log; mensagem ao cliente genérica.
+            logger.warning(
+                "Pipeline não encontrado em %s: %s", settings.model_path, exc
+            )
+            raise ModelLoadFailedError(
+                "Pipeline configurado não encontrado no servidor."
             ) from exc
         except Exception as exc:
             logger.exception(
                 "Falha ao carregar InferencePipeline de %s", settings.model_path
             )
-            raise RuntimeError(f"Erro ao carregar pipeline: {exc}") from exc
+            raise ModelLoadFailedError(
+                "Falha ao carregar o pipeline. Consulte os logs do servidor."
+            ) from exc
 
         logger.info(
             "InferencePipeline carregado — model_type=%s, feature_view=%s",

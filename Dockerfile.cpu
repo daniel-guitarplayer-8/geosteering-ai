@@ -48,8 +48,11 @@ COPY pyproject.toml README.md ./
 COPY geosteering_ai/ ./geosteering_ai/
 
 # Instala o pacote com extras [api] + [all] (inclui TF, joblib, etc.)
+# NOTA: instalação NÃO-editable (fix A4 audit v2.39) — modo editable em
+# /build cria .pth files apontando para /build, frágeis quando o venv
+# é copiado para o stage runtime. Instalação normal copia tudo para o venv.
 RUN pip install --upgrade pip setuptools wheel \
-    && pip install -e ".[api,all]"
+    && pip install ".[api,all]"
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Stage 2: RUNTIME — imagem final com venv + código
@@ -58,8 +61,10 @@ FROM python:3.13-slim-bookworm AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/opt/venv/bin:${PATH}" \
-    GEOSTEERING_API_DOCS_ENABLED=1
+    PATH="/opt/venv/bin:${PATH}"
+# NOTA: GEOSTEERING_API_DOCS_ENABLED não é hardcoded aqui (fix M1 audit
+# v2.39). Default é "1" via get_settings(); imagens de produção devem
+# setar explicitamente "0" no docker run.
 
 # Runtime deps mínimos: curl para HEALTHCHECK
 RUN apt-get update \
@@ -73,14 +78,9 @@ RUN apt-get update \
 # Copia venv do builder
 COPY --from=builder /opt/venv /opt/venv
 
-# Copia código-fonte (necessário para o pacote instalado em modo editable)
+# Código já está instalado no /opt/venv via pip install ".[api,all]" no builder
+# (fix A4 audit v2.39 — sem reinstalação redundante).
 WORKDIR /app
-COPY --from=builder /build/geosteering_ai/ /app/geosteering_ai/
-COPY --from=builder /build/pyproject.toml /app/pyproject.toml
-COPY --from=builder /build/README.md /app/README.md
-
-# Reinstala em modo não-editable no destino final (mais robusto)
-RUN pip install --no-deps --no-cache-dir /app
 
 # Sem privilégios (princípio de menor privilégio)
 USER geosteering
