@@ -969,9 +969,19 @@ class TrainingLoop:
         # Sprint v2.40 D5: warning ativo se o modelo foi construído com
         # policy errada (camadas fp32 mas use_mixed_precision=True).
         # Detecta a inconsistência em vez de só avisar genericamente.
+        # Hardening v2.40 (review code #1/#6): trata model_dtype=None
+        # como CASO INDETERMINADO (modelo custom sem .compute_dtype),
+        # não como "OK".
         if self.config.use_mixed_precision:
             model_dtype = getattr(model, "compute_dtype", None)
-            if model_dtype is not None and str(model_dtype) != "float16":
+            if model_dtype is None:
+                logger.warning(
+                    "use_mixed_precision=True mas model.compute_dtype não "
+                    "está disponível (modelo sem API Keras padrão?). "
+                    "Verifique manualmente o dtype das camadas — pode "
+                    "não haver ganho real de mp16."
+                )
+            elif str(model_dtype) != "float16":
                 logger.warning(
                     "use_mixed_precision=True mas model.compute_dtype=%s. "
                     "O modelo foi construído ANTES de "
@@ -984,8 +994,7 @@ class TrainingLoop:
                 )
             else:
                 logger.info(
-                    "Mixed precision OK: model.compute_dtype=%s (camadas fp16).",
-                    model_dtype,
+                    "Mixed precision OK: model.compute_dtype=float16 (camadas fp16)."
                 )
 
         # ── Passo 1: Compile ─────────────────────────────────────────

@@ -66,6 +66,16 @@ if [[ ! -f "${TOKEN_DB}" ]]; then
     exit 0
 fi
 
+# Early-exit: só roda lógica completa se comando é colab/gcloud-relacionado.
+# Hardening v2.40 (review security #1): matcher Bash em settings.json é amplo;
+# filtrar aqui evita overhead em comandos não relacionados (ls, pytest, etc).
+TOOL_INPUT="${CLAUDE_TOOL_INPUT:-}"
+if [[ -n "${TOOL_INPUT}" ]]; then
+    if ! echo "${TOOL_INPUT}" | grep -qE '\b(colab|gcloud)\b'; then
+        exit 0
+    fi
+fi
+
 # Calcular idade do arquivo de tokens (em segundos)
 # Compatível com macOS (BSD stat) e Linux (GNU stat)
 if [[ "$(uname)" == "Darwin" ]]; then
@@ -73,6 +83,10 @@ if [[ "$(uname)" == "Darwin" ]]; then
 else
     file_mtime=$(stat -c %Y "${TOKEN_DB}" 2>/dev/null || echo "0")
 fi
+
+# Hardening v2.40 (review security #2): fallback defensivo
+# se stat retornar string vazia (não esperado, mas defesa em profundidade).
+file_mtime=${file_mtime:-0}
 
 now=$(date +%s)
 age=$((now - file_mtime))

@@ -86,9 +86,15 @@ def _detect_gpu_available() -> bool:
     try:
         import jax  # type: ignore[import-untyped]
 
-        if any(d.platform == "gpu" for d in jax.devices()):
-            return True
-    except Exception:
+        # Hardening v2.40 (review code #7): excluir JAX-Metal (macOS) que
+        # se identifica como "gpu" mas não é CUDA Tensor Cores — testes mp16
+        # GPU assumem CUDA. CLAUDE.md: macOS=Colab, Linux=local p/ GPU real.
+        for d in jax.devices():
+            if d.platform == "gpu" and "metal" not in str(d).lower():
+                return True
+    except (ImportError, AttributeError, RuntimeError):
+        # Hardening v2.40 (review security #4): exceções específicas
+        # em vez de broad Exception (mascarava SystemError/MemoryError).
         pass
     return False
 
