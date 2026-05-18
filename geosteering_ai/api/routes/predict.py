@@ -54,16 +54,13 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import Optional
 
 import numpy as np
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException, status
 
 from geosteering_ai.api.dependencies import get_pipeline
 from geosteering_ai.api.schemas import PredictRequest, PredictResponse
-
-if TYPE_CHECKING:
-    from geosteering_ai.inference import InferencePipeline
 
 logger = logging.getLogger(__name__)
 
@@ -89,26 +86,27 @@ __all__ = ["router"]
         "- 500: erro interno (log com stacktrace no servidor)"
     ),
 )
-async def predict(
-    request: PredictRequest,
-    pipeline: "InferencePipeline" = Depends(get_pipeline),
-) -> PredictResponse:
+async def predict(request: PredictRequest) -> PredictResponse:
     """Endpoint POST /predict — invoca InferencePipeline.predict().
 
     Args:
         request: Schema validado contendo raw_data + theta/freq/UQ opcionais.
-        pipeline: Singleton InferencePipeline injetado via Depends.
 
     Returns:
         PredictResponse com predições em Ω·m, shape e latency_ms.
 
     Raises:
-        HTTPException(422): Se `pipeline.predict()` rejeitar shape (defesa em
-            profundidade — Pydantic já valida último eixo == 22).
+        HTTPException(422): Se conversão para ndarray falhar (jagged array)
+            ou se `pipeline.predict()` rejeitar shape (defesa em profundidade
+            — Pydantic já valida último eixo == 22).
         HTTPException(503): Propagado de `get_pipeline()` via exception handler
             em `app.py` quando modelo não está carregado.
 
     Note:
+        `get_pipeline()` é chamado INTERNAMENTE (não via Depends) para
+        garantir que a validação Pydantic do body aconteça PRIMEIRO. Caso
+        contrário, requisições malformadas sem modelo carregado retornariam
+        503 em vez do 422 esperado.
         Conversão list → ndarray usa dtype=float32 (mesmo dtype interno do
         InferencePipeline) para evitar cópia adicional no Passo 1 do pipeline.
         Ref: geosteering_ai/inference/pipeline.py:264
@@ -131,10 +129,13 @@ async def predict(
             ),
         ) from exc
 
-    # ── Passo 2: Executar pipeline.predict() ──────────────────────
+    # ── Passo 2: Resolver pipeline APÓS validação do body ────────
+    # Importante: chamada manual (não Depends) para garantir ordem
+    # Pydantic-then-Pipeline. RuntimeError → 503 via app.py handler.
+    pipeline = get_pipeline()
+
+    # ── Passo 3: Executar pipeline.predict() ─────────────────────
     # ValueError do pipeline (shape errado) → 422
-    # RuntimeError (modelo None) → 500 (não deveria ocorrer pois Depends
-    # já passou; manter por defesa)
     try:
         result = pipeline.predict(
             raw,
@@ -150,16 +151,24 @@ async def predict(
             detail=str(exc),
         ) from exc
 
-    # ── Passo 3: Desempacotar resposta (com ou sem incerteza) ─────
+    # ── Passo 4: Desempacotar resposta (com ou sem incerteza) ────
+    # Narrowing manual para satisfazer mypy: a assinatura de predict()
+    # retorna np.ndarray | tuple[np.ndarray, np.ndarray].
+    y_pred: np.ndarray
+    uncertainty_list: Optional[list] = None
     if request.return_uncertainty:
-        # pipeline.predict retorna tuple (mean, std) quando UQ ativa
+        assert isinstance(
+            result, tuple
+        ), "predict() deve retornar tuple quando return_uncertainty=True"
         y_pred, y_std = result
         uncertainty_list = y_std.tolist()
     else:
+        assert isinstance(
+            result, np.ndarray
+        ), "predict() deve retornar ndarray quando return_uncertainty=False"
         y_pred = result
-        uncertainty_list = None
 
-    # ── Passo 4: Construir PredictResponse ────────────────────────
+    # ── Passo 5: Construir PredictResponse ───────────────────────
     latency_ms = (time.perf_counter() - t_start) * 1000.0
     shape = list(y_pred.shape)
 
