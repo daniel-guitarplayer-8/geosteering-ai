@@ -83,10 +83,11 @@ Note:
     (integração de `dipoles_unified` em `dipoles_native.py`), prevista
     para PR #24 / v1.5.0-final.
 """
+
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
@@ -181,6 +182,90 @@ class MultiSimulationResultJAX:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Sprint A1.5 — MultiSimulationResultBatchedJAX (eixo n_models)
+# ──────────────────────────────────────────────────────────────────────────────
+@dataclass
+class MultiSimulationResultBatchedJAX:
+    """Container de resultados de :func:`simulate_multi_jax_batched`.
+
+    Versão batched de :class:`MultiSimulationResultJAX` — adiciona dimensão
+    líder ``n_models`` ao ``H_tensor`` e a ``rho_*_at_obs``. ``z_obs``,
+    ``freqs_hz``, ``tr_spacings_m`` e ``dip_degs`` são **compartilhados**
+    pelos modelos (invariantes ao perfil de resistividade).
+
+    Restrição: todos os modelos do batch compartilham o mesmo ``n``
+    (número de camadas). Para ``n`` heterogêneo, agrupar por ``n`` e
+    chamar separadamente — ver docstring de
+    :func:`simulate_multi_jax_batched`.
+
+    Attributes:
+        H_tensor: Tensor magnético H em formato 6-D batched.
+            Shape ``(n_models, nTR, nAngles, n_pos, nf, 9)`` complex128.
+            Ordem das 9 componentes flat:
+            ``[Hxx, Hxy, Hxz, Hyx, Hyy, Hyz, Hzx, Hzy, Hzz]``.
+        z_obs: Profundidade TVD ponto-médio. Shape ``(nAngles, n_pos)``
+            float64. **Compartilhado** entre modelos (depende só de
+            ``positions_z`` e ``dip_degs``).
+        rho_h_at_obs: Resistividade horizontal na camada do ponto-médio.
+            Shape ``(n_models, nAngles, n_pos)`` float64 — depende do
+            perfil ``rho_h`` por modelo.
+        rho_v_at_obs: Resistividade vertical na camada do ponto-médio.
+            Shape ``(n_models, nAngles, n_pos)`` float64.
+        freqs_hz: Frequências usadas. Shape ``(nf,)`` float64.
+        tr_spacings_m: Espaçamentos T-R. Shape ``(nTR,)`` float64.
+        dip_degs: Ângulos dip. Shape ``(nAngles,)`` float64.
+        n_models: Número de modelos no batch (``H_tensor.shape[0]``).
+
+    Note:
+        Para extrair um modelo individual: ``H_tensor[i_model, ...]`` retorna
+        shape ``(nTR, nAngles, n_pos, nf, 9)`` — equivalente ao
+        ``H_tensor`` de :class:`MultiSimulationResultJAX`.
+
+        A API batched elimina o overhead Python serial do loop sobre modelos
+        (5-20 ms/modelo de `build_static_context` + `np.asarray` sync).
+        Ver `docs/sprints/v2.41.md` para análise da causa-raiz.
+    """
+
+    H_tensor: np.ndarray  # (n_models, nTR, nAngles, n_pos, nf, 9) complex128
+    z_obs: np.ndarray  # (nAngles, n_pos) float64 — compartilhado
+    rho_h_at_obs: np.ndarray  # (n_models, nAngles, n_pos) float64
+    rho_v_at_obs: np.ndarray  # (n_models, nAngles, n_pos) float64
+    freqs_hz: np.ndarray  # (nf,) float64
+    tr_spacings_m: np.ndarray  # (nTR,) float64
+    dip_degs: np.ndarray  # (nAngles,) float64
+    n_models: int = 0
+
+    def get_model(self, i_model: int) -> MultiSimulationResultJAX:
+        """Extrai resultado de um modelo individual como :class:`MultiSimulationResultJAX`.
+
+        Útil para validar paridade contra ``simulate_multi_jax`` chamada
+        em loop Python. Não é cópia — usa views NumPy.
+
+        Args:
+            i_model: Índice do modelo (0 ≤ i_model < n_models).
+
+        Returns:
+            :class:`MultiSimulationResultJAX` com ``H_tensor`` shape
+            ``(nTR, nAngles, n_pos, nf, 9)``.
+
+        Raises:
+            IndexError: Se ``i_model`` fora do range.
+        """
+        if not (0 <= i_model < self.n_models):
+            raise IndexError(f"i_model={i_model} fora do range [0, {self.n_models})")
+        return MultiSimulationResultJAX(
+            H_tensor=self.H_tensor[i_model],
+            z_obs=self.z_obs,
+            rho_h_at_obs=self.rho_h_at_obs[i_model],
+            rho_v_at_obs=self.rho_v_at_obs[i_model],
+            freqs_hz=self.freqs_hz,
+            tr_spacings_m=self.tr_spacings_m,
+            dip_degs=self.dip_degs,
+            unique_hordist_count=0,  # dedup hordist não aplicável em batched
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Helpers internos — dedup cache por hordist
 # ──────────────────────────────────────────────────────────────────────────────
 def _compute_hordist_key(tr_spacing_m: float, dip_deg: float) -> float:
@@ -212,6 +297,70 @@ def _build_hordist_groups(
             key = _compute_hordist_key(L, theta)
             groups.setdefault(key, []).append((i_tr, i_ang, float(L), float(theta)))
     return groups
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint A1.5 — Helper interno _sanitize_profile_batch (batch de modelos)
+# ──────────────────────────────────────────────────────────────────────────────
+def _sanitize_profile_batch(
+    n: int, esp_batch: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Pré-computa ``h_arr`` e ``prof_arr`` para um batch de modelos.
+
+    Wrapper Python sobre :func:`_sanitize_profile_kernel` (Numba @njit) que
+    empilha resultados de ``n_models`` modelos em arrays 2D, prontos para
+    consumo por ``jax.vmap(in_axes=(..., 0, 0))``. Mantido em Python (não
+    portado para JAX) porque a operação é cheap (<1 ms por modelo); o
+    benefício de portar não justifica o custo de manutenção.
+
+    Args:
+        n: Número de camadas (compartilhado por todos os modelos do batch).
+        esp_batch: Espessuras internas. Shape ``(n_models, n-2)`` float64.
+            Para ``n=1`` ou ``n=2``, deve ter shape ``(n_models, 0)``.
+
+    Returns:
+        Tupla ``(h_arr_batch, prof_arr_batch)``:
+
+        - ``h_arr_batch``: Shape ``(n_models, n)`` float64.
+        - ``prof_arr_batch``: Shape ``(n_models, n+1)`` float64 — boundaries
+          com sentinelas ``-1e300`` no topo e ``+1e300`` no fundo.
+
+    Note:
+        Edge case ``n=1`` (semi-espaço único): retorna shape determinístico
+        ``h_arr_batch=zeros((n_models, 1))`` e
+        ``prof_arr_batch=tile([-1e300, 1e300], (n_models, 1))`` — alinhado
+        com ``_simulate_multi_jax_vmap_real:557-561``.
+
+    Example:
+        >>> n_models, n = 5, 3
+        >>> esp_batch = np.random.uniform(2, 10, size=(n_models, n - 2))
+        >>> h_arr_batch, prof_arr_batch = _sanitize_profile_batch(n, esp_batch)
+        >>> h_arr_batch.shape
+        (5, 3)
+        >>> prof_arr_batch.shape
+        (5, 4)
+    """
+    from geosteering_ai.simulation._numba.geometry import _sanitize_profile_kernel
+
+    n_models = esp_batch.shape[0]
+
+    # ── Edge case n=1: shapes fixos para todos os modelos ──────────────
+    if n == 1:
+        h_arr_batch = np.zeros((n_models, 1), dtype=np.float64)
+        prof_arr_batch = np.tile(
+            np.array([-1.0e300, 1.0e300], dtype=np.float64), (n_models, 1)
+        )
+        return h_arr_batch, prof_arr_batch
+
+    # ── Loop Python — sanitize é cheap (<1 ms × n_models = <50 ms total) ─
+    h_list: list = []
+    prof_list: list = []
+    for i in range(n_models):
+        h, prof = _sanitize_profile_kernel(n, np.ascontiguousarray(esp_batch[i]))
+        h_list.append(h)
+        prof_list.append(prof)
+
+    return np.stack(h_list, axis=0), np.stack(prof_list, axis=0)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -325,7 +474,9 @@ def simulate_multi_jax(
 
     # Ranges físicos (idênticos a simulate_multi Numba)
     if np.any((tr_arr < 0.1) | (tr_arr > 10.0)):
-        raise ValueError(f"tr_spacings_m fora do range [0.1, 10.0] m: {tr_arr.tolist()}")
+        raise ValueError(
+            f"tr_spacings_m fora do range [0.1, 10.0] m: {tr_arr.tolist()}"
+        )
     if np.any((dip_arr < 0.0) | (dip_arr > 89.0)):
         raise ValueError(f"dip_degs fora do range [0, 89]°: {dip_arr.tolist()}")
 
