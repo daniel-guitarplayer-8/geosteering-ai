@@ -161,8 +161,10 @@ from geosteering_ai.simulation.multi_forward import (
 # (mantém compatibilidade com ambientes Numba-only).
 try:
     from geosteering_ai.simulation._jax.multi_forward import (
+        MultiSimulationResultBatchedJAX,
         MultiSimulationResultJAX,
         simulate_multi_jax,
+        simulate_multi_jax_batched,
     )
 
     _HAS_JAX_MULTI = True
@@ -190,7 +192,13 @@ __all__ = [
     "simulate_multi",
 ]
 if _HAS_JAX_MULTI:
-    __all__ += ["MultiSimulationResultJAX", "simulate_multi_jax"]
+    __all__ += [
+        "MultiSimulationResultJAX",
+        "simulate_multi_jax",
+        # Sprint A1.5 (v2.42): batched API sobre eixo n_models
+        "MultiSimulationResultBatchedJAX",
+        "simulate_multi_jax_batched",
+    ]
 
 # Versão do subpacote. Sobe conforme Sprints concluídas.
 #   0.1.x → Sprint 1.1 (filtros Hankel extraídos)
