@@ -7,6 +7,76 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.41] — 2026-05-19 — Sprint A1: Validação JAX GPU T4 (DONE-PARTIAL)
+
+### Resumo
+
+Sprint A1 (`A-jax-gpu-validate`) executou `validate_jax_gpu_v240.ipynb` em
+Colab Pro+ T4 com RAM Alta. **Paridade Fortran <1e-12 confirmada em GPU real**
+(163/163 pytest PASS). **Gate de performance reprovado**: A: 0.38×, B: 0.37×,
+E: 0.61× Numba — abaixo do threshold de 1.5×. Causa-raiz identificada:
+ausência de API batched sobre o eixo de modelos (loop Python serial domina
+compute JAX).
+
+### Mudanças
+
+**1. Notebook `validate_jax_gpu_v240.ipynb` — 2 fixes críticos**:
+
+- Fix §2 `a1-l5-env`: `JAX_PLATFORMS="gpu"` → `""` (auto-detect). `"gpu"` é
+  plataforma inválida em JAX (fallback rocm → `RuntimeError`). `"cuda"` foi
+  tentado intermediariamente mas desabilitava backend CPU, quebrando
+  `jax.pure_callback` em `kernel.py:400` (Numba FFI requer CPU backend
+  registrado). Solução final: string vazia inicializa todos os backends
+  disponíveis (CPU + CUDA).
+- Markdown atualizado nas células `a1-sec4-md` para refletir a correção.
+
+**2. Artefatos gerados**:
+
+- `docs/perf_baselines/sprint_a1_jax_benchmark_t4_20260519_192245.json` —
+  dados completos benchmark A–H × {vmap, vmap_real} × 5 runs, gate results,
+  audit_findings com referências de código exatas.
+- `docs/reports/v2.40.4_auditoria_resultados_sprint_a1_2026-05-19.md` —
+  relatório de auditoria (8 seções + 2 apêndices): 3 patologias, 8 bugs no
+  notebook (C1-C2 críticos, H1-H3 altos, M1-M3 médios), 4 caminhos de decisão.
+
+**3. ROADMAP §0 atualizado**:
+
+- `A-jax-gpu-validate`: CANDIDATE → **DONE-PARTIAL**
+- `A-jax-gpu-batched-api`: **NOVO**, P1 CANDIDATE — API batched via vmap eixo n_models
+- `A-jax-gpu-benchmark-redesign`: **NOVO**, P1 BACKLOG — rewrite notebook
+- `A-jax-gpu-dispatcher`: dependência atualizada para batched-api + benchmark-redesign
+- `C-surrogate-train`: dependências expandidas para incluir A1.5 + A1.6
+
+**4. Docs de sprint**:
+
+- `docs/sprints/v2.41.md` — snapshot imutável Sprint A1 (este arquivo)
+- `docs/sprints/CURRENT.md` — plano Sprint A1.5 (`A-jax-gpu-batched-api`)
+
+### Resultados Benchmark T4 (resumo)
+
+| Cenário | vmap (mod/h) | vmap_real (mod/h) | Ratio Numba | Gate |
+|:-:|:-:|:-:|:-:|:-:|
+| A | 448 397 | 229 394 | 0.38× | FAIL |
+| B | 92 745 | 119 473 | 0.37× | FAIL |
+| E | 74 899 | 33 968 | 0.61× | FAIL |
+| C | 94 372 | 94 300 | 0.79× | — |
+| G | 5 612 | 8 528 | 0.12× | — |
+
+### Auditoria (3 patologias)
+
+1. **Cold-start 35-119×**: `_BUCKET_JIT_CACHE` keyed `(ct, cr, n, npt)` — 50
+   modelos aleatórios geram ~50 compilações na Run 1 (`forward_pure.py:573`)
+2. **JAX mais lento que Numba**: loop Python serial + `build_static_context()`
+   5-20ms/modelo + `np.asarray()` GPU→CPU sync por modelo (`multi_forward.py:400-422`)
+3. **Hardware mismatch**: baseline Numba medido em **Intel i9-9980HK 8C/16T (Mac Intel)** — `.claude/perf_baseline.json:15`, `docs/reports/v2.36_2026-05-15.md:8`; T4 tem 4vCPU sem HT
+
+### Próximo
+
+Sprint A1.5: `A-jax-gpu-batched-api` — implementar
+`simulate_multi_jax_batched(models=[...])` via `jax.vmap` sobre eixo `n_models`.
+
+---
+
 ## [v2.40] — 2026-05-18 — MCP colab-bridge + tf.data + Mixed Precision
 
 ### Resumo

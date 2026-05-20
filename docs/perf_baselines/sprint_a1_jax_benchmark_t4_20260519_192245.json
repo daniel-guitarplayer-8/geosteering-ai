@@ -1,0 +1,89 @@
+{
+  "sprint": "A1 — A-jax-gpu-validate",
+  "template": "validate_jax_gpu_v240",
+  "git_tag": "v2.40",
+  "git_commit": "0dab72b09d72e2b1e1e58d4f26a6969464ddc4c7",
+  "runtime": "t4",
+  "timestamp_utc": "20260519_192245",
+  "audit_report": "docs/reports/v2.40.4_auditoria_resultados_sprint_a1_2026-05-19.md",
+  "gate_pass": false,
+  "config": {
+    "n_models_per_scenario": {
+      "A": 50, "B": 50, "C": 50, "D": 50, "E": 50, "F": 50, "G": 50, "H": 10
+    },
+    "n_runs": 5,
+    "seed": 42,
+    "paridade_tol": 1e-12,
+    "jax_enable_x64": true
+  },
+  "pytest_summary": {
+    "passed": 163,
+    "total": 163,
+    "collected": 163
+  },
+  "pytest_duration_sec": 1946.96,
+  "benchmark_vmap": {
+    "A": { "median_mod_h": 448397.97, "numba_baseline_mod_h": 1180000, "ratio_vs_numba": 0.38, "cold_start_run1_sec": 0.42, "hot_cache_run2_5_sec_median": 0.40 },
+    "B": { "median_mod_h": 92745.08,  "numba_baseline_mod_h": 320000,  "ratio_vs_numba": 0.29, "cold_start_run1_sec": 146.44, "hot_cache_run2_5_sec_median": 1.93 },
+    "C": { "median_mod_h": 94372.08,  "numba_baseline_mod_h": 119000,  "ratio_vs_numba": 0.79, "cold_start_run1_sec": 173.54, "hot_cache_run2_5_sec_median": 1.90 },
+    "D": { "median_mod_h": 117200.74, "numba_baseline_mod_h": null,    "ratio_vs_numba": null, "cold_start_run1_sec": 1.43,  "hot_cache_run2_5_sec_median": 1.54 },
+    "E": { "median_mod_h": 74899.89,  "numba_baseline_mod_h": 122000,  "ratio_vs_numba": 0.61, "cold_start_run1_sec": 83.85, "hot_cache_run2_5_sec_median": 2.40 },
+    "F": { "median_mod_h": 22464.96,  "numba_baseline_mod_h": null,    "ratio_vs_numba": null, "cold_start_run1_sec": 36.77, "hot_cache_run2_5_sec_median": 7.91 },
+    "G": { "median_mod_h": 5612.68,   "numba_baseline_mod_h": 45000,   "ratio_vs_numba": 0.12, "cold_start_run1_sec": 36.14, "hot_cache_run2_5_sec_median": 32.00 },
+    "H": { "median_mod_h": 1483.92,   "numba_baseline_mod_h": null,    "ratio_vs_numba": null, "cold_start_run1_sec": 191.81, "hot_cache_run2_5_sec_median": 24.10 }
+  },
+  "benchmark_vmap_real": {
+    "A": { "median_mod_h": 229394.50, "ratio_vs_numba": 0.19 },
+    "B": { "median_mod_h": 119473.78, "ratio_vs_numba": 0.37 },
+    "C": { "median_mod_h": 94300.87,  "ratio_vs_numba": 0.79 },
+    "D": { "median_mod_h": 211182.01, "ratio_vs_numba": null },
+    "E": { "median_mod_h": 33968.71,  "ratio_vs_numba": 0.28 },
+    "F": { "median_mod_h": 31088.18,  "ratio_vs_numba": null },
+    "G": { "median_mod_h": 8528.95,   "ratio_vs_numba": 0.19 },
+    "H": { "median_mod_h": 1351.80,   "ratio_vs_numba": null }
+  },
+  "gate_results": {
+    "A": { "best_mod_h": 448397.97, "ratio": 0.38, "pass": false },
+    "B": { "best_mod_h": 119473.78, "ratio": 0.37, "pass": false },
+    "E": { "best_mod_h": 74899.89,  "ratio": 0.61, "pass": false }
+  },
+  "h_scenario_note": "dip_degs max=87.5° (JAX) vs 90.0° (Numba benchmark v2.36 D2)",
+  "audit_findings": {
+    "patologia_1_cold_start": {
+      "description": "vmap mode Run 1 é 35-119× mais lento que Runs 2-5",
+      "root_cause": "_BUCKET_JIT_CACHE keyed em (camad_t, camad_r, n, npt) gera ~50 entradas distintas para 50 modelos com perfis aleatórios; warmup com models[0] cobre apenas O(1)",
+      "code_ref": "geosteering_ai/simulation/_jax/forward_pure.py:573",
+      "mitigation": "vmap_real (jax_vmap_real=True) usa _UNIFIED_JIT_CACHE keyed (n, npt) — invariante a modelos, sem cold-start"
+    },
+    "patologia_2_jax_slower_than_numba": {
+      "description": "JAX GPU hot-cache 2-5× mais lento que Numba CPU",
+      "root_causes": [
+        "Loop Python serial sobre modelos (GIL preso) em multi_forward.py:400-422",
+        "build_static_context() recriado por modelo: 5-20ms overhead Python",
+        "np.asarray() força sync GPU->CPU por modelo (kill async pipelining)",
+        "Ausência de vmap sobre eixo de modelos: GPU subutilizada para n_pos <= 600"
+      ],
+      "code_ref": "geosteering_ai/simulation/_jax/multi_forward.py:400-422"
+    },
+    "patologia_3_baseline_hardware_mismatch": {
+      "description": "Baseline Numba foi medido em Intel i9-9980HK 8C/16T (Mac Intel, ver .claude/perf_baseline.json:15 e docs/reports/v2.36_2026-05-15.md:8); T4 CPU é n1-standard-4 4vCPU sem HT",
+      "impact": "Gate >= 1.5× Numba não é hardware-aware; comparativo é JAX-GPU-T4 vs Numba-CPU-i9-9980HK",
+      "remediation": "Re-medir Numba localmente no T4 (geosteering-cli benchmark) antes de revalidar gate"
+    }
+  },
+  "notebook_bugs": [
+    {"id": "C1", "sev": "CRITICAL", "cell": "a1-warmup + a1-bench-defs", "description": "Warmup global usa combo fixo (2,3,2) — desalinhado dos cenários"},
+    {"id": "C2", "sev": "CRITICAL", "cell": "a1-bench-defs:median", "description": "statistics.median esconde Run 1 cold-start"},
+    {"id": "H1", "sev": "HIGH", "cell": "a1-setup", "description": "d.platform == 'gpu' é API deprecada"},
+    {"id": "H2", "sev": "HIGH", "cell": "a1-bench-defs:loop", "description": "Sem block_until_ready() explícito"},
+    {"id": "H3", "sev": "HIGH", "cell": "a1-bench-defs:warmup", "description": "Warmup por cenário usa apenas models[0]"},
+    {"id": "M1", "sev": "MEDIUM", "cell": "a1-bench-defs:H", "description": "Cenário H usa 87.5° vs Numba 90.0°"},
+    {"id": "M2", "sev": "MEDIUM", "cell": "a1-bench-defs:_build_models", "description": "esp uniforme(2,10) é alta variância — não representa produção"},
+    {"id": "M3", "sev": "MEDIUM", "cell": "a1-bench-table:gate", "description": "Numba baseline hardcoded de hardware diferente"}
+  ],
+  "proposed_roadmap_changes": [
+    {"item": "A-jax-gpu-validate", "status_before": "P1 CANDIDATE", "status_after": "P1 DONE-PARTIAL", "note": "Paridade OK, performance gate falhou"},
+    {"item": "A-jax-gpu-batched-api", "status": "P1 CANDIDATE [NOVO]", "scope": "simulate_multi_jax(models=[...]) via vmap sobre eixo n_models", "effort": "8-12h"},
+    {"item": "A-jax-gpu-benchmark-redesign", "status": "P1 BACKLOG [NOVO]", "scope": "Rewrite notebook: warmup completo + Numba local + block_until_ready + cold-start separado", "effort": "4-6h"}
+  ]
+}
