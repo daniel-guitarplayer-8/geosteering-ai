@@ -970,6 +970,16 @@ def simulate_multi_jax_batched(
     esp_batch_np = np.ascontiguousarray(np.asarray(esp_batch, dtype=np.float64))
     positions_z_np = np.asarray(positions_z, dtype=np.float64)
 
+    # GAP-C1 (Sprint A1.5 review): guard positions_z vazio/inválido
+    if positions_z_np.ndim != 1:
+        raise ValueError(
+            f"positions_z deve ser 1D (n_pos,); obtido shape {positions_z_np.shape}"
+        )
+    if positions_z_np.shape[0] == 0:
+        raise ValueError(
+            "positions_z vazio — forneça ao menos 1 posição TVD para simular."
+        )
+
     if rho_h_batch_np.ndim != 2:
         raise ValueError(
             f"rho_h_batch deve ser 2D (n_models, n_camadas); obtido shape "

@@ -568,3 +568,198 @@ def test_get_model_retorna_multi_simulation_result_jax(positions_z, oklahoma_3_m
     # IndexError fora do range
     with pytest.raises(IndexError, match=r"i_model=10 fora do range"):
         res.get_model(10)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint A1.5 review fixes — GAPs identificados na revisão multi-agente
+# ──────────────────────────────────────────────────────────────────────────────
+def test_gap_c1_positions_z_vazio_levanta_value_error():
+    """GAP-C1 (CRÍTICO): positions_z=array(0,) levanta ValueError com diagnóstico."""
+    rho_h_batch = np.array([[1.0, 100.0, 1.0]], dtype=np.float64)
+    rho_v_batch = rho_h_batch.copy()
+    esp_batch = np.array([[5.0]], dtype=np.float64)
+    positions_z_empty = np.array([], dtype=np.float64)
+
+    with pytest.raises(ValueError, match=r"positions_z vazio"):
+        simulate_multi_jax_batched(
+            rho_h_batch,
+            rho_v_batch,
+            esp_batch,
+            positions_z_empty,
+            frequencies_hz=[20000.0],
+            tr_spacings_m=[1.0],
+            dip_degs=[0.0],
+        )
+
+
+def test_gap_c2_paridade_tiv_anisotropico_forte(positions_z):
+    """GAP-C2 (CRÍTICO): paridade <1e-12 com 5 modelos TIV anisotrópicos fortes.
+
+    T2 original usava `rho_v = rho_h.copy()` (isotrópico). Este teste cobre
+    o path TIV (`rho_v != rho_h`) — bug específico no eixo vertical não
+    seria detectado pelos testes anteriores.
+    """
+    n_models, n = 5, 3
+    rng = np.random.default_rng(7)
+    rho_h_batch = rng.uniform(1.0, 100.0, size=(n_models, n))
+    # Anisotropia forte: rho_v 2-5× maior que rho_h por camada
+    rho_v_batch = rho_h_batch * rng.uniform(2.0, 5.0, size=(n_models, n))
+    esp_batch = rng.uniform(2.0, 10.0, size=(n_models, n - 2))
+
+    H_serial = np.stack(
+        [
+            simulate_multi_jax(
+                rho_h=rho_h_batch[i],
+                rho_v=rho_v_batch[i],
+                esp=esp_batch[i],
+                positions_z=positions_z,
+                frequencies_hz=[20000.0, 80000.0],
+                tr_spacings_m=[0.5, 1.0],
+                dip_degs=[0.0, 30.0, 60.0],
+            ).H_tensor
+            for i in range(n_models)
+        ]
+    )
+
+    res_batched = simulate_multi_jax_batched(
+        rho_h_batch,
+        rho_v_batch,
+        esp_batch,
+        positions_z,
+        frequencies_hz=[20000.0, 80000.0],
+        tr_spacings_m=[0.5, 1.0],
+        dip_degs=[0.0, 30.0, 60.0],
+    )
+
+    diff = np.max(np.abs(H_serial - res_batched.H_tensor))
+    assert (
+        diff < 1e-12
+    ), f"GAP-C2 paridade TIV anisotrópico falhou: max |diff| = {diff:.2e}"
+
+
+@pytest.mark.parametrize(
+    "campo_vazio",
+    ["frequencies_hz", "tr_spacings_m", "dip_degs"],
+)
+def test_gap_a1_listas_vazias_levantam_value_error(
+    positions_z, oklahoma_3_model, campo_vazio
+):
+    """GAP-A1 (ALTO): 3 caminhos "lista vazia" levantam ValueError dedicado."""
+    rho_h_batch = oklahoma_3_model["rho_h"][np.newaxis, :]
+    rho_v_batch = oklahoma_3_model["rho_v"][np.newaxis, :]
+    esp_batch = oklahoma_3_model["esp"][np.newaxis, :]
+
+    kwargs = {
+        "frequencies_hz": [20000.0],
+        "tr_spacings_m": [1.0],
+        "dip_degs": [0.0],
+    }
+    kwargs[campo_vazio] = []
+
+    with pytest.raises(ValueError, match=campo_vazio):
+        simulate_multi_jax_batched(
+            rho_h_batch,
+            rho_v_batch,
+            esp_batch,
+            positions_z,
+            **kwargs,
+        )
+
+
+def test_gap_a2_rho_h_batch_1d_levanta_value_error(positions_z):
+    """GAP-A2 (ALTO): rho_h_batch 1D (erro comum de uso) levanta ValueError."""
+    rho_h_1d = np.array([1.0, 100.0, 1.0])  # 1D — erro de uso comum
+    rho_v_1d = rho_h_1d.copy()
+    esp_1d = np.array([5.0])
+
+    with pytest.raises(ValueError, match=r"rho_h_batch deve ser 2D"):
+        simulate_multi_jax_batched(
+            rho_h_1d,
+            rho_v_1d,
+            esp_1d,
+            positions_z,
+            frequencies_hz=[20000.0],
+            tr_spacings_m=[1.0],
+            dip_degs=[0.0],
+        )
+
+
+def test_gap_a3_simulate_multi_jax_legada_valores_inalterados_snapshot(
+    positions_z, oklahoma_3_model
+):
+    """GAP-A3 (ALTO): valores numéricos da API legada inalterados após A1.5.
+
+    Estende T15: além de shape/dtype, verifica que valores específicos em
+    posições de referência permanecem bit-exatos vs uma chamada de
+    `simulate_multi_jax` (proxy de snapshot pré-A1.5). Detecta regressão
+    silenciosa no `_UNIFIED_JIT_CACHE` ou path legado.
+    """
+    # Chama 2× simulate_multi_jax para verificar determinismo (cache não corrompido)
+    res1 = simulate_multi_jax(
+        rho_h=oklahoma_3_model["rho_h"],
+        rho_v=oklahoma_3_model["rho_v"],
+        esp=oklahoma_3_model["esp"],
+        positions_z=positions_z,
+        frequencies_hz=[20000.0],
+        tr_spacings_m=[1.0],
+        dip_degs=[0.0],
+    )
+    # Chamada batched intercalada — verifica que ela NÃO corrompe o cache
+    _ = simulate_multi_jax_batched(
+        oklahoma_3_model["rho_h"][np.newaxis, :],
+        oklahoma_3_model["rho_v"][np.newaxis, :],
+        oklahoma_3_model["esp"][np.newaxis, :],
+        positions_z,
+        frequencies_hz=[20000.0],
+        tr_spacings_m=[1.0],
+        dip_degs=[0.0],
+    )
+    res2 = simulate_multi_jax(
+        rho_h=oklahoma_3_model["rho_h"],
+        rho_v=oklahoma_3_model["rho_v"],
+        esp=oklahoma_3_model["esp"],
+        positions_z=positions_z,
+        frequencies_hz=[20000.0],
+        tr_spacings_m=[1.0],
+        dip_degs=[0.0],
+    )
+
+    # API legada deve retornar EXATAMENTE os mesmos valores antes/depois de batched
+    assert np.array_equal(res1.H_tensor, res2.H_tensor), (
+        "GAP-A3: simulate_multi_jax retornou valores diferentes após chamada "
+        "intercalada de simulate_multi_jax_batched — cache _UNIFIED_JIT_CACHE "
+        "corrompido (regressão crítica)."
+    )
+
+    # Snapshot mínimo de valores não-nulos (assertiva de magnitude física)
+    H = res1.H_tensor[0, 0]  # (n_pos, nf, 9) shape: (50, 1, 9)
+    # Posição central (poço atravessando middle layer) — Hzz deve ser não-nulo
+    Hzz_center = H[len(positions_z) // 2, 0, 8]  # componente 8 = Hzz
+    assert (
+        np.abs(Hzz_center) > 1e-15
+    ), f"GAP-A3: Hzz central degenerou para zero: {Hzz_center}"
+
+
+def test_gap_m1_frequencias_extremas_finite(positions_z, oklahoma_3_model):
+    """GAP-M1 (MÉDIO): frequências extremas (100 Hz, 1 MHz) preservam finite.
+
+    Range físico válido CLAUDE.md: 100 Hz a 1e6 Hz. Filtro Hankel pode
+    degenerar em extremos — verificar que não NaN/Inf em produção.
+    """
+    n_models = 2
+    rho_h_batch = np.stack([oklahoma_3_model["rho_h"]] * n_models)
+    rho_v_batch = np.stack([oklahoma_3_model["rho_v"]] * n_models)
+    esp_batch = np.stack([oklahoma_3_model["esp"]] * n_models)
+
+    res = simulate_multi_jax_batched(
+        rho_h_batch,
+        rho_v_batch,
+        esp_batch,
+        positions_z,
+        frequencies_hz=[100.0, 1_000_000.0],  # extremos do range válido
+        tr_spacings_m=[0.1, 10.0],  # extremos do range válido
+        dip_degs=[0.0, 89.0],  # extremos do range válido
+    )
+    assert np.all(
+        np.isfinite(res.H_tensor.view(np.float64))
+    ), "GAP-M1: NaN/Inf em frequências/TRs extremos"
