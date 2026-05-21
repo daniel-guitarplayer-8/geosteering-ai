@@ -7,6 +7,174 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.42] — 2026-05-20 — Sprint A1.5: API Batched JAX (`simulate_multi_jax_batched`)
+
+### Resumo
+
+Sprint A1.5 (`A-jax-gpu-batched-api`) introduz `simulate_multi_jax_batched()`
+— nova API pública que aplica `jax.vmap` sobre o eixo `n_models`, resolvendo
+a causa-raiz arquitetural da Sprint A1 (gate de performance falhou: A: 0.38×,
+B: 0.37×, E: 0.61× Numba). **Paridade vs loop serial: max |diff| = 8.33e-14**
+(bit-exato ordem ULP float64). 24/25 testes PASS (1 SKIP GPU).
+
+### Mudanças
+
+**1. Nova API pública batched** (`geosteering_ai/simulation/_jax/multi_forward.py`):
+
+- `simulate_multi_jax_batched(rho_h_batch, rho_v_batch, esp_batch, positions_z, ...)` —
+  aceita arrays 2D `(n_models, n)` e processa todos os modelos em um único trace
+  JAX via composição vmap dupla:
+  - Vmap externo: `in_axes=(0, 0, 0, 0)` sobre (rho_h, rho_v, h_arr, prof_arr)
+  - Vmap interno: `in_axes=(0, 0)` sobre (L_flat, theta_flat)
+- `MultiSimulationResultBatchedJAX` dataclass com shape
+  `(n_models, nTR, nAngles, n_pos, nf, 9)` complex128 + método `get_model(i)`
+- `_sanitize_profile_batch(n, esp_batch)` helper — pré-computa h_arr/prof_arr
+  para batch (Python loop sobre `_sanitize_profile_kernel` Numba, <50 ms total)
+- Reutiliza `_UNIFIED_JIT_CACHE` (key `(n, npt)` invariante a valores de modelo)
+  — 1 compilação XLA para o batch inteiro, eliminando bucket cache explosion
+
+**2. Resolve as 3 causas-raiz da Sprint A1**:
+
+| Causa-raiz | Antes | Depois |
+|:--|:--|:--|
+| Bucket cache explosion | ~50 compilações XLA em Run 1 | 1 compilação via `_UNIFIED_JIT_CACHE` |
+| Overhead Python serial | `build_static_context()` × 50 = 0.25-1 s | Static context compartilhado <50 ms total |
+| GPU→CPU sync por modelo | 50 syncs serializados | 1 `block_until_ready()` + 1 `np.asarray()` |
+
+**3. Exports top-level** (`geosteering_ai/simulation/__init__.py`):
+
+```python
+from geosteering_ai.simulation import (
+    simulate_multi_jax_batched,
+    MultiSimulationResultBatchedJAX,
+)
+```
+
+**4. Suite de testes** (`tests/test_simulation_jax_batched_api.py` — 24 PASS / 1 SKIP):
+
+- T1-T3: Paridade vs loop serial (<1e-12) — bit-exato
+- T4-T6: Edge cases físicos (n=1, n=2, shape/dtype)
+- T7-T8: Validações fail-fast
+- T9-T11: Garantias arquiteturais (grad, NaN/Inf, oklahoma_3)
+- T12-T13: Plataforma (CPU/GPU @pytest.mark.gpu)
+- T14: Inspeção AST — exatamente 1× block_until_ready + 1× np.asarray
+- T15: Backward-compat — `simulate_multi_jax` legada inalterada
+- **Review fixes (8 gaps)**: positions_z vazio, TIV anisotrópico, listas vazias
+  parametrizado (3), 1D rejection, snapshot não-corrupção do cache, freqs extremos
+
+**5. Correção factual Mac Intel** (4 docs Sprint A1):
+
+- 4 docs atualizados: baseline Numba foi medido em **Intel i9-9980HK 8C/16T
+  (Mac Intel)**, NÃO Apple M-series como afirmado anteriormente
+- Referências canônicas: `.claude/perf_baseline.json:15` +
+  `docs/reports/v2.36_2026-05-15.md:8`
+
+**6. Errata sobre `multi_forward.py:400-422`** (auditoria v2.40.4):
+
+- Linhas 400-422 são loop sobre (iTR, iAng) para UM modelo (não sobre modelos)
+- Loop sobre modelos ocorria no notebook `a1-bench-defs` (50× `simulate_multi_jax`)
+- Causa-raiz arquitetural permanece: assinatura aceita 1 modelo → A1.5 resolve
+
+### Multi-Agent Review
+
+Fan-out via `feature-dev:code-reviewer` (revisão físico/vmap + revisão de cobertura):
+- 1 CRÍTICO + 3 ALTO + 1 MÉDIO **acionáveis** aplicados (GAP-C1, GAP-C2, GAP-A1,
+  GAP-A2, GAP-A3, GAP-M1)
+- 3 findings sobre legacy code (A2/A3/M2) intencionalmente **não-acionados**
+  (fora do escopo A1.5 — não modificar legacy)
+
+### Restrição arquitetural
+
+Todos os modelos do batch DEVEM compartilhar o mesmo `n` (n_camadas). Para
+`n` heterogêneo, agrupar por `n` e chamar separadamente. ValueError com
+diagnóstico claro se violado.
+
+### Não Altera
+
+- `simulate_multi_jax` legada (backward-compat 100% preservada)
+- `_BUCKET_JIT_CACHE`, `_UNIFIED_JIT_CACHE` (`forward_pure.py` intocado)
+- `_simulate_multi_jax_vmap_real` (Sprint 12 preservado)
+- `cfg.SimulationConfig` (sem flag opt-in — dispatcher é A2)
+
+### Próximo
+
+Sprint A1.6: `A-jax-gpu-benchmark-redesign` — rewrite notebook
+`validate_jax_gpu_v240.ipynb` consumindo `simulate_multi_jax_batched`,
+warmup completo, `block_until_ready` explícito, baseline Numba medido
+localmente no T4.
+
+---
+
+## [v2.41] — 2026-05-19 — Sprint A1: Validação JAX GPU T4 (DONE-PARTIAL)
+
+### Resumo
+
+Sprint A1 (`A-jax-gpu-validate`) executou `validate_jax_gpu_v240.ipynb` em
+Colab Pro+ T4 com RAM Alta. **Paridade Fortran <1e-12 confirmada em GPU real**
+(163/163 pytest PASS). **Gate de performance reprovado**: A: 0.38×, B: 0.37×,
+E: 0.61× Numba — abaixo do threshold de 1.5×. Causa-raiz identificada:
+ausência de API batched sobre o eixo de modelos (loop Python serial domina
+compute JAX).
+
+### Mudanças
+
+**1. Notebook `validate_jax_gpu_v240.ipynb` — 2 fixes críticos**:
+
+- Fix §2 `a1-l5-env`: `JAX_PLATFORMS="gpu"` → `""` (auto-detect). `"gpu"` é
+  plataforma inválida em JAX (fallback rocm → `RuntimeError`). `"cuda"` foi
+  tentado intermediariamente mas desabilitava backend CPU, quebrando
+  `jax.pure_callback` em `kernel.py:400` (Numba FFI requer CPU backend
+  registrado). Solução final: string vazia inicializa todos os backends
+  disponíveis (CPU + CUDA).
+- Markdown atualizado nas células `a1-sec4-md` para refletir a correção.
+
+**2. Artefatos gerados**:
+
+- `docs/perf_baselines/sprint_a1_jax_benchmark_t4_20260519_192245.json` —
+  dados completos benchmark A–H × {vmap, vmap_real} × 5 runs, gate results,
+  audit_findings com referências de código exatas.
+- `docs/reports/v2.40.4_auditoria_resultados_sprint_a1_2026-05-19.md` —
+  relatório de auditoria (8 seções + 2 apêndices): 3 patologias, 8 bugs no
+  notebook (C1-C2 críticos, H1-H3 altos, M1-M3 médios), 4 caminhos de decisão.
+
+**3. ROADMAP §0 atualizado**:
+
+- `A-jax-gpu-validate`: CANDIDATE → **DONE-PARTIAL**
+- `A-jax-gpu-batched-api`: **NOVO**, P1 CANDIDATE — API batched via vmap eixo n_models
+- `A-jax-gpu-benchmark-redesign`: **NOVO**, P1 BACKLOG — rewrite notebook
+- `A-jax-gpu-dispatcher`: dependência atualizada para batched-api + benchmark-redesign
+- `C-surrogate-train`: dependências expandidas para incluir A1.5 + A1.6
+
+**4. Docs de sprint**:
+
+- `docs/sprints/v2.41.md` — snapshot imutável Sprint A1 (este arquivo)
+- `docs/sprints/CURRENT.md` — plano Sprint A1.5 (`A-jax-gpu-batched-api`)
+
+### Resultados Benchmark T4 (resumo)
+
+| Cenário | vmap (mod/h) | vmap_real (mod/h) | Ratio Numba | Gate |
+|:-:|:-:|:-:|:-:|:-:|
+| A | 448 397 | 229 394 | 0.38× | FAIL |
+| B | 92 745 | 119 473 | 0.37× | FAIL |
+| E | 74 899 | 33 968 | 0.61× | FAIL |
+| C | 94 372 | 94 300 | 0.79× | — |
+| G | 5 612 | 8 528 | 0.12× | — |
+
+### Auditoria (3 patologias)
+
+1. **Cold-start 35-119×**: `_BUCKET_JIT_CACHE` keyed `(ct, cr, n, npt)` — 50
+   modelos aleatórios geram ~50 compilações na Run 1 (`forward_pure.py:573`)
+2. **JAX mais lento que Numba**: loop Python serial + `build_static_context()`
+   5-20ms/modelo + `np.asarray()` GPU→CPU sync por modelo (`multi_forward.py:400-422`)
+3. **Hardware mismatch**: baseline Numba medido em **Intel i9-9980HK 8C/16T (Mac Intel)** — `.claude/perf_baseline.json:15`, `docs/reports/v2.36_2026-05-15.md:8`; T4 tem 4vCPU sem HT
+
+### Próximo
+
+Sprint A1.5: `A-jax-gpu-batched-api` — implementar
+`simulate_multi_jax_batched(models=[...])` via `jax.vmap` sobre eixo `n_models`.
+
+---
+
 ## [v2.40] — 2026-05-18 — MCP colab-bridge + tf.data + Mixed Precision
 
 ### Resumo
