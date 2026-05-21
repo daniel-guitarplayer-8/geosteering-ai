@@ -403,12 +403,19 @@ def main(argv: list[str] | None = None) -> int:
     # Desabilitar propagate corta o segundo caminho sem suprimir o primeiro.
     logging.getLogger("jax").propagate = False
 
-    # Sprint v2.31 Part 2 — Inicializar background warmup thread (daemon)
-    # para pré-aquecer LLVM Tier 2 offline, reduzindo contenda com user work
-    threading.Thread(target=_warmup_numba_tier2_background, daemon=True).start()
-
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Sprint v2.38 — Background warmup APENAS quando não há subcomando compute-heavy.
+    # `simulate` e `benchmark` spawn workers via ProcessPoolExecutor que executam
+    # seu PRÓPRIO warmup determinístico em `_simulate_worker_init` (sm_workers).
+    # Disparar o warmup no PAI nesses casos só contende com spawn de workers para
+    # CPU/imports, adicionando 0.5-1s de jitter sem benefício (cada processo
+    # worker JIT-compila ou recarrega do .nbc cache independentemente). A
+    # mitigação original (Sprint v2.31 Part 2) supunha múltiplos runs no MESMO
+    # processo Python — não é o caso da CLI (cada invocação = novo processo).
+    if args.command not in ("simulate", "benchmark"):
+        threading.Thread(target=_warmup_numba_tier2_background, daemon=True).start()
 
     if args.command is None:
         parser.print_help(sys.stderr)
