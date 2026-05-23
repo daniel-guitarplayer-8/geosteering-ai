@@ -7,7 +7,7 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
-## [v2.43] — 2026-05-22 — Sprint A1.6: Rewrite Notebook JAX GPU Benchmark
+## [v2.43] — 2026-05-22/2026-05-23 — Sprint A1.6: Rewrite Notebook JAX GPU Benchmark + Validação T4
 
 ### Resumo
 
@@ -15,6 +15,23 @@ Sprint A1.6 (`A-jax-gpu-benchmark-redesign`) reescreve o notebook
 `validate_jax_gpu_v240.ipynb` para consumir a API batched
 `simulate_multi_jax_batched` (introduzida em v2.42) e corrigir 8 bugs
 metodológicos identificados na auditoria `v2.40.4_auditoria_resultados_sprint_a1`.
+
+**Validação experimental T4 (2026-05-23, commit `a06cf12`):**
+
+- 164/164 testes paridade Fortran PASS (tol <1e-12)
+- Gate ≥1.5× Numba T4 LOCAL APROVADO: A 2.56×, B 2.86×, E 1.90×
+- Warmup CRIT-2 efetivo (C/H ratio ∈ [0.87, 1.01])
+- **Baseline JAX GPU oficial estabelecida** (`.claude/perf_baseline.json::jax_gpu_t4`)
+- Relatório completo: [docs/reports/v2.43_jax_gpu_baseline_t4_2026-05-23.md](reports/v2.43_jax_gpu_baseline_t4_2026-05-23.md)
+
+### Corrigido pós-merge (2026-05-23, commit `a06cf12`)
+
+- **OOM cenário F em T4** (`XlaRuntimeError: RESOURCE_EXHAUSTED, 17.8 GB`):
+  reduzido `N_MODELS_PER_SCENARIO` para F=20, G=5, H=5 (XLA materializa
+  `n_models × nTR × nAng` simultaneamente). A/B/C/D/E mantêm n_models=50.
+- **`try/except RESOURCE_EXHAUSTED`** no warmup (Cell 7) e benchmark (Cell 14)
+  para degradação graciosa em cenários que ainda OOM (H em T4).
+- **`oom: true`** marcador no JSON quando cenário pulado por falta de VRAM.
 
 ### Adicionado
 

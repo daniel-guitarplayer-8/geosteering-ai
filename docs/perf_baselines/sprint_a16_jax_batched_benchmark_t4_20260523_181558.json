@@ -1,0 +1,71 @@
+{
+  "sprint": "A1.6 — A-jax-gpu-benchmark-redesign",
+  "template": "validate_jax_gpu_v240 (Sprint A1.6 rewrite)",
+  "git_tag": "main",
+  "git_commit": "a06cf122ef9b6a25b878915f2c2af4db9de53e2b",
+  "runtime": "t4",
+  "timestamp_utc": "20260523_181558",
+  "config": {
+    "n_models_per_scenario": {
+      "A": 50, "B": 50, "C": 50, "D": 50, "E": 50,
+      "F": 20, "G": 5, "H": 5
+    },
+    "n_runs_hot": 4,
+    "seed": 42,
+    "paridade_tol": 1e-12,
+    "jax_enable_x64": true,
+    "api": "simulate_multi_jax_batched (Sprint A1.5 v2.42)",
+    "positions_z_range": "[-5.0, 5.0] (match CLI benchmark.py:259)",
+    "numba_baseline_workers": 4,
+    "numba_baseline_threads": 1,
+    "numba_cli_timeout_s": {
+      "A": 600, "B": 600, "C": 600, "D": 600, "E": 600,
+      "F": 600, "G": 600, "H": 1800
+    }
+  },
+  "pytest_summary": {"passed": 164, "total": 164, "collected": 188, "deselected": 24},
+  "pytest_duration_sec": 1830.1000709533691,
+  "benchmark_batched": {
+    "A": {"n_models": 50, "n_pos": 1, "nf": 1, "nTR": 1, "nAng": 1,
+          "run_1_cold_mod_h": 5978418.31, "median_hot_mod_h": 6899537.33,
+          "ratio_cold_to_hot": 0.8665, "latency_ms_per_model_hot": 0.5218,
+          "numba_t4_local_mod_h": 2692990.0, "numba_baseline_historical_mod_h": 1180000},
+    "B": {"n_models": 50, "n_pos": 100, "nf": 1, "nTR": 1, "nAng": 1,
+          "run_1_cold_mod_h": 234303.79, "median_hot_mod_h": 257629.13,
+          "ratio_cold_to_hot": 0.9095, "latency_ms_per_model_hot": 13.97,
+          "numba_t4_local_mod_h": 90158.0, "numba_baseline_historical_mod_h": 320000},
+    "C": {"n_models": 50, "n_pos": 100, "nf": 4, "nTR": 1, "nAng": 1,
+          "run_1_cold_mod_h": 149941.25, "median_hot_mod_h": 151073.24,
+          "ratio_cold_to_hot": 0.9925, "latency_ms_per_model_hot": 23.83,
+          "numba_t4_local_mod_h": 26509.0, "numba_baseline_historical_mod_h": 119000},
+    "D": {"n_models": 50, "n_pos": 1, "nf": 1, "nTR": 4, "nAng": 1,
+          "run_1_cold_mod_h": 4509038.03, "median_hot_mod_h": 4931077.75,
+          "ratio_cold_to_hot": 0.9144, "latency_ms_per_model_hot": 0.7301,
+          "numba_t4_local_mod_h": 964837.0, "numba_baseline_historical_mod_h": null},
+    "E": {"n_models": 50, "n_pos": 600, "nf": 1, "nTR": 1, "nAng": 1,
+          "run_1_cold_mod_h": 43159.26, "median_hot_mod_h": 43021.26,
+          "ratio_cold_to_hot": 1.0032, "latency_ms_per_model_hot": 83.68,
+          "numba_t4_local_mod_h": 22653.0, "numba_baseline_historical_mod_h": 122000},
+    "F": {"n_models": 20, "n_pos": 100, "nf": 4, "nTR": 4, "nAng": 1,
+          "run_1_cold_mod_h": 36688.18, "median_hot_mod_h": 36467.73,
+          "ratio_cold_to_hot": 1.0060, "latency_ms_per_model_hot": 98.72,
+          "numba_t4_local_mod_h": 8079.0, "numba_baseline_historical_mod_h": null},
+    "G": {"n_models": 5, "n_pos": 100, "nf": 4, "nTR": 4, "nAng": 4,
+          "run_1_cold_mod_h": 9156.86, "median_hot_mod_h": 9197.41,
+          "ratio_cold_to_hot": 0.9956, "latency_ms_per_model_hot": 391.41,
+          "numba_t4_local_mod_h": 2093.0, "numba_baseline_historical_mod_h": 45000},
+    "H": {"n_models": 5, "n_pos": 100, "nf": 8, "nTR": 8, "nAng": 8,
+          "oom": true, "numba_t4_local_mod_h": 416.0, "numba_baseline_historical_mod_h": null}
+  },
+  "numba_t4_local_baselines": {
+    "A": 2692990.0, "B": 90158.0, "C": 26509.0, "D": 964837.0,
+    "E": 22653.0, "F": 8079.0, "G": 2093.0, "H": 416.0
+  },
+  "gate_results": {
+    "A": {"median_hot_mod_h": 6899537.33, "numba_t4_local_mod_h": 2692990.0, "ratio_hot_vs_t4": 2.562, "pass": true},
+    "B": {"median_hot_mod_h": 257629.13, "numba_t4_local_mod_h": 90158.0, "ratio_hot_vs_t4": 2.858, "pass": true},
+    "E": {"median_hot_mod_h": 43021.26, "numba_t4_local_mod_h": 22653.0, "ratio_hot_vs_t4": 1.899, "pass": true}
+  },
+  "gate_pass": true,
+  "gate_evaluable": true
+}

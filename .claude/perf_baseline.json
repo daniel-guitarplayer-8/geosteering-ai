@@ -22,7 +22,113 @@
       "notes": "Estresse multi-core 8×8×8=512 combos, n=2, --workers 2 --threads 2. Intel i9-9980HK. Threshold 90% = 695 mod/h."
     }
   },
+  "jax_gpu_t4": {
+    "_meta": {
+      "version": "v2.43",
+      "commit": "a06cf122ef9b6a25b878915f2c2af4db9de53e2b",
+      "measured_at": "2026-05-23T18:15:58Z",
+      "hardware": "NVIDIA Tesla T4, 15 GB VRAM, Colab Pro+ n1-standard-4",
+      "api": "simulate_multi_jax_batched (Sprint A1.5 v2.42)",
+      "jax_x64": true,
+      "jax_platforms": "cuda,cpu",
+      "filter": "Werthmüller 201pt",
+      "n_runs_hot": 4,
+      "seed": 42,
+      "raw_json": "docs/perf_baselines/sprint_a16_jax_batched_benchmark_t4_20260523_181558.json",
+      "report": "docs/reports/v2.43_jax_gpu_baseline_t4_2026-05-23.md",
+      "threshold_pct": 90,
+      "notes": "Baseline canônica oficial do simulador JAX GPU. Qualquer alteração no caminho hot de _jax/ ou simulate_multi_jax_batched deve preservar ≥90% destes valores E manter paridade Fortran <1e-12 (pytest -m gpu 164/164 PASS)."
+    },
+    "A_hot": {
+      "throughput_mod_h": 6899537,
+      "n_models": 50,
+      "n_pos": 1,
+      "nf_nTR_nAng": "1x1x1",
+      "ratio_vs_numba_t4_local": 2.562,
+      "gate_member": true,
+      "threshold_90pct": 6209583,
+      "notes": "Single-pos limite inferior GPU. C/H=0.87 (timer noise em escala ~5ms)."
+    },
+    "B_hot": {
+      "throughput_mod_h": 257629,
+      "n_models": 50,
+      "n_pos": 100,
+      "nf_nTR_nAng": "1x1x1",
+      "ratio_vs_numba_t4_local": 2.858,
+      "gate_member": true,
+      "threshold_90pct": 231866,
+      "notes": "Multi-pos baseline. C/H=0.91."
+    },
+    "C_hot": {
+      "throughput_mod_h": 151073,
+      "n_models": 50,
+      "n_pos": 100,
+      "nf_nTR_nAng": "4x1x1",
+      "ratio_vs_numba_t4_local": 5.700,
+      "gate_member": false,
+      "threshold_90pct": 135966,
+      "notes": "Multi-freq vmap — sweet spot GPU. C/H=0.99."
+    },
+    "D_hot": {
+      "throughput_mod_h": 4931078,
+      "n_models": 50,
+      "n_pos": 1,
+      "nf_nTR_nAng": "1x4x1",
+      "ratio_vs_numba_t4_local": 5.110,
+      "gate_member": false,
+      "threshold_90pct": 4437970,
+      "notes": "Multi-TR vmap — sweet spot GPU. C/H=0.91."
+    },
+    "E_hot": {
+      "throughput_mod_h": 43021,
+      "n_models": 50,
+      "n_pos": 600,
+      "nf_nTR_nAng": "1x1x1",
+      "ratio_vs_numba_t4_local": 1.899,
+      "gate_member": true,
+      "threshold_90pct": 38719,
+      "notes": "n_pos=600 com fori_loop sequencial — margem apertada do gate. C/H=1.00."
+    },
+    "F_hot": {
+      "throughput_mod_h": 36468,
+      "n_models": 20,
+      "n_pos": 100,
+      "nf_nTR_nAng": "4x4x1",
+      "ratio_vs_numba_t4_local": 4.514,
+      "gate_member": false,
+      "threshold_90pct": 32821,
+      "notes": "Multi-freq×TR. n_models=20 calibrado para T4 (50 → OOM 17.8 GB). C/H=1.01."
+    },
+    "G_hot": {
+      "throughput_mod_h": 9197,
+      "n_models": 5,
+      "n_pos": 100,
+      "nf_nTR_nAng": "4x4x4",
+      "ratio_vs_numba_t4_local": 4.393,
+      "gate_member": false,
+      "threshold_90pct": 8277,
+      "notes": "Triple-nested vmap. n_models=5 calibrado para T4. C/H=1.00."
+    },
+    "H_hot": {
+      "throughput_mod_h": null,
+      "n_models": 5,
+      "n_pos": 100,
+      "nf_nTR_nAng": "8x8x8",
+      "oom_in_t4": true,
+      "notes": "OOM em T4 mesmo com 5 modelos (8×8×8=512 combos). Aceito como N/A em T4. Sprint v2.46 avaliará Colab A100 (40 GB)."
+    },
+    "_gate_criterion": {
+      "min_ratio": 1.5,
+      "scenarios": ["A", "B", "E"],
+      "status_baseline": "PASS",
+      "details": {
+        "A": "2.56× (margem +71%)",
+        "B": "2.86× (margem +90%)",
+        "E": "1.90× (margem +27%)"
+      }
+    }
+  },
   "threshold_pct": 90,
-  "version": "v2.36",
-  "notes": "Atualize manualmente após otimizações intencionais (>+5%). E_n200_warm exige medição pós-warmup explícito via 'geosteering-warmup --verbose'."
+  "version": "v2.43",
+  "notes": "Atualize manualmente após otimizações intencionais (>+5%). E_n200_warm exige medição pós-warmup explícito via 'geosteering-warmup --verbose'. jax_gpu_t4 exige re-medição em Colab T4 via notebook validate_jax_gpu_v240.ipynb."
 }

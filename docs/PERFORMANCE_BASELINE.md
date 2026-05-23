@@ -1,12 +1,13 @@
-# Performance Baseline — Simulador Python Numba JIT
+# Performance Baseline — Simulador Python (Numba JIT + JAX GPU)
 
 | Campo | Valor |
 |:------|:------|
-| **Documento** | Baseline canônico de throughput do simulador |
-| **Versão atual** | v2.34 |
-| **Última atualização** | 2026-05-15 |
+| **Documento** | Baseline canônico de throughput do simulador (Numba CPU + JAX GPU) |
+| **Versão atual** | v2.43 (Numba baseline v2.34 + JAX GPU baseline Sprint A1.6) |
+| **Última atualização** | 2026-05-23 |
 | **Hook anti-regressão** | [`.claude/hooks/check-perf-regression.sh`](../.claude/hooks/check-perf-regression.sh) |
 | **Baseline JSON** | [`.claude/perf_baseline.json`](../.claude/perf_baseline.json) |
+| **Seção JAX GPU** | [§9 abaixo](#9-jax-gpu-t4-baseline-sprint-a16) |
 
 ---
 
@@ -297,3 +298,100 @@ config = PipelineConfig(
 # Ou manual (sem MCP):
 # Upload benchmark_tfdata_mp16.ipynb para Colab → Runtime GPU → Run all
 ```
+
+---
+
+## 9. JAX GPU T4 Baseline (Sprint A1.6)
+
+**Estabelecida em**: v2.43 (2026-05-23) — Sprint A1.6 `A-jax-gpu-benchmark-redesign`
+
+Esta seção complementa a baseline Numba CPU (§1-§7) e TF Training (§8)
+com a **baseline canônica oficial do simulador JAX GPU** em NVIDIA T4.
+
+### 9.1 Validação Experimental
+
+| Item | Valor |
+|:-----|:------|
+| Hardware | NVIDIA Tesla T4 (15 GB VRAM, n1-standard-4) |
+| Plataforma | Google Colab Pro+ |
+| Commit baseline | [`a06cf12`](https://github.com/daniel-guitarplayer-8/geosteering-ai/commit/a06cf122ef9b6a25b878915f2c2af4db9de53e2b) |
+| Notebook | [`validate_jax_gpu_v240.ipynb`](../notebooks/colab_templates/validate_jax_gpu_v240.ipynb) |
+| API | `simulate_multi_jax_batched` (Sprint A1.5, v2.42) |
+| JAX version | 0.4.38+ (X64 enabled, `JAX_PLATFORMS="cuda,cpu"`) |
+| Filtro Hankel | Werthmüller 201pt (paridade Fortran) |
+| Precisão | `complex128` (sem mixed precision) |
+| Paridade Fortran | 164/164 testes `pytest -m gpu` PASS (<1e-12) |
+| Gate de aceitação | ≥1.5× Numba T4 LOCAL em A, B, E |
+| Resultado | ✅ **GATE APROVADO** (A: 2.56×, B: 2.86×, E: 1.90×) |
+
+### 9.2 Tabela Baseline (mediana hot, 4 runs)
+
+| Cenário | n_pos | nf×TR×Ang | n_models | Throughput (mod/h) | vs Numba T4 | Threshold 90% | Membro do gate |
+|:-------:|:-----:|:---------:|:--------:|-------------------:|:-----------:|--------------:|:--------------:|
+| **A** |   1 | 1×1×1 | 50 | **6 899 537** | 2.56× | 6 209 583 | ✅ Sim |
+| **B** | 100 | 1×1×1 | 50 |   **257 629** | 2.86× |   231 866 | ✅ Sim |
+| **C** | 100 | 4×1×1 | 50 |   **151 073** | 5.70× |   135 966 | — |
+| **D** |   1 | 1×4×1 | 50 | **4 931 078** | 5.11× | 4 437 970 | — |
+| **E** | 600 | 1×1×1 | 50 |    **43 021** | 1.90× |    38 719 | ✅ Sim |
+| **F** | 100 | 4×4×1 | 20 |    **36 468** | 4.51× |    32 821 | — |
+| **G** | 100 | 4×4×4 |  5 |     **9 197** | 4.39× |     8 277 | — |
+| **H** | 100 | 8×8×8 |  5 |        (OOM)  |    —  |        —  | — (N/A em T4) |
+
+### 9.3 N_MODELS Calibrado por Cenário (T4 15 GB VRAM)
+
+A memória XLA escala como `n_models × nTR × nAng × per_unit_buffer`.
+Para evitar OOM em T4:
+
+```python
+N_MODELS_PER_SCENARIO = {
+    "A": 50, "B": 50, "C": 50, "D": 50, "E": 50,  # gate scenarios — sem pressão VRAM
+    "F": 20,  # 4 TR × 1 Ang — 50 → OOM 17.8 GB; 20 → ~7 GB
+    "G": 5,   # 4 TR × 4 Ang — 4× pior que F
+    "H": 5,   # 8 TR × 8 Ang — OOM mesmo com 5 (deferido A100)
+}
+```
+
+Cenários A/B/C/D/E (gate + multi-config simples) usam **n_models=50** sem
+risco de OOM. F/G/H usam valores reduzidos calibrados empiricamente.
+
+### 9.4 Política de Não-Regressão
+
+Toda alteração no caminho hot do simulador JAX deve:
+
+1. **Manter paridade Fortran <1e-12** — pytest `-m gpu` 164/164 PASS
+2. **Não regredir gate**: razão hot/Numba_T4_LOCAL ≥1.5× em A, B, E
+3. **Não regredir throughput** ≥90% do baseline em A-G executáveis
+4. **Documentar** qualquer mudança >+5%: bump `.claude/perf_baseline.json`
+   + nova entrada na §9.6 (histórico)
+5. **Consultar skill `geosteering-jax`** antes de editar `_jax/`
+
+### 9.5 Workflow de Re-medição
+
+```bash
+# 1. Abrir Google Colab Pro+ com GPU T4 (Runtime → Change runtime type → GPU)
+# 2. Upload notebooks/colab_templates/validate_jax_gpu_v240.ipynb
+# 3. Em Cell 3, ajustar GIT_TAG="vX.YZ" (tag a validar)
+# 4. Run All — espera-se ~30 min total (pytest + warmup + benchmark)
+# 5. JSON gerado em /content/drive/MyDrive/Geosteering_AI/sprint_a16/
+# 6. Download manual + commit em docs/perf_baselines/
+# 7. Se gate PASS e throughput ≥ baseline:
+#    - Bump .claude/perf_baseline.json::jax_gpu_t4
+#    - Append entrada §9.6 abaixo
+#    - Atualizar relatório docs/reports/vX.YZ_jax_gpu_baseline_t4_*.md
+```
+
+### 9.6 Histórico de Versões JAX GPU
+
+| Versão | Data | Hardware | Gate (A/B/E) | A_hot | E_hot | Notas |
+|:------:|:----:|:--------:|:------------:|:-----:|:-----:|:------|
+| v2.43 | 2026-05-23 | T4 Colab | ✅ PASS (2.56×, 2.86×, 1.90×) | 6 899 537 | 43 021 | **Baseline canônica oficial** — Sprint A1.6 com batched API |
+
+### 9.7 Referências JAX GPU
+
+- [Sprint A1.6 snapshot](sprints/v2.43.md) — notebook rewrite + 8 bug fixes
+- [Sprint A1.5 snapshot](sprints/v2.42.md) — `simulate_multi_jax_batched` API
+- [Relatório completo v2.43](reports/v2.43_jax_gpu_baseline_t4_2026-05-23.md) —
+  análise detalhada desta baseline (paridade, warmup, speedups, OOM, próximos passos)
+- [JSON bruto da medição](perf_baselines/sprint_a16_jax_batched_benchmark_t4_20260523_181558.json)
+- [Audit v2.40.4](reports/v2.40.4_auditoria_resultados_sprint_a1.md) — 8 bugs metodológicos originais
+- Skill `geosteering-jax` — expertise no backend JAX (uso obrigatório antes de tocar `_jax/`)
