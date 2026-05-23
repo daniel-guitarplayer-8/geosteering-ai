@@ -8,14 +8,20 @@
 
 **Nenhuma sprint em execução no momento.**
 
-Sprint A1.5 (`A-jax-gpu-batched-api`) concluída em 2026-05-20 — ver snapshot
-em [v2.42.md](v2.42.md).
+Sprint A1.6 (`A-jax-gpu-benchmark-redesign`) concluída em 2026-05-22 — ver
+snapshot em [v2.43.md](v2.43.md).
 
-Próximo candidato no backlog (ver [docs/ROADMAP.md §0](../ROADMAP.md#0-backlog-priorizado-ssot)):
+Próximo candidato no backlog (ver
+[docs/ROADMAP.md §0](../ROADMAP.md#0-backlog-priorizado-ssot)):
 
 | Code | Trilha | Item | Status |
 |:--|:-:|:--|:-:|
-| `A-jax-gpu-benchmark-redesign` | A | Rewrite notebook `validate_jax_gpu_v240.ipynb` + baseline Numba local T4 | CANDIDATE |
+| `A-jax-gpu-dispatcher` | A | `simulation.simulate(cfg, backend=...)` com backend ∈ {jax_gpu, numba_cpu, auto}; auto-detect via `jax.devices()` | BACKLOG (dep: A1.6 ✓) |
+
+**Bloqueio**: Sprint A2 (`A-jax-gpu-dispatcher`) só faz sentido após
+usuário executar `validate_jax_gpu_v240.ipynb` em Colab Pro+ T4 e
+confirmar o gate ≥1.5× Numba T4 LOCAL em A/B/E. Se o gate falhar,
+investigar antes de A2.
 
 ---
 

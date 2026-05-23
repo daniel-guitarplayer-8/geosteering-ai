@@ -7,6 +7,83 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.43] — 2026-05-22 — Sprint A1.6: Rewrite Notebook JAX GPU Benchmark
+
+### Resumo
+
+Sprint A1.6 (`A-jax-gpu-benchmark-redesign`) reescreve o notebook
+`validate_jax_gpu_v240.ipynb` para consumir a API batched
+`simulate_multi_jax_batched` (introduzida em v2.42) e corrigir 8 bugs
+metodológicos identificados na auditoria `v2.40.4_auditoria_resultados_sprint_a1`.
+
+### Adicionado
+
+- **Notebook reescrito** (`notebooks/colab_templates/validate_jax_gpu_v240.ipynb`):
+  21 células (10 md + 11 code), substitui loop Python `for m in models:
+  simulate_multi_jax(...)` por uma única chamada `simulate_multi_jax_batched`.
+- **Baseline Numba T4 LOCAL** via `subprocess.run(["geosteering-cli", "benchmark",
+  ...])` com `--workers/--threads` pinados (4w × 1t para n1-standard-4 sem HT).
+- **Run 1 (cold) reportado separado** de `statistics.median(Runs 2-5 hot)`.
+- **Ratio cold/hot** como diagnóstico de efetividade de warmup (≈1.0 esperado).
+- **`fixes_applied` + `review_fixes_applied`** dicts no JSON de saída para
+  rastreabilidade dos 8 bug fixes + 9 review findings.
+
+### Corrigido (8 bugs metodológicos da Sprint A1)
+
+- **C1 (CRIT)**: warmup global shape fixa → warmup por-cenário com batch size
+  EXATO de `N_MODELS_PER_SCENARIO[scen]` (XLA cache key inclui axis size).
+- **C2 (CRIT)**: `statistics.median([T1..T5])` mascarava cold-start → Run 1
+  isolado, mediana apenas sobre Runs 2-5 hot.
+- **H1 (HIGH)**: `d.platform == "gpu"` deprecada → `jax.default_backend()
+  in ("gpu", "cuda")` (compat JAX 0.4.14+).
+- **H2 (HIGH)**: sem `block_until_ready()` explícito → batched API já chama
+  internamente; defensivo `result.H_tensor.shape` após call.
+- **H3 (HIGH)**: warmup só `models[0]` (50 ct/cr distintos no `_BUCKET_JIT_CACHE`)
+  → resolvido por design (`_UNIFIED_JIT_CACHE` keyed `(n, npt)`).
+- **M1 (MED)**: H dip 87.5° JAX vs 90° Numba → documentado (validador JAX cap
+  em 89°); tabela imprime `(dip≠)` no lugar do ratio; H fora do gate.
+- **M2 (MED)**: `esp` alta variância → resolvido por design (cache não chaveia
+  em esp).
+- **M3 (MED)**: Numba baseline hardcoded i9-9980HK → medição local T4 via CLI
+  subprocess.
+
+### Corrigido (9 review findings multi-agente — C02)
+
+- **CRIT-1**: `latency_ms_per_model_hot` formula off-by-factor `n_models`
+  → `3_600_000.0 / median_hot` (correto).
+- **CRIT-2**: warmup `batch=2` não cobre benchmark `batch=50/10` (XLA re-traçava
+  outer vmap) → `np.tile(template, (N_MODELS_PER_SCENARIO[s], 1))`.
+- **HIGH-1**: `FileNotFoundError/OSError` não capturados em CLI subprocess →
+  capturados, retorna `None` graciosamente.
+- **HIGH-2**: cenário H timeout 600s insuficiente → `NUMBA_CLI_TIMEOUT_S[H]=1800`.
+- **MED-1**: H row na tabela sem anotação → `'(dip≠)'` + legenda.
+- **MED-3**: `_pytest_data` duplicado em Cells 9 + 18 → single load.
+- **MED-4**: `JAX_PLATFORMS=""` pode falhar JAX 0.4.30+ → `"cuda,cpu"` explícito.
+- **MED-5**: `--workers/--threads` não pinados em CLI baseline → `4w × 1t`.
+- **LOW-1**: Cell 0 table faltava linha M2 → adicionada.
+
+### Validação Local
+
+- AST OK em todas as 11 células code (após strip de magic continuations)
+- 13/13 checks de fixes presentes (incluindo dimensional)
+- 24 PASS / 1 SKIP em `test_simulation_jax_batched_api.py` (zero regressão)
+- Suite total preservada (1686 PASS de v2.42 mantido)
+
+### Não Alterado
+
+- `geosteering_ai/simulation/_jax/multi_forward.py` (API batched v2.42 intocada)
+- `geosteering_ai/cli/benchmark.py` (consumido como subprocess)
+- Zero testes Python novos (notebook = deliverable do usuário em Colab T4)
+- Paridade Fortran <1e-12 PRESERVADA (gate inviolável)
+
+### Próximos Passos
+
+- Usuário executa notebook em Colab Pro+ T4 e reporta resultados
+- Após gate confirmado: Sprint A2 (`A-jax-gpu-dispatcher`)
+- Ver [docs/sprints/v2.43.md](sprints/v2.43.md) (snapshot imutável)
+
+---
+
 ## [v2.42] — 2026-05-20 — Sprint A1.5: API Batched JAX (`simulate_multi_jax_batched`)
 
 ### Resumo
