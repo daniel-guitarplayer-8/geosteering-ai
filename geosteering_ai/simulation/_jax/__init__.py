@@ -126,9 +126,10 @@ def _setup_xla_environment() -> None:
 
     # ── XLA flags (combina com pré-existentes, sem duplicar) ──────────────
     existing_flags = _os.environ.get("XLA_FLAGS", "")
+    # xla_gpu_enable_triton_softmax_fusion foi removida em JAX ≥ 0.5.x (XLA 0.7+).
+    # Setar flag desconhecida causa FATAL em parse_flags_from_env.cc — mata o kernel.
     candidate_flags = [
         "--xla_gpu_enable_latency_hiding_scheduler=true",
-        "--xla_gpu_enable_triton_softmax_fusion=true",
     ]
     new_flag_str = " ".join(
         [existing_flags] + [f for f in candidate_flags if f not in existing_flags]
