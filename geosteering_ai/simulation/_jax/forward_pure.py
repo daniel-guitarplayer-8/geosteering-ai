@@ -97,9 +97,10 @@ Note:
     lento que o caminho Numba/JAX híbrido — mas **habilita jacfwd nativo
     e GPU XLA fusion**.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -245,14 +246,19 @@ def build_static_context(
     if not HAS_JAX:
         raise ImportError("forward_pure_jax requer JAX (pip install 'jax[cpu]').")
     if strategy not in ("bucketed", "unified"):
-        raise ValueError(f"strategy={strategy!r} inválido; use 'bucketed' ou 'unified'.")
+        raise ValueError(
+            f"strategy={strategy!r} inválido; use 'bucketed' ou 'unified'."
+        )
+    # Sprint O1 (#6): get_hankel_filter_jax tem cache LRU process-wide; retorna
+    # jax.Array no device default já — evita ``np.asarray`` + ``jnp.asarray``
+    # redundantes em cada construção de contexto.
     from geosteering_ai.simulation._jax.kernel import (  # noqa: WPS433
         _sanitize_profile_kernel,
+        get_hankel_filter_jax,
     )
     from geosteering_ai.simulation._numba.geometry import (  # noqa: WPS433
         find_layers_tr,
     )
-    from geosteering_ai.simulation.filters import FilterLoader  # noqa: WPS433
 
     rho_h = np.asarray(rho_h, dtype=np.float64)
     rho_v = np.asarray(rho_v, dtype=np.float64)
@@ -266,12 +272,9 @@ def build_static_context(
     if n >= 2 and esp.shape[0] != n - 2:
         raise ValueError(f"esp.shape[0]={esp.shape[0]} != n-2={n-2}")
 
-    # Filtro Hankel
-    filt = FilterLoader().load(hankel_filter)
-    krJ0J1 = np.asarray(filt.abscissas, dtype=np.float64)
-    wJ0 = np.asarray(filt.weights_j0, dtype=np.float64)
-    wJ1 = np.asarray(filt.weights_j1, dtype=np.float64)
-    npt = krJ0J1.shape[0]
+    # Filtro Hankel: cache LRU → 1 HostToDevice por (processo, filter_name)
+    krJ0J1_jnp, wJ0_jnp, wJ1_jnp = get_hankel_filter_jax(hankel_filter)
+    npt = krJ0J1_jnp.shape[0]
 
     # Perfil geométrico
     if n == 1:
@@ -316,9 +319,9 @@ def build_static_context(
         dip_rad=dip_rad,
         n=n,
         npt=npt,
-        krJ0J1=jnp.asarray(krJ0J1),
-        wJ0=jnp.asarray(wJ0),
-        wJ1=jnp.asarray(wJ1),
+        krJ0J1=krJ0J1_jnp,
+        wJ0=wJ0_jnp,
+        wJ1=wJ1_jnp,
         h_arr_jnp=jnp.asarray(h_arr),
         prof_arr_jnp=jnp.asarray(prof_arr),
         camad_t_array=camad_t_array,
@@ -412,7 +415,7 @@ def forward_pure_jax(
 #   Para N modelos distintos em sequência, N×n_buckets compilações acumulam.
 #   O LRU limita ao `maxsize` mais recentes — suficiente para um único modelo
 #   com até ~28 camadas, e evita OOM no treino on-the-fly.
-from collections import OrderedDict
+from collections import OrderedDict  # noqa: E402
 
 _BUCKET_JIT_CACHE_MAXSIZE: int = 64
 """Tamanho máximo do cache LRU por processo. 64 cobre modelos até ~28 camadas.
@@ -773,7 +776,9 @@ def count_compiled_xla_programs(
     if s == "unified":
         return sum(1 for k in _UNIFIED_JIT_CACHE if k == (ctx.n, ctx.npt))
     return sum(
-        1 for k in _BUCKET_JIT_CACHE if len(k) == 4 and k[2] == ctx.n and k[3] == ctx.npt
+        1
+        for k in _BUCKET_JIT_CACHE
+        if len(k) == 4 and k[2] == ctx.n and k[3] == ctx.npt
     )
 
 
@@ -1090,6 +1095,7 @@ def _forward_pure_jax_unified_chunked_impl(
         ct_padded = jnp.asarray(ctx.camad_t_array, dtype=jnp.int32)
         cr_padded = jnp.asarray(ctx.camad_r_array, dtype=jnp.int32)
 
+    assert chunk_size is not None  # narrow Optional[int] → int para mypy
     jitted = _get_unified_jit_chunked(ctx.n, ctx.npt, chunk_size)
     H_padded = jitted(
         rho_h,

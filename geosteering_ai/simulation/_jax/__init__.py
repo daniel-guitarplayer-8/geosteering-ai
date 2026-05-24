@@ -69,7 +69,100 @@ Note:
     da Sprint 3.1 (hankel, rotation). Diferenças residuais vêm do
     reordenamento XLA das operações de ponto flutuante.
 """
+
+import logging as _logging
+import os as _os
+from pathlib import Path as _Path
 from typing import Final
+
+_logger = _logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint O1 (v2.43) — Setup de ambiente XLA (Quick Win #3 + #4)
+# ──────────────────────────────────────────────────────────────────────────────
+# DEVE rodar ANTES do primeiro ``import jax`` para que XLA capture as flags
+# durante a inicialização do jaxlib. Como este ``__init__.py`` é executado
+# antes de qualquer submódulo ``_jax/xxx.py`` (que importa ``jax``), este é
+# o ponto correto desde que nenhum outro módulo do projeto importe ``jax``
+# antes — auditado em 2026-05-24 (commit Sprint O1): nenhum ``import jax``
+# fora de ``geosteering_ai/simulation/_jax/``.
+#
+# Quick Win #3 — Persistent XLA Compilation Cache
+#   Sem cache persistente, cada sessão (Colab, notebook, pytest) recompila
+#   os JITs (cold-start 30–180 s). Com cache persistente em disco, sessões
+#   subsequentes reutilizam o XLA HLO compilado (~3 s).
+#
+# Quick Win #4 — XLA flags otimizadas para A100
+#   * latency_hiding_scheduler  → melhor escalonamento de kernels CUDA.
+#   * triton_softmax_fusion     → fusão de softmax (sem impacto em EM 1D, mas
+#                                  defensivo para sub-rotinas futuras).
+#   * XLA_PYTHON_CLIENT_PREALLOCATE=false → evita alocação eager de 75%
+#     da VRAM (BFC allocator), só ativado em GPU (não em CPU dev).
+#   * XLA_PYTHON_CLIENT_MEM_FRACTION=0.85 → deixa 15% para CUDA runtime
+#     e cuDNN handles.
+#
+# Backward compatibility
+#   * Opt-out via ``GEOSTEERING_JAX_NO_XLA_SETUP=1`` (preserva env vars
+#     pré-existentes do usuário sem modificação).
+#   * Cache dir: criado se não existir; em caso de OSError, faz log
+#     warning e segue sem cache (degradação graciosa).
+#   * Em CPU-only (macOS dev), env vars de GPU não causam efeito —
+#     XLA CPU backend ignora-as silenciosamente.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _setup_xla_environment() -> None:
+    """Configura env vars XLA + cache de compilação persistente.
+
+    Idempotente: usa ``os.environ.setdefault`` para preservar overrides
+    do usuário. Gracioso: cache dir criado on-demand; falhas só geram
+    warning. Pode ser desabilitado globalmente via env var
+    ``GEOSTEERING_JAX_NO_XLA_SETUP=1``.
+    """
+    if _os.environ.get("GEOSTEERING_JAX_NO_XLA_SETUP", "0") == "1":
+        _logger.debug("XLA setup desabilitado via GEOSTEERING_JAX_NO_XLA_SETUP=1")
+        return
+
+    # ── XLA flags (combina com pré-existentes, sem duplicar) ──────────────
+    existing_flags = _os.environ.get("XLA_FLAGS", "")
+    candidate_flags = [
+        "--xla_gpu_enable_latency_hiding_scheduler=true",
+        "--xla_gpu_enable_triton_softmax_fusion=true",
+    ]
+    new_flag_str = " ".join(
+        [existing_flags] + [f for f in candidate_flags if f not in existing_flags]
+    ).strip()
+    _os.environ["XLA_FLAGS"] = new_flag_str
+
+    # ── VRAM allocation (só relevante em GPU; CPU XLA ignora) ─────────────
+    # setdefault preserva qualquer override explícito do usuário.
+    _os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    _os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.85")
+
+    # ── Compilation cache dir ─────────────────────────────────────────────
+    # Prioridade: 1) env var explícita; 2) $TMPDIR/jax_compilation_cache_geosteering;
+    # 3) /tmp/jax_compilation_cache_geosteering (fallback POSIX).
+    cache_dir = _os.environ.get("JAX_COMPILATION_CACHE_DIR")
+    if not cache_dir:
+        tmpdir = _os.environ.get("TMPDIR", "/tmp")
+        cache_dir = str(_Path(tmpdir) / "jax_compilation_cache_geosteering")
+        _os.environ["JAX_COMPILATION_CACHE_DIR"] = cache_dir
+
+    try:
+        _Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        _logger.info("JAX compilation cache configurado: %s", cache_dir)
+    except OSError as exc:
+        _logger.warning(
+            "Falha ao criar JAX cache dir %s: %s — seguindo sem cache persistente",
+            cache_dir,
+            exc,
+        )
+
+
+# Executa setup ANTES do primeiro ``import jax`` abaixo.
+_setup_xla_environment()
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Detecção dual-mode
@@ -82,9 +175,27 @@ try:
     # JAX default é float32 para TPU; o simulador EM requer complex128.
     jax.config.update("jax_enable_x64", True)
 
+    # Sprint O1 — Persistent compilation cache via jax.config (API moderna,
+    # JAX ≥ 0.4.25). Algumas versões antigas não têm a chave; degrada
+    # gracioso. A env var JAX_COMPILATION_CACHE_DIR (setada acima) também
+    # é honrada por jaxlib internamente.
+    _cache_dir = _os.environ.get("JAX_COMPILATION_CACHE_DIR")
+    if _cache_dir:
+        try:
+            jax.config.update("jax_compilation_cache_dir", _cache_dir)
+            _logger.debug(
+                "jax.config.jax_compilation_cache_dir aplicado: %s", _cache_dir
+            )
+        except (AttributeError, KeyError, ValueError) as _exc:
+            _logger.warning(
+                "jax.config persistent cache não suportado nesta versão (%s): %s",
+                getattr(jax, "__version__", "?"),
+                _exc,
+            )
+
     HAS_JAX: Final[bool] = True
 except ImportError:
-    HAS_JAX: Final[bool] = False  # type: ignore[no-redef]
+    HAS_JAX = False  # type: ignore[no-redef,misc]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
