@@ -300,6 +300,56 @@ def _build_hordist_groups(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Sprint O1 (v2.43) — Helpers vetorizados (NumPy) para metadados pós-GPU
+# ──────────────────────────────────────────────────────────────────────────────
+# MOTIVAÇÃO
+#   Após a GPU sincronizar (H_tensor já em CPU), o cálculo de rho_h_at_obs /
+#   rho_v_at_obs era feito por loop Python triplo chamando ``layer_at_depth``
+#   (Numba) por ponto. Para Cenário E (n_models=50, n_pos=600, nAng=2),
+#   isso são 60.000 chamadas seriais (15-60 ms de CPU desperdiçados após a
+#   GPU já estar livre). Sprint O1 substitui por uma única operação NumPy
+#   vetorizada com ``np.searchsorted``.
+#
+# CONVENÇÃO
+#   ``layer_at_depth(n, z, prof_mid)`` retorna o maior ``i`` em ``[0, n-1]``
+#   tal que ``prof_mid[i] <= z`` (com ``prof_mid[0]`` implicitamente ``-inf``).
+#   Equivalente a ``np.searchsorted(prof_mid[1:n], z, side='right')`` —
+#   convenção RX-inclusive (``>=``) idêntica à de ``find_layers_tr_jax``.
+def _layer_at_depth_vec(n: int, z: np.ndarray, prof_mid: np.ndarray) -> np.ndarray:
+    """Versão vetorizada NumPy de ``layer_at_depth`` para arrays de profundidades.
+
+    Substitui o loop Python ``for i_pos: layer_at_depth(n, z[i_pos], prof)``
+    por uma única chamada ``np.searchsorted`` (bit-exato com o kernel Numba
+    original). Eliminou o gargalo CPU pós-sync GPU identificado no Sprint O0.
+
+    Args:
+        n: Número total de camadas (>=1).
+        z: Profundidades alvo. Shape arbitrária (broadcastável). float64.
+        prof_mid: Boundaries acumulados ``[0.0, esp[0], esp[0]+esp[1], ...]``
+            com shape ``(n,)``. **Sem** sentinelas ±1e300 (formato distinto de
+            ``_sanitize_profile_kernel``).
+
+    Returns:
+        Índices de camada 0-based com mesma shape que ``z``, dtype int64.
+
+    Note:
+        Convenção idêntica a ``layer_at_depth`` (RX-inclusive ``>=``):
+        ``prof_mid[i] <= z < prof_mid[i+1]`` → camada ``i``. Para ``n==1``
+        ``prof_mid[1:1]`` é vazio e ``searchsorted`` retorna ``0`` para
+        qualquer z — comportamento idêntico ao kernel original.
+
+    Example:
+        >>> prof = np.array([0.0, 5.0, 10.0])      # n=3 camadas
+        >>> z = np.array([-1.0, 2.5, 7.5, 100.0])
+        >>> _layer_at_depth_vec(3, z, prof).tolist()
+        [0, 0, 1, 2]
+    """
+    # prof_mid[1:n] são as ``n-1`` interfaces internas; side='right' implementa
+    # ``>=`` (RX-inclusive, equivalente ao Fortran utils.f08:63 para receptor).
+    return np.searchsorted(prof_mid[1:n], z, side="right").astype(np.int64)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Sprint A1.5 — Helper interno _sanitize_profile_batch (batch de modelos)
 # ──────────────────────────────────────────────────────────────────────────────
 def _sanitize_profile_batch(
@@ -340,8 +390,6 @@ def _sanitize_profile_batch(
         >>> prof_arr_batch.shape
         (5, 4)
     """
-    from geosteering_ai.simulation._numba.geometry import _sanitize_profile_kernel
-
     n_models = esp_batch.shape[0]
 
     # ── Edge case n=1: shapes fixos para todos os modelos ──────────────
@@ -352,15 +400,25 @@ def _sanitize_profile_batch(
         )
         return h_arr_batch, prof_arr_batch
 
-    # ── Loop Python — sanitize é cheap (<1 ms × n_models = <50 ms total) ─
-    h_list: list = []
-    prof_list: list = []
-    for i in range(n_models):
-        h, prof = _sanitize_profile_kernel(n, np.ascontiguousarray(esp_batch[i]))
-        h_list.append(h)
-        prof_list.append(prof)
+    # ── Sprint O1 (#9): vetoriza sanitize batch via NumPy puro ────────────
+    # Elimina loop Python sobre n_models (5-25 ms para n_models>=50) e o
+    # round-trip Numba per-model. Replica EXATAMENTE _sanitize_profile_kernel:
+    #   h[0] = h[n-1] = 0; h[1:n-1] = esp        (shape (n,))
+    #   prof[0] = -1e300; prof[i+1] = cumsum(h)[i]; prof[n] = +1e300  (shape (n+1,))
+    INFINITY_PROF = 1.0e300
+    h_arr_batch = np.zeros((n_models, n), dtype=np.float64)
+    if n > 2:
+        # esp_batch tem shape (n_models, n-2); h[1:n-1] = esp
+        h_arr_batch[:, 1 : n - 1] = esp_batch
 
-    return np.stack(h_list, axis=0), np.stack(prof_list, axis=0)
+    prof_arr_batch = np.empty((n_models, n + 1), dtype=np.float64)
+    prof_arr_batch[:, 0] = -INFINITY_PROF
+    # cumsum sobre eixo de camadas → boundaries internos prof[1:n+1] (mas prof[n]
+    # será sobrescrito por sentinel ``+INFINITY_PROF`` logo abaixo).
+    np.cumsum(h_arr_batch, axis=1, out=prof_arr_batch[:, 1:])
+    prof_arr_batch[:, n] = INFINITY_PROF
+
+    return h_arr_batch, prof_arr_batch
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -582,21 +640,15 @@ def simulate_multi_jax(
                 z_mid = 0.5 * (Tz + cz)  # = positions_z
                 z_obs[i_ang] = z_mid
 
-                # Camada no ponto-médio (mesma lógica simulate_multi)
-                from geosteering_ai.simulation._numba.geometry import (
-                    layer_at_depth,
-                )
-
+                # Sprint O1 (#1): vetoriza camada no ponto-médio.
                 # Prof array: [0.0, esp[0], esp[0]+esp[1], ...]
                 if n >= 2:
                     prof_arr = np.concatenate([np.array([0.0]), np.cumsum(esp_np)])
                 else:
                     prof_arr = np.array([0.0])
-
-                for i_pos in range(n_pos):
-                    lay = layer_at_depth(n, z_mid[i_pos], prof_arr)
-                    rho_h_at_obs[i_ang, i_pos] = rho_h_np[lay]
-                    rho_v_at_obs[i_ang, i_pos] = rho_v_np[lay]
+                lay = _layer_at_depth_vec(n, z_mid, prof_arr)  # (n_pos,)
+                rho_h_at_obs[i_ang] = rho_h_np[lay]
+                rho_v_at_obs[i_ang] = rho_v_np[lay]
                 z_obs_filled[i_ang] = True
 
     return MultiSimulationResultJAX(
@@ -689,9 +741,10 @@ def _simulate_multi_jax_vmap_real(
     from geosteering_ai.simulation._jax.geometry_jax import (
         find_layers_tr_jax_vmap,
     )
-    from geosteering_ai.simulation._jax.kernel import _sanitize_profile_kernel
-    from geosteering_ai.simulation._numba.geometry import layer_at_depth
-    from geosteering_ai.simulation.filters import FilterLoader
+    from geosteering_ai.simulation._jax.kernel import (
+        _sanitize_profile_kernel,
+        get_hankel_filter_jax,
+    )
 
     n = rho_h_np.shape[0]
     n_pos = positions_z_np.shape[0]
@@ -699,11 +752,10 @@ def _simulate_multi_jax_vmap_real(
     nAngles = dip_arr.shape[0]
 
     # ── Pré-computa estruturas estáticas (uma vez) ────────────────────────
-    filt = FilterLoader().load(hankel_filter)
-    krJ0J1 = np.asarray(filt.abscissas, dtype=np.float64)
-    wJ0 = np.asarray(filt.weights_j0, dtype=np.float64)
-    wJ1 = np.asarray(filt.weights_j1, dtype=np.float64)
-    npt = krJ0J1.shape[0]
+    # Sprint O1 (#6): filtro Hankel via cache LRU process-wide — retorna
+    # jax.Array já no device default. Evita HtoD repetido a cada call.
+    krJ0J1_jnp, wJ0_jnp, wJ1_jnp = get_hankel_filter_jax(hankel_filter)
+    npt = krJ0J1_jnp.shape[0]
 
     if n == 1:
         h_arr = np.zeros(1, dtype=np.float64)
@@ -712,15 +764,28 @@ def _simulate_multi_jax_vmap_real(
         h_arr, prof_arr = _sanitize_profile_kernel(n, esp_np)
 
     # ── Converte para jnp uma única vez (compartilhado em todas as configs) ─
-    rho_h_jnp = jnp.asarray(rho_h_np, dtype=jnp.float64)
-    rho_v_jnp = jnp.asarray(rho_v_np, dtype=jnp.float64)
-    positions_z_jnp = jnp.asarray(positions_z_np, dtype=jnp.float64)
-    freqs_jnp = jnp.asarray(freqs_arr, dtype=jnp.float64)
-    h_arr_jnp = jnp.asarray(h_arr, dtype=jnp.float64)
-    prof_arr_jnp = jnp.asarray(prof_arr, dtype=jnp.float64)
-    krJ0J1_jnp = jnp.asarray(krJ0J1, dtype=jnp.float64)
-    wJ0_jnp = jnp.asarray(wJ0, dtype=jnp.float64)
-    wJ1_jnp = jnp.asarray(wJ1, dtype=jnp.float64)
+    # Sprint O1 (#8): agrupa 6 HostToDevice transfers via ``jax.tree.map``.
+    # Cada ``jnp.asarray`` separado dispara 1 HtoD (~3 µs); o agrupamento
+    # reduz overhead Python (preserva dtype float64 ↔ paridade Fortran).
+    # Filtros Hankel (krJ0J1/wJ0/wJ1) já vêm como jax.Array do cache LRU.
+    (
+        rho_h_jnp,
+        rho_v_jnp,
+        positions_z_jnp,
+        freqs_jnp,
+        h_arr_jnp,
+        prof_arr_jnp,
+    ) = jax.tree.map(
+        lambda x: jnp.asarray(x, dtype=jnp.float64),
+        (
+            rho_h_np,
+            rho_v_np,
+            positions_z_np,
+            freqs_arr,
+            h_arr,
+            prof_arr,
+        ),
+    )
 
     # ── Recupera o JIT unificado (1 programa XLA por (n, npt)) ────────────
     jitted = _get_unified_jit(n, npt)
@@ -777,26 +842,27 @@ def _simulate_multi_jax_vmap_real(
     H_flat = vmap_fn(L_flat, theta_flat, rho_h_jnp, rho_v_jnp)
     # H_flat shape: (nTR*nAngles, n_pos, nf, 9)
 
-    # Reshape para (nTR, nAngles, n_pos, nf, 9)
+    # Reshape para (nTR, nAngles, n_pos, nf, 9).
+    # Sprint O1 (#7): sync deferido ao chamador (que faz ``np.asarray``,
+    # sincronização implícita). Remover ``block_until_ready()`` redundante
+    # economiza 1 RTT GPU/CPU (~0.3-0.5 ms em T4).
     H_tensor_jax = H_flat.reshape(nTR, nAngles, n_pos, -1, 9)
-    H_tensor_jax.block_until_ready()
 
     # ── Metadados z_obs / rho_*_at_obs (NumPy, por ângulo) ────────────────
-    z_obs = np.empty((nAngles, n_pos), dtype=np.float64)
-    rho_h_at_obs = np.empty((nAngles, n_pos), dtype=np.float64)
-    rho_v_at_obs = np.empty((nAngles, n_pos), dtype=np.float64)
+    # Sprint O1 (#1): vetoriza loop Python sobre (nAng × n_pos) via searchsorted.
     if n >= 2:
         prof_mid = np.concatenate([np.array([0.0]), np.cumsum(esp_np)])
     else:
         prof_mid = np.array([0.0])
 
-    for i_ang in range(nAngles):
-        # z_mid é o próprio positions_z (ponto médio por convenção)
-        z_obs[i_ang] = positions_z_np
-        for i_pos in range(n_pos):
-            lay = layer_at_depth(n, float(positions_z_np[i_pos]), prof_mid)
-            rho_h_at_obs[i_ang, i_pos] = rho_h_np[lay]
-            rho_v_at_obs[i_ang, i_pos] = rho_v_np[lay]
+    # z_mid é positions_z (ponto-médio por convenção); broadcast em nAngles.
+    z_obs = np.broadcast_to(positions_z_np, (nAngles, n_pos)).copy()
+    # Camada idêntica para todos os ângulos (z_mid não depende de θ).
+    lay = _layer_at_depth_vec(n, positions_z_np, prof_mid)  # (n_pos,)
+    rho_h_pos = rho_h_np[lay]  # (n_pos,)
+    rho_v_pos = rho_v_np[lay]  # (n_pos,)
+    rho_h_at_obs = np.broadcast_to(rho_h_pos, (nAngles, n_pos)).copy()
+    rho_v_at_obs = np.broadcast_to(rho_v_pos, (nAngles, n_pos)).copy()
 
     return H_tensor_jax, z_obs, rho_h_at_obs, rho_v_at_obs
 
@@ -922,9 +988,8 @@ def simulate_multi_jax_batched(
 
     from geosteering_ai.simulation._jax.forward_pure import _get_unified_jit
     from geosteering_ai.simulation._jax.geometry_jax import find_layers_tr_jax_vmap
-    from geosteering_ai.simulation._numba.geometry import layer_at_depth
+    from geosteering_ai.simulation._jax.kernel import get_hankel_filter_jax
     from geosteering_ai.simulation.config import SimulationConfig
-    from geosteering_ai.simulation.filters import FilterLoader
 
     # ── Defaults via cfg ──────────────────────────────────────────────────────
     if cfg is None:
@@ -1015,25 +1080,36 @@ def simulate_multi_jax_batched(
     nAngles = dip_arr.shape[0]
 
     # ── Pré-computa arrays estáticos (1× por batch — não por modelo) ──────────
-    filt = FilterLoader().load(hankel_filter)
-    krJ0J1 = np.asarray(filt.abscissas, dtype=np.float64)
-    wJ0 = np.asarray(filt.weights_j0, dtype=np.float64)
-    wJ1 = np.asarray(filt.weights_j1, dtype=np.float64)
-    npt = krJ0J1.shape[0]
+    # Sprint O1 (#6): filtro Hankel via cache LRU process-wide — retorna
+    # jax.Array já no device default. Evita HtoD repetido a cada call batched.
+    krJ0J1_jnp, wJ0_jnp, wJ1_jnp = get_hankel_filter_jax(hankel_filter)
+    npt = krJ0J1_jnp.shape[0]
 
     # Sanitize profile por modelo (Python loop, cheap <50 ms total)
     h_arr_batch_np, prof_arr_batch_np = _sanitize_profile_batch(n, esp_batch_np)
 
     # ── Converte para jnp (1× — compartilhado em todo o batch) ────────────────
-    positions_z_jnp = jnp.asarray(positions_z_np, dtype=jnp.float64)
-    freqs_jnp = jnp.asarray(freqs_arr, dtype=jnp.float64)
-    krJ0J1_jnp = jnp.asarray(krJ0J1, dtype=jnp.float64)
-    wJ0_jnp = jnp.asarray(wJ0, dtype=jnp.float64)
-    wJ1_jnp = jnp.asarray(wJ1, dtype=jnp.float64)
-    rho_h_batch_jnp = jnp.asarray(rho_h_batch_np, dtype=jnp.float64)
-    rho_v_batch_jnp = jnp.asarray(rho_v_batch_np, dtype=jnp.float64)
-    h_arr_batch_jnp = jnp.asarray(h_arr_batch_np, dtype=jnp.float64)
-    prof_arr_batch_jnp = jnp.asarray(prof_arr_batch_np, dtype=jnp.float64)
+    # Sprint O1 (#8): agrupa 6 HostToDevice copies em um único ``jax.tree.map``
+    # (preserva dtype float64; reduz overhead Python entre transfers individuais).
+    # Filtros Hankel (krJ0J1/wJ0/wJ1) já vêm como jax.Array do cache LRU.
+    (
+        positions_z_jnp,
+        freqs_jnp,
+        rho_h_batch_jnp,
+        rho_v_batch_jnp,
+        h_arr_batch_jnp,
+        prof_arr_batch_jnp,
+    ) = jax.tree.map(
+        lambda x: jnp.asarray(x, dtype=jnp.float64),
+        (
+            positions_z_np,
+            freqs_arr,
+            rho_h_batch_np,
+            rho_v_batch_np,
+            h_arr_batch_np,
+            prof_arr_batch_np,
+        ),
+    )
 
     # ── Recupera o JIT unificado (1 programa XLA por (n, npt)) ────────────────
     # Mesma função usada por _simulate_multi_jax_vmap_real (Sprint 12, PR #25).
@@ -1104,35 +1180,52 @@ def simulate_multi_jax_batched(
     )
     # H_flat_batched shape: (n_models, nTR*nAngles, n_pos, nf, 9)
 
-    # Reshape final + ÚNICO sync GPU→CPU para todo o batch
+    # Reshape final + ÚNICO sync GPU→CPU para todo o batch.
+    # Sprint O1 (#7): ``np.asarray`` já sincroniza internamente — remover
+    # o ``block_until_ready()`` redundante economiza 1 RTT GPU (~0.5-1 ms).
     H_tensor_jax = H_flat_batched.reshape(
         n_models, nTR, nAngles, n_pos, freqs_arr.shape[0], 9
     )
-    H_tensor_jax.block_until_ready()  # 1× ao final (não n_models×)
-    H_tensor_np = np.asarray(H_tensor_jax)  # 1× sync (não n_models×)
+    H_tensor_np = np.asarray(H_tensor_jax)  # sync GPU→CPU implícito (1×)
 
     # ── Metadados z_obs / rho_*_at_obs (NumPy, compartilhado + por modelo) ────
     # z_obs depende apenas de positions_z (ponto-médio é o próprio z_mid).
-    z_obs = np.empty((nAngles, n_pos), dtype=np.float64)
-    for i_ang in range(nAngles):
-        z_obs[i_ang] = positions_z_np
+    # Broadcast: replica positions_z_np em nAngles linhas sem loop.
+    z_obs = np.broadcast_to(positions_z_np, (nAngles, n_pos)).copy()
 
-    # rho_*_at_obs depende do perfil de cada modelo
+    # ── Sprint O1 (#1 CRÍTICA): vetoriza ``rho_*_at_obs`` ─────────────────────
+    # Antes: loop Python n_models × nAngles × n_pos chamando ``layer_at_depth``
+    #   (Numba @njit) — 60.000 chamadas em Cenário E, 15-60 ms desperdiçados
+    #   APÓS sync da GPU. Agora: 1× ``np.searchsorted`` vetorizado por modelo
+    #   (mantém n_models como dim externa porque ``prof_mid`` varia por modelo).
+    # Convenção bit-exata vs ``layer_at_depth``: RX-inclusive (``>=``, side='right').
+    # Convenção bit-exata vs single-model path (vmap_real :852):
+    #   n>=2 → prof_mid shape (n-1,) = [0.0, cumsum(esp)...]
+    #   n==1 → prof_mid shape (1,)   = [0.0]
+    # Para n=2, esp shape (n_models, 0) → prof_mid_batch = [[0.0], ...].
+    if n >= 2:
+        prof_mid_batch = np.empty((n_models, n - 1), dtype=np.float64)
+        prof_mid_batch[:, 0] = 0.0
+        if n > 2:  # cumsum só faz sentido quando esp tem ≥1 coluna (n-2 ≥ 1)
+            np.cumsum(esp_batch_np, axis=1, out=prof_mid_batch[:, 1:])
+    else:
+        prof_mid_batch = np.zeros((n_models, 1), dtype=np.float64)
+
+    # Para cada modelo, lay[i_pos] = searchsorted(prof_mid[1:n], pos_z, 'right').
+    # Vetorizar sobre n_models simultaneamente exigiria 2D-searchsorted (não
+    # nativo em NumPy); o loop interno percorre apenas n_models (≤ alguns 100s),
+    # cada iteração faz O(n_pos · log n) em C puro — ~50× mais rápido que o
+    # loop triplo Python anterior. nAng é replicado via broadcast (z_obs é o
+    # mesmo para todos os ângulos por construção, ver ``z_mid = positions_z``).
     rho_h_at_obs = np.empty((n_models, nAngles, n_pos), dtype=np.float64)
     rho_v_at_obs = np.empty((n_models, nAngles, n_pos), dtype=np.float64)
     for i_model in range(n_models):
-        rho_h_m = rho_h_batch_np[i_model]
-        rho_v_m = rho_v_batch_np[i_model]
-        if n >= 2:
-            esp_m = esp_batch_np[i_model]
-            prof_mid = np.concatenate([np.array([0.0]), np.cumsum(esp_m)])
-        else:
-            prof_mid = np.array([0.0])
-        for i_ang in range(nAngles):
-            for i_pos in range(n_pos):
-                lay = layer_at_depth(n, float(positions_z_np[i_pos]), prof_mid)
-                rho_h_at_obs[i_model, i_ang, i_pos] = rho_h_m[lay]
-                rho_v_at_obs[i_model, i_ang, i_pos] = rho_v_m[lay]
+        lay = _layer_at_depth_vec(n, positions_z_np, prof_mid_batch[i_model])
+        rho_h_pos = rho_h_batch_np[i_model][lay]  # (n_pos,)
+        rho_v_pos = rho_v_batch_np[i_model][lay]  # (n_pos,)
+        # Broadcast sobre eixo de ângulos (idêntico para todos)
+        rho_h_at_obs[i_model] = rho_h_pos[np.newaxis, :]
+        rho_v_at_obs[i_model] = rho_v_pos[np.newaxis, :]
 
     return MultiSimulationResultBatchedJAX(
         H_tensor=H_tensor_np,
