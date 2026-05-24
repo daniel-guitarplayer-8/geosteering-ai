@@ -82,6 +82,7 @@ Note:
     são estáticas, enquanto ``camad_t`` e ``camad_r`` são tracers. Isto
     é o que permite a consolidação de buckets.
 """
+
 from __future__ import annotations
 
 try:
@@ -96,6 +97,45 @@ except ImportError:
 
 _MX = 1.0  # Momento magnético unitário (A·m²) — paridade com dipoles_native.py
 _MZ = 1.0  # Momento magnético vertical (A·m²) — paridade com dipoles_native.py:986
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint O1 (v2.43) — Configuração de unrolling da loop de camadas (Quick Win)
+# ──────────────────────────────────────────────────────────────────────────────
+# `_MAX_LAYER_UNROLL` controla o fator máximo de unroll passado para
+# `jax.lax.scan` quando substituímos os `fori_loop` sobre camadas. O scan
+# unrolled funde N iterações em 1 único kernel CUDA (em vez de 1 kernel
+# por iteração em `fori_loop`), eliminando ~5-10 µs/iteração de overhead
+# de launch — ganho dominante em cenários com n_cam pequeno (oklahoma_5,
+# devine_8, hou_7) onde o kernel é leve e o overhead relativo é alto.
+#
+# Limite 8: balanço empírico entre redução de kernel launches (≥4× para
+# n=5..8) e tamanho do programa XLA (cresce linearmente com unroll, pode
+# pressionar instruction cache e stack do compilador para n grande). Para
+# n_cam > 8 (oklahoma_28), efetivo será `min(n, 8)` — unroll parcial.
+_MAX_LAYER_UNROLL: int = 8
+
+
+def _effective_unroll(n: int, enabled: bool) -> int:
+    """Determina o fator de unroll efetivo para ``lax.scan``.
+
+    Args:
+        n: Número de camadas (estático, conhecido no JIT).
+        enabled: Flag para habilitar/desabilitar unroll (vinda da config).
+
+    Returns:
+        Inteiro ≥ 1. Quando ``enabled=False`` retorna 1 (sem unroll,
+        equivalente a ``fori_loop`` em termos de kernel launches mas com
+        forma `scan`). Caso contrário, ``min(n, _MAX_LAYER_UNROLL)``.
+
+    Note:
+        Para ``n ≤ _MAX_LAYER_UNROLL`` o resultado é ``n`` (full unroll),
+        gerando 1 único kernel CUDA. Para ``n > _MAX_LAYER_UNROLL``
+        (e.g., oklahoma_28) usamos unroll parcial para evitar stack
+        overflow no compilador XLA.
+    """
+    if not enabled:
+        return 1
+    return max(1, min(n, _MAX_LAYER_UNROLL))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -467,6 +507,8 @@ def _hmd_tiv_propagation_unified(
     Euup,
     prof,
     h0,
+    *,
+    unroll_layers: bool = True,
 ):
     """Propaga os potenciais TE/TM de HMD TIV via ``jax.lax.fori_loop``.
 
@@ -500,9 +542,22 @@ def _hmd_tiv_propagation_unified(
     Txup_init = jnp.zeros((npt, n), dtype=jnp.complex128)
     Tuup_init = jnp.zeros((npt, n), dtype=jnp.complex128)
 
+    # ── Sprint O1 (v2.43) — Determina fator de unroll efetivo ───────────────
+    # `n` é estático aqui (vem de `static_argnames` upstream), permitindo
+    # `lax.scan(unroll=...)` com inteiro Python. O scan unrolled funde
+    # `unroll_factor` iterações em 1 kernel CUDA, eliminando overhead de
+    # launch por iteração que o `fori_loop` original incorria.
+    unroll_factor = _effective_unroll(n, unroll_layers)
+
     # ── Caso A: camad_r > camad_t (descendente) ──────────────────────────────
-    def _body_descent_bound(j, carry):
-        return _hmd_tiv_descent_body(
+    # SUBSTITUI `fori_loop(camad_t, camad_r+1, body, init)` por
+    # `scan(body, init, xs=arange(n), length=n, unroll=unroll_factor)`.
+    # Como `camad_t`/`camad_r` são tracers, não podem ser usados como
+    # `start`/`stop` do scan (que exige `length` estático). Itera-se sobre
+    # TODAS as camadas e a máscara `(j >= camad_t) & (j <= camad_r)` reproduz
+    # o range original — quando inativa, o carry é retornado inalterado.
+    def _scan_descent(carry, j):
+        new_carry = _hmd_tiv_descent_body(
             j,
             carry,
             camad_t,
@@ -522,18 +577,30 @@ def _hmd_tiv_propagation_unified(
             prof,
             h0,
         )
+        # Máscara: ativa só para j ∈ [camad_t, camad_r] (range original do
+        # fori_loop). Fora desse range, mantém carry inalterado.
+        active = (j >= camad_t) & (j <= camad_r)
+        Txdw_old, Tudw_old = carry
+        Txdw_new, Tudw_new = new_carry
+        Txdw_sel = jnp.where(active, Txdw_new, Txdw_old)
+        Tudw_sel = jnp.where(active, Tudw_new, Tudw_old)
+        return (Txdw_sel, Tudw_sel), None
 
-    Txdw_A, Tudw_A = jax.lax.fori_loop(
-        camad_t,
-        camad_r + 1,
-        _body_descent_bound,
+    (Txdw_A, Tudw_A), _ = jax.lax.scan(
+        _scan_descent,
         (Txdw_init, Tudw_init),
+        xs=jnp.arange(n),
+        length=n,
+        unroll=unroll_factor,
     )
 
     # ── Caso B: camad_r < camad_t (ascendente) ──────────────────────────────
-    # k vai de 0 até (camad_t - camad_r), que corresponde a j = camad_t, camad_t-1, ..., camad_r
-    def _body_ascent_bound(k, carry):
-        return _hmd_tiv_ascent_body(
+    # SUBSTITUI `fori_loop(0, camad_t - camad_r + 1, body, init)` por scan.
+    # `k` é o índice 0-based do loop original; `j = camad_t - k` decresce.
+    # Range válido: k ∈ [0, camad_t - camad_r]. Itera-se sobre `arange(n)`
+    # e mascara-se via `k <= camad_t - camad_r`. (k >= 0 sempre verdadeiro.)
+    def _scan_ascent(carry, k):
+        new_carry = _hmd_tiv_ascent_body(
             k,
             carry,
             camad_t,
@@ -553,12 +620,19 @@ def _hmd_tiv_propagation_unified(
             prof,
             h0,
         )
+        active = k <= (camad_t - camad_r)
+        Txup_old, Tuup_old = carry
+        Txup_new, Tuup_new = new_carry
+        Txup_sel = jnp.where(active, Txup_new, Txup_old)
+        Tuup_sel = jnp.where(active, Tuup_new, Tuup_old)
+        return (Txup_sel, Tuup_sel), None
 
-    Txup_B, Tuup_B = jax.lax.fori_loop(
-        0,
-        camad_t - camad_r + 1,
-        _body_ascent_bound,
+    (Txup_B, Tuup_B), _ = jax.lax.scan(
+        _scan_ascent,
         (Txup_init, Tuup_init),
+        xs=jnp.arange(n),
+        length=n,
+        unroll=unroll_factor,
     )
 
     # ── Caso C: camad_r == camad_t (mesma camada) ────────────────────────────
@@ -799,6 +873,8 @@ def _vmd_propagation_unified(
     prof,
     h0,
     zeta,
+    *,
+    unroll_layers: bool = True,
 ):
     """Propaga os potenciais TE de VMD via ``jax.lax.fori_loop``.
 
@@ -836,9 +912,14 @@ def _vmd_propagation_unified(
     TEdwz_init = jnp.zeros((npt, n), dtype=jnp.complex128)
     TEupz_init = jnp.zeros((npt, n), dtype=jnp.complex128)
 
+    # ── Sprint O1 (v2.43) — Determina fator de unroll efetivo ───────────────
+    # Mesmo padrão do HMD: `n` estático permite `scan` com `unroll` Python int.
+    unroll_factor = _effective_unroll(n, unroll_layers)
+
     # ── Caso A: camad_r > camad_t (descendente) ──────────────────────────────
-    def _body_descent_bound(j, carry):
-        return _vmd_descent_body(
+    # SUBSTITUI `fori_loop` por `scan` mascarado (vide HMD para detalhes).
+    def _scan_descent(carry, j):
+        new_carry = _vmd_descent_body(
             j,
             carry,
             camad_t,
@@ -853,18 +934,22 @@ def _vmd_propagation_unified(
             h0,
             zeta,
         )
+        active = (j >= camad_t) & (j <= camad_r)
+        TEdwz_sel = jnp.where(active, new_carry, carry)
+        return TEdwz_sel, None
 
-    TEdwz_A = jax.lax.fori_loop(
-        camad_t,
-        camad_r + 1,
-        _body_descent_bound,
+    TEdwz_A, _ = jax.lax.scan(
+        _scan_descent,
         TEdwz_init,
+        xs=jnp.arange(n),
+        length=n,
+        unroll=unroll_factor,
     )
 
     # ── Caso B: camad_r < camad_t (ascendente) ──────────────────────────────
     # k vai de 0 até (camad_t - camad_r); j = camad_t - k
-    def _body_ascent_bound(k, carry):
-        return _vmd_ascent_body(
+    def _scan_ascent(carry, k):
+        new_carry = _vmd_ascent_body(
             k,
             carry,
             camad_t,
@@ -879,12 +964,16 @@ def _vmd_propagation_unified(
             h0,
             zeta,
         )
+        active = k <= (camad_t - camad_r)
+        TEupz_sel = jnp.where(active, new_carry, carry)
+        return TEupz_sel, None
 
-    TEupz_B = jax.lax.fori_loop(
-        0,
-        camad_t - camad_r + 1,
-        _body_ascent_bound,
+    TEupz_B, _ = jax.lax.scan(
+        _scan_ascent,
         TEupz_init,
+        xs=jnp.arange(n),
+        length=n,
+        unroll=unroll_factor,
     )
 
     # ── Caso C: camad_r == camad_t (mesma camada) ────────────────────────────

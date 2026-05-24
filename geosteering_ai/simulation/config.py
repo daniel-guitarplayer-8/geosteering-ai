@@ -658,6 +658,32 @@ class SimulationConfig:
     jax_position_chunk_size: Optional[int] = None
 
     # ─────────────────────────────────────────────────────────────────
+    # SPRINT O1 (v2.43, Quick Win #2) — Unroll de loop de camadas
+    # ─────────────────────────────────────────────────────────────────
+    # `unroll_layer_loop=True` substitui `jax.lax.fori_loop` por
+    # `jax.lax.scan(unroll=K)` nos kernels TE/TM de propagação em
+    # `_jax/dipoles_unified.py` e `_jax/propagation.py`. O scan unrolled
+    # funde até K iterações em 1 kernel CUDA único, eliminando o overhead
+    # de launch (~5-10 µs por iteração) que o `fori_loop` incorria.
+    #
+    # K efetivo = `min(n_cam, 8)`:
+    #   • n_cam ≤ 8 (oklahoma_5, devine_8, hou_7) → full unroll = 1 kernel
+    #   • n_cam > 8 (oklahoma_28) → unroll parcial (8), evita stack overflow
+    #     do compilador XLA por programa grande demais
+    #
+    # Ganho esperado em GPU:
+    #   • +50% a +200% no hot path para n_cam ∈ [5, 8]
+    #   • Marginal para n_cam grande (>16) — overhead/iteração já é diluído
+    #
+    # Backward-compat: default True (kernels mais rápidos). Setar False para
+    # voltar ao comportamento `fori_loop` original (debug/comparação).
+    #
+    # Só tem efeito quando `jax_strategy="unified"`. Para "bucketed" o
+    # caminho legacy (`dipoles_native.py:_hmd_tiv_native_jax`) não usa
+    # nenhuma das funções afetadas.
+    unroll_layer_loop: bool = True
+
+    # ─────────────────────────────────────────────────────────────────
     # VALIDAÇÃO (errata imutável, inspired by PipelineConfig)
     # ─────────────────────────────────────────────────────────────────
     def __post_init__(self) -> None:
