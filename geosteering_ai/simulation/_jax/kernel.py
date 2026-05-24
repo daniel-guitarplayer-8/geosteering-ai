@@ -62,6 +62,7 @@ para vetorização automática (CPU/GPU).
 
 from __future__ import annotations
 
+import functools
 import math
 
 import jax
@@ -117,6 +118,141 @@ def _to_writeable(arr) -> np.ndarray:
     if not out.flags.writeable:
         out = out.copy()
     return out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Cache process-wide de filtros Hankel já transferidos para o device JAX
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint O1 (v2.43) — otimização #6 Quick Wins JAX GPU
+#
+# Motivação:
+#   `FilterLoader._class_cache` (loader.py:305) já garante que o `.npz`
+#   é lido do disco UMA VEZ por processo (cache classe-level com lock).
+#   Porém, os callers JAX (`_jax/multi_forward.py`, `_jax/forward_pure.py`)
+#   chamam `FilterLoader().load(...)` + `jnp.asarray(...)` em todo
+#   `simulate_multi_jax`. O `np.asarray()` é praticamente no-op (filtros
+#   já vêm contíguos float64), mas o `jnp.asarray()` força um host→device
+#   transfer (10-100µs em GPU, ~5µs em CPU) e produz um novo `jax.Array`
+#   handle a cada chamada, impedindo o XLA de reusar buffers entre invocations.
+#
+# Solução:
+#   Cache LRU process-wide (`functools.lru_cache`) chaveado pelo nome
+#   canônico do filtro. Retorna a tupla `(krJ0J1, wJ0, wJ1)` já como
+#   `jax.Array` no device default. Subsequent calls com mesmo `filter_name`
+#   retornam exatamente os mesmos handles, permitindo XLA bufferreuse.
+#
+# Thread-safety:
+#   `functools.lru_cache` é thread-safe sob GIL do CPython (insert/get
+#   atômico). `FilterLoader.load()` interno usa double-checked locking.
+#   Em modo spawn (workers Numba), cada processo tem seu próprio cache —
+#   correto e desejado (não há shared memory inter-processo para handles JAX).
+#
+# Cache invalidation:
+#   Cache chaveado por nome canônico (str). Se caller passar
+#   `'werthmuller_201pt'` vs `'kong_61pt'` vs `'anderson_801pt'`, cada
+#   um terá entrada distinta no LRU (maxsize=8 > 3 filtros catalogados).
+#   Aliases (e.g. `'wer'`, `'0'`) são resolvidos para canônico ANTES de
+#   chavear, evitando entradas duplicadas no LRU para o mesmo filtro.
+
+
+@functools.lru_cache(maxsize=8)
+def _get_hankel_filter_cached(
+    filter_name: str = "werthmuller_201pt",
+) -> tuple["jax.Array", "jax.Array", "jax.Array"]:
+    """Retorna ``(krJ0J1, wJ0, wJ1)`` como ``jax.Array`` via cache LRU.
+
+    Carrega o filtro Hankel UMA VEZ por processo (e por nome canônico)
+    e transfere os arrays para o device JAX default. Subsequent calls
+    retornam os mesmos handles — permite ao XLA reusar buffers entre
+    invocações de :func:`fields_in_freqs_jax_batch`.
+
+    Args:
+        filter_name: Nome canônico do filtro, alias amigável ou string
+            numérica equivalente ao ``filter_type`` do Fortran.
+            Aceita: ``'werthmuller_201pt'`` (default, ``filter_type=0``),
+            ``'kong_61pt'`` (``=1``), ``'anderson_801pt'`` (``=2``), além
+            de aliases como ``'wer'``, ``'kong'``, ``'and'`` e strings
+            numéricas ``'0'``, ``'1'``, ``'2'``.
+
+    Returns:
+        Tupla ``(krJ0J1, wJ0, wJ1)`` — abscissas e pesos J0/J1 já como
+        ``jax.Array`` float64 no device JAX default (CPU/GPU/TPU).
+
+    Note:
+        Helper introduzida no Sprint O1 v2.43 (Quick Wins JAX GPU,
+        otimização #6). Use-a em hot paths para evitar repetir o
+        ``jnp.asarray(...)`` em cada chamada do simulador. Os arrays
+        retornados são imutáveis (``HankelFilter`` marca readonly no
+        lado NumPy; ``jax.Array`` é semanticamente imutável).
+
+        Cache invalidation: chaveado por nome canônico após
+        :meth:`FilterLoader.resolve_name`. Se caller passar dois aliases
+        do mesmo filtro, ambos compartilham a mesma entrada (resolvidos
+        para o canônico antes de cachear).
+
+    See Also:
+        :class:`geosteering_ai.simulation.filters.FilterLoader`:
+            cache classe-level de :class:`HankelFilter` (lado NumPy);
+            esta helper adiciona a camada JAX-device por cima.
+    """
+    # Import local: evita custo de importar `filters` no import-time de
+    # `_jax/kernel`, e quebra ciclo potencial caso filters.py importe
+    # algo de _jax no futuro.
+    from geosteering_ai.simulation.filters import FilterLoader
+
+    loader = FilterLoader()
+    # Resolve alias/numérico → canônico ANTES de o LRU chavear.
+    # Isso garante que `load('wer')` e `load('werthmuller_201pt')`
+    # compartilhem a mesma entrada do LRU (1 entrada, 1 transferência
+    # para device — em vez de 2 entradas idênticas em conteúdo).
+    # Nota: como `lru_cache` chaveia pelo argumento bruto, a resolução
+    # já aconteceu antes de chamarmos esta helper se o caller passar
+    # apenas nomes canônicos. Para garantir consistência, expomos um
+    # wrapper público (`get_hankel_filter_jax`) que normaliza primeiro.
+    filt = loader.load(filter_name)
+
+    # `jnp.asarray` (não `jnp.array`): evita cópia desnecessária quando
+    # o backend já consegue reusar o buffer NumPy (CPU). Em GPU, faz
+    # host→device uma única vez por (processo, nome canônico).
+    kr_jax = jnp.asarray(filt.abscissas, dtype=jnp.float64)
+    w0_jax = jnp.asarray(filt.weights_j0, dtype=jnp.float64)
+    w1_jax = jnp.asarray(filt.weights_j1, dtype=jnp.float64)
+    return kr_jax, w0_jax, w1_jax
+
+
+def get_hankel_filter_jax(
+    filter_name: str = "werthmuller_201pt",
+) -> tuple["jax.Array", "jax.Array", "jax.Array"]:
+    """API pública: filtro Hankel como ``jax.Array`` (cache process-wide).
+
+    Wrapper sobre :func:`_get_hankel_filter_cached` que normaliza aliases
+    para o nome canônico ANTES de consultar o LRU. Isso garante que
+    chamadas com aliases distintos do mesmo filtro (e.g. ``'wer'`` vs
+    ``'werthmuller_201pt'`` vs ``'0'``) compartilhem a mesma entrada
+    no cache LRU, evitando entradas duplicadas e transferências
+    host→device redundantes em GPU.
+
+    Args:
+        filter_name: Nome canônico, alias ou string numérica do filtro.
+
+    Returns:
+        Tupla ``(krJ0J1, wJ0, wJ1)`` como ``jax.Array`` float64 no
+        device JAX default. Mesmos handles em chamadas subsequentes
+        com o mesmo nome canônico (após resolução de alias).
+
+    Example:
+        >>> kr, w0, w1 = get_hankel_filter_jax()                # default 201pt
+        >>> kr2, w0_2, w1_2 = get_hankel_filter_jax("wer")     # alias
+        >>> kr is kr2                                            # True — mesmo handle
+        True
+        >>> kr_k, _, _ = get_hankel_filter_jax("kong_61pt")    # filter_type=1
+        >>> kr_k is kr                                           # False — filtro diferente
+        False
+    """
+    from geosteering_ai.simulation.filters import FilterLoader
+
+    canonical = FilterLoader().resolve_name(filter_name)
+    return _get_hankel_filter_cached(canonical)
 
 
 def _to_readonly_contig(arr) -> np.ndarray:
@@ -581,4 +717,4 @@ def fields_in_freqs_jax_batch(
     return H_tensor
 
 
-__all__ = ["fields_in_freqs_jax_batch"]
+__all__ = ["fields_in_freqs_jax_batch", "get_hankel_filter_jax"]
