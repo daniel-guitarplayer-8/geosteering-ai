@@ -763,3 +763,98 @@ def test_gap_m1_frequencias_extremas_finite(positions_z, oklahoma_3_model):
     assert np.all(
         np.isfinite(res.H_tensor.view(np.float64))
     ), "GAP-M1: NaN/Inf em frequências/TRs extremos"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# T1.2 — Sprint O0 (Tier 1) — Paridade DIRETA batched vs Numba (não-transitiva)
+# ══════════════════════════════════════════════════════════════════════════════
+# Adicionado em 2026-05-24 (Sprint O0 do plano de otimização JAX GPU).
+#
+# Motivação: até esta sprint, a paridade do batched API era apenas TRANSITIVA
+# (batched vs serial_jax + serial_jax vs Numba). Se ambos regredirem no mesmo
+# commit, regressão é invisível. Este teste fecha o triângulo DIRETO.
+
+
+@pytest.mark.parametrize("model_name", ["oklahoma_3", "oklahoma_5"])
+def test_t14_batched_vs_numba_parity_direct(model_name: str) -> None:  # noqa: D103
+    """T1.2 — paridade DIRETA ``simulate_multi_jax_batched`` vs ``simulate_multi`` Numba.
+
+    Cria um batch de 3 modelos idênticos (réplicas do modelo canônico) e compara
+    cada slot do batch JAX com a saída única do simulador Numba. Tolerância
+    `<1e-12` (paridade Fortran inviolável).
+
+    Args:
+        model_name: Modelo canônico (``oklahoma_3`` ou ``oklahoma_5``).
+    """
+    # ── Modelo canônico (3 réplicas no batch JAX) ─────────────────────────────
+    # `model_name` vem de pytest.parametrize como str genérico; get_canonical_model
+    # exige Literal de nomes válidos. Cast via Any para satisfazer Pyright (runtime OK).
+    from typing import Any, cast
+
+    from geosteering_ai.simulation import simulate_multi
+    from geosteering_ai.simulation._jax.multi_forward import (
+        simulate_multi_jax_batched,
+    )
+    from geosteering_ai.simulation.validation.canonical_models import (
+        get_canonical_model,
+    )
+
+    m = get_canonical_model(cast(Any, model_name))
+    n_models = 3
+    rho_h_batch = np.stack([m.rho_h] * n_models)
+    rho_v_batch = np.stack([m.rho_v] * n_models)
+    esp_batch = np.stack([m.esp] * n_models)
+
+    # ── Geometria de teste (compacta, mas multi-ang para exercitar vmap) ──────
+    positions_z = np.linspace(m.min_depth + 0.5, m.max_depth - 0.5, 5)
+    frequencies_hz = [20000.0]
+    tr_spacings_m = [1.0]
+    dip_degs = [0.0, 30.0]
+
+    # ── Path JAX batched (3 modelos simultaneamente) ──────────────────────────
+    res_jax = simulate_multi_jax_batched(
+        rho_h_batch,
+        rho_v_batch,
+        esp_batch,
+        positions_z,
+        frequencies_hz=frequencies_hz,
+        tr_spacings_m=tr_spacings_m,
+        dip_degs=dip_degs,
+    )
+    # H_tensor JAX shape: (n_models=3, nTR=1, nAngles=2, n_pos=5, nf=1, 9)
+
+    # ── Path Numba (single call, modelo único — todas as réplicas são iguais) ─
+    # Note: simulate_multi retorna Union[MultiSimulationResult, MultiSimulationResultBatch].
+    # Quando models=None (chamada single-model), retorna MultiSimulationResult com H_tensor.
+    from geosteering_ai.simulation.multi_forward import MultiSimulationResult
+
+    res_numba = simulate_multi(
+        rho_h=m.rho_h,
+        rho_v=m.rho_v,
+        esp=m.esp,
+        positions_z=positions_z,
+        frequencies_hz=frequencies_hz,
+        tr_spacings_m=tr_spacings_m,
+        dip_degs=dip_degs,
+    )
+    assert isinstance(res_numba, MultiSimulationResult), (
+        f"simulate_multi sem models= deveria retornar MultiSimulationResult, "
+        f"obtido {type(res_numba).__name__}"
+    )
+    # H_tensor Numba shape: (nTR=1, nAngles=2, n_pos=5, nf=1, 9)
+
+    # ── Compara CADA slot do batch JAX com saída Numba ────────────────────────
+    H_numba = np.asarray(res_numba.H_tensor)
+    H_jax = np.asarray(res_jax.H_tensor)
+
+    assert H_jax.shape == (
+        n_models,
+        *H_numba.shape,
+    ), f"T1.2 shape mismatch: JAX={H_jax.shape} vs Numba={H_numba.shape}"
+
+    for i_model in range(n_models):
+        diff = float(np.max(np.abs(H_jax[i_model] - H_numba)))
+        assert diff < 1e-12, (
+            f"T1.2 paridade DIRETA batched[{i_model}] vs Numba {model_name}: "
+            f"max|diff|={diff:.3e} > 1e-12"
+        )

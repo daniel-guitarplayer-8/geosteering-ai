@@ -211,3 +211,66 @@ class TestCommonFactorsParity:
         for o_n, o_j in zip(cf_n, cf_j):
             diff = np.max(np.abs(np.asarray(o_j) - o_n))
             assert diff < 1e-11  # tolerância levemente maior por ter exp grandes
+
+
+# ────────────────────────────────────────────────────────────────────────
+# T1.4 — Sprint O0 Tier 1
+# Cobertura de branch ausente: TX posicionado na camada do FUNDO (n-1).
+# A suite atual (test_common_factors_three_layers_tiv) só exercita TX em
+# camadas 0 e 1; este teste fecha a lacuna validando paridade JAX vs Numba
+# quando o transmissor reside na última camada do perfil.
+# ────────────────────────────────────────────────────────────────────────
+def test_common_factors_tx_in_bottom_layer() -> None:
+    """T1.4 (Sprint O0) — paridade common_factors_jax vs Numba com TX na camada n-1.
+
+    Lacuna identificada na auditoria de cobertura: a suite atual só exercita
+    TX em camadas 0 e 1 (test_common_factors_three_layers_tiv testa camad_t=1).
+    Este teste cobre o branch crítico onde TX está na CAMADA DO FUNDO (n-1),
+    que ativa caminho de código diferente em ``common_factors_jax``.
+    """
+    n = 3
+    npt = 64
+    hordist = 1.5
+    krJ0J1 = np.linspace(0.001, 50.0, npt).astype(np.float64)
+    zeta = complex(0.0, 2.0 * np.pi * 20000.0 * 4e-7 * np.pi)
+    eta = np.array([[1.0, 1.0], [0.01, 0.005], [0.5, 0.5]], dtype=np.float64)
+    h_arr, prof_arr = sanitize_profile(n, np.array([3.0]))
+
+    # ── CRÍTICO: TX na camada do FUNDO (camad_t = n-1 = 2) ─────────
+    # Posição h0 colocada NA camada do fundo (depois da última fronteira)
+    h0 = prof_arr[n - 1] + 1.0  # 1 m abaixo da última fronteira
+    camad_t = n - 1  # = 2
+
+    # Path Numba (referência)
+    outs_n = ca_numba(n, npt, hordist, krJ0J1, zeta, h_arr, eta)
+    cf_n = cf_numba(n, npt, h0, h_arr, prof_arr, camad_t, *outs_n[:8])
+
+    # Path JAX
+    outs_j = common_arrays_jax(
+        n,
+        npt,
+        hordist,
+        jnp.asarray(krJ0J1),
+        zeta,
+        jnp.asarray(h_arr),
+        jnp.asarray(eta),
+    )
+    cf_j = common_factors_jax(
+        n,
+        npt,
+        h0,
+        jnp.asarray(h_arr),
+        jnp.asarray(prof_arr),
+        camad_t,
+        *outs_j[:8],
+    )
+
+    # Validações: finitude + paridade < 1e-11 (tolerância levemente maior por exp grandes)
+    for i, (o_n, o_j) in enumerate(zip(cf_n, cf_j)):
+        o_j_np = np.asarray(o_j)
+        assert np.all(np.isfinite(o_j_np)), f"T1.4 NaN/Inf no fator {i} (TX bottom)"
+        diff = np.max(np.abs(o_j_np - o_n))
+        assert diff < 1e-11, (
+            f"T1.4 paridade fator {i} JAX vs Numba (TX bottom): "
+            f"max|diff|={diff:.3e} > 1e-11"
+        )

@@ -242,10 +242,10 @@ def test_jit_cache_parity_after_eviction() -> None:
     clear_jit_cache()
     set_jit_cache_maxsize(3)
 
+    from geosteering_ai.simulation.config import SimulationConfig
     from geosteering_ai.simulation.validation.canonical_models import (
         get_canonical_model,
     )
-    from geosteering_ai.simulation.config import SimulationConfig
 
     m = get_canonical_model("oklahoma_5")
     z = np.linspace(m.min_depth - 2, m.max_depth + 2, 80)
@@ -443,3 +443,85 @@ def test_forward_pure_jax_pmap_mismatch_raises() -> None:
     wrong = jax.numpy.stack([ctx.rho_h_jnp] * (n_devices + 1), axis=0)
     with pytest.raises(ValueError, match="n_devices"):
         forward_pure_jax_pmap(wrong, wrong, ctx)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# T1.3 — Sprint O0 Tier 1: paridade pmap vs forward_pure_jax serial
+# ════════════════════════════════════════════════════════════════════════════
+# Lacuna coberta: `forward_pure_jax_pmap` é testado apenas para shape+finite
+# (test_forward_pure_jax_pmap_single_device acima). NÃO há validação numérica
+# bit-a-bit garantindo que o resultado do path pmap (vetorizado sobre devices)
+# casa com o resultado do path serial (forward_pure_jax invocado N vezes).
+#
+# Este teste fecha a lacuna: cria N modelos PERTURBADOS (ρ × Uniform[0.99,1.01])
+# para que cada device processe um modelo diferente — garantindo que a paridade
+# observada não é trivial (modelos idênticos pmap≡serial por construção).
+#
+# Tolerância: 1e-10. pmap pode introduzir pequenas diferenças por ordem de
+# operações de redução em hardware multi-device, mas em mono-device CPU
+# (ambiente CI) deve ser efetivamente bit-exato.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_pmap_parity_vs_forward_pure(model_oklahoma_3) -> None:
+    """T1.3 — paridade BIT-A-BIT pmap vs forward_pure_jax serial."""
+    from geosteering_ai.simulation._jax.forward_pure import (
+        forward_pure_jax,
+        forward_pure_jax_pmap,
+    )
+
+    n_devices = jax.local_device_count()  # >=1 sempre
+
+    # Cria N modelos PERTURBADOS (não idênticos) para que cada device
+    # processe um modelo diferente — paridade real, não trivial.
+    rho_h, rho_v, esp, z = model_oklahoma_3
+    rng = np.random.default_rng(42)
+    perturbations = rng.uniform(0.99, 1.01, size=n_devices)
+    rho_h_batch = np.stack([rho_h * p for p in perturbations])
+    rho_v_batch = np.stack([rho_v * p for p in perturbations])
+
+    # ── Path 1: serial (forward_pure_jax invocado n_devices vezes) ─
+    H_serial_list = []
+    for i in range(n_devices):
+        ctx_i = build_static_context(
+            rho_h_batch[i],
+            rho_v_batch[i],
+            esp,
+            z,
+            freqs_hz=np.array([20000.0]),
+            tr_spacing_m=1.0,
+            dip_deg=0.0,
+        )
+        H_i = forward_pure_jax(
+            jax.numpy.asarray(rho_h_batch[i]),
+            jax.numpy.asarray(rho_v_batch[i]),
+            ctx_i,
+        )
+        H_serial_list.append(np.asarray(H_i))
+    H_serial = np.stack(H_serial_list)  # (n_devices, n_pos, nf, 9)
+
+    # ── Path 2: pmap (forward_pure_jax_pmap em 1 call) ─────────────
+    # Reusa ctx do primeiro modelo (geometria igual para todos).
+    ctx0 = build_static_context(
+        rho_h_batch[0],
+        rho_v_batch[0],
+        esp,
+        z,
+        freqs_hz=np.array([20000.0]),
+        tr_spacing_m=1.0,
+        dip_deg=0.0,
+    )
+    H_pmap = forward_pure_jax_pmap(
+        jax.numpy.asarray(rho_h_batch),
+        jax.numpy.asarray(rho_v_batch),
+        ctx0,
+    )
+    H_pmap_np = np.asarray(H_pmap)
+
+    # ── Validações ─────────────────────────────────────────────────
+    assert (
+        H_serial.shape == H_pmap_np.shape
+    ), f"T1.3 shape mismatch: serial={H_serial.shape} vs pmap={H_pmap_np.shape}"
+    diff = float(np.max(np.abs(H_serial - H_pmap_np)))
+    # Tolerância 1e-10: pmap pode ter pequenas diferenças por ordem de operações.
+    assert diff < 1e-10, f"T1.3 paridade pmap vs serial: max|diff|={diff:.3e} > 1e-10"
