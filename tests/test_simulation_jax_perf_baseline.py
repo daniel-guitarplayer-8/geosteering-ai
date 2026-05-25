@@ -9,28 +9,31 @@
 # ║  Status      : Produção (gate Tier 1 anti-regressão de performance)       ║
 # ║  Framework   : pytest + JAX + .claude/perf_baseline.json                  ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-"""Teste T1.6 — gate automático de throughput JAX GPU vs baseline A100.
+"""Teste T1.6 — gate automático de throughput JAX GPU vs baseline da GPU em uso.
 
 **Motivação**: sem um gate automático de performance, qualquer otimização que
-acidentalmente DEGRADE throughput pode passar por CI sem alarme. A baseline
-A100 oficial v2.43 está registrada em ``.claude/perf_baseline.json`` (seção
-``jax_gpu_a100``). Este teste mede throughput atual via
-``simulate_multi_jax_batched`` e falha se cair abaixo do ``threshold_90pct``.
+acidentalmente DEGRADE throughput pode passar por CI sem alarme. Baselines
+oficiais v2.43 estão registradas em ``.claude/perf_baseline.json`` em duas
+seções: ``jax_gpu_t4`` e ``jax_gpu_a100``. O gate detecta a GPU em uso e
+compara contra a seção apropriada (evita falso positivo de regressão quando
+T4 roda contra threshold A100, que é ~1.32× maior em A).
 
 **Cenários cobertos** (subset do gate oficial A/B/E):
 
-  - **A**: n_models=50, n_pos=1, nf=1, nTR=1, nAng=1 — threshold 8.215.977 mod/h
-  - **B**: n_models=50, n_pos=100, nf=1, nTR=1, nAng=1 — threshold 256.323 mod/h
-  - **E**: n_models=50, n_pos=600, nf=1, nTR=1, nAng=1 — threshold 43.031 mod/h
+  - **A**: n_models=50, n_pos=1, nf=1, nTR=1, nAng=1
+  - **B**: n_models=50, n_pos=100, nf=1, nTR=1, nAng=1
+  - **E**: n_models=50, n_pos=600, nf=1, nTR=1, nAng=1
+
+Thresholds variam por hardware — consulte ``perf_baseline.json``.
 
 **Metodologia**:
   - 1 warmup (descartado)
   - 3 runs hot, mediana usada para comparação
-  - SKIP gracioso se rodando em CPU (não faz sentido medir A100 em CPU)
-  - SKIP gracioso se baseline JSON não encontrado
+  - SKIP gracioso se rodando em CPU
+  - SKIP gracioso se baseline JSON ou seção do hardware ausente
 
 **Markers**: ``@pytest.mark.gpu`` + ``@pytest.mark.slow`` (não roda em CI
-rápido — apenas em pre-release Colab A100).
+rápido — apenas em pre-release Colab T4/A100).
 """
 
 from __future__ import annotations
@@ -70,8 +73,41 @@ _BASELINE_PATH = Path(__file__).resolve().parents[1] / ".claude" / "perf_baselin
 """Caminho absoluto para ``.claude/perf_baseline.json`` na raiz do projeto."""
 
 
-def _load_baseline() -> dict[str, Any] | None:
-    """Carrega seção ``jax_gpu_a100`` do ``perf_baseline.json``.
+def _detect_gpu_baseline_key() -> str:
+    """Detecta GPU em uso e retorna a chave da baseline correspondente.
+
+    Mapeia ``device.device_kind`` para a seção apropriada em
+    ``perf_baseline.json``. Sem este mapeamento, o gate compararia T4
+    contra threshold A100 (1.32× maior em cenário A), gerando falsos
+    positivos de regressão.
+
+    Returns:
+        ``"jax_gpu_a100"`` se A100 detectada, ``"jax_gpu_t4"`` se T4,
+        ``"jax_gpu_a100"`` como fallback conservador (oficial canônica).
+    """
+    if not HAS_JAX:
+        return "jax_gpu_a100"
+    try:
+        device = jax.devices()[0]
+        kind = (getattr(device, "device_kind", "") or "").lower()
+        # Fallback: alguns backends expõem só via str(device)
+        if not kind:
+            kind = str(device).lower()
+        if "a100" in kind:
+            return "jax_gpu_a100"
+        if "t4" in kind:
+            return "jax_gpu_t4"
+    except Exception:
+        pass
+    return "jax_gpu_a100"
+
+
+def _load_baseline(section: str | None = None) -> dict[str, Any] | None:
+    """Carrega seção da baseline GPU do ``perf_baseline.json``.
+
+    Args:
+        section: Chave da seção (``"jax_gpu_t4"`` ou ``"jax_gpu_a100"``).
+            Se ``None``, detecta hardware via :func:`_detect_gpu_baseline_key`.
 
     Returns:
         Dict com cenários ``{A,B,E}_hot`` + thresholds, ou ``None`` se
@@ -84,7 +120,9 @@ def _load_baseline() -> dict[str, Any] | None:
             data = json.load(fh)
     except (json.JSONDecodeError, OSError):
         return None
-    return data.get("jax_gpu_a100")
+    if section is None:
+        section = _detect_gpu_baseline_key()
+    return data.get(section)
 
 
 def _is_running_on_gpu() -> bool:
@@ -178,9 +216,11 @@ _SCENARIOS_GATE = {
 
 @pytest.mark.parametrize("scenario", ["A", "B", "E"])
 def test_throughput_gpu_regression_gate(scenario: str) -> None:
-    """Gate de regressão: throughput atual ≥ 90% do baseline A100 (v2.43).
+    """Gate de regressão: throughput atual ≥ 90% da baseline da GPU em uso.
 
-    Falha se otimização degradar performance abaixo do limiar estabelecido.
+    Detecta T4 vs A100 e compara contra a seção apropriada de
+    ``perf_baseline.json``. Falha se otimização degradar performance
+    abaixo do limiar estabelecido para o hardware atual.
 
     Args:
         scenario: Identificador do cenário gate (``A``, ``B``, ``E``).
@@ -189,21 +229,22 @@ def test_throughput_gpu_regression_gate(scenario: str) -> None:
     if not _is_running_on_gpu():
         pytest.skip("T1.6 requer GPU CUDA — rodando em CPU, sem sentido medir")
 
-    baseline = _load_baseline()
+    baseline_key = _detect_gpu_baseline_key()
+    baseline = _load_baseline(baseline_key)
     if baseline is None:
         pytest.skip(
-            "Baseline jax_gpu_a100 ausente em .claude/perf_baseline.json — "
-            "rode `validate_jax_gpu_v240.ipynb` em A100 primeiro"
+            f"Baseline {baseline_key} ausente em .claude/perf_baseline.json — "
+            f"rode `validate_jax_gpu_v240.ipynb` no hardware correspondente primeiro"
         )
 
     scen_key = f"{scenario}_hot"
     if scen_key not in baseline:
-        pytest.skip(f"Cenário {scen_key} ausente na baseline")
+        pytest.skip(f"Cenário {scen_key} ausente em baseline {baseline_key}")
 
     # ── Threshold oficial (90% do baseline) ───────────────────────────────────
     threshold = baseline[scen_key].get("threshold_90pct")
     if threshold is None:
-        pytest.skip(f"threshold_90pct ausente em baseline[{scen_key}]")
+        pytest.skip(f"threshold_90pct ausente em {baseline_key}[{scen_key}]")
 
     # ── Medição atual ─────────────────────────────────────────────────────────
     cfg = _SCENARIOS_GATE[scenario]
@@ -211,7 +252,8 @@ def test_throughput_gpu_regression_gate(scenario: str) -> None:
 
     # ── Gate ──────────────────────────────────────────────────────────────────
     assert measured >= threshold, (
-        f"T1.6 REGRESSÃO de throughput em cenário {scenario}: "
+        f"T1.6 REGRESSÃO de throughput em cenário {scenario} "
+        f"(baseline={baseline_key}): "
         f"medido={measured:,.0f} mod/h < threshold={threshold:,.0f} mod/h "
         f"(baseline={baseline[scen_key].get('throughput_mod_h'):,.0f} mod/h, "
         f"90% gate)"
@@ -221,8 +263,8 @@ def test_throughput_gpu_regression_gate(scenario: str) -> None:
 def test_baseline_file_structure_is_valid() -> None:
     """Sanity check: baseline JSON existe E tem estrutura mínima esperada.
 
-    Falha indica corrupção do arquivo de baseline (não regressão de performance).
-    Roda sempre, mesmo em CPU.
+    Valida ambas as seções (T4 e A100) — falha indica corrupção do arquivo
+    de baseline (não regressão de performance). Roda sempre, mesmo em CPU.
     """
     if not _BASELINE_PATH.exists():
         pytest.skip(f".claude/perf_baseline.json ausente em {_BASELINE_PATH}")
@@ -230,10 +272,15 @@ def test_baseline_file_structure_is_valid() -> None:
     with _BASELINE_PATH.open(encoding="utf-8") as fh:
         data = json.load(fh)
 
-    assert "jax_gpu_a100" in data, "Seção 'jax_gpu_a100' faltando na baseline"
-    a100 = data["jax_gpu_a100"]
-    assert "_meta" in a100, "Subsection '_meta' faltando em jax_gpu_a100"
-    for scen in ("A_hot", "B_hot", "E_hot"):
-        assert scen in a100, f"Cenário {scen} faltando em jax_gpu_a100"
-        assert "threshold_90pct" in a100[scen], f"threshold_90pct faltando em {scen}"
-        assert "throughput_mod_h" in a100[scen], f"throughput_mod_h faltando em {scen}"
+    for section in ("jax_gpu_t4", "jax_gpu_a100"):
+        assert section in data, f"Seção {section!r} faltando na baseline"
+        block = data[section]
+        assert "_meta" in block, f"Subsection '_meta' faltando em {section}"
+        for scen in ("A_hot", "B_hot", "E_hot"):
+            assert scen in block, f"Cenário {scen} faltando em {section}"
+            assert (
+                "threshold_90pct" in block[scen]
+            ), f"threshold_90pct faltando em {section}[{scen}]"
+            assert (
+                "throughput_mod_h" in block[scen]
+            ), f"throughput_mod_h faltando em {section}[{scen}]"
