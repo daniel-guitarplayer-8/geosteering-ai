@@ -57,17 +57,14 @@ _HORDIST_SINGULARITY_R: float = 1.0e-2
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Sprint O1 (v2.43) — Unroll de scans de recursão TE/TM
+# Patch O1-fix-1 (v2.43.1): teto de unroll é GPU-AWARE (delegado para
+# dipoles_unified._get_max_layer_unroll — single source of truth).
 # ──────────────────────────────────────────────────────────────────────────────
 # Os `lax.scan` bottom-up (camada n-1 → 0) e top-down (camada 0 → n-1) iteram
-# n-1 vezes. Sem `unroll`, o XLA emite ~1 kernel CUDA por iteração (overhead
-# de ~5-10 µs por launch em GPU). Com `unroll=K` o compilador funde até K
-# iterações em 1 kernel, eliminando overhead a custo de programa XLA maior.
-#
-# Limite 8: mesmo balanço usado em `dipoles_unified._MAX_LAYER_UNROLL`. Para
-# n_cam ≤ 8 (oklahoma_3/5, devine_8, hou_7) → full unroll (1 kernel). Para
-# n_cam > 8 (oklahoma_28) → unroll parcial evita pressão excessiva no
-# instruction cache e stack do XLA.
-_MAX_LAYER_UNROLL: int = 8
+# n-1 vezes. Com `unroll=K` o compilador funde até K iterações em 1 kernel,
+# eliminando overhead — porém em T4 (4 MB L2, 64 KB regs/SM) o full unroll
+# causa register spill e regride performance em cenários overhead-dominated.
+# Solução: detecção runtime via dipoles_unified._get_max_layer_unroll().
 
 
 def _effective_unroll_for_scan(length: int) -> int:
@@ -77,10 +74,15 @@ def _effective_unroll_for_scan(length: int) -> int:
         length: Comprimento estático do scan (e.g., ``n - 1``).
 
     Returns:
-        Inteiro ≥ 1. ``min(length, _MAX_LAYER_UNROLL)`` clampeado em 1
-        (scan exige unroll positivo).
+        Inteiro ≥ 1. ``min(length, max_unroll)`` clampeado em 1, onde
+        ``max_unroll`` vem de ``_get_max_layer_unroll()`` (GPU-aware:
+        A100/H100=8, T4/V100/CPU=1).
     """
-    return max(1, min(length, _MAX_LAYER_UNROLL))
+    from geosteering_ai.simulation._jax.dipoles_unified import (
+        _get_max_layer_unroll,
+    )
+
+    return max(1, min(length, _get_max_layer_unroll()))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

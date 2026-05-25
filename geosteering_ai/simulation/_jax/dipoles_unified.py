@@ -85,6 +85,8 @@ Note:
 
 from __future__ import annotations
 
+import functools
+
 try:
     import jax
     import jax.numpy as jnp
@@ -100,19 +102,41 @@ _MZ = 1.0  # Momento magnético vertical (A·m²) — paridade com dipoles_nativ
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Sprint O1 (v2.43) — Configuração de unrolling da loop de camadas (Quick Win)
+# Patch O1-fix-1 (v2.43.1): unroll é GPU-AWARE — full unroll só em A100/H100.
 # ──────────────────────────────────────────────────────────────────────────────
-# `_MAX_LAYER_UNROLL` controla o fator máximo de unroll passado para
-# `jax.lax.scan` quando substituímos os `fori_loop` sobre camadas. O scan
-# unrolled funde N iterações em 1 único kernel CUDA (em vez de 1 kernel
-# por iteração em `fori_loop`), eliminando ~5-10 µs/iteração de overhead
-# de launch — ganho dominante em cenários com n_cam pequeno (oklahoma_5,
-# devine_8, hou_7) onde o kernel é leve e o overhead relativo é alto.
+# `_MAX_LAYER_UNROLL_DEFAULT` é o teto teórico (A100/H100 com L2≥40 MB e
+# registradores abundantes). Em T4 (4 MB L2, 64 KB regs/SM) o full unroll
+# causou regressão de -11.8% a -15.7% (cenários A e B) porque:
+#   1. Body é não-trivial (complex128 sobre ~201 lanes Hankel)
+#   2. Inlinado N× em descent + ascent + cada vmap config → register spill
+#   3. Masking via jnp.where executa TODAS as iterações (antes fori_loop
+#      tinha early-exit lógico)
 #
-# Limite 8: balanço empírico entre redução de kernel launches (≥4× para
-# n=5..8) e tamanho do programa XLA (cresce linearmente com unroll, pode
-# pressionar instruction cache e stack do compilador para n grande). Para
-# n_cam > 8 (oklahoma_28), efetivo será `min(n, 8)` — unroll parcial.
-_MAX_LAYER_UNROLL: int = 8
+# Solução: `_get_max_layer_unroll()` detecta GPU em runtime via
+# `jax.devices()[0].device_kind` (cached). Para hardware "grande" mantém 8;
+# para T4/V100/desconhecido cai para 1 (equivalente fori_loop).
+_MAX_LAYER_UNROLL_DEFAULT: int = 8
+
+
+@functools.lru_cache(maxsize=1)
+def _get_max_layer_unroll() -> int:
+    """Retorna o teto de unroll seguro para a GPU em uso (cached).
+
+    A100/H100: 8 (mantém ganho QW#2 da Sprint O1).
+    T4/V100/CPU/desconhecido: 1 (equivalente fori_loop, sem regressão).
+
+    Returns:
+        Inteiro ≥ 1. Detecção via ``jax.devices()[0].device_kind``.
+        Falha gracioso → 1 (conservador, sem regressão garantida).
+    """
+    try:
+        kind = (getattr(jax.devices()[0], "device_kind", "") or "").lower()
+    except Exception:
+        return 1
+    # Hardware com L2≥40 MB e registradores abundantes
+    if "a100" in kind or "h100" in kind:
+        return _MAX_LAYER_UNROLL_DEFAULT
+    return 1
 
 
 def _effective_unroll(n: int, enabled: bool) -> int:
@@ -125,17 +149,15 @@ def _effective_unroll(n: int, enabled: bool) -> int:
     Returns:
         Inteiro ≥ 1. Quando ``enabled=False`` retorna 1 (sem unroll,
         equivalente a ``fori_loop`` em termos de kernel launches mas com
-        forma `scan`). Caso contrário, ``min(n, _MAX_LAYER_UNROLL)``.
+        forma `scan`). Caso contrário, ``min(n, _get_max_layer_unroll())``.
 
     Note:
-        Para ``n ≤ _MAX_LAYER_UNROLL`` o resultado é ``n`` (full unroll),
-        gerando 1 único kernel CUDA. Para ``n > _MAX_LAYER_UNROLL``
-        (e.g., oklahoma_28) usamos unroll parcial para evitar stack
-        overflow no compilador XLA.
+        ``_get_max_layer_unroll()`` é GPU-aware: A100/H100 retorna 8;
+        T4/V100/CPU retorna 1. Detecção cached via ``lru_cache``.
     """
     if not enabled:
         return 1
-    return max(1, min(n, _MAX_LAYER_UNROLL))
+    return max(1, min(n, _get_max_layer_unroll()))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

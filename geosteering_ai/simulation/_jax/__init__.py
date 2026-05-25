@@ -124,22 +124,52 @@ def _setup_xla_environment() -> None:
         _logger.debug("XLA setup desabilitado via GEOSTEERING_JAX_NO_XLA_SETUP=1")
         return
 
+    # ── Detecção GPU pré-JAX (via nvidia-smi) ─────────────────────────────
+    # Patch O1-fix-2 (v2.43.1): flags A100-tuned causaram regressão em T4
+    # nas cenários A/B (-11.8%/-15.7%). Detecção via nvidia-smi (subprocess
+    # 2s timeout) decide se aplica flags otimistas. Falha gracioso → assume
+    # não-A100 (conservador, sem regressão garantida).
+    _is_a100_class = False
+    try:
+        import subprocess as _sp
+
+        _gpu_name = _sp.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout.lower()
+        _is_a100_class = "a100" in _gpu_name or "h100" in _gpu_name
+    except (FileNotFoundError, _sp.TimeoutExpired, _sp.SubprocessError, OSError):
+        # nvidia-smi ausente (CPU dev) ou timeout — assume não-A100
+        pass
+
     # ── XLA flags (combina com pré-existentes, sem duplicar) ──────────────
-    existing_flags = _os.environ.get("XLA_FLAGS", "")
     # xla_gpu_enable_triton_softmax_fusion foi removida em JAX ≥ 0.5.x (XLA 0.7+).
     # Setar flag desconhecida causa FATAL em parse_flags_from_env.cc — mata o kernel.
-    candidate_flags = [
-        "--xla_gpu_enable_latency_hiding_scheduler=true",
-    ]
+    existing_flags = _os.environ.get("XLA_FLAGS", "")
+    candidate_flags: list[str] = []
+    if _is_a100_class:
+        # latency_hiding_scheduler é tunado para A100/H100 (deep async copy
+        # engines, 108 SMs). Em T4 adiciona compile-time e reordena kernels
+        # pequenos de forma que prejudica cenário A (launch-bound).
+        candidate_flags.append("--xla_gpu_enable_latency_hiding_scheduler=true")
     new_flag_str = " ".join(
         [existing_flags] + [f for f in candidate_flags if f not in existing_flags]
     ).strip()
-    _os.environ["XLA_FLAGS"] = new_flag_str
+    if new_flag_str:
+        _os.environ["XLA_FLAGS"] = new_flag_str
 
     # ── VRAM allocation (só relevante em GPU; CPU XLA ignora) ─────────────
     # setdefault preserva qualquer override explícito do usuário.
+    # MEM_FRACTION: A100 (40 GB) suporta 0.85 confortavelmente. T4 (15 GB)
+    # com 0.85 = 12.75 GB; somado a cuDNN handles + cache HLO acumulado,
+    # fragmenta o BFC allocator e causa OOM em cenário E (5.6 GiB alloc).
+    # 0.75 = 11.25 GB em T4 deixa ~3.75 GB de folga para drivers.
     _os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    _os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.85")
+    _os.environ.setdefault(
+        "XLA_PYTHON_CLIENT_MEM_FRACTION", "0.85" if _is_a100_class else "0.75"
+    )
 
     # ── Compilation cache dir ─────────────────────────────────────────────
     # Prioridade: 1) env var explícita; 2) $TMPDIR/jax_compilation_cache_geosteering;
