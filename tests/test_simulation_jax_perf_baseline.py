@@ -165,7 +165,16 @@ def _measure_throughput_mod_h(
     Returns:
         Mediana de throughput em modelos/hora.
     """
+    import gc
+
     from geosteering_ai.simulation._jax.multi_forward import simulate_multi_jax_batched
+
+    # Mitigação OOM A100 (Sprint O1 unroll regression): libera VRAM pinada por
+    # programas XLA compilados em testes anteriores antes de alocar buffers
+    # grandes (cenário E aloca ~5.6 GiB num único op). Sem isto, BFC allocator
+    # fragmenta após 169 testes e falha mesmo em A100 40 GB.
+    jax.clear_caches()
+    gc.collect()
 
     # ── Modelo sintético reproduzível (oklahoma_3-like) ───────────────────────
     rng = np.random.default_rng(42)

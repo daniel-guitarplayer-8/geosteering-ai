@@ -647,6 +647,10 @@ def test_chunked_unified_parity_600pos_3freqs():
     Este é o caso de regressão identificado em E2: config produção que
     saturava a L2 do T4 no caminho monolítico.
     """
+    import gc
+
+    import jax
+
     from geosteering_ai.simulation._jax.forward_pure import (
         build_static_context,
         forward_pure_jax,
@@ -654,6 +658,13 @@ def test_chunked_unified_parity_600pos_3freqs():
     from geosteering_ai.simulation.validation.canonical_models import (
         get_canonical_model,
     )
+
+    # Mitigação OOM A100 (Sprint O1 unroll=8 em oklahoma_28 com 28 camadas):
+    # libera VRAM pinada por programas XLA compilados antes deste teste alocar
+    # buffers de propagação unrolled (~2.3 GiB num único op). Sem isto, BFC
+    # allocator fragmenta após muitos testes e falha mesmo em A100 40 GB.
+    jax.clear_caches()
+    gc.collect()
 
     m = get_canonical_model("oklahoma_28")
     z = np.linspace(m.min_depth - 2, m.max_depth + 2, 600)
