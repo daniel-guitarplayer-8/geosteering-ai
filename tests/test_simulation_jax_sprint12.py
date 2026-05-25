@@ -651,18 +651,25 @@ def test_chunked_unified_parity_600pos_3freqs():
 
     import jax
 
+    # Mitigação OOM T4/A100 (Sprint O1 unroll=8 em oklahoma_28 com 28 camadas):
+    # libera VRAM pinada por programas XLA compilados antes deste teste alocar
+    # buffers de propagação unrolled (~2.3 GiB num único op). Precisa limpar
+    # caches PROJECT-LEVEL (_BUCKET_JIT_CACHE, _UNIFIED_JIT_CACHE,
+    # _UNIFIED_CHUNKED_JIT_CACHE) — ``jax.clear_caches()`` sozinho não basta
+    # pois limpa apenas o cache interno do JAX, não os do projeto que
+    # retêm referências a buffers persistentes na VRAM.
     from geosteering_ai.simulation._jax.forward_pure import (
         build_static_context,
+        clear_jit_cache,
+        clear_unified_jit_cache,
         forward_pure_jax,
     )
     from geosteering_ai.simulation.validation.canonical_models import (
         get_canonical_model,
     )
 
-    # Mitigação OOM A100 (Sprint O1 unroll=8 em oklahoma_28 com 28 camadas):
-    # libera VRAM pinada por programas XLA compilados antes deste teste alocar
-    # buffers de propagação unrolled (~2.3 GiB num único op). Sem isto, BFC
-    # allocator fragmenta após muitos testes e falha mesmo em A100 40 GB.
+    clear_jit_cache()
+    clear_unified_jit_cache()
     jax.clear_caches()
     gc.collect()
 

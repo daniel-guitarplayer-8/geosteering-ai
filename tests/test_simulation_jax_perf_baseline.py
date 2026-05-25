@@ -167,12 +167,22 @@ def _measure_throughput_mod_h(
     """
     import gc
 
+    from geosteering_ai.simulation._jax.forward_pure import (
+        clear_jit_cache,
+        clear_unified_jit_cache,
+    )
     from geosteering_ai.simulation._jax.multi_forward import simulate_multi_jax_batched
 
-    # Mitigação OOM A100 (Sprint O1 unroll regression): libera VRAM pinada por
-    # programas XLA compilados em testes anteriores antes de alocar buffers
-    # grandes (cenário E aloca ~5.6 GiB num único op). Sem isto, BFC allocator
-    # fragmenta após 169 testes e falha mesmo em A100 40 GB.
+    # Mitigação OOM T4/A100 (Sprint O1 unroll regression): após 170+ testes
+    # GPU, os caches project-level retêm dezenas de programas XLA compilados,
+    # cada um pinando buffers persistentes na VRAM. ``jax.clear_caches()``
+    # limpa SOMENTE o cache interno do JAX — os caches do projeto
+    # (``_BUCKET_JIT_CACHE``, ``_UNIFIED_JIT_CACHE``,
+    # ``_UNIFIED_CHUNKED_JIT_CACHE``) precisam ser limpos explicitamente.
+    # Cenário E aloca ~5.6 GiB num único op; sem cleanup completo falha em
+    # T4 15 GB (3 GB livres após estado acumulado) e até em A100 40 GB.
+    clear_jit_cache()
+    clear_unified_jit_cache()
     jax.clear_caches()
     gc.collect()
 
@@ -254,6 +264,40 @@ def test_throughput_gpu_regression_gate(scenario: str) -> None:
     threshold = baseline[scen_key].get("threshold_90pct")
     if threshold is None:
         pytest.skip(f"threshold_90pct ausente em {baseline_key}[{scen_key}]")
+
+    # ── Pre-flight memory check (T4 + cenário E) ──────────────────────────────
+    # T4 tem 15 GB total. Cenário E aloca ~5.6 GiB num único op. Após 170+
+    # testes acumulados o contexto CUDA retém ~12 GB fora dos caches JAX
+    # (drivers, cuDNN handles, fragmentação histórica do allocator). Mesmo
+    # com clear_jit_cache + clear_unified_jit_cache, T4 pode não ter 6.5 GB
+    # livres. Skip gracioso evita falha falsa de gate por OOM ambiental.
+    if baseline_key == "jax_gpu_t4" and scenario == "E":
+        import gc
+
+        from geosteering_ai.simulation._jax.forward_pure import (
+            clear_jit_cache,
+            clear_unified_jit_cache,
+        )
+
+        clear_jit_cache()
+        clear_unified_jit_cache()
+        jax.clear_caches()
+        gc.collect()
+        try:
+            stats = jax.devices()[0].memory_stats() or {}
+            bytes_limit = stats.get("bytes_limit", 0)
+            bytes_in_use = stats.get("bytes_in_use", 0)
+            free_bytes = bytes_limit - bytes_in_use
+            REQUIRED_BYTES = 6_500_000_000  # ~6.5 GiB
+            if 0 < free_bytes < REQUIRED_BYTES:
+                pytest.skip(
+                    f"T4 OOM avoidance: {free_bytes / 1e9:.1f} GiB livre < "
+                    f"6.5 GiB necessário para cenário E (limite arquitetural T4 "
+                    f"com estado acumulado de testes prévios). Rode cenário E "
+                    f"em sessão isolada ou use A100."
+                )
+        except (KeyError, AttributeError, TypeError):
+            pass  # memory_stats() indisponível em algumas versões JAX
 
     # ── Medição atual ─────────────────────────────────────────────────────────
     cfg = _SCENARIOS_GATE[scenario]
