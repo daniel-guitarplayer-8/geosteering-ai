@@ -1,0 +1,37 @@
+{
+  "sprint": "O0+O1 (full benchmark — 8 scenarios)",
+  "template": "validate_jax_gpu_sprinto0_o1 (cópia adaptada de v240)",
+  "git_branch": "feat/sprint-o1-quick-wins",
+  "git_commit": "1714d442af5a8076c82b219442e968b6881333f0",
+  "runtime": "t4",
+  "baseline_section": "jax_gpu_t4",
+  "timestamp_utc": "20260525_175329",
+  "jax_version": "0.7.2",
+  "env_vars": {
+    "JAX_ENABLE_X64": "1",
+    "JAX_PLATFORMS": "cuda,cpu",
+    "JAX_COMPILATION_CACHE_DIR": "/content/jax_cache",
+    "XLA_FLAGS": null,
+    "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+    "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.75"
+  },
+  "pytest_summary": {"passed": 168, "skipped": 5, "failed": 2, "total": 175},
+  "pytest_duration_sec": 2012.42,
+  "benchmark_summary": {
+    "A": {"hot": 4860318, "numba_t4": 1883651, "ratio_numba": 2.58, "vs_pre_o1": 0.70},
+    "B": {"hot": 160015,  "numba_t4": 83230,   "ratio_numba": 1.92, "vs_pre_o1": 0.62},
+    "C": {"hot": 80059,   "numba_t4": 25280,   "ratio_numba": 3.17, "vs_pre_o1": 0.53},
+    "D": {"hot": 3210747, "numba_t4": 898907,  "ratio_numba": 3.57, "vs_pre_o1": 0.65},
+    "E": {"hot": 26368,   "numba_t4": 21767,   "ratio_numba": 1.21, "vs_pre_o1": 0.61},
+    "F": {"hot": 20268,   "numba_t4": 8261,    "ratio_numba": 2.45, "vs_pre_o1": 0.56},
+    "G": {"hot": 5075,    "numba_t4": 2041,    "ratio_numba": 2.49, "vs_pre_o1": 0.55},
+    "H": {"hot": null,    "oom_in_t4": true}
+  },
+  "gates": {
+    "a16_pass": false,
+    "o1_pass": false,
+    "paridade_pass": true,
+    "quick_wins_pass": "10/10"
+  },
+  "note": "Resumido. JSON completo em /content/drive/MyDrive/Geosteering_AI/sprint_o0_o1/"
+}
