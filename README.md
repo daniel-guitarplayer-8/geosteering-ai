@@ -107,7 +107,7 @@ TensorFlow 2.x / Keras (EXCLUSIVO — PyTorch PROIBIDO).
 
 ## Autor
 
-Daniel Leal Souza, José Jadson, Celso Rafael, Valdelírio da Silva 
+Daniel Leal Souza, José Jadson, Celso Rafael Lima de Lima, Valdelírio da Silva 
 
 ## Licença
 
