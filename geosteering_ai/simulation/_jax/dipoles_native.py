@@ -46,6 +46,7 @@ IMPORTANTE: Este módulo é EXPERIMENTAL. O kernel híbrido
 preferida e totalmente funcional. Este módulo expõe helpers nativos
 para experimentação e é a base para Sprints 3.3.2 e 3.3.3 futuras.
 """
+
 from __future__ import annotations
 
 import jax
@@ -547,7 +548,7 @@ def compute_case_index_jax(
             return 1
         if camad_r == camad_t:
             # z vs h0 pode ser tracer → resolve via jnp.where.
-            return jnp.where(z <= h0, 2, 3)
+            return jnp.where(z <= h0, 2, 3)  # type: ignore[no-any-return]
         if camad_r > camad_t and camad_r != (n - 1):
             return 4
         return 5
@@ -647,7 +648,7 @@ def _hmd_tiv_full_jax(
         _hmd_tiv_kernel_case5_jax,
         _hmd_tiv_kernel_case6_jax,
     ]
-    return jax.lax.switch(
+    return jax.lax.switch(  # type: ignore[no-any-return]
         case_index,
         branches,
         u_r,
@@ -949,7 +950,7 @@ def _vmd_full_jax(
         _vmd_kernel_case5_jax,
         _vmd_kernel_case6_jax,
     ]
-    return jax.lax.switch(
+    return jax.lax.switch(  # type: ignore[no-any-return]
         case_index,
         branches,
         TEdwz_r,
@@ -1054,10 +1055,14 @@ def _hmd_tiv_native_jax(
     kr = krJ0J1 / r
 
     # ── ETAPA 3: Propagação dos potenciais TM/TE entre camadas ──────
-    Txdw = jnp.zeros((npt, n), dtype=jnp.complex128)
-    Tudw = jnp.zeros((npt, n), dtype=jnp.complex128)
-    Txup = jnp.zeros((npt, n), dtype=jnp.complex128)
-    Tuup = jnp.zeros((npt, n), dtype=jnp.complex128)
+    # Sprint O2 (v2.43): dtype derivado de `u` (output de common_arrays_jax),
+    # que já carrega o complex_dtype selecionado pelo dispatcher. Garante que
+    # operações `.at[].set()` subsequentes não promovam tipo silencioso.
+    _cdtype = u.dtype
+    Txdw = jnp.zeros((npt, n), dtype=_cdtype)
+    Tudw = jnp.zeros((npt, n), dtype=_cdtype)
+    Txup = jnp.zeros((npt, n), dtype=_cdtype)
+    Tuup = jnp.zeros((npt, n), dtype=_cdtype)
 
     if camad_r > camad_t:
         # Caso A: RX abaixo do TX — propagação descendente
@@ -1349,8 +1354,10 @@ def _vmd_native_jax(
     kr = krJ0J1 / r
 
     # ── ETAPA 3: Propagação TEdwz / TEupz ───────────────────────────
-    TEdwz = jnp.zeros((npt, n), dtype=jnp.complex128)
-    TEupz = jnp.zeros((npt, n), dtype=jnp.complex128)
+    # Sprint O2 (v2.43): dtype derivado de `u` (output de common_arrays_jax).
+    _cdtype = u.dtype
+    TEdwz = jnp.zeros((npt, n), dtype=_cdtype)
+    TEupz = jnp.zeros((npt, n), dtype=_cdtype)
 
     if camad_r > camad_t:
         for j in range(camad_t, camad_r + 1):
