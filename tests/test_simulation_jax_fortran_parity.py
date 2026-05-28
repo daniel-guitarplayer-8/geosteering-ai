@@ -107,21 +107,26 @@ def test_forward_pure_bucketed_fortran_parity_canonical(model_name: str) -> None
     # ``compare_fortran_python`` resolve internamente: monta model.in, executa
     # tatu.x, parseia .dat, roda forward_pure_jax (bucketed), compara campo a
     # campo via max(|JAX - Fortran|).
-    result = compare_fortran_python(
-        model_name=model_name,
+    results = compare_fortran_python(
+        canonical_model_name=model_name,
         backends=["jax_hybrid"],
         tol_abs=1e-10,  # tolerância estrita para gate Tier 1
     )
 
     # ── Validações de gate ────────────────────────────────────────────────────
     assert (
-        result.get("success_jax_hybrid", False) is True
-    ), f"T1.1 paridade JAX-bucketed vs Fortran FALHOU em {model_name}: {result}"
+        len(results) == 1
+    ), f"esperado 1 resultado (jax_hybrid), obtido {len(results)}"
+    r = results[0]
 
-    max_err = result.get("max_abs_error_jax_hybrid", float("inf"))
-    assert max_err < 1e-10, (
+    assert r.passed is True, (
+        f"T1.1 paridade JAX-bucketed vs Fortran FALHOU em {model_name}: "
+        f"max_abs={r.max_abs_error:.3e} tol={r.tol_abs_used:.0e} notes={r.notes!r}"
+    )
+
+    assert r.max_abs_error < 1e-10, (
         f"T1.1 paridade JAX-bucketed vs Fortran {model_name}: "
-        f"max|diff|={max_err:.3e} excede tolerância 1e-10"
+        f"max|diff|={r.max_abs_error:.3e} excede tolerância 1e-10"
     )
 
 
@@ -135,10 +140,12 @@ def test_t11_fortran_parity_smoke() -> None:
         compare_fortran_python,
     )
 
-    result = compare_fortran_python(
-        model_name="oklahoma_3",
+    results = compare_fortran_python(
+        canonical_model_name="oklahoma_3",
         backends=["jax_hybrid"],
         tol_abs=1e-6,  # smoke: aceitar qualquer paridade básica
     )
-    assert result is not None, "T1.1 smoke: compare_fortran_python retornou None"
-    assert "jax_hybrid" in str(result), "T1.1 smoke: backend jax_hybrid não consumido"
+    assert results, "T1.1 smoke: compare_fortran_python retornou lista vazia"
+    assert (
+        results[0].backend == "jax_hybrid"
+    ), f"T1.1 smoke: backend esperado jax_hybrid, obtido {results[0].backend}"

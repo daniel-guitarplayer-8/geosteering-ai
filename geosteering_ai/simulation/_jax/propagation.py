@@ -55,35 +55,6 @@ jax.config.update("jax_enable_x64", True)
 _HORDIST_SINGULARITY_EPS: float = 1.0e-12
 _HORDIST_SINGULARITY_R: float = 1.0e-2
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Sprint O1 (v2.43) — Unroll de scans de recursão TE/TM
-# Patch O1-fix-1 (v2.43.1): teto de unroll é GPU-AWARE (delegado para
-# dipoles_unified._get_max_layer_unroll — single source of truth).
-# ──────────────────────────────────────────────────────────────────────────────
-# Os `lax.scan` bottom-up (camada n-1 → 0) e top-down (camada 0 → n-1) iteram
-# n-1 vezes. Com `unroll=K` o compilador funde até K iterações em 1 kernel,
-# eliminando overhead — porém em T4 (4 MB L2, 64 KB regs/SM) o full unroll
-# causa register spill e regride performance em cenários overhead-dominated.
-# Solução: detecção runtime via dipoles_unified._get_max_layer_unroll().
-
-
-def _effective_unroll_for_scan(length: int) -> int:
-    """Determina o fator de unroll efetivo para os ``scan`` de propagação.
-
-    Args:
-        length: Comprimento estático do scan (e.g., ``n - 1``).
-
-    Returns:
-        Inteiro ≥ 1. ``min(length, max_unroll)`` clampeado em 1, onde
-        ``max_unroll`` vem de ``_get_max_layer_unroll()`` (GPU-aware:
-        A100/H100=8, T4/V100/CPU=1).
-    """
-    from geosteering_ai.simulation._jax.dipoles_unified import (
-        _get_max_layer_unroll,
-    )
-
-    return max(1, min(length, _get_max_layer_unroll()))
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # common_arrays_jax — port de _numba.common_arrays
@@ -225,17 +196,11 @@ def common_arrays_jax(
 
     if n > 1:
         indices_bottom = jnp.arange(n - 2, -1, -1)
-        # Sprint O1 (v2.43): `unroll` funde iterações em 1 kernel CUDA,
-        # eliminando overhead de launch (~5-10 µs por iteração em GPU).
-        # `length=n-1` é Python int estático — seguro para unroll.
-        _unroll_bot = _effective_unroll_for_scan(n - 1)
         _, (AdmApdw_stacked, ImpApdw_stacked, RTEdw_stacked, RTMdw_stacked) = (
             jax.lax.scan(
                 _bottom_up_step,
                 (AdmApdw_terminal, ImpApdw_terminal),
                 indices_bottom,
-                length=n - 1,
-                unroll=_unroll_bot,
             )
         )
         # scan retorna em ordem de iteração (n-2, n-3, ..., 0) — precisamos
@@ -285,14 +250,10 @@ def common_arrays_jax(
 
     if n > 1:
         indices_top = jnp.arange(1, n)
-        # Sprint O1 (v2.43): mesmo padrão de unroll do scan bottom-up.
-        _unroll_top = _effective_unroll_for_scan(n - 1)
         _, (_, _, RTEup_stacked, RTMup_stacked) = jax.lax.scan(
             _top_down_step,
             (AdmApup_terminal, ImpApup_terminal),
             indices_top,
-            length=n - 1,
-            unroll=_unroll_top,
         )
         # scan retorna na ordem (1, 2, ..., n-1) — ordem direta
         RTEup_inner = RTEup_stacked  # shape (n-1, npt)

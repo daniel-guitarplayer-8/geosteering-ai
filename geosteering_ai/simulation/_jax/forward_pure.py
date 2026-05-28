@@ -312,16 +312,13 @@ def build_static_context(
             f"complex_dtype={complex_dtype!r} inválido; use "
             f"{list(_COMPLEX_DTYPE_MAP.keys())}."
         )
-    # Sprint O1 (#6): get_hankel_filter_jax tem cache LRU process-wide; retorna
-    # jax.Array no device default já — evita ``np.asarray`` + ``jnp.asarray``
-    # redundantes em cada construção de contexto.
     from geosteering_ai.simulation._jax.kernel import (  # noqa: WPS433
         _sanitize_profile_kernel,
-        get_hankel_filter_jax,
     )
     from geosteering_ai.simulation._numba.geometry import (  # noqa: WPS433
         find_layers_tr,
     )
+    from geosteering_ai.simulation.filters import FilterLoader  # noqa: WPS433
 
     rho_h = np.asarray(rho_h, dtype=np.float64)
     rho_v = np.asarray(rho_v, dtype=np.float64)
@@ -333,11 +330,14 @@ def build_static_context(
     if rho_v.shape[0] != n:
         raise ValueError(f"rho_v.shape={rho_v.shape} != rho_h.shape={rho_h.shape}")
     if n >= 2 and esp.shape[0] != n - 2:
-        raise ValueError(f"esp.shape[0]={esp.shape[0]} != n-2={n-2}")
+        raise ValueError(f"esp.shape[0]={esp.shape[0]} != n-2={n - 2}")
 
-    # Filtro Hankel: cache LRU → 1 HostToDevice por (processo, filter_name)
-    krJ0J1_jnp, wJ0_jnp, wJ1_jnp = get_hankel_filter_jax(hankel_filter)
-    npt = krJ0J1_jnp.shape[0]
+    # Filtro Hankel
+    filt = FilterLoader().load(hankel_filter)
+    krJ0J1 = np.asarray(filt.abscissas, dtype=np.float64)
+    wJ0 = np.asarray(filt.weights_j0, dtype=np.float64)
+    wJ1 = np.asarray(filt.weights_j1, dtype=np.float64)
+    npt = krJ0J1.shape[0]
 
     # Perfil geométrico
     if n == 1:
@@ -382,9 +382,9 @@ def build_static_context(
         dip_rad=dip_rad,
         n=n,
         npt=npt,
-        krJ0J1=krJ0J1_jnp,
-        wJ0=wJ0_jnp,
-        wJ1=wJ1_jnp,
+        krJ0J1=jnp.asarray(krJ0J1),
+        wJ0=jnp.asarray(wJ0),
+        wJ1=jnp.asarray(wJ1),
         h_arr_jnp=jnp.asarray(h_arr),
         prof_arr_jnp=jnp.asarray(prof_arr),
         camad_t_array=camad_t_array,
@@ -393,6 +393,195 @@ def build_static_context(
         chunk_size=chunk_size,
         complex_dtype=complex_dtype,
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint O3p1 (v2.43) — _CTX_CACHE: cache LRU de ForwardPureContext
+# ──────────────────────────────────────────────────────────────────────────────
+# MOTIVAÇÃO
+#   `build_static_context` é O(npt × n) — gera arrays Hankel, computa
+#   `find_layers_tr` (~30 µs/posição), e materializa h_arr/prof_arr.
+#   Em batches de N modelos com MESMA geometria (esp/positions/freqs/TR/dip
+#   constantes, apenas rho varia — caso típico de treino PINN), pode-se
+#   amortizar o setup em O(N) → O(1) via memoization.
+#
+# CHAVE
+#   hash(esp_np, positions_z_np, freqs_np, TR, dip, hankel_filter, strategy,
+#        chunk_size, complex_dtype). rho_h/rho_v NÃO entram na chave —
+#   `forward_pure_jax(rho_h, rho_v, ctx)` recebe rho como args explícitos
+#   e ignora `ctx.rho_h_jnp`/`ctx.rho_v_jnp` no trace.
+#
+# SEGURANÇA
+#   Cache hit retorna ctx com `rho_h_jnp`/`rho_v_jnp` do PRIMEIRO modelo
+#   dessa geometria. Isso é INOFENSIVO porque o `forward_pure_jax` recebe
+#   rho como args traceable explícitos.
+# ──────────────────────────────────────────────────────────────────────────────
+import hashlib  # noqa: E402
+import struct  # noqa: E402
+
+_CTX_CACHE: "OrderedDict[bytes, ForwardPureContext]" = OrderedDict()
+"""LRU cache de :class:`ForwardPureContext` chaveado por hash da geometria."""
+
+_CTX_CACHE_MAXSIZE: int = 32
+"""Tamanho máximo do :data:`_CTX_CACHE` — controla via :func:`set_ctx_cache_maxsize`."""
+
+
+def _hash_ctx_key(
+    esp_np: np.ndarray,
+    pos_z_np: np.ndarray,
+    freqs_np: np.ndarray,
+    tr_spacing_m: float,
+    dip_deg: float,
+    hankel_filter: str,
+    strategy: str,
+    chunk_size: Optional[int],
+    complex_dtype: str,
+) -> bytes:
+    """Chave hash determinística para lookup de :class:`ForwardPureContext`.
+
+    Args:
+        esp_np: (n-2,) m — espessuras internas (NumPy).
+        pos_z_np: (n_pos,) m — profundidades ponto-médio.
+        freqs_np: (nf,) Hz — frequências de operação.
+        tr_spacing_m: distância transmissor-receptor (m).
+        dip_deg: ângulo de inclinação do poço (graus).
+        hankel_filter: nome do filtro Hankel.
+        strategy: ``"bucketed"`` ou ``"unified"``.
+        chunk_size: tamanho do chunk para ``lax.scan`` (ou ``None``).
+        complex_dtype: ``"complex128"`` ou ``"complex64"``.
+
+    Returns:
+        Hash de 24 bytes (BLAKE2b) determinístico para a geometria.
+
+    Note:
+        ``rho_h``/``rho_v`` NÃO entram na chave — varia entre modelos do
+        mesmo dataset, mas geometria é constante. Hash de arrays usa
+        ``.tobytes()`` com cast forçado a ``float64`` para invariância.
+    """
+    h = hashlib.blake2b(digest_size=24)
+    h.update(np.asarray(esp_np, dtype=np.float64).tobytes())
+    h.update(np.asarray(pos_z_np, dtype=np.float64).tobytes())
+    h.update(np.asarray(freqs_np, dtype=np.float64).tobytes())
+    h.update(struct.pack("dd", float(tr_spacing_m), float(dip_deg)))
+    h.update(hankel_filter.encode("utf-8"))
+    h.update(strategy.encode("utf-8"))
+    h.update(complex_dtype.encode("utf-8"))
+    h.update(struct.pack("q", chunk_size if chunk_size is not None else -1))
+    return h.digest()
+
+
+def set_ctx_cache_maxsize(maxsize: int) -> None:
+    """Ajusta tamanho máximo do :data:`_CTX_CACHE`.
+
+    Args:
+        maxsize: Novo tamanho máximo (>= 0).
+
+    Raises:
+        ValueError: Se ``maxsize`` for negativo.
+
+    Note:
+        Quando o cache atual excede o novo ``maxsize``, eviction LRU
+        é aplicado imediatamente (remove entradas mais antigas).
+    """
+    global _CTX_CACHE_MAXSIZE
+    if maxsize < 0:
+        raise ValueError(f"maxsize deve ser >= 0, recebido {maxsize}")
+    _CTX_CACHE_MAXSIZE = maxsize
+    while len(_CTX_CACHE) > maxsize:
+        _CTX_CACHE.popitem(last=False)
+
+
+def clear_ctx_cache() -> int:
+    """Limpa :data:`_CTX_CACHE`.
+
+    Returns:
+        Número de entradas removidas.
+    """
+    n = len(_CTX_CACHE)
+    _CTX_CACHE.clear()
+    return n
+
+
+def get_ctx_cache_info() -> dict:
+    """Diagnóstico do estado atual de :data:`_CTX_CACHE`.
+
+    Returns:
+        Dict com ``n_entries`` (int) e ``maxsize`` (int).
+    """
+    return {
+        "n_entries": len(_CTX_CACHE),
+        "maxsize": _CTX_CACHE_MAXSIZE,
+    }
+
+
+def build_static_context_cached(
+    rho_h: np.ndarray,
+    rho_v: np.ndarray,
+    esp: np.ndarray,
+    positions_z: np.ndarray,
+    freqs_hz: np.ndarray,
+    tr_spacing_m: float,
+    dip_deg: float,
+    hankel_filter: str = "werthmuller_201pt",
+    strategy: str = "bucketed",
+    chunk_size: Optional[int] = None,
+    complex_dtype: str = "complex128",
+) -> ForwardPureContext:
+    """Wrapper LRU em torno de :func:`build_static_context`.
+
+    Amortiza o setup em batches de N modelos com mesma geometria
+    (rho varia, esp/positions/freqs/TR/dip constantes). Caso típico:
+    treino PINN com dataset de N modelos físicos do mesmo dataset.
+
+    Args:
+        Mesmos kwargs de :func:`build_static_context`. Apenas ``rho_h``/
+        ``rho_v`` NÃO entram na chave do cache.
+
+    Returns:
+        :class:`ForwardPureContext` — cached ou newly built.
+
+    Note:
+        Cache hit retorna ctx com ``rho_h_jnp``/``rho_v_jnp`` do **primeiro**
+        modelo dessa geometria. Isso é INOFENSIVO porque
+        :func:`forward_pure_jax` recebe ``rho_h``/``rho_v`` como argumentos
+        explícitos e ignora os campos ``ctx.rho_*_jnp`` durante o trace.
+    """
+    key = _hash_ctx_key(
+        esp,
+        positions_z,
+        freqs_hz,
+        tr_spacing_m,
+        dip_deg,
+        hankel_filter,
+        strategy,
+        chunk_size,
+        complex_dtype,
+    )
+    if key in _CTX_CACHE:
+        # LRU touch — move para o fim (mais recentemente usado).
+        _CTX_CACHE.move_to_end(key)
+        return _CTX_CACHE[key]
+
+    # Cache miss — build real.
+    ctx = build_static_context(
+        rho_h=rho_h,
+        rho_v=rho_v,
+        esp=esp,
+        positions_z=positions_z,
+        freqs_hz=freqs_hz,
+        tr_spacing_m=tr_spacing_m,
+        dip_deg=dip_deg,
+        hankel_filter=hankel_filter,
+        strategy=strategy,
+        chunk_size=chunk_size,
+        complex_dtype=complex_dtype,
+    )
+
+    # LRU eviction (remove mais antigo) antes de inserir.
+    if len(_CTX_CACHE) >= _CTX_CACHE_MAXSIZE:
+        _CTX_CACHE.popitem(last=False)
+    _CTX_CACHE[key] = ctx
+    return ctx
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -593,10 +782,14 @@ def get_jit_cache_info() -> dict:
         (_UNIFIED_CHUNKED_JIT_CACHE, "chunked"),
     ):
         for k in cache:
-            # bucket: (ct, cr, n, npt); unified: (n, npt); chunked: (n, npt, chunk)
-            if key_layout == "bucket" and len(k) == 4:
+            # Sprint O2: chaves agora incluem complex_dtype no final.
+            #   bucket: (ct, cr, n, npt, complex_dtype)
+            #   unified: (n, npt, complex_dtype)
+            #   chunked: (n, npt, chunk, complex_dtype)
+            # Backward-compat: aceita também as tuplas antigas (sem dtype).
+            if key_layout == "bucket" and len(k) in (4, 5):
                 n_idx, npt_idx = 2, 3
-            elif key_layout == "unified" and len(k) == 2:
+            elif key_layout == "unified" and len(k) in (2, 3):
                 n_idx, npt_idx = 0, 1
             elif key_layout == "chunked" and len(k) >= 3:
                 n_idx, npt_idx = 0, 1
@@ -626,22 +819,32 @@ def get_jit_cache_info() -> dict:
     }
 
 
-def _get_bucket_jit(ct: int, cr: int, n: int, npt: int):
-    """Retorna (e memoriza) função jitada para bucket (ct, cr, n, npt).
+def _get_bucket_jit(
+    ct: int, cr: int, n: int, npt: int, complex_dtype: str = "complex128"
+):
+    """Retorna (e memoriza) função jitada para bucket (ct, cr, n, npt, complex_dtype).
 
     A função aceita ``(rho_h, rho_v, z_bucket, freqs, ctx_arrays)`` e retorna
     ``H_bucket`` com shape ``(n_pos_bucket, nf, 9)``.
 
     O cache é ``OrderedDict`` com LRU bounded em
     :data:`_BUCKET_JIT_CACHE_MAXSIZE` — previne vazamento de VRAM em GPU.
+
+    Sprint O2 (v2.43): chave do cache inclui ``complex_dtype`` —
+    CRITICO para evitar hit silencioso em função compilada para dtype
+    incorreto (e.g., chamada com complex64 hitar entrada complex128 →
+    resultado em complex128 ao invés de complex64 esperado).
     """
     from geosteering_ai.simulation._jax.kernel import _single_position_jax
 
-    key = (int(ct), int(cr), int(n), int(npt))
+    key = (int(ct), int(cr), int(n), int(npt), complex_dtype)
     if key in _BUCKET_JIT_CACHE:
         # Move to end (LRU tracking: este é o MRU agora)
         _BUCKET_JIT_CACHE.move_to_end(key)
         return _BUCKET_JIT_CACHE[key]
+
+    # Sprint O2: resolve dtype JNP para passar a _single_position_jax.
+    _cdtype_jnp = _COMPLEX_DTYPE_MAP[complex_dtype]
 
     def _forward_bucket(
         rho_h: "jax.Array",
@@ -687,6 +890,7 @@ def _get_bucket_jit(ct: int, cr: int, n: int, npt: int):
                 wJ0,
                 wJ1,
                 use_native_dipoles=True,
+                complex_dtype=_cdtype_jnp,
             )
 
         # vmap sobre frequências (in_axes=(None, 0)) → shape (nf, 9)
@@ -736,7 +940,8 @@ def _forward_pure_jax_bucketed_impl(
     unique_keys, inverse = np.unique(key_arr, return_inverse=True)
 
     # Shape de saída final (em ordem original) — usa jnp.empty + scatter.
-    H_out = jnp.zeros((n_pos, nf, 9), dtype=jnp.complex128)
+    # Sprint O2 (v2.43): H_out usa complex_dtype do ctx (default complex128).
+    H_out = jnp.zeros((n_pos, nf, 9), dtype=_COMPLEX_DTYPE_MAP[ctx.complex_dtype])
     for bucket_idx, key in enumerate(unique_keys):
         mask = inverse == bucket_idx
         indices = np.nonzero(mask)[0]
@@ -744,7 +949,7 @@ def _forward_pure_jax_bucketed_impl(
         cr = int(cr_arr[indices[0]])
         z_bucket_np = ctx.positions_z_jnp[indices]  # jnp slice; OK fora do trace
 
-        jitted_fn = _get_bucket_jit(ct, cr, ctx.n, ctx.npt)
+        jitted_fn = _get_bucket_jit(ct, cr, ctx.n, ctx.npt, ctx.complex_dtype)
         H_bucket = jitted_fn(
             rho_h,
             rho_v,
@@ -838,30 +1043,43 @@ def count_compiled_xla_programs(
     """
     s = strategy or ctx.strategy
     if s == "unified":
-        return sum(1 for k in _UNIFIED_JIT_CACHE if k == (ctx.n, ctx.npt))
+        # Sprint O2: cache key inclui complex_dtype — fixe ao do ctx.
+        return sum(
+            1 for k in _UNIFIED_JIT_CACHE if k == (ctx.n, ctx.npt, ctx.complex_dtype)
+        )
+    # Sprint O2: bucket key agora é (ct, cr, n, npt, complex_dtype) — len==5.
     return sum(
         1
         for k in _BUCKET_JIT_CACHE
-        if len(k) == 4 and k[2] == ctx.n and k[3] == ctx.npt
+        if len(k) == 5
+        and k[2] == ctx.n
+        and k[3] == ctx.npt
+        and k[4] == ctx.complex_dtype
     )
 
 
-def _get_unified_jit(n: int, npt: int):
-    """Retorna (e memoriza) função jitada unified para ``(n, npt)``.
+def _get_unified_jit(n: int, npt: int, complex_dtype: str = "complex128"):
+    """Retorna (e memoriza) função jitada unified para ``(n, npt, complex_dtype)``.
 
     A função aceita ``(rho_h, rho_v, z_positions, freqs, camad_t_arr,
     camad_r_arr, dz_half, r_half, dip_rad, h_arr, prof_arr, krJ0J1,
     wJ0, wJ1)`` e retorna ``H_tensor`` shape ``(n_pos, nf, 9)``.
 
-    Chave do cache: ``(n, npt)`` — **não** inclui ``(ct, cr)``, pois estes
-    são tracers dentro do JIT.
+    Chave do cache: ``(n, npt, complex_dtype)`` — **não** inclui ``(ct, cr)``,
+    pois estes são tracers dentro do JIT.
+
+    Sprint O2 (v2.43): ``complex_dtype`` faz parte da chave para garantir
+    que função compilada para c128 NÃO seja usada quando c64 é requerido.
     """
     from geosteering_ai.simulation._jax.kernel import _single_position_jax
 
-    key = (int(n), int(npt))
+    key = (int(n), int(npt), complex_dtype)
     if key in _UNIFIED_JIT_CACHE:
         _UNIFIED_JIT_CACHE.move_to_end(key)
         return _UNIFIED_JIT_CACHE[key]
+
+    # Sprint O2: resolve dtype JNP para passar a _single_position_jax.
+    _cdtype_jnp = _COMPLEX_DTYPE_MAP[complex_dtype]
 
     def _forward_unified(
         rho_h: "jax.Array",
@@ -909,6 +1127,7 @@ def _get_unified_jit(n: int, npt: int):
                 wJ1,
                 use_native_dipoles=True,
                 use_unified=True,
+                complex_dtype=_cdtype_jnp,
             )
 
         # vmap interno sobre frequências (in_axes=(None, None, None, 0))
@@ -947,7 +1166,8 @@ def _forward_pure_jax_unified_impl(
     if ctx.chunk_size is not None:
         return _forward_pure_jax_unified_chunked_impl(rho_h, rho_v, ctx)
 
-    jitted = _get_unified_jit(ctx.n, ctx.npt)
+    # Sprint O2: complex_dtype propagado para cache key + função interna.
+    jitted = _get_unified_jit(ctx.n, ctx.npt, ctx.complex_dtype)
     return jitted(
         rho_h,
         rho_v,
@@ -992,7 +1212,9 @@ def _forward_pure_jax_unified_impl(
 #   vmaps internos. O XLA compila 1× por (padded_size,) distinto.
 
 
-def _get_unified_jit_chunked(n: int, npt: int, chunk_size: int):
+def _get_unified_jit_chunked(
+    n: int, npt: int, chunk_size: int, complex_dtype: str = "complex128"
+):
     """Retorna (e memoriza) função jitada unified com chunking via lax.scan.
 
     Divide posições em blocos de ``chunk_size`` (com padding para forma fixa),
@@ -1000,14 +1222,19 @@ def _get_unified_jit_chunked(n: int, npt: int, chunk_size: int):
     ``jax.lax.scan``. Evita materialização de ``(n_pos, nf, n, npt)`` todo
     de uma vez.
 
-    Chave do cache: ``(n, npt, chunk_size)`` — distinto de
-    :data:`_UNIFIED_JIT_CACHE` (``(n, npt)``). Uma entrada por tripla;
-    o XLA interno tem compilações distintas por ``(padded_size,)``.
+    Chave do cache: ``(n, npt, chunk_size, complex_dtype)`` — distinto de
+    :data:`_UNIFIED_JIT_CACHE` (``(n, npt, complex_dtype)``). Uma entrada
+    por quádrupla; o XLA interno tem compilações distintas por
+    ``(padded_size,)``.
+
+    Sprint O2 (v2.43): ``complex_dtype`` faz parte da chave para evitar
+    hit em função compilada para dtype incorreto.
 
     Args:
         n: Número de camadas (inteiro estático — fecha na função interna).
         npt: Número de pontos do filtro Hankel (inteiro estático).
         chunk_size: Tamanho de cada bloco de posições (estático, > 0).
+        complex_dtype: ``"complex128"`` (default) ou ``"complex64"``.
 
     Returns:
         Função jitada com assinatura::
@@ -1020,10 +1247,13 @@ def _get_unified_jit_chunked(n: int, npt: int, chunk_size: int):
     """
     from geosteering_ai.simulation._jax.kernel import _single_position_jax
 
-    key = (int(n), int(npt), int(chunk_size))
+    key = (int(n), int(npt), int(chunk_size), complex_dtype)
     if key in _UNIFIED_CHUNKED_JIT_CACHE:
         _UNIFIED_CHUNKED_JIT_CACHE.move_to_end(key)
         return _UNIFIED_CHUNKED_JIT_CACHE[key]
+
+    # Sprint O2: resolve dtype JNP para passar a _single_position_jax.
+    _cdtype_jnp = _COMPLEX_DTYPE_MAP[complex_dtype]
 
     def _forward_unified_chunked(
         rho_h: "jax.Array",
@@ -1071,6 +1301,7 @@ def _get_unified_jit_chunked(n: int, npt: int, chunk_size: int):
                 wJ1,
                 use_native_dipoles=True,
                 use_unified=True,
+                complex_dtype=_cdtype_jnp,
             )
 
         # vmap interno: sobre frequências → (nf, 9) por posição.
@@ -1164,8 +1395,8 @@ def _forward_pure_jax_unified_chunked_impl(
         ct_padded = jnp.asarray(ctx.camad_t_array, dtype=jnp.int32)
         cr_padded = jnp.asarray(ctx.camad_r_array, dtype=jnp.int32)
 
-    assert chunk_size is not None  # narrow Optional[int] → int para mypy
-    jitted = _get_unified_jit_chunked(ctx.n, ctx.npt, chunk_size)
+    # Sprint O2: complex_dtype propagado para cache key + função interna.
+    jitted = _get_unified_jit_chunked(ctx.n, ctx.npt, chunk_size, ctx.complex_dtype)
     H_padded = jitted(
         rho_h,
         rho_v,
@@ -1258,7 +1489,8 @@ def warmup_all_buckets(
         # posições deste bucket) — JAX compila por shape, então um warmup
         # com shape diferente não beneficia a chamada real.
         z_bucket = ctx.positions_z_jnp[indices]
-        jitted_fn = _get_bucket_jit(ct, cr, ctx.n, ctx.npt)
+        # Sprint O2: warmup também usa complex_dtype do ctx para alinhar cache.
+        jitted_fn = _get_bucket_jit(ct, cr, ctx.n, ctx.npt, ctx.complex_dtype)
         H_bucket_warm = jitted_fn(
             rho_h_ref,
             rho_v_ref,
@@ -1439,13 +1671,18 @@ __all__ = [
     "HAS_JAX",
     "ForwardPureContext",
     "build_static_context",
+    # Sprint O3p1 (v2.43) — _CTX_CACHE
+    "build_static_context_cached",
+    "clear_ctx_cache",
     "clear_jit_cache",
     "clear_unified_jit_cache",
     "count_compiled_xla_programs",
     "forward_pure_jax",
     "forward_pure_jax_chunked",
     "forward_pure_jax_pmap",
+    "get_ctx_cache_info",
     "get_jit_cache_info",
+    "set_ctx_cache_maxsize",
     "set_jit_cache_maxsize",
     "warmup_all_buckets",
 ]

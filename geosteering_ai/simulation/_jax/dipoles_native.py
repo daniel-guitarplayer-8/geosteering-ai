@@ -1495,19 +1495,26 @@ def native_dipoles_full_jax(
     Euup: jax.Array,
     FEdwz: jax.Array,
     FEupz: jax.Array,
+    complex_dtype=None,
 ) -> jax.Array:
     """Orquestrador end-to-end: HMD (hmdx+hmdy) + VMD → matH (3,3).
 
     Substitui ``_dipoles_numba_host`` (``pure_callback``) no kernel JAX
     quando ``use_native_dipoles=True``. Mesma interface de saída:
-    array ``(3,3) complex128`` com::
+    array ``(3,3)`` no ``complex_dtype`` solicitado com::
 
         matH[0,:] = [Hxx, Hxy, Hxz]   (hmdx)
         matH[1,:] = [Hyx, Hyy, Hyz]   (hmdy)
         matH[2,:] = [Hzx, Hzy, Hzz]   (vmd)
 
     **Diferenciável** via ``jax.grad`` sobre qualquer input JAX.
+
+    Sprint O3 (v2.43): ``complex_dtype`` agora é kwarg explícito. Default
+    ``None`` → mantém comportamento anterior (deriva de ``u.dtype``). Quando
+    passado, força ``matH`` no dtype solicitado (cast final).
     """
+    if complex_dtype is None:
+        complex_dtype = u.dtype
     h0 = Tz  # profundidade do TX (convenção Numba: h0 = Tz)
 
     # HMD: retorna (Hx[2], Hy[2], Hz[2])
@@ -1571,14 +1578,16 @@ def native_dipoles_full_jax(
         FEupz,
     )
 
-    # Assembly (3,3) — mesma ordem que _dipoles_numba_host
+    # Assembly (3,3) — mesma ordem que _dipoles_numba_host.
+    # Sprint O3 (v2.43): cast final para `complex_dtype` garante que mesmo
+    # se algum sub-cálculo promover a c128 silenciosamente, a saída é c64.
     matH = jnp.array(
         [
             [Hx_hmd[0], Hy_hmd[0], Hz_hmd[0]],
             [Hx_hmd[1], Hy_hmd[1], Hz_hmd[1]],
             [Hx_vmd, Hy_vmd, Hz_vmd],
         ]
-    )
+    ).astype(complex_dtype)
     return matH
 
 
@@ -1872,11 +1881,18 @@ def native_dipoles_full_jax_unified(
     Euup,
     FEdwz,
     FEupz,
+    complex_dtype=None,
 ):
     """Orquestrador unified: HMD + VMD → matH (3,3). Paridade 1:1 com
     :func:`native_dipoles_full_jax` (legacy) mas aceita ``camad_t``/``camad_r``
     como tracers. **Diferenciável** via ``jax.grad``/``jax.jacfwd``.
+
+    Sprint O3 (v2.43): ``complex_dtype`` agora é kwarg explícito (default
+    ``None`` → deriva de ``u.dtype``). Força ``matH`` no dtype solicitado
+    via cast final — proteção contra promoção implícita c128.
     """
+    if complex_dtype is None:
+        complex_dtype = u.dtype
     h0 = Tz
 
     Hx_hmd, Hy_hmd, Hz_hmd = _hmd_tiv_native_jax_unified(
@@ -1938,13 +1954,15 @@ def native_dipoles_full_jax_unified(
         FEupz,
     )
 
+    # Sprint O3 (v2.43): cast final para `complex_dtype` força o dtype da
+    # saída unified — garante consistência com o legacy não-unified.
     return jnp.array(
         [
             [Hx_hmd[0], Hy_hmd[0], Hz_hmd[0]],
             [Hx_hmd[1], Hy_hmd[1], Hz_hmd[1]],
             [Hx_vmd, Hy_vmd, Hz_vmd],
         ]
-    )
+    ).astype(complex_dtype)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
