@@ -436,6 +436,7 @@ def _single_position_jax(
     wJ1: jax.Array,
     use_native_dipoles: bool = False,
     use_unified: bool = False,
+    complex_dtype=None,
 ) -> jax.Array:
     """Calcula H para uma frequência numa posição via backend JAX.
 
@@ -450,9 +451,17 @@ def _single_position_jax(
             ``camad_t``/``camad_r`` como tracers int32. Consolida 44 buckets
             XLA em 1 único JIT por ``(n, npt)``. Ignorado quando
             ``use_native_dipoles=False``.
+        complex_dtype: Sprint O2 (v2.43) — dtype complexo. ``None`` →
+            ``jnp.complex128`` (paridade Fortran sagrada). ``jnp.complex64``
+            opt-in (2× menor footprint, GPU/PINN). Path híbrido (``pure_callback``)
+            SEMPRE chama Numba em complex128 e faz cast pós-callback.
 
-    Retorna array (9,) complex128 — Hxx, Hxy, Hxz, Hyx, Hyy, Hyz, Hzx, Hzy, Hzz.
+    Retorna array (9,) no ``complex_dtype`` solicitado — Hxx, Hxy, Hxz, Hyx, Hyy, Hyz, Hzx, Hzy, Hzz.
     """
+    # Sprint O2 (v2.43): default complex128. Override só altera os arrays
+    # propagadores e o tensor H final.
+    if complex_dtype is None:
+        complex_dtype = jnp.complex128
     omega = 2.0 * jnp.pi * freq
     zeta = 1j * omega * _MU_0
 
@@ -462,7 +471,11 @@ def _single_position_jax(
     r = jnp.sqrt(dx * dx + dy * dy)
 
     # Sprint 3.2: propagação em JAX puro
-    outs = common_arrays_jax(n, npt, r, krJ0J1, zeta, h_arr, eta)
+    # Sprint O2: complex_dtype propagado para common_arrays_jax → arrays
+    # u/s/uh/sh/RTE*/RTM*/AdmInt no dtype solicitado.
+    outs = common_arrays_jax(
+        n, npt, r, krJ0J1, zeta, h_arr, eta, complex_dtype=complex_dtype
+    )
     u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, AdmInt = outs
 
     cf = common_factors_jax(
@@ -532,8 +545,18 @@ def _single_position_jax(
         )
     else:
         # Caminho híbrido (default) — callback para Numba @njit host
+        # Sprint O2 (v2.43): Numba host SEMPRE retorna complex128 (paridade
+        # Fortran sagrada). Cast pós-callback para complex_dtype se opt-in.
+        # Notavelmente, as `u`, `s`, ... passadas para o callback foram
+        # downcast para complex_dtype, mas o callback faz `_to_writeable` que
+        # converte via `np.ascontiguousarray` → preserva dtype incoming.
+        # Para mantermos paridade exata no path híbrido, deveríamos passar
+        # versões complex128 ao callback. Solução escolhida: o caminho híbrido
+        # com complex64 não é caso de uso suportado (use_native_dipoles=True
+        # é o path complex64 esperado). Mantemos paridade c128 inalterada
+        # neste branch, apenas castamos resultado a complex_dtype.
         result_shape = jax.ShapeDtypeStruct((3, 3), jnp.complex128)
-        matH = jax.pure_callback(
+        matH_c128 = jax.pure_callback(
             _dipoles_numba_host,
             result_shape,
             Tx,
@@ -549,25 +572,27 @@ def _single_position_jax(
             h_arr,
             prof_arr,
             zeta,
-            eta,
+            eta.astype(jnp.float64),
             cx,
             cy,
             cz,
-            u,
-            s,
-            uh,
-            sh,
-            RTEdw,
-            RTEup,
-            RTMdw,
-            RTMup,
-            Mxdw,
-            Mxup,
-            Eudw,
-            Euup,
-            FEdwz,
-            FEupz,
+            u.astype(jnp.complex128),
+            s.astype(jnp.complex128),
+            uh.astype(jnp.complex128),
+            sh.astype(jnp.complex128),
+            RTEdw.astype(jnp.complex128),
+            RTEup.astype(jnp.complex128),
+            RTMdw.astype(jnp.complex128),
+            RTMup.astype(jnp.complex128),
+            Mxdw.astype(jnp.complex128),
+            Mxup.astype(jnp.complex128),
+            Eudw.astype(jnp.complex128),
+            Euup.astype(jnp.complex128),
+            FEdwz.astype(jnp.complex128),
+            FEupz.astype(jnp.complex128),
         )
+        # Cast pós-callback (no-op se complex_dtype=complex128).
+        matH = matH_c128.astype(complex_dtype)
 
     # Rotação
     tH = rotate_tensor(dip_rad, 0.0, 0.0, matH)
