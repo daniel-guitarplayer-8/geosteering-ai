@@ -100,6 +100,7 @@ Note:
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Optional
 
@@ -114,6 +115,34 @@ except ImportError:  # pragma: no cover
     HAS_JAX = False
     jax = None  # type: ignore
     jnp = None  # type: ignore
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint O2 (v2.43) — Mapeamento opt-in de dtype complexo
+# ──────────────────────────────────────────────────────────────────────────────
+# MOTIVAÇÃO
+#   Default `complex128` é INVIOLÁVEL para preservar paridade Fortran <1e-13
+#   (gate F1). Mas treinos PINN / inferência em GPU se beneficiam de
+#   `complex64`: 2× menor footprint VRAM + ~1.5-2× speedup em matmul.
+#   `complex64` aceita erro <1e-4 (tolerância PINN-friendly).
+#
+# USO
+#   Default permanece `"complex128"` em `SimulationConfig.dtype`. Opt-in via:
+#     >>> cfg = SimulationConfig(backend="jax", dtype="complex64", ...)
+#   Path Numba (paridade Fortran sagrada) SEMPRE permanece complex128 mesmo
+#   com `dtype="complex64"` no JAX path.
+_COMPLEX_DTYPE_MAP: dict = {}
+"""Mapeamento ``str`` → ``jnp.dtype`` para dtype complexo opt-in (Sprint O2).
+
+Vazio se JAX indisponível. Populado abaixo apenas quando :data:`HAS_JAX`.
+Chaves válidas: ``{"complex128", "complex64"}``.
+"""
+
+if HAS_JAX:
+    _COMPLEX_DTYPE_MAP = {
+        "complex128": jnp.complex128,
+        "complex64": jnp.complex64,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -199,6 +228,29 @@ class ForwardPureContext:
     Propagado de :attr:`SimulationConfig.jax_position_chunk_size`.
     """
 
+    complex_dtype: str = "complex128"
+    """Sprint O2 (v2.43) — dtype complexo do tensor H e propagadores TE/TM.
+
+    Default ``"complex128"`` preserva paridade Fortran bit-a-bit <1e-13
+    (gate F1 INVIOLÁVEL). Opt-in para ``"complex64"`` (2× menor footprint,
+    ~1.5-2× speedup em GPU) com tolerância <1e-4 vs complex128 (uso
+    PINN-friendly).
+
+    Propagado de :attr:`SimulationConfig.dtype` via
+    :func:`build_static_context`. Valores válidos: chaves de
+    :data:`_COMPLEX_DTYPE_MAP` (``"complex128"`` ou ``"complex64"``).
+
+    Notas críticas:
+      • Float64 (``rho_h``, ``rho_v``, ``freqs``, ``positions_z``, ``esp``)
+        permanece imutável — apenas tensor H complexo + arrays propagadores
+        TE/TM mudam dtype.
+      • Caminho híbrido (Numba `pure_callback`) SEMPRE retorna complex128
+        (paridade Fortran sagrada). Cast pós-callback se ``complex64``.
+      • Chave dos JIT caches (`_BUCKET_JIT_CACHE`, `_UNIFIED_JIT_CACHE`,
+        `_UNIFIED_CHUNKED_JIT_CACHE`) inclui ``complex_dtype`` — evita hit
+        em função compilada para dtype incorreto.
+    """
+
 
 def build_static_context(
     rho_h: np.ndarray,
@@ -211,6 +263,7 @@ def build_static_context(
     hankel_filter: str = "werthmuller_201pt",
     strategy: str = "bucketed",
     chunk_size: Optional[int] = None,
+    complex_dtype: str = "complex128",
 ) -> ForwardPureContext:
     """Pré-computa arrays estáticos para ``forward_pure_jax``.
 
@@ -233,6 +286,11 @@ def build_static_context(
             ``lax.scan`` no caminho unified. Propagado de
             :attr:`SimulationConfig.jax_position_chunk_size`. Ignorado
             quando ``strategy="bucketed"``.
+        complex_dtype: Sprint O2 (v2.43) — dtype complexo do tensor H e
+            propagadores TE/TM. Default ``"complex128"`` (paridade Fortran
+            <1e-13 inviolável). Opt-in ``"complex64"`` (2× menor footprint
+            VRAM + ~1.5-2× speedup em GPU, tolerância <1e-4 PINN-friendly).
+            Propagado de :attr:`SimulationConfig.dtype`.
 
     Returns:
         :class:`ForwardPureContext` imutável pronto para consumo por
@@ -240,14 +298,19 @@ def build_static_context(
 
     Raises:
         ImportError: Se JAX não estiver instalado.
-        ValueError: Se ``rho_h.shape != rho_v.shape`` ou
-            ``esp.shape[0] != n - 2``.
+        ValueError: Se ``rho_h.shape != rho_v.shape``, ``esp.shape[0] != n - 2``,
+            ou ``complex_dtype`` desconhecido.
     """
     if not HAS_JAX:
         raise ImportError("forward_pure_jax requer JAX (pip install 'jax[cpu]').")
     if strategy not in ("bucketed", "unified"):
         raise ValueError(
             f"strategy={strategy!r} inválido; use 'bucketed' ou 'unified'."
+        )
+    if complex_dtype not in _COMPLEX_DTYPE_MAP:
+        raise ValueError(
+            f"complex_dtype={complex_dtype!r} inválido; use "
+            f"{list(_COMPLEX_DTYPE_MAP.keys())}."
         )
     # Sprint O1 (#6): get_hankel_filter_jax tem cache LRU process-wide; retorna
     # jax.Array no device default já — evita ``np.asarray`` + ``jnp.asarray``
@@ -328,6 +391,7 @@ def build_static_context(
         camad_r_array=camad_r_array,
         strategy=strategy,
         chunk_size=chunk_size,
+        complex_dtype=complex_dtype,
     )
 
 
@@ -415,7 +479,7 @@ def forward_pure_jax(
 #   Para N modelos distintos em sequência, N×n_buckets compilações acumulam.
 #   O LRU limita ao `maxsize` mais recentes — suficiente para um único modelo
 #   com até ~28 camadas, e evita OOM no treino on-the-fly.
-from collections import OrderedDict  # noqa: E402
+# (OrderedDict importado no topo do módulo — Sprint O2.)
 
 _BUCKET_JIT_CACHE_MAXSIZE: int = 64
 """Tamanho máximo do cache LRU por processo. 64 cobre modelos até ~28 camadas.
@@ -1063,7 +1127,12 @@ def _forward_pure_jax_unified_chunked_impl(
     Returns:
         Tensor ``(n_pos, nf, 9)`` complex128 idêntico ao caminho monolítico.
     """
-    chunk_size = ctx.chunk_size
+    # ctx.chunk_size é Optional[int]; este path só é alcançado quando definido
+    # (validado em :func:`_forward_pure_jax_unified_impl`). Mypy strict guard.
+    assert (
+        ctx.chunk_size is not None
+    ), "_forward_pure_jax_unified_chunked_impl requer chunk_size definido"
+    chunk_size: int = ctx.chunk_size
     n_pos = ctx.positions_z_jnp.shape[0]
 
     # Padding: garante padded_size divisível por chunk_size → forma fixa XLA.
@@ -1270,13 +1339,15 @@ def forward_pure_jax_chunked(
             camad_r_array=ctx.camad_r_array,
             strategy=ctx.strategy,
             chunk_size=chunk_size,
+            complex_dtype=ctx.complex_dtype,
         )
         return _forward_pure_jax_unified_chunked_impl(rho_h, rho_v, chunked_ctx)
 
     # Bucketed: Python loop sobre chunks — cada sub-contexto tem tamanho
     # variável (último pode ser menor). Bucketed é menos sensível a
     # recompilações pois já itera por (ct, cr) buckets de tamanhos distintos.
-    H_out = jnp.zeros((n_pos, nf, 9), dtype=jnp.complex128)
+    # Sprint O2: H_out usa complex_dtype do ctx (default complex128).
+    H_out = jnp.zeros((n_pos, nf, 9), dtype=_COMPLEX_DTYPE_MAP[ctx.complex_dtype])
     ct_full = np.asarray(ctx.camad_t_array, dtype=np.int32)
     cr_full = np.asarray(ctx.camad_r_array, dtype=np.int32)
     for start in range(0, n_pos, chunk_size):
@@ -1301,6 +1372,7 @@ def forward_pure_jax_chunked(
             camad_r_array=cr_full[start:end],
             strategy=ctx.strategy,
             chunk_size=None,
+            complex_dtype=ctx.complex_dtype,
         )
         H_out = H_out.at[start:end].set(
             _forward_pure_jax_bucketed_impl(rho_h, rho_v, sub_ctx)
