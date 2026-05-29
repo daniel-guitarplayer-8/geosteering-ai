@@ -351,3 +351,69 @@ def test_o4_block_until_ready_unico_bucketed():
     assert (
         n_asarray == 1
     ), f"bucketed: {n_asarray}× np.asarray(H_tensor_jax) (esperado 1)"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# chunk_size_models — invariância (OOM fix Cenário H)
+# ──────────────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("chunk", [None, 4, 8, 16, 5])
+def test_o4_chunk_size_models_invariante(chunk):
+    """jax_chunk_size_models não altera o resultado — bit-exato vs monolítico.
+
+    Chunking apenas reordena o loop Python sobre fatias de modelos (mesma
+    matemática por modelo). Inclui chunk=5 (NÃO divisor de 16 → última fatia
+    parcial) para validar o caso de fatia menor. Gate: max|diff| == 0.
+    """
+    n, n_models = 5, 16
+    positions_z = np.linspace(-10.0, 10.0, 80)
+    rho_h, rho_v, esp = _make_shared_geom_batch(n, n_models, seed=42)
+    kw = dict(frequencies_hz=[20000.0], tr_spacings_m=[1.0], dip_degs=[0.0])
+
+    # Referência monolítica (chunk=None).
+    H_mono = simulate_multi_jax_batched(
+        rho_h, rho_v, esp, positions_z, cfg=_CFG_BUCKETED, **kw
+    ).H_tensor
+
+    cfg_chunk = SimulationConfig(
+        backend="jax", jax_strategy="bucketed", jax_chunk_size_models=chunk
+    )
+    H_chunk = simulate_multi_jax_batched(
+        rho_h, rho_v, esp, positions_z, cfg=cfg_chunk, **kw
+    ).H_tensor
+
+    assert H_chunk.shape == H_mono.shape == (n_models, 1, 1, 80, 1, 9)
+    diff = np.max(np.abs(H_mono - H_chunk))
+    assert (
+        diff == 0.0
+    ), f"chunk={chunk}: chunking alterou resultado max|diff|={diff:.2e}"
+
+
+def test_o4_chunk_size_models_unified_path():
+    """Chunking também funciona no fallback unified (geometria heterogênea).
+
+    Tolerância <1e-13 (não bit-exato): o kernel unified usa vmap+fori_loop, e
+    o XLA pode reordenar reduções conforme o tamanho do batch (n_models vs
+    chunk) → diferença ~ULP float64 (~7e-15), fisicamente idêntica. O path
+    bucketed, por construção independente-por-modelo, é bit-exato (==0, ver
+    test_o4_chunk_size_models_invariante).
+    """
+    n, n_models = 4, 10
+    positions_z = np.linspace(-10.0, 10.0, 50)
+    rng = np.random.default_rng(5)
+    rho_h = rng.uniform(1.0, 100.0, size=(n_models, n))
+    rho_v = rho_h.copy()
+    esp = rng.uniform(2.0, 10.0, size=(n_models, n - 2))  # HETEROGÊNEO → unified
+    kw = dict(frequencies_hz=[20000.0], tr_spacings_m=[1.0], dip_degs=[0.0])
+
+    H_mono = simulate_multi_jax_batched(
+        rho_h, rho_v, esp, positions_z, cfg=_CFG_UNIFIED, **kw
+    ).H_tensor
+    cfg_chunk = SimulationConfig(
+        backend="jax", jax_strategy="unified", jax_chunk_size_models=3
+    )
+    H_chunk = simulate_multi_jax_batched(
+        rho_h, rho_v, esp, positions_z, cfg=cfg_chunk, **kw
+    ).H_tensor
+
+    diff = np.max(np.abs(H_mono - H_chunk))
+    assert diff < 1e-13, f"chunk unified alterou resultado: max|diff|={diff:.2e}"

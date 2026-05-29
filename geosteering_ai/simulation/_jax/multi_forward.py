@@ -1074,60 +1074,62 @@ def simulate_multi_jax_batched(
     )
 
     nf = freqs_arr.shape[0]
-    if _strategy == "bucketed" and geom_homogeneous:
-        # Path ótimo PINN/on-the-fly: vmap dos kernels de bucket sobre modelos.
-        H_tensor_np = _build_H_tensor_batched_bucketed(
-            n=n,
-            npt=npt,
-            n_models=n_models,
-            n_pos=n_pos,
-            nf=nf,
-            nTR=nTR,
-            nAngles=nAngles,
-            complex_dtype=_complex_dtype_batched,
-            rho_h_ref_np=rho_h_batch_np[0],
-            rho_v_ref_np=rho_v_batch_np[0],
-            esp_ref_np=esp_batch_np[0],
-            positions_z_np=positions_z_np,
-            freqs_arr=freqs_arr,
-            tr_arr=tr_arr,
-            dip_arr=dip_arr,
-            hankel_filter=hankel_filter,
-            rho_h_batch_jnp=rho_h_batch_jnp,
-            rho_v_batch_jnp=rho_v_batch_jnp,
+
+    # Warning de fallback emitido 1× (não por chunk).
+    if _strategy == "bucketed" and not geom_homogeneous:
+        logger.warning(
+            "simulate_multi_jax_batched: geometria HETEROGÊNEA detectada "
+            "(esp varia entre modelos do batch) — bucketing compartilhado "
+            "inaplicável; usando fallback 'unified' (correto, mais lento). "
+            "Para o ganho bucketed, agrupe modelos por geometria idêntica."
         )
-    else:
-        # Fallback UNIFIED — correto p/ geometria heterogênea (camad como
-        # tracers) e p/ strategy="unified" explícito. ZERO regressão: este é
-        # o path histórico (pré-O4), apenas não mais hardcodado.
-        if _strategy == "bucketed" and not geom_homogeneous:
-            logger.warning(
-                "simulate_multi_jax_batched: geometria HETEROGÊNEA detectada "
-                "(esp varia entre modelos do batch) — bucketing compartilhado "
-                "inaplicável; usando fallback 'unified' (correto, mais lento). "
-                "Para o ganho bucketed, agrupe modelos por geometria idêntica."
-            )
-        H_tensor_np = _build_H_tensor_batched_unified(
+
+    # ── Chunk do eixo de modelos (Sprint O4) — fix OOM Cenário H ─────────────
+    # jax_chunk_size_models=K processa o batch em fatias de K modelos (loop
+    # Python, mesma compilação XLA reusada, 1 sync por fatia). Reduz o pico de
+    # VRAM em n_models/K. None = batch monolítico (vmap sobre todos de uma vez).
+    _chunk_models = getattr(cfg, "jax_chunk_size_models", None)
+
+    def _dispatch_slice(sl: slice, sub_n_models: int):
+        return _build_H_tensor_batched_dispatch(
+            strategy=_strategy,
+            complex_dtype=_complex_dtype_batched,
+            geom_homogeneous=geom_homogeneous,
             n=n,
             npt=npt,
-            n_models=n_models,
+            n_models=sub_n_models,
             n_pos=n_pos,
             nf=nf,
             nTR=nTR,
             nAngles=nAngles,
-            complex_dtype=_complex_dtype_batched,
             tr_arr=tr_arr,
             dip_arr=dip_arr,
+            positions_z_np=positions_z_np,
             positions_z_jnp=positions_z_jnp,
+            freqs_arr=freqs_arr,
             freqs_jnp=freqs_jnp,
             krJ0J1_jnp=krJ0J1_jnp,
             wJ0_jnp=wJ0_jnp,
             wJ1_jnp=wJ1_jnp,
-            rho_h_batch_jnp=rho_h_batch_jnp,
-            rho_v_batch_jnp=rho_v_batch_jnp,
-            h_arr_batch_jnp=h_arr_batch_jnp,
-            prof_arr_batch_jnp=prof_arr_batch_jnp,
+            hankel_filter=hankel_filter,
+            rho_h_batch_jnp=rho_h_batch_jnp[sl],
+            rho_v_batch_jnp=rho_v_batch_jnp[sl],
+            h_arr_batch_jnp=h_arr_batch_jnp[sl],
+            prof_arr_batch_jnp=prof_arr_batch_jnp[sl],
+            rho_h_batch_np=rho_h_batch_np[sl],
+            rho_v_batch_np=rho_v_batch_np[sl],
+            esp_batch_np=esp_batch_np[sl],
         )
+
+    if _chunk_models is None or n_models <= _chunk_models:
+        H_tensor_np = _dispatch_slice(slice(0, n_models), n_models)
+    else:
+        # Loop sobre ⌈n_models/K⌉ fatias; concatena no eixo de modelos (CPU).
+        _parts: list = []
+        for _start in range(0, n_models, _chunk_models):
+            _end = min(_start + _chunk_models, n_models)
+            _parts.append(_dispatch_slice(slice(_start, _end), _end - _start))
+        H_tensor_np = np.concatenate(_parts, axis=0)
 
     # ── Metadados z_obs / rho_*_at_obs (NumPy, compartilhado + por modelo) ────
     # z_obs depende apenas de positions_z (ponto-médio é o próprio z_mid).
@@ -1504,6 +1506,99 @@ def _build_H_tensor_batched_bucketed(
     H_tensor_jax = jnp.moveaxis(H_stack, 2, 0)
     H_tensor_jax.block_until_ready()  # 1× ao final (sync único por batch)
     return np.asarray(H_tensor_jax)
+
+
+def _build_H_tensor_batched_dispatch(
+    *,
+    strategy: str,
+    complex_dtype: str,
+    geom_homogeneous: bool,
+    n: int,
+    npt: int,
+    n_models: int,
+    n_pos: int,
+    nf: int,
+    nTR: int,
+    nAngles: int,
+    tr_arr,
+    dip_arr,
+    positions_z_np,
+    positions_z_jnp,
+    freqs_arr,
+    freqs_jnp,
+    krJ0J1_jnp,
+    wJ0_jnp,
+    wJ1_jnp,
+    hankel_filter: str,
+    rho_h_batch_jnp,
+    rho_v_batch_jnp,
+    h_arr_batch_jnp,
+    prof_arr_batch_jnp,
+    rho_h_batch_np,
+    rho_v_batch_np,
+    esp_batch_np,
+):
+    """Escolhe bucketed (geom compartilhada) vs unified e monta o H_tensor.
+
+    Núcleo do dispatcher de :func:`simulate_multi_jax_batched`, fatorado para
+    ser chamável por (sub)batch — permite o loop de ``jax_chunk_size_models``
+    (commit O4 chunking) reusar a MESMA lógica de escolha de estratégia por
+    fatia de modelos. NÃO emite o warning de fallback (responsabilidade do
+    caller, 1× por chamada — não por chunk).
+
+    Args:
+        strategy: ``cfg.jax_strategy`` (``"bucketed"``|``"unified"``).
+        geom_homogeneous: pré-computado pelo caller sobre o batch COMPLETO
+            (subset de homogêneo é homogêneo; conservador e correto).
+        n_models: tamanho deste (sub)batch (pode ser < n_models total no chunk).
+        (demais args: ver :func:`_build_H_tensor_batched_bucketed` /
+        :func:`_build_H_tensor_batched_unified`).
+
+    Returns:
+        ``np.ndarray`` ``(n_models, nTR, nAngles, n_pos, nf, 9)`` deste (sub)batch.
+    """
+    if strategy == "bucketed" and geom_homogeneous:
+        return _build_H_tensor_batched_bucketed(
+            n=n,
+            npt=npt,
+            n_models=n_models,
+            n_pos=n_pos,
+            nf=nf,
+            nTR=nTR,
+            nAngles=nAngles,
+            complex_dtype=complex_dtype,
+            rho_h_ref_np=rho_h_batch_np[0],
+            rho_v_ref_np=rho_v_batch_np[0],
+            esp_ref_np=esp_batch_np[0],
+            positions_z_np=positions_z_np,
+            freqs_arr=freqs_arr,
+            tr_arr=tr_arr,
+            dip_arr=dip_arr,
+            hankel_filter=hankel_filter,
+            rho_h_batch_jnp=rho_h_batch_jnp,
+            rho_v_batch_jnp=rho_v_batch_jnp,
+        )
+    return _build_H_tensor_batched_unified(
+        n=n,
+        npt=npt,
+        n_models=n_models,
+        n_pos=n_pos,
+        nf=nf,
+        nTR=nTR,
+        nAngles=nAngles,
+        complex_dtype=complex_dtype,
+        tr_arr=tr_arr,
+        dip_arr=dip_arr,
+        positions_z_jnp=positions_z_jnp,
+        freqs_jnp=freqs_jnp,
+        krJ0J1_jnp=krJ0J1_jnp,
+        wJ0_jnp=wJ0_jnp,
+        wJ1_jnp=wJ1_jnp,
+        rho_h_batch_jnp=rho_h_batch_jnp,
+        rho_v_batch_jnp=rho_v_batch_jnp,
+        h_arr_batch_jnp=h_arr_batch_jnp,
+        prof_arr_batch_jnp=prof_arr_batch_jnp,
+    )
 
 
 __all__ = [
