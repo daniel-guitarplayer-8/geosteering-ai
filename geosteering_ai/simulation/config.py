@@ -671,6 +671,26 @@ class SimulationConfig:
     unroll_layer_loop: bool = True
 
     # ─────────────────────────────────────────────────────────────────
+    # SPRINT O4 (v2.44) — Chunk do eixo de MODELOS em batched
+    # ─────────────────────────────────────────────────────────────────
+    # `jax_chunk_size_models=K` divide o eixo `n_models` de
+    # `simulate_multi_jax_batched` em fatias de K modelos, processadas em
+    # loop Python (cada fatia reusa a MESMA compilação XLA cacheada), com
+    # 1 sync GPU→CPU por fatia. Reduz o pico de VRAM linearmente em
+    # `n_models/K` — destrava Cenário H (8×8×8 configs), que sem chunking
+    # materializa `(n_models, nTR·nAng, n_pos, nf, 9)` de uma vez (OOM
+    # ~110 GB na A6000 48 GB).
+    #
+    #   • None (default): batch monolítico — vmap sobre TODOS os modelos
+    #     de uma vez (comportamento v2.42; ótimo se couber em VRAM).
+    #   • K ≥ 1: loop sobre ⌈n_models/K⌉ fatias. Ortogonal a
+    #     `jax_position_chunk_size` (que chunka POSIÇÕES no path unified).
+    #
+    # Só afeta `simulate_multi_jax_batched`. Sem efeito no loop serial
+    # `simulate_multi_jax` (que processa 1 modelo por vez por construção).
+    jax_chunk_size_models: Optional[int] = None
+
+    # ─────────────────────────────────────────────────────────────────
     # VALIDAÇÃO (errata imutável, inspired by PipelineConfig)
     # ─────────────────────────────────────────────────────────────────
     def __post_init__(self) -> None:
@@ -913,6 +933,15 @@ class SimulationConfig:
                 f"range válido [1, 10000]. Use None para desabilitar o chunking "
                 f"(comportamento monolítico padrão). Valores típicos para GPU T4: "
                 f"32 (conservador), 64 (recomendado, oklahoma_28), 128 (nf=1)."
+            )
+
+        # Sprint O4 (v2.44) — chunk do eixo de modelos em batched.
+        # None = monolítico (vmap sobre todos os modelos). K >= 1 = fatias.
+        if self.jax_chunk_size_models is not None:
+            assert self.jax_chunk_size_models >= 1, (
+                f"jax_chunk_size_models={self.jax_chunk_size_models} inválido — "
+                f"deve ser None (batch monolítico) ou inteiro >= 1 (tamanho da "
+                f"fatia do eixo n_models em simulate_multi_jax_batched)."
             )
 
         # ──────────────────────────────────────────────────────────────

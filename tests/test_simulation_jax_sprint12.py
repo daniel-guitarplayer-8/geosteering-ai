@@ -599,6 +599,20 @@ def test_chunk_size_config_validation():
         SimulationConfig(jax_position_chunk_size=10_001)
 
 
+def test_chunk_size_models_config_validation():
+    """Sprint O4 — SimulationConfig valida jax_chunk_size_models (None ou >= 1)."""
+    from geosteering_ai.simulation.config import SimulationConfig
+
+    SimulationConfig(jax_chunk_size_models=None)  # default — batch monolítico
+    SimulationConfig(jax_chunk_size_models=1)  # mínimo válido
+    SimulationConfig(jax_chunk_size_models=8)  # valor típico (fix OOM Cenário H)
+    SimulationConfig(jax_chunk_size_models=1024)  # batches grandes
+    with pytest.raises(AssertionError):
+        SimulationConfig(jax_chunk_size_models=0)
+    with pytest.raises(AssertionError):
+        SimulationConfig(jax_chunk_size_models=-4)
+
+
 @jax_required
 def test_chunked_unified_parity_100pos():
     """Chunked unified (K=32) é bit-exato vs monolítico em 100 posições × 3f."""
