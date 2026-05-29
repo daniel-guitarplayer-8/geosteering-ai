@@ -447,7 +447,8 @@ def test_t13_gpu_path_executa(positions_z, oklahoma_3_model):
 def test_t14_block_until_ready_chamado_uma_vez_por_batch():
     """T14: block_until_ready chamado exatamente 1× no source code (não em loop).
 
-    Inspeciona o source de :func:`simulate_multi_jax_batched` para confirmar:
+    Inspeciona o source de :func:`simulate_multi_jax_batched` + o helper de
+    montagem ``_build_H_tensor_batched_unified`` para confirmar:
 
     1. Exatamente 1 chamada a ``block_until_ready()`` (sync único por batch).
     2. Exatamente 1 chamada a ``np.asarray(H_tensor_jax)`` (não em loop).
@@ -457,16 +458,31 @@ def test_t14_block_until_ready_chamado_uma_vez_por_batch():
     na Sprint A1 — verificação estrutural mais robusta que mock dinâmico
     em ``jax.Array.block_until_ready`` (que não é exposto como atributo
     de classe em JAX 0.4+).
+
+    Sprint O4 (v2.44): a montagem do H_tensor foi fatorada em
+    ``_build_H_tensor_batched_unified`` (refactor no-op) — o sync (1×
+    ``block_until_ready`` + 1× ``np.asarray(H_tensor_jax)``) vive nesse helper.
+    A contagem é sobre OCORRÊNCIAS no source (literais), então permanece 1
+    mesmo quando o helper é chamado em loop sobre chunks de modelos (commit 5):
+    o que importa é que NÃO há sync por-modelo. O sibling bucketed tem seu
+    próprio gate dedicado (ver test_o4_block_until_ready_unico_bucketed).
     """
     import inspect
 
-    src = inspect.getsource(simulate_multi_jax_batched)
+    from geosteering_ai.simulation._jax.multi_forward import (
+        _build_H_tensor_batched_unified,
+    )
 
-    # 1. Exatamente 1 block_until_ready
+    src = inspect.getsource(simulate_multi_jax_batched) + inspect.getsource(
+        _build_H_tensor_batched_unified
+    )
+
+    # 1. Exatamente 1 block_until_ready (no helper unified, sync final do batch)
     n_bur = src.count("block_until_ready")
     assert n_bur == 1, (
         f"T14: {n_bur}× block_until_ready encontradas em "
-        f"simulate_multi_jax_batched (esperado: 1 — sync único por batch)"
+        f"simulate_multi_jax_batched + helper unified (esperado: 1 — "
+        f"sync único por batch, nunca por modelo)"
     )
 
     # 2. Exatamente 1 np.asarray do H_tensor (sync GPU→CPU final)
