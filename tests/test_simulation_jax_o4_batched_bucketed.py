@@ -41,12 +41,21 @@ from __future__ import annotations
 
 import logging
 
-import jax
 import numpy as np
 import pytest
 
-jax.config.update("jax_enable_x64", True)
-import jax.numpy as jnp  # noqa: E402
+# Sprint O4 (v2.44): import guardado — sem JAX o módulo PULA (skipif), não
+# quebra a coleção do pytest (CI sem o extra `sim`). Ativa x64 antes de tudo.
+try:
+    import jax
+    import jax.numpy as jnp
+
+    jax.config.update("jax_enable_x64", True)
+    HAS_JAX = True
+except ImportError:
+    HAS_JAX = False
+
+pytestmark = pytest.mark.skipif(not HAS_JAX, reason="JAX não instalado")
 
 from geosteering_ai.simulation import (  # noqa: E402
     SimulationConfig,

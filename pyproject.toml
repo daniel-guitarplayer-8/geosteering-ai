@@ -41,6 +41,14 @@ viz = [
 hpo = [
     "optuna>=3.0",
 ]
+# Sprint O4 (v2.44) — backends do simulador (JAX CPU + Numba). São deps de
+# RUNTIME do simulador (_jax/ e _numba/), antes não declaradas — a CI nunca
+# os instalava, derrubando o step geosteering-warmup. `jax` aqui é a base CPU;
+# em GPU instale `jax[cuda12]` separadamente (Colab/local), que sobrepõe.
+sim = [
+    "jax>=0.4.30",
+    "numba>=0.59",
+]
 # Sprint v2.39 — I2.7 — API REST MVP (FastAPI + Pydantic v2 + Uvicorn)
 api = [
     "fastapi>=0.110",
@@ -54,6 +62,9 @@ all = [
     "joblib>=1.2",
     "pandas>=2.0",
     "tqdm>=4.65",
+    # Sprint O4 — backends do simulador (JAX CPU + Numba)
+    "jax>=0.4.30",
+    "numba>=0.59",
     # Sprint v2.39 — API REST stack
     "fastapi>=0.110",
     "pydantic>=2.5",
