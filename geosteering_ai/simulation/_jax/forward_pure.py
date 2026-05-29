@@ -427,6 +427,7 @@ _CTX_CACHE_MAXSIZE: int = 32
 
 
 def _hash_ctx_key(
+    n: int,
     esp_np: np.ndarray,
     pos_z_np: np.ndarray,
     freqs_np: np.ndarray,
@@ -440,6 +441,12 @@ def _hash_ctx_key(
     """Chave hash determinística para lookup de :class:`ForwardPureContext`.
 
     Args:
+        n: número de camadas (rho_h.shape[0]). CRÍTICO incluir na chave —
+            para ``n=1`` e ``n=2`` o ``esp`` é vazio ``(0,)`` em AMBOS, então
+            sem ``n`` a chave colidiria (ctx de ``n=1`` retornado p/ ``n=2`` →
+            ``h_arr`` shape (1,) vs ``eta`` (2,2) → crash sob vmap; ver
+            regressão de paridade O4). Para ``n>=3`` o comprimento de ``esp``
+            (n-2) já distingue, mas incluir ``n`` é defensivo e barato.
         esp_np: (n-2,) m — espessuras internas (NumPy).
         pos_z_np: (n_pos,) m — profundidades ponto-médio.
         freqs_np: (nf,) Hz — frequências de operação.
@@ -457,11 +464,20 @@ def _hash_ctx_key(
         ``rho_h``/``rho_v`` NÃO entram na chave — varia entre modelos do
         mesmo dataset, mas geometria é constante. Hash de arrays usa
         ``.tobytes()`` com cast forçado a ``float64`` para invariância.
+        Comprimentos de ``esp``/``pos_z``/``freqs`` são incluídos
+        explicitamente (``struct.pack``) para eliminar aliasing de fronteira
+        entre arrays concatenados.
     """
     h = hashlib.blake2b(digest_size=24)
-    h.update(np.asarray(esp_np, dtype=np.float64).tobytes())
-    h.update(np.asarray(pos_z_np, dtype=np.float64).tobytes())
-    h.update(np.asarray(freqs_np, dtype=np.float64).tobytes())
+    # Estrutura discreta primeiro (n + comprimentos) — elimina colisão n=1/n=2
+    # (esp vazio em ambos) e aliasing de fronteira entre arrays adjacentes.
+    esp_arr = np.asarray(esp_np, dtype=np.float64)
+    pos_arr = np.asarray(pos_z_np, dtype=np.float64)
+    freqs_arr = np.asarray(freqs_np, dtype=np.float64)
+    h.update(struct.pack("qqqq", int(n), esp_arr.size, pos_arr.size, freqs_arr.size))
+    h.update(esp_arr.tobytes())
+    h.update(pos_arr.tobytes())
+    h.update(freqs_arr.tobytes())
     h.update(struct.pack("dd", float(tr_spacing_m), float(dip_deg)))
     h.update(hankel_filter.encode("utf-8"))
     h.update(strategy.encode("utf-8"))
@@ -549,7 +565,11 @@ def build_static_context_cached(
         :func:`forward_pure_jax` recebe ``rho_h``/``rho_v`` como argumentos
         explícitos e ignora os campos ``ctx.rho_*_jnp`` durante o trace.
     """
+    # Número de camadas — DEVE entrar na chave (n=1 e n=2 têm esp vazio →
+    # colidiriam sem isto). Ver docstring de _hash_ctx_key.
+    n = int(np.asarray(rho_h).shape[0])
     key = _hash_ctx_key(
+        n,
         esp,
         positions_z,
         freqs_hz,

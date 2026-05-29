@@ -336,3 +336,52 @@ def test_extra_set_maxsize_zero_levanta_erro():
         set_ctx_cache_maxsize(0)
     # Restaura default para não vazar estado entre testes.
     set_ctx_cache_maxsize(32)
+
+
+def test_extra_ctx_cache_no_collision_n1_n2():
+    """Regressão O4: chave NÃO colide entre n=1 e n=2 (esp vazio em ambos).
+
+    Bug (exposto pelo path batched-bucketed): ``_hash_ctx_key`` omitia o nº de
+    camadas ``n``. Para n=1 e n=2 o ``esp`` é vazio ``(0,)`` em AMBOS, e se
+    positions/freqs/TR/dip forem iguais, a chave colidia → o ctx de n=1
+    (``h_arr`` shape (1,)) era retornado para uma chamada n=2 → mismatch
+    (1,) vs (2,2) sob vmap. Fix: ``n`` entra na chave.
+    """
+    from geosteering_ai.simulation._jax.forward_pure import (
+        build_static_context_cached,
+        clear_ctx_cache,
+    )
+
+    clear_ctx_cache()
+    pos = np.linspace(-5.0, 5.0, 12)
+    freqs = np.array([20000.0])
+
+    # n=1 PRIMEIRO (popula o cache) — esp vazio.
+    ctx1 = build_static_context_cached(
+        rho_h=np.array([10.0]),
+        rho_v=np.array([10.0]),
+        esp=np.empty(0, dtype=np.float64),
+        positions_z=pos,
+        freqs_hz=freqs,
+        tr_spacing_m=1.0,
+        dip_deg=0.0,
+        strategy="bucketed",
+        complex_dtype="complex128",
+    )
+    # n=2 com MESMA geometria-de-chave (esp vazio, mesmas pos/freqs/TR/dip).
+    ctx2 = build_static_context_cached(
+        rho_h=np.array([10.0, 20.0]),
+        rho_v=np.array([10.0, 20.0]),
+        esp=np.empty(0, dtype=np.float64),
+        positions_z=pos,
+        freqs_hz=freqs,
+        tr_spacing_m=1.0,
+        dip_deg=0.0,
+        strategy="bucketed",
+        complex_dtype="complex128",
+    )
+
+    assert ctx1.n == 1
+    assert ctx2.n == 2  # se colidisse, retornaria ctx1 (n=1)
+    assert tuple(ctx1.h_arr_jnp.shape) == (1,)
+    assert tuple(ctx2.h_arr_jnp.shape) == (2,)  # NÃO (1,) — prova ausência de colisão
