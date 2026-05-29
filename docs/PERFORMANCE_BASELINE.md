@@ -7,7 +7,7 @@
 | **Última atualização** | 2026-05-23 |
 | **Hook anti-regressão** | [`.claude/hooks/check-perf-regression.sh`](../.claude/hooks/check-perf-regression.sh) |
 | **Baseline JSON** | [`.claude/perf_baseline.json`](../.claude/perf_baseline.json) |
-| **Seção JAX GPU** | [§9 abaixo](#9-jax-gpu-t4-baseline-sprint-a16) |
+| **Seção JAX GPU** | [§9 abaixo](#9-jax-gpu-baseline) — A6000 local (v2.44); T4/A100 Colab deprecados |
 
 ---
 
@@ -301,12 +301,21 @@ config = PipelineConfig(
 
 ---
 
-## 9. JAX GPU T4 Baseline (Sprint A1.6)
+## 9. JAX GPU Baseline
+
+> ⚠️ **v2.44 — Baseline canônica migrou para A6000 LOCAL.** O Google Colab foi
+> **descontinuado** para o desenvolvimento do simulador JAX GPU; o desenvolvimento
+> em GPU é agora **local (RTX A6000 48 GB)**. As baselines **T4 e A100 (Colab)
+> abaixo estão DEPRECADAS** — foram medidas PRÉ-O4 (batched-unified, artefato).
+> A baseline oficial pós-O4 é **§9.9 (A6000, 8 cenários, 2 regimes)** e
+> `.claude/perf_baseline.json::jax_gpu_a6000_v244`. Re-medição em T4/A100 **N/A**
+> (Colab abandonado).
+
+### 9.0 (DEPRECADO) T4 Baseline (Sprint A1.6)
 
 **Estabelecida em**: v2.43 (2026-05-23) — Sprint A1.6 `A-jax-gpu-benchmark-redesign`
 
-Esta seção complementa a baseline Numba CPU (§1-§7) e TF Training (§8)
-com a **baseline canônica oficial do simulador JAX GPU** em NVIDIA T4.
+Histórico: baseline do simulador JAX GPU em NVIDIA T4 (Colab, pré-O4).
 
 ### 9.1 Validação Experimental
 
@@ -400,10 +409,27 @@ modelos do batch (regime PINN/on-the-fly), em vez do `unified` hardcodado. O
 | On-the-fly 32 modelos × 600 pos | 65 100 mod/h | **1 466 000 mod/h** | **22.5×** |
 | Cenário H (8×8×8 = 512 cfg) | OOM ~110 GB (pulado) | roda c/ `chunk_size_models=8` (32 600 mod/h) | destrava |
 
-> **Gate**: a baseline oficial permanece `jax_gpu_t4` (§9.2). A seção
-> `jax_gpu_a6000_o4` no JSON é **referência local** (não-gate). O `E_hot` T4
-> deve ser **re-medido pós-O4** em Colab (batched agora usa bucketed). Ver
-> [relatório v2.44](reports/v2.44_sprint_O4_batched_bucketed_2026-05-29.md).
+### 9.9 Baseline OFICIAL A6000 — 8 cenários, 2 regimes (v2.44)
+
+**Substitui** T4/A100 (Colab, deprecados). Hardware: RTX A6000 48 GB + Threadripper
+7970X. c128, `n_iters=3`, batch=16 modelos, `chunk_size_models=8`. JSON:
+`jax_gpu_a6000_v244`. CSV: `benchmarks/results/a6000_baseline_v2.44.csv`.
+
+| Cen | cfg | **Numba** single | **JAX-loop** single | **JAX-batched** (16) | bat÷Numba |
+|:---:|:---:|:----------------:|:-------------------:|:--------------------:|:---------:|
+| A | 1 | 5.17M | 1.76M | **9.39M** | 1.82× |
+| B | 1 | **3.17M** | 264k | 1.57M | 0.50× |
+| C | 4 | 1.15M | 264k | **1.45M** | 1.26× |
+| D | 4 | 2.03M | 557k | **3.27M** | 1.61× |
+| E | 1 | 1.05M | 231k | 1.01M | 0.96× |
+| F | 16 | 391k | 66k | 390k | 1.00× |
+| G | 64 | 83k | 17k | **101k** | 1.21× |
+| H | 512 | 35k | 5.2k | 31k | 0.89× |
+
+**Dois regimes**: *single-model* (Numba vence sempre — inferência); *batched*
+(misto a 16 modelos; a 32 modelos JAX vence A–G — a vantagem **cresce com o batch**,
+o regime real de PINN/treino). Relatório:
+[v2.44_baseline_a6000_8cenarios](reports/v2.44_baseline_a6000_8cenarios_2026-05-29.md).
 
 ### 9.7 Referências JAX GPU
 

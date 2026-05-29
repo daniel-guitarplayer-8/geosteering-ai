@@ -27,16 +27,20 @@
 # ║    • Sprint O2 — _COMPLEX_DTYPE_MAP em forward_pure.py                  ║
 # ║    • SimulationConfig.dtype — config.py:361                             ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-"""Bench Sprint O2 — Numba vs JAX nos cenários A/E/H com dtype opt-in.
+"""Bench Numba vs JAX nos 8 cenários canônicos A–H (Sprint v2.44).
 
-Cenários (definidos por convenção do projeto v2.30+):
-    A — Single position (sanity): 1 modelo × n_pos × 1 freq × 1 TR × 1 dip
-    E — Sequential positions: 1 modelo × 600 pos × 1 freq × 1 TR × 1 dip
-    H — Multi-dim stress: 1 modelo × n_pos × 8 freq × 8 TR × 8 dip
+Cenários (fonte única: ``geosteering_ai.cli.benchmark.SCENARIOS``):
+    A 1pos · B 100pos · C 4freq · D 4TR · E 600pos · F 16cfg · G 64cfg · H 512cfg
+    (use ``--scenarios all`` para os 8; default ``A,E,H``.)
 
-Métrica: mod/h (modelos por hora) calculado como n_iters / wall_time_s × 3600.
+Dois REGIMES reportados (coluna `regime` no CSV):
+    single  — 1 modelo/chamada (Numba 4w×16t, JAX loop) → inferência
+    batched — N modelos/chamada (JAX vmap) → treino/PINN/geração de datasets
 
-Saída: tabela CSV em `benchmarks/results/bench_O2_<scenario>_<dtype>.csv`.
+Métrica: mod/h (modelos por hora) = n_iters / wall_time_s × 3600 (single) ou
+n_iters × n_models / wall_time_s × 3600 (batched).
+
+Saída: CSV em `benchmarks/results/bench_O2_<dtype>.csv` (ou --output-csv).
 """
 
 from __future__ import annotations
@@ -68,45 +72,49 @@ def _get_default_model():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Cenários A/E/H
+# Cenários canônicos A–H (Sprint v2.44 — fonte única: cli/benchmark.SCENARIOS)
 # ──────────────────────────────────────────────────────────────────────────────
+# Antes este bench definia só A/E/H localmente. Agora importa os 8 cenários
+# canônicos do CLI (A/B/C/D/E/F/G/H), garantindo paridade de definição entre o
+# benchmark Numba-vs-JAX e o `geosteering-cli benchmark`.
+#
+#   A 1pos · B 100pos · C 4freq · D 4TR · E 600pos · F 16cfg · G 64cfg · H 512cfg
+#
+# Clamp defensivo de dip ≤ 89°: o path JAX valida dip em [0, 89]° (90° = poço
+# horizontal degenerado). O Cenário H canônico já usa 87.5° (fix v2.44), mas o
+# clamp protege contra qualquer override que ultrapasse 89°.
+from geosteering_ai.cli.benchmark import SCENARIOS as _CLI_SCENARIOS  # noqa: E402
+
+_JAX_DIP_MAX = 89.0
 
 
-def _scenario_A(n: int):
-    """Single position bench (sanity)."""
-    return {
-        "n_positions": n,
-        "frequencies_hz": [20000.0],
-        "tr_spacings_m": [1.0],
-        "dip_degs": [0.0],
-    }
+def _build_scenario_params(scen: str, n_pos: int) -> dict:
+    """Constrói os parâmetros de um cenário canônico a partir de SCENARIOS.
 
+    Args:
+        scen: identificador do cenário (``"A"``..``"H"``).
+        n_pos: número de posições (override do n_pos canônico).
 
-def _scenario_E(n: int):
-    """Sequential positions (600pos típico)."""
-    return {
-        "n_positions": n,
-        "frequencies_hz": [20000.0],
-        "tr_spacings_m": [1.0],
-        "dip_degs": [0.0],
-    }
-
-
-def _scenario_H(n: int):
-    """Multi-dim 8×8×8 stress test.
-
-    NOTA: Range valido de dip é [0, 89]° (paridade Fortran). 90° e 105° foram
-    substituidos por 70° e 85° (8 valores espacados sem violar range).
+    Returns:
+        Dict com ``n_positions``, ``frequencies_hz``, ``tr_spacings_m``,
+        ``dip_degs`` (dips clampados a ≤ 89° para compat JAX).
     """
+    sc = _CLI_SCENARIOS[scen]
     return {
-        "n_positions": n,
-        "frequencies_hz": list(np.logspace(3, np.log10(2e5), 8).tolist()),
-        "tr_spacings_m": [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 2.25, 2.5],
-        "dip_degs": [0.0, 15.0, 30.0, 45.0, 60.0, 70.0, 80.0, 85.0],
+        "n_positions": n_pos,
+        "frequencies_hz": [float(f) for f in sc["freqs"]],
+        "tr_spacings_m": [float(t) for t in sc["trs"]],
+        "dip_degs": [min(float(d), _JAX_DIP_MAX) for d in sc["dips"]],
     }
 
 
-_SCENARIO_BUILDERS = {"A": _scenario_A, "E": _scenario_E, "H": _scenario_H}
+# Builders para todos os 8 cenários (assinatura `(n_pos) -> params`).
+_SCENARIO_BUILDERS = {
+    scen: (lambda n, _s=scen: _build_scenario_params(_s, n)) for scen in _CLI_SCENARIOS
+}
+
+# n_pos canônico por cenário (default; A/E/H ainda aceitam --n-a/--n-e/--n-h).
+_SCENARIO_NPOS_DEFAULT = {scen: int(sc["n_pos"]) for scen, sc in _CLI_SCENARIOS.items()}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -353,7 +361,11 @@ def main(argv: List[str] | None = None) -> int:
         "--scenarios",
         type=str,
         default="A,E,H",
-        help="Lista CSV de cenários: A, E, H (default: A,E,H).",
+        help=(
+            "Lista CSV de cenários A–H (default: A,E,H). Use 'all' para os 8 "
+            "canônicos (A,B,C,D,E,F,G,H). B/C/D/F/G usam o n_pos canônico do "
+            "cli/benchmark.SCENARIOS; A/E/H aceitam --n-a/--n-e/--n-h."
+        ),
     )
     parser.add_argument("--n-a", type=int, default=200, help="n_pos para cenário A")
     parser.add_argument("--n-e", type=int, default=50, help="n_pos para cenário E")
@@ -427,7 +439,10 @@ def main(argv: List[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
+    if args.scenarios.strip().lower() == "all":
+        scenarios = list(_CLI_SCENARIOS)  # A,B,C,D,E,F,G,H
+    else:
+        scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
     strategies = [s.strip() for s in args.jax_strategies.split(",") if s.strip()]
 
     # ── Modelo ───────────────────────────────────────────────────────────────
@@ -446,10 +461,14 @@ def main(argv: List[str] | None = None) -> int:
         out_csv = Path(args.output_csv)
         out_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    rows = ["scenario,backend,strategy,dtype,n_pos,n_iters,wall_s,mod_per_h"]
+    # Coluna `regime` (Sprint v2.44): single = 1 modelo/chamada (inferência —
+    # Numba e JAX loop); batched = N modelos/chamada (treino/PINN — JAX vmap).
+    rows = ["scenario,backend,regime,strategy,dtype,n_pos,n_iters,wall_s,mod_per_h"]
 
     # ── Bench loop ────────────────────────────────────────────────────────────
-    n_map = {"A": args.n_a, "E": args.n_e, "H": args.n_h}
+    # n_pos: canônico por cenário (B/C/D/F/G); A/E/H sobrescritos via flags.
+    n_map = dict(_SCENARIO_NPOS_DEFAULT)
+    n_map["A"], n_map["E"], n_map["H"] = args.n_a, args.n_e, args.n_h
     for scen in scenarios:
         if scen not in _SCENARIO_BUILDERS:
             print(f"[bench-O2] cenário {scen!r} desconhecido, pulando.")
@@ -490,7 +509,8 @@ def main(argv: List[str] | None = None) -> int:
                     f"wall={t_n:.3f}s | mod/h={mod_h_n:.2e}"
                 )
                 rows.append(
-                    f"{scen},numba,{args.numba_workers}w{args.numba_threads}t,"
+                    f"{scen},numba,single,"
+                    f"{args.numba_workers}w{args.numba_threads}t,"
                     f"complex128,{n_pos},{args.n_iters},"
                     f"{t_n:.6f},{mod_h_n:.6e}"
                 )
@@ -507,8 +527,8 @@ def main(argv: List[str] | None = None) -> int:
                     f"mod/h={mod_h_j:.2e}"
                 )
                 rows.append(
-                    f"{scen},jax,{strat},{args.dtype},{n_pos},{args.n_iters},"
-                    f"{t_j:.6f},{mod_h_j:.6e}"
+                    f"{scen},jax,single,{strat},{args.dtype},{n_pos},"
+                    f"{args.n_iters},{t_j:.6f},{mod_h_j:.6e}"
                 )
             except Exception as e:
                 print(f"  [jax/{strat}] FALHA: {e}")
@@ -543,7 +563,8 @@ def main(argv: List[str] | None = None) -> int:
                             f"wall={t_b:.3f}s | mod/h={mod_h_b:.2e}"
                         )
                         rows.append(
-                            f"{scen},jax_batched,{tag}_x{args.n_models_batch},"
+                            f"{scen},jax_batched,batched,"
+                            f"{tag}_x{args.n_models_batch},"
                             f"{args.dtype},{n_pos},{args.n_iters},"
                             f"{t_b:.6f},{mod_h_b:.6e}"
                         )
