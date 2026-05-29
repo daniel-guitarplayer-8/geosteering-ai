@@ -474,18 +474,21 @@ def set_ctx_cache_maxsize(maxsize: int) -> None:
     """Ajusta tamanho máximo do :data:`_CTX_CACHE`.
 
     Args:
-        maxsize: Novo tamanho máximo (>= 0).
+        maxsize: Novo tamanho máximo (>= 1). Alinhado com o sibling
+            :func:`set_jit_cache_maxsize` — ``maxsize=0`` não é permitido
+            porque desabilitar o cache não é um caso de uso suportado e
+            tornaria a eviction LRU degenerada.
 
     Raises:
-        ValueError: Se ``maxsize`` for negativo.
+        ValueError: Se ``maxsize < 1``.
 
     Note:
         Quando o cache atual excede o novo ``maxsize``, eviction LRU
         é aplicado imediatamente (remove entradas mais antigas).
     """
     global _CTX_CACHE_MAXSIZE
-    if maxsize < 0:
-        raise ValueError(f"maxsize deve ser >= 0, recebido {maxsize}")
+    if maxsize < 1:
+        raise ValueError(f"maxsize deve ser >= 1, recebido {maxsize}")
     _CTX_CACHE_MAXSIZE = maxsize
     while len(_CTX_CACHE) > maxsize:
         _CTX_CACHE.popitem(last=False)
@@ -578,7 +581,10 @@ def build_static_context_cached(
     )
 
     # LRU eviction (remove mais antigo) antes de inserir.
-    if len(_CTX_CACHE) >= _CTX_CACHE_MAXSIZE:
+    # `while` + `max(..., 1)` é defensivo: nunca chama popitem em cache
+    # vazio (evita KeyError mesmo se _CTX_CACHE_MAXSIZE for mutado para 0
+    # diretamente) e converge quando o cache excede o limite.
+    while len(_CTX_CACHE) >= max(_CTX_CACHE_MAXSIZE, 1):
         _CTX_CACHE.popitem(last=False)
     _CTX_CACHE[key] = ctx
     return ctx

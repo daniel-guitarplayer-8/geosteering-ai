@@ -318,5 +318,21 @@ def test_extra_set_maxsize_negativo_levanta_erro():
     """`set_ctx_cache_maxsize(-1)` levanta ValueError."""
     from geosteering_ai.simulation._jax.forward_pure import set_ctx_cache_maxsize
 
-    with pytest.raises(ValueError, match="maxsize deve ser >= 0"):
+    with pytest.raises(ValueError, match="maxsize deve ser >= 1"):
         set_ctx_cache_maxsize(-1)
+
+
+def test_extra_set_maxsize_zero_levanta_erro():
+    """`set_ctx_cache_maxsize(0)` levanta ValueError (alinhado ao sibling JIT).
+
+    Regressão (review O2/O3, finding P1): ``maxsize=0`` era aceito mas
+    tornava a eviction LRU degenerada — ``build_static_context_cached``
+    chamava ``popitem`` em cache vazio (``0 >= 0`` → ``KeyError``). Agora
+    o setter rejeita ``< 1`` e a eviction usa ``while … max(MAXSIZE, 1)``.
+    """
+    from geosteering_ai.simulation._jax.forward_pure import set_ctx_cache_maxsize
+
+    with pytest.raises(ValueError, match="maxsize deve ser >= 1"):
+        set_ctx_cache_maxsize(0)
+    # Restaura default para não vazar estado entre testes.
+    set_ctx_cache_maxsize(32)
