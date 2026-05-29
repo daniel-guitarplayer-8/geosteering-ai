@@ -74,6 +74,11 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-qt>=4.4",    # Sprint v2.33 — Qt GUI tests (qtbot fixture)
+    # Sprint O4 (v2.44): binding Qt — pytest-qt EXIGE PyQt6/PyQt5/PySide6 ao
+    # carregar (mesmo sem rodar GUI tests). Antes não declarado → 'pytest tests/'
+    # falhava com exit 4 na CI assim que o warmup parou de derrubar o job antes.
+    # Import headless basta p/ o plugin; GUI tests reais usam xvfb (step à parte).
+    "PyQt6>=6.6",
     "mypy>=1.0",
     # Multi-agent infrastructure (Etapa 1 Quality Mesh)
     "watchdog>=3.0",     # tools/file_watcher_daemon.py
