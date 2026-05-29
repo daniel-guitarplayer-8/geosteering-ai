@@ -185,15 +185,28 @@ def _bench_jax(
     dip_degs,
     n_iters: int,
     dtype: str,
-    strategy: str = "unified",
+    strategy: str = "bucketed",
 ) -> float:
     """Mede tempo wall de simulate_multi_jax com n_iters chamadas.
 
     Args:
         dtype: 'complex128' (default) ou 'complex64' (Sprint O2 opt-in).
-        strategy: 'bucketed' ou 'unified' (default 'unified' = 1 JIT por n,npt).
+        strategy: 'bucketed' (default) ou 'unified'. Sprint O4 (v2.44):
+            default trocado para 'bucketed' — investigação confirmou que
+            'unified' (lax.fori_loop com bounds dinâmicos camad_t/camad_r)
+            é ~6.9× mais lenta que 'bucketed' (kernels estáticos por
+            (ct,cr) que o XLA especializa). O teto de ~42.8k mod/h do
+            headline antigo era ARTEFATO deste default 'unified', não do
+            código. Com 'bucketed', Cenário E empata Numba 4w×16t (~369k).
 
     Returns: tempo total em segundos.
+
+    Note:
+        Política de sync (apples-to-apples vs _bench_jax_batched):
+        ``simulate_multi_jax`` já materializa ``H_tensor`` em NumPy
+        (sync GPU→CPU interno por config) ANTES de retornar, então o
+        cronômetro captura o transfer completo. O ``np.asarray`` no loop
+        abaixo é no-op defensivo (resultado já é host array).
     """
     from geosteering_ai.simulation import SimulationConfig, simulate_multi_jax
 
@@ -354,8 +367,11 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument(
         "--jax-strategies",
         type=str,
-        default="unified",
-        help="Lista CSV de strategies JAX (bucketed,unified). Default: unified.",
+        default="bucketed",
+        help=(
+            "Lista CSV de strategies JAX (bucketed,unified). Default: bucketed "
+            "(Sprint O4 — 'unified' é ~6.9× mais lenta; ver _bench_jax docstring)."
+        ),
     )
     parser.add_argument(
         "--skip-numba",
