@@ -42,6 +42,7 @@ Reusa a lógica de :mod:`geosteering_ai.simulation._numba.propagation`,
 substituindo loops Python por :func:`jax.lax.scan` para permitir
 compilação XLA sem overhead interpretado.
 """
+
 from __future__ import annotations
 
 import jax
@@ -68,6 +69,7 @@ def common_arrays_jax(
     zeta: complex,
     h: jax.Array,
     eta: jax.Array,
+    complex_dtype=None,
 ) -> tuple[jax.Array, ...]:
     """Port JAX de :func:`_numba.propagation.common_arrays`.
 
@@ -83,9 +85,12 @@ def common_arrays_jax(
         zeta: Impeditividade complexa ``i·ω·μ₀`` (scalar complex128).
         h: Array ``(n,)`` float64 — espessuras por camada.
         eta: Array ``(n, 2)`` float64 — condutividades ``[σh, σv]``.
+        complex_dtype: Sprint O2 (v2.43) — ``jnp.complex128`` (default,
+            paridade Fortran <1e-13) ou ``jnp.complex64`` (opt-in PINN/GPU,
+            tolerância <1e-4). ``None`` → ``jnp.complex128``.
 
     Returns:
-        Tupla de 9 arrays ``(npt, n)`` complex128:
+        Tupla de 9 arrays ``(npt, n)`` no ``complex_dtype`` solicitado:
         ``(u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, AdmInt)``.
 
     Note:
@@ -94,11 +99,15 @@ def common_arrays_jax(
         em si NÃO é decorada com jit — deixa escolha ao caller (útil
         dentro de ``vmap`` onde jit é aplicado ao nível externo).
     """
+    # Sprint O2 (v2.43): complex_dtype opt-in. Default complex128 preserva
+    # paridade Fortran <1e-13. complex64 reduz VRAM 2× em GPU para PINN.
+    if complex_dtype is None:
+        complex_dtype = jnp.complex128
     # Guard de singularidade — jnp.where para branch-free
     r = jnp.where(hordist < _HORDIST_SINGULARITY_EPS, _HORDIST_SINGULARITY_R, hordist)
 
     kr = krJ0J1 / r  # (npt,)
-    kr_squared = (kr * kr).astype(jnp.complex128)  # promovido para complex
+    kr_squared = (kr * kr).astype(complex_dtype)  # promovido para complex
 
     # ──────────────────────────────────────────────────────────────────
     # ETAPA 1: Constantes de propagação por camada (vmap sobre camadas)
@@ -134,9 +143,9 @@ def common_arrays_jax(
 
     # vmap sobre camadas → shape final (n, npt, ...) — precisamos transpor
     # para (npt, n) para consistência com backend Numba.
-    u_all, s_all, uh_all, sh_all, AdmInt_all, ImpInt_all, tghuh_all, tghsh_all = jax.vmap(
-        _per_layer, in_axes=(0, 0)
-    )(h, eta)
+    u_all, s_all, uh_all, sh_all, AdmInt_all, ImpInt_all, tghuh_all, tghsh_all = (
+        jax.vmap(_per_layer, in_axes=(0, 0))(h, eta)
+    )
     # Atual: shape (n, npt). Transpor para (npt, n).
     u = u_all.T
     s = s_all.T
@@ -201,15 +210,15 @@ def common_arrays_jax(
 
         # Monta saídas finais (npt, n): inserir terminal em [:, n-1]
         RTEdw = jnp.concatenate(
-            [RTEdw_inner.T, jnp.zeros((npt, 1), dtype=jnp.complex128)], axis=1
+            [RTEdw_inner.T, jnp.zeros((npt, 1), dtype=complex_dtype)], axis=1
         )
         RTMdw = jnp.concatenate(
-            [RTMdw_inner.T, jnp.zeros((npt, 1), dtype=jnp.complex128)], axis=1
+            [RTMdw_inner.T, jnp.zeros((npt, 1), dtype=complex_dtype)], axis=1
         )
     else:
         # n == 1: só terminais
-        RTEdw = jnp.zeros((npt, 1), dtype=jnp.complex128)
-        RTMdw = jnp.zeros((npt, 1), dtype=jnp.complex128)
+        RTEdw = jnp.zeros((npt, 1), dtype=complex_dtype)
+        RTMdw = jnp.zeros((npt, 1), dtype=complex_dtype)
 
     # ──────────────────────────────────────────────────────────────────
     # ETAPA 3: Recursão top-down (camada 0 → n-1) via jax.lax.scan
@@ -251,14 +260,14 @@ def common_arrays_jax(
         RTMup_inner = RTMup_stacked
 
         RTEup = jnp.concatenate(
-            [jnp.zeros((npt, 1), dtype=jnp.complex128), RTEup_inner.T], axis=1
+            [jnp.zeros((npt, 1), dtype=complex_dtype), RTEup_inner.T], axis=1
         )
         RTMup = jnp.concatenate(
-            [jnp.zeros((npt, 1), dtype=jnp.complex128), RTMup_inner.T], axis=1
+            [jnp.zeros((npt, 1), dtype=complex_dtype), RTMup_inner.T], axis=1
         )
     else:
-        RTEup = jnp.zeros((npt, 1), dtype=jnp.complex128)
-        RTMup = jnp.zeros((npt, 1), dtype=jnp.complex128)
+        RTEup = jnp.zeros((npt, 1), dtype=complex_dtype)
+        RTMup = jnp.zeros((npt, 1), dtype=complex_dtype)
 
     return (u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, AdmInt)
 

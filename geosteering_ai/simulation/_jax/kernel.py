@@ -300,6 +300,7 @@ def _single_position_jax(
     wJ1: jax.Array,
     use_native_dipoles: bool = False,
     use_unified: bool = False,
+    complex_dtype=None,
 ) -> jax.Array:
     """Calcula H para uma frequência numa posição via backend JAX.
 
@@ -314,11 +315,26 @@ def _single_position_jax(
             ``camad_t``/``camad_r`` como tracers int32. Consolida 44 buckets
             XLA em 1 único JIT por ``(n, npt)``. Ignorado quando
             ``use_native_dipoles=False``.
+        complex_dtype: Sprint O2 (v2.43) — dtype complexo. ``None`` →
+            ``jnp.complex128`` (paridade Fortran sagrada). ``jnp.complex64``
+            opt-in (2× menor footprint, GPU/PINN). Path híbrido (``pure_callback``)
+            SEMPRE chama Numba em complex128 e faz cast pós-callback.
 
-    Retorna array (9,) complex128 — Hxx, Hxy, Hxz, Hyx, Hyy, Hyz, Hzx, Hzy, Hzz.
+    Retorna array (9,) no ``complex_dtype`` solicitado — Hxx, Hxy, Hxz, Hyx, Hyy, Hyz, Hzx, Hzy, Hzz.
     """
+    # Sprint O2 (v2.43): default complex128. Override altera os arrays
+    # propagadores, o escalar `zeta` (i·ω·μ₀) e o tensor H final.
+    # Sprint O3 (v2.43): fix wiring — `zeta` PRECISA ser cast para
+    # `complex_dtype`, senão `_per_layer` em common_arrays_jax promove
+    # silenciosamente `kh2 = -zeta*sigma_h` para c128 e `jnp.sqrt(...)`
+    # retorna u/s/uh/sh em c128 mesmo quando complex_dtype=c64. Isso
+    # anulava 100% do speedup esperado de complex64 (bench O2 0%).
+    if complex_dtype is None:
+        complex_dtype = jnp.complex128
     omega = 2.0 * jnp.pi * freq
-    zeta = 1j * omega * _MU_0
+    # Cast `zeta` explicitamente para `complex_dtype` — propaga para
+    # u/s/uh/sh via common_arrays_jax::_per_layer (kh2 = -zeta*sigma_h).
+    zeta = jnp.asarray(1j * omega * _MU_0, dtype=complex_dtype)
 
     # Distância horizontal
     dx = cx - Tx
@@ -326,7 +342,11 @@ def _single_position_jax(
     r = jnp.sqrt(dx * dx + dy * dy)
 
     # Sprint 3.2: propagação em JAX puro
-    outs = common_arrays_jax(n, npt, r, krJ0J1, zeta, h_arr, eta)
+    # Sprint O2: complex_dtype propagado para common_arrays_jax → arrays
+    # u/s/uh/sh/RTE*/RTM*/AdmInt no dtype solicitado.
+    outs = common_arrays_jax(
+        n, npt, r, krJ0J1, zeta, h_arr, eta, complex_dtype=complex_dtype
+    )
     u, s, uh, sh, RTEdw, RTEup, RTMdw, RTMup, AdmInt = outs
 
     cf = common_factors_jax(
@@ -361,6 +381,10 @@ def _single_position_jax(
                 native_dipoles_full_jax as _dipoles_impl,
             )
 
+        # Sprint O3 (v2.43): passar `complex_dtype` explícito ao orquestrador
+        # de dipolos. Antes (Sprint O2) o dtype era derivado silenciosamente
+        # de `u.dtype` dentro de `_hmd_tiv_native_jax*` e `_vmd_native_jax*` —
+        # propenso a promoção implícita caso algum caller passe arrays c128.
         matH = _dipoles_impl(
             Tx,
             Ty,
@@ -393,11 +417,22 @@ def _single_position_jax(
             Euup,
             FEdwz,
             FEupz,
+            complex_dtype=complex_dtype,
         )
     else:
         # Caminho híbrido (default) — callback para Numba @njit host
+        # Sprint O2 (v2.43): Numba host SEMPRE retorna complex128 (paridade
+        # Fortran sagrada). Cast pós-callback para complex_dtype se opt-in.
+        # Notavelmente, as `u`, `s`, ... passadas para o callback foram
+        # downcast para complex_dtype, mas o callback faz `_to_writeable` que
+        # converte via `np.ascontiguousarray` → preserva dtype incoming.
+        # Para mantermos paridade exata no path híbrido, deveríamos passar
+        # versões complex128 ao callback. Solução escolhida: o caminho híbrido
+        # com complex64 não é caso de uso suportado (use_native_dipoles=True
+        # é o path complex64 esperado). Mantemos paridade c128 inalterada
+        # neste branch, apenas castamos resultado a complex_dtype.
         result_shape = jax.ShapeDtypeStruct((3, 3), jnp.complex128)
-        matH = jax.pure_callback(
+        matH_c128 = jax.pure_callback(
             _dipoles_numba_host,
             result_shape,
             Tx,
@@ -413,25 +448,27 @@ def _single_position_jax(
             h_arr,
             prof_arr,
             zeta,
-            eta,
+            eta.astype(jnp.float64),
             cx,
             cy,
             cz,
-            u,
-            s,
-            uh,
-            sh,
-            RTEdw,
-            RTEup,
-            RTMdw,
-            RTMup,
-            Mxdw,
-            Mxup,
-            Eudw,
-            Euup,
-            FEdwz,
-            FEupz,
+            u.astype(jnp.complex128),
+            s.astype(jnp.complex128),
+            uh.astype(jnp.complex128),
+            sh.astype(jnp.complex128),
+            RTEdw.astype(jnp.complex128),
+            RTEup.astype(jnp.complex128),
+            RTMdw.astype(jnp.complex128),
+            RTMup.astype(jnp.complex128),
+            Mxdw.astype(jnp.complex128),
+            Mxup.astype(jnp.complex128),
+            Eudw.astype(jnp.complex128),
+            Euup.astype(jnp.complex128),
+            FEdwz.astype(jnp.complex128),
+            FEupz.astype(jnp.complex128),
         )
+        # Cast pós-callback (no-op se complex_dtype=complex128).
+        matH = matH_c128.astype(complex_dtype)
 
     # Rotação
     tH = rotate_tensor(dip_rad, 0.0, 0.0, matH)

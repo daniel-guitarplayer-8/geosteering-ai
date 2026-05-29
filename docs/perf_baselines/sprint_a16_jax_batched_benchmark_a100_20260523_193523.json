@@ -1,0 +1,292 @@
+{
+  "sprint": "A1.6 — A-jax-gpu-benchmark-redesign",
+  "template": "validate_jax_gpu_v240 (Sprint A1.6 rewrite)",
+  "git_tag": "main",
+  "git_commit": "8e945b4be52ba7950ac792fd21ddf366429b62bb",
+  "runtime": "a100",
+  "timestamp_utc": "20260523_193523",
+  "config": {
+    "n_models_per_scenario": {
+      "A": 50,
+      "B": 50,
+      "C": 50,
+      "D": 50,
+      "E": 50,
+      "F": 20,
+      "G": 5,
+      "H": 5
+    },
+    "n_runs_hot": 4,
+    "seed": 42,
+    "paridade_tol": 1e-12,
+    "jax_enable_x64": true,
+    "api": "simulate_multi_jax_batched (Sprint A1.5 v2.42)",
+    "positions_z_range": "[-5.0, 5.0] (match CLI benchmark.py:259)",
+    "numba_baseline_workers": 4,
+    "numba_baseline_threads": 1,
+    "numba_cli_timeout_s": {
+      "A": 600,
+      "B": 600,
+      "C": 600,
+      "D": 600,
+      "E": 600,
+      "F": 600,
+      "G": 600,
+      "H": 1800
+    }
+  },
+  "pytest_summary": {
+    "passed": 164,
+    "total": 164,
+    "collected": 188,
+    "deselected": 24
+  },
+  "pytest_duration_sec": 2024.2945783138275,
+  "benchmark_batched": {
+    "A": {
+      "scenario": "A",
+      "n_models": 50,
+      "n_pos": 1,
+      "nf": 1,
+      "nTR": 1,
+      "nAng": 1,
+      "n_runs_hot": 4,
+      "run_1_cold_mod_h": 7695858.311209518,
+      "run_1_cold_elapsed_s": 0.023389204000523023,
+      "hot_throughputs_mod_h": [
+        8988283.322934214,
+        9058053.06168998,
+        9199675.271904683,
+        9213703.090207888
+      ],
+      "median_hot_mod_h": 9128864.166797332,
+      "min_hot_mod_h": 8988283.322934214,
+      "max_hot_mod_h": 9213703.090207888,
+      "ratio_cold_to_hot": 0.8430247367684787,
+      "latency_ms_per_model_hot": 0.39435355091530333,
+      "numba_t4_local_mod_h": 2571013.0,
+      "numba_baseline_historical_mod_h": 1180000
+    },
+    "B": {
+      "scenario": "B",
+      "n_models": 50,
+      "n_pos": 100,
+      "nf": 1,
+      "nTR": 1,
+      "nAng": 1,
+      "n_runs_hot": 4,
+      "run_1_cold_mod_h": 270737.9859948926,
+      "run_1_cold_elapsed_s": 0.6648494460005168,
+      "hot_throughputs_mod_h": [
+        284988.4409635807,
+        284616.87802693254,
+        285014.9346164024,
+        283662.0028307215
+      ],
+      "median_hot_mod_h": 284802.6594952566,
+      "min_hot_mod_h": 283662.0028307215,
+      "max_hot_mod_h": 285014.9346164024,
+      "ratio_cold_to_hot": 0.9506160738621956,
+      "latency_ms_per_model_hot": 12.640331401329341,
+      "numba_t4_local_mod_h": 92010.0,
+      "numba_baseline_historical_mod_h": 320000
+    },
+    "C": {
+      "scenario": "C",
+      "n_models": 50,
+      "n_pos": 100,
+      "nf": 4,
+      "nTR": 1,
+      "nAng": 1,
+      "n_runs_hot": 4,
+      "run_1_cold_mod_h": 257381.03681894916,
+      "run_1_cold_elapsed_s": 0.6993522220000159,
+      "hot_throughputs_mod_h": [
+        257189.93796538835,
+        257968.02240448585,
+        256977.1127788623,
+        256809.27217068206
+      ],
+      "median_hot_mod_h": 257083.52537212532,
+      "min_hot_mod_h": 256809.27217068206,
+      "max_hot_mod_h": 257968.02240448585,
+      "ratio_cold_to_hot": 1.00115725597894,
+      "latency_ms_per_model_hot": 14.003231030806207,
+      "numba_t4_local_mod_h": 24411.0,
+      "numba_baseline_historical_mod_h": 119000
+    },
+    "D": {
+      "scenario": "D",
+      "n_models": 50,
+      "n_pos": 1,
+      "nf": 1,
+      "nTR": 4,
+      "nAng": 1,
+      "n_runs_hot": 4,
+      "run_1_cold_mod_h": 4940146.014202546,
+      "run_1_cold_elapsed_s": 0.03643617000034283,
+      "hot_throughputs_mod_h": [
+        5302862.69156222,
+        5314097.089145044,
+        5370168.392316818,
+        5375429.556573718
+      ],
+      "median_hot_mod_h": 5342132.740730931,
+      "min_hot_mod_h": 5302862.69156222,
+      "max_hot_mod_h": 5375429.556573718,
+      "ratio_cold_to_hot": 0.9247516402085165,
+      "latency_ms_per_model_hot": 0.6738881594146674,
+      "numba_t4_local_mod_h": 938648.0,
+      "numba_baseline_historical_mod_h": null
+    },
+    "E": {
+      "scenario": "E",
+      "n_models": 50,
+      "n_pos": 600,
+      "nf": 1,
+      "nTR": 1,
+      "nAng": 1,
+      "n_runs_hot": 4,
+      "run_1_cold_mod_h": 47784.64991215536,
+      "run_1_cold_elapsed_s": 3.7669000470004903,
+      "hot_throughputs_mod_h": [
+        47882.819962726775,
+        47652.18298049632,
+        47742.174497626045,
+        47946.10354207744
+      ],
+      "median_hot_mod_h": 47812.49723017641,
+      "min_hot_mod_h": 47652.18298049632,
+      "max_hot_mod_h": 47946.10354207744,
+      "ratio_cold_to_hot": 0.9994175723998061,
+      "latency_ms_per_model_hot": 75.29412200891892,
+      "numba_t4_local_mod_h": 21817.0,
+      "numba_baseline_historical_mod_h": 122000
+    },
+    "F": {
+      "scenario": "F",
+      "n_models": 20,
+      "n_pos": 100,
+      "nf": 4,
+      "nTR": 4,
+      "nAng": 1,
+      "n_runs_hot": 4,
+      "run_1_cold_mod_h": 67119.00213060278,
+      "run_1_cold_elapsed_s": 1.0727215500000966,
+      "hot_throughputs_mod_h": [
+        67377.91706768134,
+        67559.28261602011,
+        67689.54614977006,
+        67209.79580982409
+      ],
+      "median_hot_mod_h": 67468.59984185072,
+      "min_hot_mod_h": 67209.79580982409,
+      "max_hot_mod_h": 67689.54614977006,
+      "ratio_cold_to_hot": 0.9948183642158365,
+      "latency_ms_per_model_hot": 53.35815488150864,
+      "numba_t4_local_mod_h": 8308.0,
+      "numba_baseline_historical_mod_h": null
+    },
+    "G": {
+      "scenario": "G",
+      "n_models": 5,
+      "n_pos": 100,
+      "nf": 4,
+      "nTR": 4,
+      "nAng": 4,
+      "n_runs_hot": 4,
+      "run_1_cold_mod_h": 16795.539651082938,
+      "run_1_cold_elapsed_s": 1.07171310800004,
+      "hot_throughputs_mod_h": [
+        16733.906928960037,
+        16807.648098412352,
+        16861.7393801472,
+        16962.199764219356
+      ],
+      "median_hot_mod_h": 16834.693739279777,
+      "min_hot_mod_h": 16733.906928960037,
+      "max_hot_mod_h": 16962.199764219356,
+      "ratio_cold_to_hot": 0.9976742025246659,
+      "latency_ms_per_model_hot": 213.84410407183418,
+      "numba_t4_local_mod_h": 2172.0,
+      "numba_baseline_historical_mod_h": 45000
+    },
+    "H": {
+      "scenario": "H",
+      "n_models": 5,
+      "n_pos": 100,
+      "nf": 8,
+      "nTR": 8,
+      "nAng": 8,
+      "n_runs_hot": 4,
+      "run_1_cold_mod_h": 3863.5516578514234,
+      "run_1_cold_elapsed_s": 4.658925671000361,
+      "hot_throughputs_mod_h": [
+        3879.5732870880165,
+        3885.80586712664,
+        3864.5470405355763,
+        3842.496824516661
+      ],
+      "median_hot_mod_h": 3872.0601638117964,
+      "min_hot_mod_h": 3842.496824516661,
+      "max_hot_mod_h": 3885.80586712664,
+      "ratio_cold_to_hot": 0.9978025894225784,
+      "latency_ms_per_model_hot": 929.7376196902967,
+      "numba_t4_local_mod_h": 444.0,
+      "numba_baseline_historical_mod_h": null
+    }
+  },
+  "numba_t4_local_baselines": {
+    "A": 2571013.0,
+    "B": 92010.0,
+    "C": 24411.0,
+    "D": 938648.0,
+    "E": 21817.0,
+    "F": 8308.0,
+    "G": 2172.0,
+    "H": 444.0
+  },
+  "gate_results": {
+    "A": {
+      "median_hot_mod_h": 9128864.166797332,
+      "numba_t4_local_mod_h": 2571013.0,
+      "ratio_hot_vs_t4": 3.5506876732234853,
+      "pass": true
+    },
+    "B": {
+      "median_hot_mod_h": 284802.6594952566,
+      "numba_t4_local_mod_h": 92010.0,
+      "ratio_hot_vs_t4": 3.0953446309668147,
+      "pass": true
+    },
+    "E": {
+      "median_hot_mod_h": 47812.49723017641,
+      "numba_t4_local_mod_h": 21817.0,
+      "ratio_hot_vs_t4": 2.1915248306447452,
+      "pass": true
+    }
+  },
+  "gate_pass": true,
+  "gate_evaluable": true,
+  "h_scenario_note": "dip_degs max=87.5° (JAX validador cap 89°) vs 90° Numba CLI (M1 doc, gate só A/B/E)",
+  "fixes_applied": {
+    "C1": "warmup por-cenário com batch size EXATO (XLA cache key inclui n_models)",
+    "C2": "Run 1 cold isolado de statistics.median(Runs 2-5)",
+    "H1": "jax.default_backend() em vez de d.platform == 'gpu'",
+    "H2": "result.H_tensor.shape após cada call (force materialization)",
+    "H3": "_UNIFIED_JIT_CACHE keyed (n, npt) — invariante a modelos (design)",
+    "M1": "doc: cap dip 89° JAX (multi_forward.py:880); H fora do gate; tabela anotada",
+    "M2": "batched cache não chaveia em esp (design)",
+    "M3": "Numba baseline medido localmente no T4 via geosteering-cli benchmark"
+  },
+  "review_fixes_applied": {
+    "CRIT-1": "latency_ms_per_model_hot = 3.6e6 / median_hot (não n_models / hot * 3.6e6)",
+    "CRIT-2": "warmup com batch size matching N_MODELS_PER_SCENARIO (XLA cache hit)",
+    "HIGH-1": "FileNotFoundError/OSError capturados em measure_numba_baseline_t4",
+    "HIGH-2": "H scenario timeout 1800s (stress test 8x8x8)",
+    "MED-1": "H row na tabela sem ratio direto (dip mismatch)",
+    "MED-3": "single _pytest_report load (sem _pytest_data duplicado)",
+    "MED-4": "JAX_PLATFORMS='cuda,cpu' explícito (compat JAX 0.4.30+)",
+    "MED-5": "--workers/--threads pinados no CLI Numba baseline"
+  }
+}

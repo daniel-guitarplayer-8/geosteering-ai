@@ -82,6 +82,7 @@ Note:
     são estáticas, enquanto ``camad_t`` e ``camad_r`` são tracers. Isto
     é o que permite a consolidação de buckets.
 """
+
 from __future__ import annotations
 
 try:
@@ -494,11 +495,17 @@ def _hmd_tiv_propagation_unified(
     if not HAS_JAX:
         raise ImportError("dipoles_unified requer JAX (pip install 'jax[cpu]').")
 
+    # Sprint O2 (v2.43): complex_dtype derivado de s (output common_arrays_jax).
+    # CRITICO: todos os branches do `jnp.where` final precisam ter mesmo dtype
+    # — derivar de `s` garante consistencia com Txdw_A/Tudw_A produzidos pelos
+    # bodies internos (que tambem operam sobre `s`/`u`).
+    _cdtype = s.dtype
+
     # Inicialização
-    Txdw_init = jnp.zeros((npt, n), dtype=jnp.complex128)
-    Tudw_init = jnp.zeros((npt, n), dtype=jnp.complex128)
-    Txup_init = jnp.zeros((npt, n), dtype=jnp.complex128)
-    Tuup_init = jnp.zeros((npt, n), dtype=jnp.complex128)
+    Txdw_init = jnp.zeros((npt, n), dtype=_cdtype)
+    Tudw_init = jnp.zeros((npt, n), dtype=_cdtype)
+    Txup_init = jnp.zeros((npt, n), dtype=_cdtype)
+    Tuup_init = jnp.zeros((npt, n), dtype=_cdtype)
 
     # ── Caso A: camad_r > camad_t (descendente) ──────────────────────────────
     def _body_descent_bound(j, carry):
@@ -565,13 +572,9 @@ def _hmd_tiv_propagation_unified(
     # Tudw[:, camad_t] = -_MX / 2; Tuup[:, camad_t] = _MX / 2
     # Txdw[:, camad_t] = _MX / (2 * s[:, camad_t]); Txup[:, camad_t] = Txdw[:, camad_t]
     Txdw_C = Txdw_init.at[:, camad_t].set(_MX / (2.0 * s[:, camad_t]))
-    Tudw_C = Tudw_init.at[:, camad_t].set(
-        -_MX / 2.0 + jnp.zeros(npt, dtype=jnp.complex128)
-    )
+    Tudw_C = Tudw_init.at[:, camad_t].set(-_MX / 2.0 + jnp.zeros(npt, dtype=_cdtype))
     Txup_C = Txup_init.at[:, camad_t].set(_MX / (2.0 * s[:, camad_t]))
-    Tuup_C = Tuup_init.at[:, camad_t].set(
-        _MX / 2.0 + jnp.zeros(npt, dtype=jnp.complex128)
-    )
+    Tuup_C = Tuup_init.at[:, camad_t].set(_MX / 2.0 + jnp.zeros(npt, dtype=_cdtype))
 
     # ── Seleção do caso via jnp.where ────────────────────────────────────────
     # Caso A (descente): usa Txdw_A/Tudw_A, Txup permanece zero
@@ -832,9 +835,13 @@ def _vmd_propagation_unified(
     if not HAS_JAX:
         raise ImportError("dipoles_unified requer JAX (pip install 'jax[cpu]').")
 
+    # Sprint O2 (v2.43): complex_dtype derivado de u (output common_arrays_jax).
+    # CRITICO para `jnp.where` final — branches devem ter mesmo dtype.
+    _cdtype = u.dtype
+
     # Inicialização
-    TEdwz_init = jnp.zeros((npt, n), dtype=jnp.complex128)
-    TEupz_init = jnp.zeros((npt, n), dtype=jnp.complex128)
+    TEdwz_init = jnp.zeros((npt, n), dtype=_cdtype)
+    TEupz_init = jnp.zeros((npt, n), dtype=_cdtype)
 
     # ── Caso A: camad_r > camad_t (descendente) ──────────────────────────────
     def _body_descent_bound(j, carry):

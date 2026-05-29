@@ -647,13 +647,31 @@ def test_chunked_unified_parity_600pos_3freqs():
     Este é o caso de regressão identificado em E2: config produção que
     saturava a L2 do T4 no caminho monolítico.
     """
+    import gc
+
+    import jax
+
+    # Mitigação OOM T4/A100 (Sprint O1 unroll=8 em oklahoma_28 com 28 camadas):
+    # libera VRAM pinada por programas XLA compilados antes deste teste alocar
+    # buffers de propagação unrolled (~2.3 GiB num único op). Precisa limpar
+    # caches PROJECT-LEVEL (_BUCKET_JIT_CACHE, _UNIFIED_JIT_CACHE,
+    # _UNIFIED_CHUNKED_JIT_CACHE) — ``jax.clear_caches()`` sozinho não basta
+    # pois limpa apenas o cache interno do JAX, não os do projeto que
+    # retêm referências a buffers persistentes na VRAM.
     from geosteering_ai.simulation._jax.forward_pure import (
         build_static_context,
+        clear_jit_cache,
+        clear_unified_jit_cache,
         forward_pure_jax,
     )
     from geosteering_ai.simulation.validation.canonical_models import (
         get_canonical_model,
     )
+
+    clear_jit_cache()
+    clear_unified_jit_cache()
+    jax.clear_caches()
+    gc.collect()
 
     m = get_canonical_model("oklahoma_28")
     z = np.linspace(m.min_depth - 2, m.max_depth + 2, 600)
@@ -752,3 +770,67 @@ def test_chunked_via_simulate_multi_jax():
     )
     diff = float(np.abs(res_mono.H_tensor - res_chunk.H_tensor).max())
     assert diff == 0.0, f"simulate_multi_jax chunked diverge: {diff:.3e}"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# T1.5 — Sprint O0 Tier 1
+# Combinação tripla de flags JAX usada em produção GPU mas nunca
+# exercitada cumulativamente na suite. Mitiga risco de regressão
+# invisível em refatorações que afetem a interação dos 3 caminhos.
+# ─────────────────────────────────────────────────────────────────────
+@jax_required
+def test_unified_triple_flag_combination() -> None:
+    """T1.5 (Sprint O0) — combinação ``unified`` + ``chunked`` + ``vmap_real`` juntas.
+
+    Esta combinação é a CONFIGURAÇÃO DE PRODUÇÃO GPU (ativada na A100), mas
+    a auditoria de cobertura identificou que ela NUNCA foi testada
+    cumulativamente. Cada flag tem testes individuais; a tripla não.
+
+    Risco mitigado: refatorações que afetam interação entre os 3 caminhos
+    (unified JIT + position chunking + vmap real multi-config) seriam
+    invisíveis para a suite até este teste ser adicionado.
+    """
+    from geosteering_ai.simulation._jax.multi_forward import simulate_multi_jax
+    from geosteering_ai.simulation.config import SimulationConfig
+    from geosteering_ai.simulation.validation.canonical_models import (
+        get_canonical_model,
+    )
+
+    m = get_canonical_model("oklahoma_5")
+    # n_pos=100 com chunk_size=64 → dividido em 2 chunks (64 + 36) — exercita chunking
+    z = np.linspace(m.min_depth - 1, m.max_depth + 1, 100)
+    kwargs = dict(
+        rho_h=m.rho_h,
+        rho_v=m.rho_v,
+        esp=m.esp,
+        positions_z=z,
+        frequencies_hz=[20000.0],
+        tr_spacings_m=[1.0, 1.5],  # nTR=2 — exercita vmap_real
+        dip_degs=[0.0, 30.0],  # nAngles=2 — exercita vmap_real
+    )
+
+    # ── Path baseline: defaults (bucketed, vmap_real=False, chunk_size=None) ─
+    cfg_baseline = SimulationConfig()
+    res_baseline = simulate_multi_jax(**kwargs, cfg=cfg_baseline)
+
+    # ── Path TRIPLO: as 3 flags ativas simultaneamente ─────────────
+    cfg_triple = SimulationConfig(
+        jax_strategy="unified",
+        jax_position_chunk_size=64,
+        jax_vmap_real=True,
+    )
+    res_triple = simulate_multi_jax(**kwargs, cfg=cfg_triple)
+
+    # ── Validações ─────────────────────────────────────────────────
+    assert res_triple.H_tensor.shape == res_baseline.H_tensor.shape, (
+        f"T1.5 shape mismatch: triple={res_triple.H_tensor.shape} vs "
+        f"baseline={res_baseline.H_tensor.shape}"
+    )
+    diff = float(np.max(np.abs(res_triple.H_tensor - res_baseline.H_tensor)))
+    # Tolerância 1e-10: caminhos têm ordem de operações ligeiramente diferentes
+    assert (
+        diff < 1e-10
+    ), f"T1.5 paridade tripla vs baseline: max|diff|={diff:.3e} > 1e-10"
+    assert np.all(
+        np.isfinite(res_triple.H_tensor.view(np.float64))
+    ), "T1.5 NaN/Inf na combinação tripla unified+chunked+vmap_real"

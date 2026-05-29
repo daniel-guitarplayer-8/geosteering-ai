@@ -658,6 +658,19 @@ class SimulationConfig:
     jax_position_chunk_size: Optional[int] = None
 
     # ─────────────────────────────────────────────────────────────────
+    # RESERVADO (não-wired) — Unroll de loop de camadas
+    # ─────────────────────────────────────────────────────────────────
+    # Placeholder para uma otimização futura de unroll dos kernels TE/TM
+    # (substituir `jax.lax.fori_loop` por `jax.lax.scan(unroll=K)`).
+    #
+    # ATENÇÃO: este campo AINDA NÃO TEM EFEITO — nenhum backend `_jax/` o
+    # lê. NÃO setá-lo esperando mudança de comportamento. Mantido apenas
+    # como reserva de nome; a versão e o escopo da otimização serão
+    # definidos quando a sprint correspondente for iniciada (ADR-0001
+    # R1/R2 — ver `docs/ROADMAP.md`, único SSoT do backlog futuro).
+    unroll_layer_loop: bool = True
+
+    # ─────────────────────────────────────────────────────────────────
     # VALIDAÇÃO (errata imutável, inspired by PipelineConfig)
     # ─────────────────────────────────────────────────────────────────
     def __post_init__(self) -> None:

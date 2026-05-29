@@ -46,6 +46,7 @@ IMPORTANTE: Este módulo é EXPERIMENTAL. O kernel híbrido
 preferida e totalmente funcional. Este módulo expõe helpers nativos
 para experimentação e é a base para Sprints 3.3.2 e 3.3.3 futuras.
 """
+
 from __future__ import annotations
 
 import jax
@@ -547,7 +548,7 @@ def compute_case_index_jax(
             return 1
         if camad_r == camad_t:
             # z vs h0 pode ser tracer → resolve via jnp.where.
-            return jnp.where(z <= h0, 2, 3)
+            return jnp.where(z <= h0, 2, 3)  # type: ignore[no-any-return]
         if camad_r > camad_t and camad_r != (n - 1):
             return 4
         return 5
@@ -647,7 +648,7 @@ def _hmd_tiv_full_jax(
         _hmd_tiv_kernel_case5_jax,
         _hmd_tiv_kernel_case6_jax,
     ]
-    return jax.lax.switch(
+    return jax.lax.switch(  # type: ignore[no-any-return]
         case_index,
         branches,
         u_r,
@@ -949,7 +950,7 @@ def _vmd_full_jax(
         _vmd_kernel_case5_jax,
         _vmd_kernel_case6_jax,
     ]
-    return jax.lax.switch(
+    return jax.lax.switch(  # type: ignore[no-any-return]
         case_index,
         branches,
         TEdwz_r,
@@ -1054,10 +1055,14 @@ def _hmd_tiv_native_jax(
     kr = krJ0J1 / r
 
     # ── ETAPA 3: Propagação dos potenciais TM/TE entre camadas ──────
-    Txdw = jnp.zeros((npt, n), dtype=jnp.complex128)
-    Tudw = jnp.zeros((npt, n), dtype=jnp.complex128)
-    Txup = jnp.zeros((npt, n), dtype=jnp.complex128)
-    Tuup = jnp.zeros((npt, n), dtype=jnp.complex128)
+    # Sprint O2 (v2.43): dtype derivado de `u` (output de common_arrays_jax),
+    # que já carrega o complex_dtype selecionado pelo dispatcher. Garante que
+    # operações `.at[].set()` subsequentes não promovam tipo silencioso.
+    _cdtype = u.dtype
+    Txdw = jnp.zeros((npt, n), dtype=_cdtype)
+    Tudw = jnp.zeros((npt, n), dtype=_cdtype)
+    Txup = jnp.zeros((npt, n), dtype=_cdtype)
+    Tuup = jnp.zeros((npt, n), dtype=_cdtype)
 
     if camad_r > camad_t:
         # Caso A: RX abaixo do TX — propagação descendente
@@ -1349,8 +1354,10 @@ def _vmd_native_jax(
     kr = krJ0J1 / r
 
     # ── ETAPA 3: Propagação TEdwz / TEupz ───────────────────────────
-    TEdwz = jnp.zeros((npt, n), dtype=jnp.complex128)
-    TEupz = jnp.zeros((npt, n), dtype=jnp.complex128)
+    # Sprint O2 (v2.43): dtype derivado de `u` (output de common_arrays_jax).
+    _cdtype = u.dtype
+    TEdwz = jnp.zeros((npt, n), dtype=_cdtype)
+    TEupz = jnp.zeros((npt, n), dtype=_cdtype)
 
     if camad_r > camad_t:
         for j in range(camad_t, camad_r + 1):
@@ -1488,19 +1495,26 @@ def native_dipoles_full_jax(
     Euup: jax.Array,
     FEdwz: jax.Array,
     FEupz: jax.Array,
+    complex_dtype=None,
 ) -> jax.Array:
     """Orquestrador end-to-end: HMD (hmdx+hmdy) + VMD → matH (3,3).
 
     Substitui ``_dipoles_numba_host`` (``pure_callback``) no kernel JAX
     quando ``use_native_dipoles=True``. Mesma interface de saída:
-    array ``(3,3) complex128`` com::
+    array ``(3,3)`` no ``complex_dtype`` solicitado com::
 
         matH[0,:] = [Hxx, Hxy, Hxz]   (hmdx)
         matH[1,:] = [Hyx, Hyy, Hyz]   (hmdy)
         matH[2,:] = [Hzx, Hzy, Hzz]   (vmd)
 
     **Diferenciável** via ``jax.grad`` sobre qualquer input JAX.
+
+    Sprint O3 (v2.43): ``complex_dtype`` agora é kwarg explícito. Default
+    ``None`` → mantém comportamento anterior (deriva de ``u.dtype``). Quando
+    passado, força ``matH`` no dtype solicitado (cast final).
     """
+    if complex_dtype is None:
+        complex_dtype = u.dtype
     h0 = Tz  # profundidade do TX (convenção Numba: h0 = Tz)
 
     # HMD: retorna (Hx[2], Hy[2], Hz[2])
@@ -1564,14 +1578,16 @@ def native_dipoles_full_jax(
         FEupz,
     )
 
-    # Assembly (3,3) — mesma ordem que _dipoles_numba_host
+    # Assembly (3,3) — mesma ordem que _dipoles_numba_host.
+    # Sprint O3 (v2.43): cast final para `complex_dtype` garante que mesmo
+    # se algum sub-cálculo promover a c128 silenciosamente, a saída é c64.
     matH = jnp.array(
         [
             [Hx_hmd[0], Hy_hmd[0], Hz_hmd[0]],
             [Hx_hmd[1], Hy_hmd[1], Hz_hmd[1]],
             [Hx_vmd, Hy_vmd, Hz_vmd],
         ]
-    )
+    ).astype(complex_dtype)
     return matH
 
 
@@ -1865,11 +1881,18 @@ def native_dipoles_full_jax_unified(
     Euup,
     FEdwz,
     FEupz,
+    complex_dtype=None,
 ):
     """Orquestrador unified: HMD + VMD → matH (3,3). Paridade 1:1 com
     :func:`native_dipoles_full_jax` (legacy) mas aceita ``camad_t``/``camad_r``
     como tracers. **Diferenciável** via ``jax.grad``/``jax.jacfwd``.
+
+    Sprint O3 (v2.43): ``complex_dtype`` agora é kwarg explícito (default
+    ``None`` → deriva de ``u.dtype``). Força ``matH`` no dtype solicitado
+    via cast final — proteção contra promoção implícita c128.
     """
+    if complex_dtype is None:
+        complex_dtype = u.dtype
     h0 = Tz
 
     Hx_hmd, Hy_hmd, Hz_hmd = _hmd_tiv_native_jax_unified(
@@ -1931,13 +1954,15 @@ def native_dipoles_full_jax_unified(
         FEupz,
     )
 
+    # Sprint O3 (v2.43): cast final para `complex_dtype` força o dtype da
+    # saída unified — garante consistência com o legacy não-unified.
     return jnp.array(
         [
             [Hx_hmd[0], Hy_hmd[0], Hz_hmd[0]],
             [Hx_hmd[1], Hy_hmd[1], Hz_hmd[1]],
             [Hx_vmd, Hy_vmd, Hz_vmd],
         ]
-    )
+    ).astype(complex_dtype)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

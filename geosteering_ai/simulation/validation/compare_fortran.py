@@ -70,12 +70,13 @@ Note:
     Todas as funções fazem ``pytest.skip`` implícito quando ``tatu.x``
     não está presente no repositório (via guarda em ``run_tatu_x``).
 """
+
 from __future__ import annotations
 
 import logging
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -240,7 +241,7 @@ def run_tatu_x(
             timeout=timeout_s,
             check=False,
         )
-    except subprocess.TimeoutExpired as exc:
+    except subprocess.TimeoutExpired:
         logger.error("tatu.x timeout após %.1fs", timeout_s)
         raise
     elapsed_s = time.perf_counter() - t0
@@ -464,7 +465,7 @@ def compare_fortran_python(
             "Execute `make -C Fortran_Gerador` para compilar."
         )
 
-    model = get_canonical_model(canonical_model_name)
+    model = get_canonical_model(canonical_model_name)  # type: ignore[arg-type]
 
     # ── Setup workdir ─────────────────────────────────────────────────────
     if workdir is None:
@@ -501,7 +502,9 @@ def compare_fortran_python(
     )
 
     # ── Executa tatu.x ────────────────────────────────────────────────────
-    run_result = run_tatu_x(model_in_path, fortran_exec=fortran_exec, output_dir=workdir)
+    run_result = run_tatu_x(
+        model_in_path, fortran_exec=fortran_exec, output_dir=workdir
+    )
     if not run_result["success"]:
         logger.error(
             "tatu.x falhou para %s: stderr=%r",
@@ -567,14 +570,37 @@ def compare_fortran_python(
 
         t0 = time.perf_counter()
         try:
-            py_result = simulate(
-                rho_h=model.rho_h,
-                rho_v=model.rho_v,
-                esp=model.esp,
-                positions_z=positions_z_fortran,
-                cfg=sim_cfg,
-                dip_deg=0.0,
-            )
+            if backend_name in ("jax_hybrid", "jax_native"):
+                # JAX vive em simulate_multi_jax (simulate_multi Numba-only
+                # rejeita backend='jax'). Unified API até PR #F2 (backlog).
+                from geosteering_ai.simulation._jax.multi_forward import (
+                    simulate_multi_jax,
+                )
+
+                jax_result = simulate_multi_jax(
+                    rho_h=model.rho_h,
+                    rho_v=model.rho_v,
+                    esp=model.esp,
+                    positions_z=positions_z_fortran,
+                    frequencies_hz=[frequency_hz],
+                    tr_spacings_m=[tr_spacing_m],
+                    dip_degs=[0.0],
+                    cfg=sim_cfg,
+                )
+                # Unwrap (nTR=1, nAng=1, n_pos, nf, 9) → (n_pos, nf, 9).
+                H_jax = np.asarray(jax_result.H_tensor)
+                py_result = type(
+                    "SimulationResultLike", (), {"H_tensor": H_jax[0, 0]}
+                )()
+            else:
+                py_result = simulate(
+                    rho_h=model.rho_h,
+                    rho_v=model.rho_v,
+                    esp=model.esp,
+                    positions_z=positions_z_fortran,
+                    cfg=sim_cfg,
+                    dip_deg=0.0,
+                )
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("simulate falhou em backend=%s", backend_name)
             results.append(
@@ -670,7 +696,7 @@ def _build_sim_config_for_backend(
                 frequency_hz=frequency_hz,
                 tr_spacing_m=tr_spacing_m,
                 backend="jax",
-                use_native_dipoles=use_native,
+                use_native_dipoles=use_native,  # type: ignore[call-arg]
             )
             return cfg, f"jax (use_native_dipoles={use_native})"
         except TypeError:
@@ -680,7 +706,7 @@ def _build_sim_config_for_backend(
                 tr_spacing_m=tr_spacing_m,
                 backend="jax",
             )
-            return cfg, f"jax (use_native_dipoles=N/A, backend unified)"
+            return cfg, "jax (use_native_dipoles=N/A, backend unified)"
 
     return None, f"backend desconhecido: {backend_name}"
 

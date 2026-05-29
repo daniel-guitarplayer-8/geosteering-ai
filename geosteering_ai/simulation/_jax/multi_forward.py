@@ -436,7 +436,7 @@ def simulate_multi_jax(
         raise ImportError("simulate_multi_jax requer JAX (pip install 'jax[cpu]').")
 
     from geosteering_ai.simulation._jax.forward_pure import (
-        build_static_context,
+        build_static_context_cached,
         forward_pure_jax,
     )
     from geosteering_ai.simulation.config import SimulationConfig
@@ -498,6 +498,8 @@ def simulate_multi_jax(
     # (iTR, iAng) flat. Mantém paridade bit-exata e mesma API de saída.
     # Default False preserva backward-compat com v1.5.0.
     _use_vmap_real = bool(getattr(cfg, "jax_vmap_real", False))
+    # Sprint O2 (v2.43): cfg.dtype propagado tambem para vmap_real path.
+    _cfg_dtype = getattr(cfg, "dtype", "complex128")
     if _use_vmap_real:
         H_tensor_jax, z_obs_np, rho_h_at_obs_np, rho_v_at_obs_np = (
             _simulate_multi_jax_vmap_real(
@@ -509,6 +511,7 @@ def simulate_multi_jax(
                 tr_arr=tr_arr,
                 dip_arr=dip_arr,
                 hankel_filter=hankel_filter,
+                complex_dtype=_cfg_dtype,
             )
         )
         hordist_groups_count = len(
@@ -528,13 +531,6 @@ def simulate_multi_jax(
     # ── Deduplicação de cache por hordist ────────────────────────────────────
     hordist_groups = _build_hordist_groups(tr_arr.tolist(), dip_arr.tolist())
 
-    # ── Pré-alocação dos tensores de saída ───────────────────────────────────
-    H_tensor = np.empty((nTR, nAngles, n_pos, nf, 9), dtype=np.complex128)
-    z_obs = np.empty((nAngles, n_pos), dtype=np.float64)
-    rho_h_at_obs = np.empty((nAngles, n_pos), dtype=np.float64)
-    rho_v_at_obs = np.empty((nAngles, n_pos), dtype=np.float64)
-    z_obs_filled = np.zeros(nAngles, dtype=bool)
-
     # ── Loop sobre (iTR, iAng): reutiliza cache por hordist ──────────────────
     # Sprint 10 Phase 2 (PR #24-part2): propaga `cfg.jax_strategy` — quando
     # "unified", cada forward interno usa 1 JIT único por (n, npt) em vez de
@@ -548,10 +544,31 @@ def simulate_multi_jax(
     # Sprint 12 E4: chunk_size=None → monolítico (v1.5.0/v1.6.0); inteiro →
     # lax.scan sobre blocos de posições (fix regressão 600pos×3f).
     _chunk_size = getattr(cfg, "jax_position_chunk_size", None)
+    # Sprint O2 (v2.43): complex_dtype propagado de cfg.dtype.
+    # Default "complex128" preserva paridade Fortran <1e-13 inviolavel.
+    _complex_dtype = getattr(cfg, "dtype", "complex128")
+
+    # ── Pré-alocação dos tensores de saída ───────────────────────────────────
+    # Sprint O3 (v2.43): H_tensor agora respeita `cfg.dtype` — antes era
+    # hard-coded `np.complex128`, anulando o ganho de memória de c64.
+    _np_complex_dtype: type = (
+        np.complex64 if _complex_dtype == "complex64" else np.complex128
+    )
+    H_tensor: np.ndarray = np.empty(
+        (nTR, nAngles, n_pos, nf, 9), dtype=_np_complex_dtype
+    )
+    z_obs = np.empty((nAngles, n_pos), dtype=np.float64)
+    rho_h_at_obs = np.empty((nAngles, n_pos), dtype=np.float64)
+    rho_v_at_obs = np.empty((nAngles, n_pos), dtype=np.float64)
+    z_obs_filled = np.zeros(nAngles, dtype=bool)
     for hordist_key, group in hordist_groups.items():
         for i_tr, i_ang, L, theta in group:
-            # Build static context JAX (inclui camad_t_array, camad_r_array)
-            ctx = build_static_context(
+            # Build static context JAX (inclui camad_t_array, camad_r_array).
+            # Sprint O3p1 (v2.43): usa `build_static_context_cached` para
+            # amortizar setup em batches de N modelos com mesma geometria
+            # (rho varia, esp/positions/freqs/TR/dip constantes — caso PINN).
+            # LRU 32 entries default — controle via `set_ctx_cache_maxsize`.
+            ctx = build_static_context_cached(
                 rho_h=rho_h_np,
                 rho_v=rho_v_np,
                 esp=esp_np,
@@ -562,6 +579,7 @@ def simulate_multi_jax(
                 hankel_filter=hankel_filter,
                 strategy=_strategy,
                 chunk_size=_chunk_size,
+                complex_dtype=_complex_dtype,
             )
 
             # Forward JAX → (n_pos, nf, 9)
@@ -654,6 +672,7 @@ def _simulate_multi_jax_vmap_real(
     tr_arr,
     dip_arr,
     hankel_filter: str,
+    complex_dtype: str = "complex128",
 ) -> Tuple["jax.Array", "jax.Array", "jax.Array", "jax.Array"]:
     """Forward multi-TR/multi-ângulo via ``jax.vmap`` real sobre (iTR, iAng).
 
@@ -722,8 +741,9 @@ def _simulate_multi_jax_vmap_real(
     wJ0_jnp = jnp.asarray(wJ0, dtype=jnp.float64)
     wJ1_jnp = jnp.asarray(wJ1, dtype=jnp.float64)
 
-    # ── Recupera o JIT unificado (1 programa XLA por (n, npt)) ────────────
-    jitted = _get_unified_jit(n, npt)
+    # ── Recupera o JIT unificado (1 programa XLA por (n, npt, dtype)) ─────
+    # Sprint O2 (v2.43): complex_dtype propagado para chave do cache.
+    jitted = _get_unified_jit(n, npt, complex_dtype)
 
     # ── Função por configuração (L, θ) — todos args tracers ou estáticos ──
     def _one_config(L, theta_deg, rho_h, rho_v):
@@ -1035,10 +1055,12 @@ def simulate_multi_jax_batched(
     h_arr_batch_jnp = jnp.asarray(h_arr_batch_np, dtype=jnp.float64)
     prof_arr_batch_jnp = jnp.asarray(prof_arr_batch_np, dtype=jnp.float64)
 
-    # ── Recupera o JIT unificado (1 programa XLA por (n, npt)) ────────────────
+    # ── Recupera o JIT unificado (1 programa XLA por (n, npt, dtype)) ────────
     # Mesma função usada por _simulate_multi_jax_vmap_real (Sprint 12, PR #25).
     # Vmap externo sobre modelos compõe com vmap interno sobre (iTR, iAng).
-    jitted = _get_unified_jit(n, npt)
+    # Sprint O2 (v2.43): complex_dtype propagado de cfg.dtype.
+    _complex_dtype_batched = getattr(cfg, "dtype", "complex128")
+    jitted = _get_unified_jit(n, npt, _complex_dtype_batched)
 
     # ── L_flat / theta_flat (compartilhados entre modelos) ────────────────────
     # L_flat[k] = tr_arr[k // nAngles]; theta_flat[k] = dip_arr[k % nAngles]

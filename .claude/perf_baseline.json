@@ -128,7 +128,150 @@
       }
     }
   },
+  "jax_gpu_a100": {
+    "_meta": {
+      "version": "v2.43",
+      "commit": "8e945b4be52ba7950ac792fd21ddf366429b62bb",
+      "measured_at": "2026-05-23T19:35:23Z",
+      "hardware": "NVIDIA A100 40 GB, Colab Pro+ (a2-highgpu-1g ou n1-highmem-4)",
+      "api": "simulate_multi_jax_batched (Sprint A1.5 v2.42)",
+      "jax_x64": true,
+      "jax_platforms": "cuda,cpu",
+      "filter": "Werthmüller 201pt",
+      "n_runs_hot": 4,
+      "seed": 42,
+      "raw_json": "docs/perf_baselines/sprint_a16_jax_batched_benchmark_a100_20260523_193523.json",
+      "report": "docs/reports/v2.43_jax_gpu_baseline_a100_2026-05-23.md",
+      "threshold_pct": 90,
+      "status": "OFFICIAL_BASELINE",
+      "notes": "Baseline CANÔNICA OFICIAL do simulador JAX GPU A100. Supera T4 em todos os cenários (1.08-1.85×). Cenário H rodou pela 1ª vez (era OOM em T4). Qualquer alteração no caminho hot de _jax/ ou simulate_multi_jax_batched deve preservar ≥90% destes valores E manter paridade Fortran <1e-12 (pytest -m gpu 164/164 PASS)."
+    },
+    "A_hot": {
+      "throughput_mod_h": 9128864,
+      "n_models": 50,
+      "n_pos": 1,
+      "nf_nTR_nAng": "1x1x1",
+      "ratio_vs_numba_a100_local": 3.551,
+      "vs_t4_speedup": 1.32,
+      "gate_member": true,
+      "threshold_90pct": 8215977,
+      "latency_ms_per_model": 0.394,
+      "cold_to_hot_ratio": 0.84,
+      "notes": "Single-pos overhead-bound. C/H=0.84 (timer noise em escala ~20ms total). +32% vs T4."
+    },
+    "B_hot": {
+      "throughput_mod_h": 284803,
+      "n_models": 50,
+      "n_pos": 100,
+      "nf_nTR_nAng": "1x1x1",
+      "ratio_vs_numba_a100_local": 3.095,
+      "vs_t4_speedup": 1.11,
+      "gate_member": true,
+      "threshold_90pct": 256323,
+      "latency_ms_per_model": 12.640,
+      "cold_to_hot_ratio": 0.95,
+      "notes": "Multi-pos bandwidth-bound. +11% vs T4. C/H=0.95."
+    },
+    "C_hot": {
+      "throughput_mod_h": 257084,
+      "n_models": 50,
+      "n_pos": 100,
+      "nf_nTR_nAng": "4x1x1",
+      "ratio_vs_numba_a100_local": 10.532,
+      "vs_t4_speedup": 1.70,
+      "gate_member": false,
+      "threshold_90pct": 231376,
+      "latency_ms_per_model": 14.003,
+      "cold_to_hot_ratio": 1.00,
+      "notes": "Multi-freq sweet spot. +70% vs T4. Maior ratio GPU/CPU local (10.53×)."
+    },
+    "D_hot": {
+      "throughput_mod_h": 5342133,
+      "n_models": 50,
+      "n_pos": 1,
+      "nf_nTR_nAng": "1x4x1",
+      "ratio_vs_numba_a100_local": 5.692,
+      "vs_t4_speedup": 1.08,
+      "gate_member": false,
+      "threshold_90pct": 4807920,
+      "latency_ms_per_model": 0.674,
+      "cold_to_hot_ratio": 0.92,
+      "notes": "Multi-TR single-pos. +8% vs T4 (overhead-bound)."
+    },
+    "E_hot": {
+      "throughput_mod_h": 47812,
+      "n_models": 50,
+      "n_pos": 600,
+      "nf_nTR_nAng": "1x1x1",
+      "ratio_vs_numba_a100_local": 2.192,
+      "vs_t4_speedup": 1.11,
+      "gate_member": true,
+      "threshold_90pct": 43031,
+      "latency_ms_per_model": 75.294,
+      "cold_to_hot_ratio": 1.00,
+      "notes": "n_pos=600 com fori_loop sequencial. Margem do gate +46%. +11% vs T4."
+    },
+    "F_hot": {
+      "throughput_mod_h": 67469,
+      "n_models": 20,
+      "n_pos": 100,
+      "nf_nTR_nAng": "4x4x1",
+      "ratio_vs_numba_a100_local": 8.121,
+      "vs_t4_speedup": 1.85,
+      "gate_member": false,
+      "threshold_90pct": 60722,
+      "latency_ms_per_model": 53.358,
+      "cold_to_hot_ratio": 0.99,
+      "notes": "Multi-freq×TR. n_models=20 herdado do T4 (subutiliza A100). +85% vs T4 mesmo assim."
+    },
+    "G_hot": {
+      "throughput_mod_h": 16835,
+      "n_models": 5,
+      "n_pos": 100,
+      "nf_nTR_nAng": "4x4x4",
+      "ratio_vs_numba_a100_local": 7.751,
+      "vs_t4_speedup": 1.83,
+      "gate_member": false,
+      "threshold_90pct": 15151,
+      "latency_ms_per_model": 213.844,
+      "cold_to_hot_ratio": 1.00,
+      "notes": "Triple-nested vmap. n_models=5 herdado do T4. +83% vs T4."
+    },
+    "H_hot": {
+      "throughput_mod_h": 3872,
+      "n_models": 5,
+      "n_pos": 100,
+      "nf_nTR_nAng": "8x8x8",
+      "ratio_vs_numba_a100_local": 8.721,
+      "vs_t4_speedup": "N/A (T4 era OOM)",
+      "gate_member": false,
+      "threshold_90pct": 3485,
+      "latency_ms_per_model": 929.738,
+      "cold_to_hot_ratio": 1.00,
+      "notes": "Stress test 8x8x8=512 combos. Rodou pela 1ª vez em GPU. JAX usa dip 87.5° (cap 89°) vs Numba 90° — comparação aproximada."
+    },
+    "_gate_criterion": {
+      "min_ratio": 1.5,
+      "scenarios": ["A", "B", "E"],
+      "status_baseline": "PASS",
+      "details": {
+        "A": "3.55× (margem +137%)",
+        "B": "3.10× (margem +107%)",
+        "E": "2.19× (margem +46%)"
+      }
+    },
+    "_historical_i9_comparison": {
+      "explanation": "Aparente 'inferioridade' do JAX A100 em B/E/G vs i9 historic é artefato metodológico — i9 mede 8 cores paralelos via simulate_multi (multi-process pool), A100 mede 1 device via simulate_multi_jax_batched. Quando normalizado POR CORE/DEVICE, A100 é 3-62× mais rápida que i9. Ver §6 do relatório.",
+      "per_device_advantage": {
+        "A": "61.89× (vs i9 per-core)",
+        "B": "7.12× (vs i9 per-core)",
+        "C": "17.28× (vs i9 per-core)",
+        "E": "3.14× (vs i9 per-core)",
+        "G": "2.99× (vs i9 per-core)"
+      }
+    }
+  },
   "threshold_pct": 90,
   "version": "v2.43",
-  "notes": "Atualize manualmente após otimizações intencionais (>+5%). E_n200_warm exige medição pós-warmup explícito via 'geosteering-warmup --verbose'. jax_gpu_t4 exige re-medição em Colab T4 via notebook validate_jax_gpu_v240.ipynb."
+  "notes": "Atualize manualmente após otimizações intencionais (>+5%). E_n200_warm exige medição pós-warmup explícito via 'geosteering-warmup --verbose'. jax_gpu_t4 e jax_gpu_a100 exigem re-medição em Colab T4/A100 via notebook validate_jax_gpu_v240.ipynb. jax_gpu_a100 é a baseline OFICIAL JAX GPU desde 2026-05-23."
 }
