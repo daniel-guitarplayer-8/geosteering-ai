@@ -358,11 +358,16 @@ def test_o4_block_until_ready_unico_bucketed():
 # ──────────────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("chunk", [None, 4, 8, 16, 5])
 def test_o4_chunk_size_models_invariante(chunk):
-    """jax_chunk_size_models não altera o resultado — bit-exato vs monolítico.
+    """jax_chunk_size_models não altera o resultado — paridade <1e-13.
 
     Chunking apenas reordena o loop Python sobre fatias de modelos (mesma
     matemática por modelo). Inclui chunk=5 (NÃO divisor de 16 → última fatia
-    parcial) para validar o caso de fatia menor. Gate: max|diff| == 0.
+    parcial) para validar o caso de fatia menor.
+
+    Tolerância <1e-13 (portável CPU/GPU): em GPU o resultado é bit-exato
+    (max|diff|==0), mas em CPU o XLA pode reordenar reduções conforme o
+    tamanho do batch (n_models vs fatia) → ~1e-14 ULP float64, fisicamente
+    idêntico. Asserir ==0 falharia em CPU (review adversarial O4, P1).
     """
     n, n_models = 5, 16
     positions_z = np.linspace(-10.0, 10.0, 80)
@@ -384,7 +389,7 @@ def test_o4_chunk_size_models_invariante(chunk):
     assert H_chunk.shape == H_mono.shape == (n_models, 1, 1, 80, 1, 9)
     diff = np.max(np.abs(H_mono - H_chunk))
     assert (
-        diff == 0.0
+        diff < 1e-13
     ), f"chunk={chunk}: chunking alterou resultado max|diff|={diff:.2e}"
 
 

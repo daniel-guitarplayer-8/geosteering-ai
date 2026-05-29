@@ -7,6 +7,41 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.44] — 2026-05-29 — Sprint O4: Batched-Bucketed JAX GPU
+
+### Resumo
+
+Elimina o gargalo on-the-fly do simulador JAX GPU: `simulate_multi_jax_batched`
+deixa de hardcodar o kernel `unified` (~6.9× mais lento) e passa a usar
+**bucketed** quando a geometria é compartilhada entre os modelos do batch
+(regime PINN / geração on-the-fly). Throughput on-the-fly (32 modelos × 600 pos,
+A6000): **65k → 1.47M mod/h (22.5×)**, superando Numba 4w×16t (~1.05M) nesse regime.
+
+### Added
+
+- `simulate_multi_jax_batched`: path **batched-bucketed** (`vmap` dos kernels de
+  bucket sobre o eixo de modelos) com dispatcher por geometria compartilhada
+  (`np.allclose(esp, esp[0], atol=0)`) e fallback seguro p/ `unified` (warning).
+- `SimulationConfig.jax_chunk_size_models`: fatia o eixo de modelos (fix OOM
+  Cenário H 8×8×8 = 512 configs, antes ~110 GB).
+- `bench_numba_vs_jax_gpu.py`: `--chunk-size-models`; Cenário H habilitado em
+  `--batched`; defaults `bucketed`.
+- Suite `tests/test_simulation_jax_o4_batched_bucketed.py` (16 testes).
+
+### Fixed
+
+- **Colisão de chave `_CTX_CACHE` n=1↔n=2** (`esp` vazio em ambos): `_hash_ctx_key`
+  agora inclui `n` + comprimentos de esp/pos/freqs. Afetava também o serial.
+
+### Validação
+
+- Gates F1–F4 pós-O4: **220 PASS / 0 FAIL** (Fortran c128 <1e-12 inviolável).
+- Paridade O4 <1e-13: batched-bucketed vs serial bucketed / vs batched-unified /
+  multi-dim; chunking bit-exato (bucketed).
+- Relatório: [docs/reports/v2.44_sprint_O4_batched_bucketed_2026-05-29.md](reports/v2.44_sprint_O4_batched_bucketed_2026-05-29.md)
+
+---
+
 ## [v2.43] — 2026-05-22/2026-05-23 — Sprint A1.6: Rewrite Notebook JAX GPU Benchmark + Validação T4
 
 ### Resumo

@@ -64,7 +64,7 @@
       "n_models": 50,
       "n_pos": 100,
       "nf_nTR_nAng": "4x1x1",
-      "ratio_vs_numba_t4_local": 5.700,
+      "ratio_vs_numba_t4_local": 5.7,
       "gate_member": false,
       "threshold_90pct": 135966,
       "notes": "Multi-freq vmap — sweet spot GPU. C/H=0.99."
@@ -74,7 +74,7 @@
       "n_models": 50,
       "n_pos": 1,
       "nf_nTR_nAng": "1x4x1",
-      "ratio_vs_numba_t4_local": 5.110,
+      "ratio_vs_numba_t4_local": 5.11,
       "gate_member": false,
       "threshold_90pct": 4437970,
       "notes": "Multi-TR vmap — sweet spot GPU. C/H=0.91."
@@ -119,7 +119,11 @@
     },
     "_gate_criterion": {
       "min_ratio": 1.5,
-      "scenarios": ["A", "B", "E"],
+      "scenarios": [
+        "A",
+        "B",
+        "E"
+      ],
       "status_baseline": "PASS",
       "details": {
         "A": "2.56× (margem +71%)",
@@ -168,7 +172,7 @@
       "vs_t4_speedup": 1.11,
       "gate_member": true,
       "threshold_90pct": 256323,
-      "latency_ms_per_model": 12.640,
+      "latency_ms_per_model": 12.64,
       "cold_to_hot_ratio": 0.95,
       "notes": "Multi-pos bandwidth-bound. +11% vs T4. C/H=0.95."
     },
@@ -178,11 +182,11 @@
       "n_pos": 100,
       "nf_nTR_nAng": "4x1x1",
       "ratio_vs_numba_a100_local": 10.532,
-      "vs_t4_speedup": 1.70,
+      "vs_t4_speedup": 1.7,
       "gate_member": false,
       "threshold_90pct": 231376,
       "latency_ms_per_model": 14.003,
-      "cold_to_hot_ratio": 1.00,
+      "cold_to_hot_ratio": 1.0,
       "notes": "Multi-freq sweet spot. +70% vs T4. Maior ratio GPU/CPU local (10.53×)."
     },
     "D_hot": {
@@ -208,7 +212,7 @@
       "gate_member": true,
       "threshold_90pct": 43031,
       "latency_ms_per_model": 75.294,
-      "cold_to_hot_ratio": 1.00,
+      "cold_to_hot_ratio": 1.0,
       "notes": "n_pos=600 com fori_loop sequencial. Margem do gate +46%. +11% vs T4."
     },
     "F_hot": {
@@ -234,7 +238,7 @@
       "gate_member": false,
       "threshold_90pct": 15151,
       "latency_ms_per_model": 213.844,
-      "cold_to_hot_ratio": 1.00,
+      "cold_to_hot_ratio": 1.0,
       "notes": "Triple-nested vmap. n_models=5 herdado do T4. +83% vs T4."
     },
     "H_hot": {
@@ -247,12 +251,16 @@
       "gate_member": false,
       "threshold_90pct": 3485,
       "latency_ms_per_model": 929.738,
-      "cold_to_hot_ratio": 1.00,
+      "cold_to_hot_ratio": 1.0,
       "notes": "Stress test 8x8x8=512 combos. Rodou pela 1ª vez em GPU. JAX usa dip 87.5° (cap 89°) vs Numba 90° — comparação aproximada."
     },
     "_gate_criterion": {
       "min_ratio": 1.5,
-      "scenarios": ["A", "B", "E"],
+      "scenarios": [
+        "A",
+        "B",
+        "E"
+      ],
       "status_baseline": "PASS",
       "details": {
         "A": "3.55× (margem +137%)",
@@ -273,5 +281,42 @@
   },
   "threshold_pct": 90,
   "version": "v2.43",
-  "notes": "Atualize manualmente após otimizações intencionais (>+5%). E_n200_warm exige medição pós-warmup explícito via 'geosteering-warmup --verbose'. jax_gpu_t4 e jax_gpu_a100 exigem re-medição em Colab T4/A100 via notebook validate_jax_gpu_v240.ipynb. jax_gpu_a100 é a baseline OFICIAL JAX GPU desde 2026-05-23."
+  "notes": "Atualize manualmente após otimizações intencionais (>+5%). E_n200_warm exige medição pós-warmup explícito via 'geosteering-warmup --verbose'. jax_gpu_t4 e jax_gpu_a100 exigem re-medição em Colab T4/A100 via notebook validate_jax_gpu_v240.ipynb. jax_gpu_a100 é a baseline OFICIAL JAX GPU desde 2026-05-23.",
+  "jax_gpu_a6000_o4": {
+    "_meta": {
+      "version": "v2.44",
+      "measured_at": "2026-05-29T00:00:00Z",
+      "hardware": "NVIDIA RTX A6000 48 GB, AMD Threadripper 7970X (32C/64T)",
+      "api": "simulate_multi_jax_batched (Sprint O4 batched-bucketed)",
+      "dtype": "complex128",
+      "jax": "0.7.2 cuda12",
+      "report": "docs/reports/v2.44_sprint_O4_batched_bucketed_2026-05-29.md",
+      "notes": "Referencia LOCAL A6000 do Sprint O4 (NAO e gate). Gate oficial permanece jax_gpu_t4 (re-medir em Colab T4 pos-O4). Mostra o ganho batched-bucketed vs batched-unified no regime on-the-fly/PINN."
+    },
+    "E_onthefly_32x600_unified": {
+      "throughput_mod_h": 65100,
+      "n_models": 32,
+      "n_pos": 600,
+      "nf_nTR_nAng": "1x1x1",
+      "strategy": "unified (pre-O4 hardcoded)",
+      "notes": "Baseline batched-unified (gargalo on-the-fly pre-O4)."
+    },
+    "E_onthefly_32x600_bucketed": {
+      "throughput_mod_h": 1466000,
+      "n_models": 32,
+      "n_pos": 600,
+      "nf_nTR_nAng": "1x1x1",
+      "strategy": "bucketed (O4)",
+      "speedup_vs_unified": 22.5,
+      "notes": "Sprint O4 batched-bucketed. Supera Numba 4w16t (~1.05e6) neste regime."
+    },
+    "H_512cfg_chunked": {
+      "throughput_mod_h": 32600,
+      "n_models": 16,
+      "n_pos": 20,
+      "nf_nTR_nAng": "8x8x8",
+      "strategy": "bucketed + chunk_size_models=8",
+      "notes": "Cenario H (512 configs) roda SEM OOM via chunking (antes: OOM ~110 GB / pulado)."
+    }
+  }
 }
