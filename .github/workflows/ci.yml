@@ -28,8 +28,15 @@ jobs:
           # simulador, antes não instalados na CI (derrubava geosteering-warmup).
           pip install -e ".[dev,viz,train,hpo,sim]"
 
-      - name: Install xvfb for headless GUI tests
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Install xvfb + Qt runtime libs for headless GUI tests
+        # Sprint O4 (v2.44): PyQt6.QtGui (importado pelo plugin pytest-qt no
+        # pytest_configure, mesmo sem rodar GUI tests) exige libs de sistema
+        # EGL/GL/xkbcommon — ausentes no ubuntu-latest. Sem elas o pytest
+        # aborta com INTERNALERROR (libEGL.so.1 not found) ANTES de qualquer
+        # teste. xvfb continua p/ os GUI tests (QT_QPA_PLATFORM=offscreen).
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            xvfb libegl1 libgl1 libxkbcommon0 libdbus-1-3
 
       - name: Compile check
         run: python -m compileall geosteering_ai/ -q
