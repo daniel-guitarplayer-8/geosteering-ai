@@ -384,7 +384,26 @@ Toda alteração no caminho hot do simulador JAX deve:
 
 | Versão | Data | Hardware | Gate (A/B/E) | A_hot | E_hot | Notas |
 |:------:|:----:|:--------:|:------------:|:-----:|:-----:|:------|
-| v2.43 | 2026-05-23 | T4 Colab | ✅ PASS (2.56×, 2.86×, 1.90×) | 6 899 537 | 43 021 | **Baseline canônica oficial** — Sprint A1.6 com batched API |
+| v2.43 | 2026-05-23 | T4 Colab | ✅ PASS (2.56×, 2.86×, 1.90×) | 6 899 537 | 43 021 | **Baseline canônica oficial** — Sprint A1.6 com batched API (batched-**unified**) |
+| v2.44 | 2026-05-29 | A6000 local | n/a (ref local) | — | — | Sprint O4 batched-**bucketed** — ver §9.8 |
+
+### 9.8 Sprint O4 — Batched-Bucketed (A6000 local, v2.44)
+
+`simulate_multi_jax_batched` passou a usar o kernel **bucketed** (vmap dos kernels
+de bucket sobre o eixo de modelos) quando a geometria é compartilhada entre os
+modelos do batch (regime PINN/on-the-fly), em vez do `unified` hardcodado. O
+`E_hot = 43 021` da baseline T4 v2.43 era medido com **batched-unified** — o
+"teto de ~42.8k" era artefato desse caminho, não limite do simulador.
+
+| Métrica (A6000 48 GB, c128) | batched-unified (pré-O4) | batched-bucketed (O4) | Ganho |
+|:----------------------------|:------------------------:|:---------------------:|:-----:|
+| On-the-fly 32 modelos × 600 pos | 65 100 mod/h | **1 466 000 mod/h** | **22.5×** |
+| Cenário H (8×8×8 = 512 cfg) | OOM ~110 GB (pulado) | roda c/ `chunk_size_models=8` (32 600 mod/h) | destrava |
+
+> **Gate**: a baseline oficial permanece `jax_gpu_t4` (§9.2). A seção
+> `jax_gpu_a6000_o4` no JSON é **referência local** (não-gate). O `E_hot` T4
+> deve ser **re-medido pós-O4** em Colab (batched agora usa bucketed). Ver
+> [relatório v2.44](reports/v2.44_sprint_O4_batched_bucketed_2026-05-29.md).
 
 ### 9.7 Referências JAX GPU
 

@@ -46,7 +46,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 # Garante x64 antes de qualquer import JAX
 os.environ.setdefault("JAX_ENABLE_X64", "True")
@@ -185,15 +185,28 @@ def _bench_jax(
     dip_degs,
     n_iters: int,
     dtype: str,
-    strategy: str = "unified",
+    strategy: str = "bucketed",
 ) -> float:
     """Mede tempo wall de simulate_multi_jax com n_iters chamadas.
 
     Args:
         dtype: 'complex128' (default) ou 'complex64' (Sprint O2 opt-in).
-        strategy: 'bucketed' ou 'unified' (default 'unified' = 1 JIT por n,npt).
+        strategy: 'bucketed' (default) ou 'unified'. Sprint O4 (v2.44):
+            default trocado para 'bucketed' — investigação confirmou que
+            'unified' (lax.fori_loop com bounds dinâmicos camad_t/camad_r)
+            é ~6.9× mais lenta que 'bucketed' (kernels estáticos por
+            (ct,cr) que o XLA especializa). O teto de ~42.8k mod/h do
+            headline antigo era ARTEFATO deste default 'unified', não do
+            código. Com 'bucketed', Cenário E empata Numba 4w×16t (~369k).
 
     Returns: tempo total em segundos.
+
+    Note:
+        Política de sync (apples-to-apples vs _bench_jax_batched):
+        ``simulate_multi_jax`` já materializa ``H_tensor`` em NumPy
+        (sync GPU→CPU interno por config) ANTES de retornar, então o
+        cronômetro captura o transfer completo. O ``np.asarray`` no loop
+        abaixo é no-op defensivo (resultado já é host array).
     """
     from geosteering_ai.simulation import SimulationConfig, simulate_multi_jax
 
@@ -243,28 +256,31 @@ def _bench_jax_batched(
     dip_degs,
     n_iters: int,
     dtype: str,
-    strategy: str = "unified",
+    strategy: str = "bucketed",
     n_models: int = 4,
+    chunk_size_models: Optional[int] = None,
 ) -> float:
     """Bench JAX usando ``simulate_multi_jax_batched`` (vmap sobre modelos).
 
     Sprint O3p2 (v2.43): caminho batched amortiza ``build_static_context``
-    e ``np.asarray`` GPU→CPU sync entre N modelos via ``jax.vmap``. 1 JIT
-    XLA para o batch inteiro — elimina compilação por modelo.
+    e ``np.asarray`` GPU→CPU sync entre N modelos via ``jax.vmap``.
+
+    Sprint O4 (v2.44): default trocado para 'bucketed'. Como o bench replica
+    o MESMO modelo ``n_models`` vezes (np.tile), a geometria é compartilhada e
+    o dispatcher usa o path batched-BUCKETED (vmap dos kernels de bucket sobre
+    modelos), ~20× mais rápido que o antigo batched-unified hardcodado. O
+    ``chunk_size_models`` fatia o eixo de modelos (fix OOM Cenário H).
 
     Args:
         rho_h, rho_v, esp: arrays 1D do modelo de referência.
             ``rho_h_batch`` = ``rho_h`` repetido ``n_models`` vezes.
         n_models: Número de modelos no batch (default 4).
         dtype: 'complex128' ou 'complex64'.
-        strategy: 'unified' (default, único compatível com batched).
+        strategy: 'bucketed' (default, Sprint O4) ou 'unified'.
+        chunk_size_models: K para fatiar o eixo de modelos (None = monolítico).
 
     Returns:
         Tempo total em segundos.
-
-    Note:
-        Cenário H (8×8×8) NÃO é compatível — pode causar OOM. Manter loop
-        legacy via ``_bench_jax``.
     """
     from geosteering_ai.simulation import SimulationConfig
     from geosteering_ai.simulation._jax.multi_forward import (
@@ -275,6 +291,7 @@ def _bench_jax_batched(
         backend="jax",
         dtype=dtype,
         jax_strategy=strategy,
+        jax_chunk_size_models=chunk_size_models,
         parallel=False,
     )
 
@@ -354,8 +371,11 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument(
         "--jax-strategies",
         type=str,
-        default="unified",
-        help="Lista CSV de strategies JAX (bucketed,unified). Default: unified.",
+        default="bucketed",
+        help=(
+            "Lista CSV de strategies JAX (bucketed,unified). Default: bucketed "
+            "(Sprint O4 — 'unified' é ~6.9× mais lenta; ver _bench_jax docstring)."
+        ),
     )
     parser.add_argument(
         "--skip-numba",
@@ -367,15 +387,25 @@ def main(argv: List[str] | None = None) -> int:
         "--batched",
         action="store_true",
         help=(
-            "Sprint O3p2: bench JAX via simulate_multi_jax_batched (vmap "
-            "sobre n_models). NÃO suportado em cenário H (OOM)."
+            "bench JAX via simulate_multi_jax_batched (vmap sobre n_models). "
+            "Sprint O4: usa batched-BUCKETED (geom compartilhada); Cenário H "
+            "habilitado quando --chunk-size-models é definido."
         ),
     )
     parser.add_argument(
         "--n-models-batch",
         type=int,
         default=4,
-        help="Sprint O3p2: n_models no batch (apenas com --batched). Default 4.",
+        help="n_models no batch (apenas com --batched). Default 4.",
+    )
+    parser.add_argument(
+        "--chunk-size-models",
+        type=int,
+        default=None,
+        help=(
+            "Sprint O4: K do chunk do eixo de modelos em --batched (fix OOM "
+            "Cenário H). None = batch monolítico. Ex.: 8."
+        ),
     )
     parser.add_argument(
         "--numba-workers",
@@ -483,42 +513,42 @@ def main(argv: List[str] | None = None) -> int:
             except Exception as e:
                 print(f"  [jax/{strat}] FALHA: {e}")
 
-        # JAX batched — Sprint O3p2 (skip Cenário H: OOM).
+        # JAX batched (Sprint O4: bucketed quando geom compartilhada).
+        # Cenário H habilitado SE --chunk-size-models for definido (fix OOM);
+        # senão pulado (monolítico estoura VRAM em 8×8×8 configs).
         if args.batched:
-            if scen == "H":
+            if scen == "H" and args.chunk_size_models is None:
                 print(
-                    f"  [jax/batched] cenário H ignorado (potencial OOM). "
-                    f"Use loop legacy."
+                    "  [jax/batched] Cenário H pulado: defina --chunk-size-models "
+                    "(ex. 8) para habilitar via chunking do eixo de modelos (OOM)."
                 )
             else:
                 for strat in strategies:
-                    if strat != "unified":
-                        print(
-                            f"  [jax/batched/{strat}] strategy != unified — "
-                            f"pulando (batched requer unified)."
-                        )
-                        continue
+                    tag = f"{strat}"
+                    if args.chunk_size_models is not None:
+                        tag += f"_k{args.chunk_size_models}"
                     try:
                         t_b = _bench_jax_batched(
                             dtype=args.dtype,
                             strategy=strat,
                             n_models=args.n_models_batch,
+                            chunk_size_models=args.chunk_size_models,
                             **common,
                         )
                         # mod/h normalizado pelo número de modelos do batch.
                         mod_h_b = args.n_iters * args.n_models_batch / t_b * 3600.0
                         print(
-                            f"  [jax/batched/{strat}] n_models="
+                            f"  [jax/batched/{tag}] n_models="
                             f"{args.n_models_batch} dtype={args.dtype} "
                             f"wall={t_b:.3f}s | mod/h={mod_h_b:.2e}"
                         )
                         rows.append(
-                            f"{scen},jax_batched,{strat}_x{args.n_models_batch},"
+                            f"{scen},jax_batched,{tag}_x{args.n_models_batch},"
                             f"{args.dtype},{n_pos},{args.n_iters},"
                             f"{t_b:.6f},{mod_h_b:.6e}"
                         )
                     except Exception as e:
-                        print(f"  [jax/batched/{strat}] FALHA: {e}")
+                        print(f"  [jax/batched/{tag}] FALHA: {e}")
         print()
 
     # ── Escreve CSV ───────────────────────────────────────────────────────────

@@ -86,6 +86,7 @@ Note:
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
@@ -101,6 +102,10 @@ except ImportError:
     HAS_JAX = False
     jax = None  # type: ignore
     jnp = None  # type: ignore
+
+# Logger do módulo (D9 — nunca print). Usado para avisar fallback de estratégia
+# batched (ex.: geometria heterogênea → bucketing inaplicável → unified).
+logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -940,8 +945,6 @@ def simulate_multi_jax_batched(
             "simulate_multi_jax_batched requer JAX (pip install 'jax[cpu]')."
         )
 
-    from geosteering_ai.simulation._jax.forward_pure import _get_unified_jit
-    from geosteering_ai.simulation._jax.geometry_jax import find_layers_tr_jax_vmap
     from geosteering_ai.simulation._numba.geometry import layer_at_depth
     from geosteering_ai.simulation.config import SimulationConfig
     from geosteering_ai.simulation.filters import FilterLoader
@@ -1055,83 +1058,78 @@ def simulate_multi_jax_batched(
     h_arr_batch_jnp = jnp.asarray(h_arr_batch_np, dtype=jnp.float64)
     prof_arr_batch_jnp = jnp.asarray(prof_arr_batch_np, dtype=jnp.float64)
 
-    # ── Recupera o JIT unificado (1 programa XLA por (n, npt, dtype)) ────────
-    # Mesma função usada por _simulate_multi_jax_vmap_real (Sprint 12, PR #25).
-    # Vmap externo sobre modelos compõe com vmap interno sobre (iTR, iAng).
-    # Sprint O2 (v2.43): complex_dtype propagado de cfg.dtype.
+    # ── Dispatcher de montagem do H_tensor por estratégia (Sprint O4) ────────
+    # complex_dtype propagado de cfg.dtype (Sprint O2; default complex128).
     _complex_dtype_batched = getattr(cfg, "dtype", "complex128")
-    jitted = _get_unified_jit(n, npt, _complex_dtype_batched)
+    _strategy = getattr(cfg, "jax_strategy", "bucketed")
 
-    # ── L_flat / theta_flat (compartilhados entre modelos) ────────────────────
-    # L_flat[k] = tr_arr[k // nAngles]; theta_flat[k] = dip_arr[k % nAngles]
-    L_flat = jnp.asarray(np.repeat(tr_arr, nAngles).astype(np.float64))
-    theta_flat = jnp.asarray(np.tile(dip_arr, nTR).astype(np.float64))
-
-    # ── Função interna: 1 modelo → todas as configs (vmap (L, θ)) ─────────────
-    def _one_model(rho_h, rho_v, h_arr, prof_arr):
-        """Forward para 1 modelo cobrindo (nTR × nAngles) configs via vmap.
-
-        Args (todos tracers do outer vmap):
-            rho_h: (n,) float64 — perfil deste modelo.
-            rho_v: (n,) float64.
-            h_arr: (n,) float64 — espessuras sanitizadas deste modelo.
-            prof_arr: (n+1,) float64 — boundaries deste modelo.
-
-        Returns:
-            (nTR*nAngles, n_pos, nf, 9) complex128 — flat sobre configs.
-        """
-
-        def _one_config(L, theta_deg):
-            theta_rad = jnp.deg2rad(theta_deg)
-            cos_t = jnp.cos(theta_rad)
-            sin_t = jnp.sin(theta_rad)
-            dz_half = 0.5 * L * cos_t
-            r_half = 0.5 * L * sin_t
-
-            # Convenção Fortran (v1.4.1): T abaixo, R acima
-            Tz_arr = positions_z_jnp + dz_half
-            Rz_arr = positions_z_jnp - dz_half
-
-            # find_layers vmapped sobre posições; prof_arr é tracer do outer vmap.
-            # in_axes=(0, 0, None, None) → prof_arr broadcast (NÃO vmapped aqui,
-            # mas é tracer do nível superior). Composição vmap-em-vmap.
-            camad_t_arr, camad_r_arr = find_layers_tr_jax_vmap(
-                Tz_arr, Rz_arr, prof_arr, n
-            )
-
-            return jitted(
-                rho_h,
-                rho_v,
-                positions_z_jnp,
-                freqs_jnp,
-                camad_t_arr,
-                camad_r_arr,
-                dz_half,
-                r_half,
-                theta_rad,
-                h_arr,
-                prof_arr,
-                krJ0J1_jnp,
-                wJ0_jnp,
-                wJ1_jnp,
-            )
-
-        vmap_configs = jax.vmap(_one_config, in_axes=(0, 0))
-        return vmap_configs(L_flat, theta_flat)  # (nTR*nAngles, n_pos, nf, 9)
-
-    # ── Vmap externo sobre modelos ────────────────────────────────────────────
-    batched_fn = jax.vmap(_one_model, in_axes=(0, 0, 0, 0))
-    H_flat_batched = batched_fn(
-        rho_h_batch_jnp, rho_v_batch_jnp, h_arr_batch_jnp, prof_arr_batch_jnp
+    # Pré-condição do path BUCKETED: geometria COMPARTILHADA entre modelos
+    # (esp bit-idêntico). Só então camad_t/camad_r são iguais p/ todos e o
+    # bucketing único é fisicamente correto. Igualdade EXATA (atol=0): camad
+    # depende de comparações de fronteira bit-exatas — tolerância geraria
+    # buckets divergentes silenciosos. n=1/n=2 → esp shape (n_models, 0) →
+    # np.allclose vacuamente True (geometria trivialmente compartilhada).
+    geom_homogeneous = bool(
+        np.allclose(esp_batch_np, esp_batch_np[0:1], rtol=0.0, atol=0.0)
     )
-    # H_flat_batched shape: (n_models, nTR*nAngles, n_pos, nf, 9)
 
-    # Reshape final + ÚNICO sync GPU→CPU para todo o batch
-    H_tensor_jax = H_flat_batched.reshape(
-        n_models, nTR, nAngles, n_pos, freqs_arr.shape[0], 9
-    )
-    H_tensor_jax.block_until_ready()  # 1× ao final (não n_models×)
-    H_tensor_np = np.asarray(H_tensor_jax)  # 1× sync (não n_models×)
+    nf = freqs_arr.shape[0]
+
+    # Warning de fallback emitido 1× (não por chunk).
+    if _strategy == "bucketed" and not geom_homogeneous:
+        logger.warning(
+            "simulate_multi_jax_batched: geometria HETEROGÊNEA detectada "
+            "(esp varia entre modelos do batch) — bucketing compartilhado "
+            "inaplicável; usando fallback 'unified' (correto, mais lento). "
+            "Para o ganho bucketed, agrupe modelos por geometria idêntica."
+        )
+
+    # ── Chunk do eixo de modelos (Sprint O4) — fix OOM Cenário H ─────────────
+    # jax_chunk_size_models=K processa o batch em fatias de K modelos (loop
+    # Python, mesma compilação XLA reusada, 1 sync por fatia). Reduz o pico de
+    # VRAM em n_models/K. None = batch monolítico (vmap sobre todos de uma vez).
+    _chunk_models = getattr(cfg, "jax_chunk_size_models", None)
+
+    def _dispatch_slice(sl: slice, sub_n_models: int):
+        return _build_H_tensor_batched_dispatch(
+            strategy=_strategy,
+            complex_dtype=_complex_dtype_batched,
+            geom_homogeneous=geom_homogeneous,
+            n=n,
+            npt=npt,
+            n_models=sub_n_models,
+            n_pos=n_pos,
+            nf=nf,
+            nTR=nTR,
+            nAngles=nAngles,
+            tr_arr=tr_arr,
+            dip_arr=dip_arr,
+            positions_z_np=positions_z_np,
+            positions_z_jnp=positions_z_jnp,
+            freqs_arr=freqs_arr,
+            freqs_jnp=freqs_jnp,
+            krJ0J1_jnp=krJ0J1_jnp,
+            wJ0_jnp=wJ0_jnp,
+            wJ1_jnp=wJ1_jnp,
+            hankel_filter=hankel_filter,
+            rho_h_batch_jnp=rho_h_batch_jnp[sl],
+            rho_v_batch_jnp=rho_v_batch_jnp[sl],
+            h_arr_batch_jnp=h_arr_batch_jnp[sl],
+            prof_arr_batch_jnp=prof_arr_batch_jnp[sl],
+            rho_h_batch_np=rho_h_batch_np[sl],
+            rho_v_batch_np=rho_v_batch_np[sl],
+            esp_batch_np=esp_batch_np[sl],
+        )
+
+    if _chunk_models is None or n_models <= _chunk_models:
+        H_tensor_np = _dispatch_slice(slice(0, n_models), n_models)
+    else:
+        # Loop sobre ⌈n_models/K⌉ fatias; concatena no eixo de modelos (CPU).
+        _parts: list = []
+        for _start in range(0, n_models, _chunk_models):
+            _end = min(_start + _chunk_models, n_models)
+            _parts.append(_dispatch_slice(slice(_start, _end), _end - _start))
+        H_tensor_np = np.concatenate(_parts, axis=0)
 
     # ── Metadados z_obs / rho_*_at_obs (NumPy, compartilhado + por modelo) ────
     # z_obs depende apenas de positions_z (ponto-médio é o próprio z_mid).
@@ -1165,6 +1163,441 @@ def simulate_multi_jax_batched(
         tr_spacings_m=tr_arr,
         dip_degs=dip_arr,
         n_models=n_models,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint O4 (v2.44) — Helpers de montagem do H_tensor batched por estratégia
+# ──────────────────────────────────────────────────────────────────────────────
+# MOTIVAÇÃO
+#   `simulate_multi_jax_batched` historicamente HARDCODAVA `_get_unified_jit`
+#   (lax.fori_loop com camad_t/camad_r dinâmicos — ~6.9× mais lento que
+#   bucketed). A montagem do H_tensor foi fatorada em helpers por estratégia
+#   para permitir, sem regressão, o path BUCKETED quando a geometria é
+#   compartilhada entre os modelos do batch (caso PINN/on-the-fly dominante).
+#
+#   Este helper (`_build_H_tensor_batched_unified`) é o EXTRACT bit-exato do
+#   código original (vmap-modelos ∘ vmap-configs ∘ kernel unified). O sibling
+#   bucketed (`_build_H_tensor_batched_bucketed`) é adicionado no commit
+#   seguinte. O dispatcher em `simulate_multi_jax_batched` escolhe entre eles.
+
+
+def _build_H_tensor_batched_unified(
+    *,
+    n: int,
+    npt: int,
+    n_models: int,
+    n_pos: int,
+    nf: int,
+    nTR: int,
+    nAngles: int,
+    complex_dtype: str,
+    tr_arr,
+    dip_arr,
+    positions_z_jnp,
+    freqs_jnp,
+    krJ0J1_jnp,
+    wJ0_jnp,
+    wJ1_jnp,
+    rho_h_batch_jnp,
+    rho_v_batch_jnp,
+    h_arr_batch_jnp,
+    prof_arr_batch_jnp,
+):
+    """Monta o ``H_tensor`` batched via o kernel UNIFIED (1 JIT por (n,npt,dtype)).
+
+    Extract bit-exato do código original de :func:`simulate_multi_jax_batched`
+    (pré-Sprint O4). ``camad_t/camad_r`` são computados como **tracers** dentro
+    do ``vmap`` sobre modelos (via :func:`find_layers_tr_jax_vmap`), o que exige
+    o kernel unified (``lax.fori_loop`` com bounds dinâmicos). Funciona para
+    geometria heterogênea entre modelos (cada linha de ``prof_arr_batch`` pode
+    diferir) — por isso é o **fallback** quando a geometria NÃO é compartilhada.
+
+    Estrutura: ``vmap_modelos(vmap_configs(jitted_unified))`` — vmap externo
+    sobre o eixo ``n_models``, vmap interno sobre as ``nTR×nAngles`` configs.
+
+    Args:
+        n: Número de camadas (homogêneo no batch).
+        npt: Número de pontos do filtro Hankel.
+        n_models: Tamanho do batch (eixo 0 de ``rho_*_batch_jnp``).
+        n_pos: Número de posições TVD compartilhadas.
+        nf: Número de frequências.
+        nTR: Número de espaçamentos T-R.
+        nAngles: Número de ângulos dip.
+        complex_dtype: ``"complex128"`` (default) ou ``"complex64"`` — chave
+            do cache JIT (Sprint O2) que garante o dtype correto do kernel.
+        tr_arr: ``(nTR,)`` espaçamentos T-R (m), NumPy float64.
+        dip_arr: ``(nAngles,)`` ângulos dip (graus), NumPy float64.
+        positions_z_jnp: ``(n_pos,)`` profundidades TVD compartilhadas (jnp).
+        freqs_jnp: ``(nf,)`` frequências (Hz) (jnp).
+        krJ0J1_jnp, wJ0_jnp, wJ1_jnp: arrays do filtro Hankel (jnp).
+        rho_h_batch_jnp, rho_v_batch_jnp: ``(n_models, n)`` resistividades (jnp).
+        h_arr_batch_jnp: ``(n_models, n)`` espessuras sanitizadas (jnp).
+        prof_arr_batch_jnp: ``(n_models, n+1)`` fronteiras por modelo (jnp).
+
+    Returns:
+        ``np.ndarray`` complex de shape ``(n_models, nTR, nAngles, n_pos, nf, 9)``
+        — host array (1 único sync GPU→CPU ao final).
+
+    Note:
+        Diferenciável (``jacfwd``) — ``eta`` é reconstruído traceable no kernel.
+        Paridade vs loop serial ``simulate_multi_jax`` (unified): <1e-13.
+    """
+    from geosteering_ai.simulation._jax.forward_pure import _get_unified_jit
+    from geosteering_ai.simulation._jax.geometry_jax import find_layers_tr_jax_vmap
+
+    # 1 programa XLA por (n, npt, complex_dtype) — reutilizado p/ todos modelos.
+    jitted = _get_unified_jit(n, npt, complex_dtype)
+
+    # L_flat[k] = tr_arr[k // nAngles]; theta_flat[k] = dip_arr[k % nAngles].
+    L_flat = jnp.asarray(np.repeat(tr_arr, nAngles).astype(np.float64))
+    theta_flat = jnp.asarray(np.tile(dip_arr, nTR).astype(np.float64))
+
+    def _one_model(rho_h, rho_v, h_arr, prof_arr):
+        """Forward para 1 modelo cobrindo (nTR × nAngles) configs via vmap."""
+
+        def _one_config(L, theta_deg):
+            theta_rad = jnp.deg2rad(theta_deg)
+            cos_t = jnp.cos(theta_rad)
+            sin_t = jnp.sin(theta_rad)
+            dz_half = 0.5 * L * cos_t
+            r_half = 0.5 * L * sin_t
+
+            # Convenção Fortran (v1.4.1): T abaixo, R acima.
+            Tz_arr = positions_z_jnp + dz_half
+            Rz_arr = positions_z_jnp - dz_half
+
+            # find_layers vmapped sobre posições; prof_arr é tracer do outer vmap.
+            camad_t_arr, camad_r_arr = find_layers_tr_jax_vmap(
+                Tz_arr, Rz_arr, prof_arr, n
+            )
+
+            return jitted(
+                rho_h,
+                rho_v,
+                positions_z_jnp,
+                freqs_jnp,
+                camad_t_arr,
+                camad_r_arr,
+                dz_half,
+                r_half,
+                theta_rad,
+                h_arr,
+                prof_arr,
+                krJ0J1_jnp,
+                wJ0_jnp,
+                wJ1_jnp,
+            )
+
+        vmap_configs = jax.vmap(_one_config, in_axes=(0, 0))
+        return vmap_configs(L_flat, theta_flat)  # (nTR*nAngles, n_pos, nf, 9)
+
+    # Vmap externo sobre modelos.
+    batched_fn = jax.vmap(_one_model, in_axes=(0, 0, 0, 0))
+    H_flat_batched = batched_fn(
+        rho_h_batch_jnp, rho_v_batch_jnp, h_arr_batch_jnp, prof_arr_batch_jnp
+    )
+    # (n_models, nTR*nAngles, n_pos, nf, 9) → reshape + ÚNICO sync GPU→CPU.
+    H_tensor_jax = H_flat_batched.reshape(n_models, nTR, nAngles, n_pos, nf, 9)
+    H_tensor_jax.block_until_ready()  # 1× ao final (não n_models×)
+    return np.asarray(H_tensor_jax)
+
+
+def _forward_config_buckets_over_models(
+    *,
+    ctx,
+    rho_h_batch_jnp,
+    rho_v_batch_jnp,
+    n: int,
+    npt: int,
+    n_models: int,
+    n_pos: int,
+    nf: int,
+    complex_dtype: str,
+):
+    """Forward BUCKETED de 1 config (L, θ) sobre TODO o eixo de modelos via vmap.
+
+    Núcleo do Sprint O4. Reusa EXATAMENTE o mesmo kernel ``_get_bucket_jit`` do
+    path serial (:func:`_forward_pure_jax_bucketed_impl`), apenas envolvido por
+    um ``jax.vmap`` que mapeia o eixo 0 (modelos) em ``rho_h_batch``/``rho_v_batch``
+    e faz broadcast (``in_axes=None``) de TODOS os arrays de geometria/filtro do
+    ``ctx`` — válido porque a geometria é COMPARTILHADA entre os modelos (mesmo
+    ``esp``/``positions_z``/``L``/``θ`` → mesmos ``camad_t/camad_r`` concretos).
+
+    O agrupamento por bucket ``(camad_t, camad_r)`` é feito em NumPy CONCRETO
+    (fora do trace), via ``np.unique`` sobre ``ctx.camad_t_array/camad_r_array``
+    — idêntico a :func:`_forward_pure_jax_bucketed_impl`. Cada bucket fecha
+    ``ct/cr`` estáticos no closure (XLA especializa → sem ``lax.fori_loop``
+    dinâmico do unified).
+
+    Args:
+        ctx: :class:`ForwardPureContext` CONCRETO desta config (camad_t/camad_r
+            numpy, ``dz_half``/``r_half``/``dip_rad`` floats via ``np.cos`` —
+            bit-idênticos ao serial).
+        rho_h_batch_jnp, rho_v_batch_jnp: ``(n_models, n)`` — únicos eixos vmapped.
+        n, npt, n_models, n_pos, nf: dimensões estáticas.
+        complex_dtype: chave do cache JIT (Sprint O2) + dtype do H_config.
+
+    Returns:
+        ``jax.Array`` ``(n_models, n_pos, nf, 9)`` na ORDEM ORIGINAL de posições
+        (scatter via ``.at[:, indices].set`` preserva a ordem). NÃO sincronizado
+        (o sync único acontece no caller :func:`_build_H_tensor_batched_bucketed`).
+
+    Note:
+        Diferenciável: ``rho_h/rho_v`` entram como tracers do vmap E como
+        argumentos diferenciáveis do kernel (``eta`` reconstruído via
+        ``jnp.stack(1/rho)``). Paridade vs serial bucketed: bit-exata (<1e-13).
+    """
+    from geosteering_ai.simulation._jax.forward_pure import (
+        _COMPLEX_DTYPE_MAP,
+        _get_bucket_jit,
+    )
+
+    # Agrupa posições por (camad_t, camad_r) ÚNICO — NumPy concreto, fora do
+    # trace (mesma lógica de _forward_pure_jax_bucketed_impl:937-940).
+    ct_arr = np.asarray(ctx.camad_t_array, dtype=np.int32)
+    cr_arr = np.asarray(ctx.camad_r_array, dtype=np.int32)
+    key_arr = ct_arr.astype(np.int64) * 10_000 + cr_arr.astype(np.int64)
+    unique_keys, inverse = np.unique(key_arr, return_inverse=True)
+
+    H_config = jnp.zeros(
+        (n_models, n_pos, nf, 9), dtype=_COMPLEX_DTYPE_MAP[complex_dtype]
+    )
+    # _forward_bucket assinatura: (rho_h, rho_v, z_bucket, freqs, dz_half,
+    # r_half, dip_rad, h_arr, prof_arr, krJ0J1, wJ0, wJ1). Mapeia eixo 0
+    # (modelos) APENAS em rho_h/rho_v; resto broadcast (geometria compartilhada).
+    _in_axes = (0, 0, None, None, None, None, None, None, None, None, None, None)
+    for bucket_idx in range(len(unique_keys)):
+        indices = np.nonzero(inverse == bucket_idx)[0]
+        ct = int(ct_arr[indices[0]])
+        cr = int(cr_arr[indices[0]])
+        z_bucket = ctx.positions_z_jnp[indices]  # (n_pos_bucket,)
+
+        jitted = _get_bucket_jit(ct, cr, n, npt, complex_dtype)
+        bucket_over_models = jax.vmap(jitted, in_axes=_in_axes)
+        H_bucket = bucket_over_models(
+            rho_h_batch_jnp,
+            rho_v_batch_jnp,
+            z_bucket,
+            ctx.freqs_hz_jnp,
+            ctx.dz_half,
+            ctx.r_half,
+            ctx.dip_rad,
+            ctx.h_arr_jnp,
+            ctx.prof_arr_jnp,
+            ctx.krJ0J1,
+            ctx.wJ0,
+            ctx.wJ1,
+        )  # (n_models, n_pos_bucket, nf, 9)
+
+        # Scatter no eixo de POSIÇÃO (eixo 1) — preserva ordem original.
+        H_config = H_config.at[:, jnp.asarray(indices)].set(H_bucket)
+
+    return H_config
+
+
+def _build_H_tensor_batched_bucketed(
+    *,
+    n: int,
+    npt: int,
+    n_models: int,
+    n_pos: int,
+    nf: int,
+    nTR: int,
+    nAngles: int,
+    complex_dtype: str,
+    rho_h_ref_np,
+    rho_v_ref_np,
+    esp_ref_np,
+    positions_z_np,
+    freqs_arr,
+    tr_arr,
+    dip_arr,
+    hankel_filter: str,
+    rho_h_batch_jnp,
+    rho_v_batch_jnp,
+):
+    """Monta o ``H_tensor`` batched via kernel BUCKETED (geometria compartilhada).
+
+    Sprint O4 (v2.44). Path ótimo para o regime PINN/on-the-fly: todos os
+    modelos do batch compartilham a MESMA geometria (``esp``/``positions_z``),
+    variando apenas ``rho_h``/``rho_v``. Nesse regime ``camad_t/camad_r`` são
+    idênticos entre modelos e podem ser computados UMA vez por config (L, θ)
+    em NumPy concreto (via :func:`build_static_context_cached`), permitindo
+    ``np.unique``/bucketing fora do trace e ``jax.vmap`` dos kernels de bucket
+    sobre o eixo de modelos.
+
+    Estrutura (loop Python sobre nTR×nAngles configs; dedup por hordist como
+    :func:`simulate_multi_jax`):
+
+      for (i_tr, i_ang, L, θ):
+        ctx = build_static_context_cached(..., L, θ, strategy="bucketed")  # cache hit p/ geom fixa
+        H_config[i_tr][i_ang] = _forward_config_buckets_over_models(ctx, rho_batch)  # (n_models,n_pos,nf,9)
+      H_tensor = stack/moveaxis → (n_models, nTR, nAngles, n_pos, nf, 9)
+      ÚNICO block_until_ready + np.asarray no fim.
+
+    Args:
+        n, npt, n_models, n_pos, nf, nTR, nAngles: dimensões estáticas.
+        complex_dtype: ``"complex128"`` (default) ou ``"complex64"``.
+        rho_h_ref_np, rho_v_ref_np, esp_ref_np: perfil do modelo 0 (referência
+            de GEOMETRIA — ``esp`` é idêntico em todos por pré-condição checada
+            pelo dispatcher; ``rho`` do ref NÃO é usado no kernel, só geometria).
+        positions_z_np, freqs_arr, tr_arr, dip_arr: arrays compartilhados (NumPy).
+        hankel_filter: nome do filtro Hankel.
+        rho_h_batch_jnp, rho_v_batch_jnp: ``(n_models, n)`` — eixos vmapped.
+
+    Returns:
+        ``np.ndarray`` ``(n_models, nTR, nAngles, n_pos, nf, 9)`` — host array
+        (1 único sync GPU→CPU ao final do batch inteiro).
+
+    Note:
+        PRÉ-CONDIÇÃO (garantida pelo dispatcher): geometria compartilhada entre
+        modelos (``esp`` bit-idêntico). Geometria heterogênea → usar
+        :func:`_build_H_tensor_batched_unified`. Paridade vs serial bucketed e
+        vs batched-unified: <1e-13 (mesmo kernel ``_get_bucket_jit``).
+    """
+    from geosteering_ai.simulation._jax.forward_pure import (
+        build_static_context_cached,
+    )
+
+    # Storage por config (preenchido na ordem original i_tr, i_ang).
+    configs_jnp = [[None] * nAngles for _ in range(nTR)]
+
+    # Loop sobre configs com dedup por hordist (max cache hit em ctx — geom fixa).
+    hordist_groups = _build_hordist_groups(tr_arr.tolist(), dip_arr.tolist())
+    for _hordist_key, group in hordist_groups.items():
+        for i_tr, i_ang, L, theta in group:
+            # ctx CONCRETO desta config — camad_t/camad_r + dz/r via np.cos
+            # (bit-idêntico ao serial). Cache LRU amortiza geometria fixa.
+            ctx = build_static_context_cached(
+                rho_h=rho_h_ref_np,
+                rho_v=rho_v_ref_np,
+                esp=esp_ref_np,
+                positions_z=positions_z_np,
+                freqs_hz=freqs_arr,
+                tr_spacing_m=L,
+                dip_deg=theta,
+                hankel_filter=hankel_filter,
+                strategy="bucketed",
+                chunk_size=None,
+                complex_dtype=complex_dtype,
+            )
+            configs_jnp[i_tr][i_ang] = _forward_config_buckets_over_models(
+                ctx=ctx,
+                rho_h_batch_jnp=rho_h_batch_jnp,
+                rho_v_batch_jnp=rho_v_batch_jnp,
+                n=n,
+                npt=npt,
+                n_models=n_models,
+                n_pos=n_pos,
+                nf=nf,
+                complex_dtype=complex_dtype,
+            )
+
+    # Empilha (nTR, nAngles, n_models, n_pos, nf, 9) e move eixo de modelos p/
+    # frente → (n_models, nTR, nAngles, n_pos, nf, 9). ÚNICO sync GPU→CPU.
+    H_stack = jnp.stack(
+        [
+            jnp.stack([configs_jnp[i_tr][i_ang] for i_ang in range(nAngles)], axis=0)
+            for i_tr in range(nTR)
+        ],
+        axis=0,
+    )  # (nTR, nAngles, n_models, n_pos, nf, 9)
+    H_tensor_jax = jnp.moveaxis(H_stack, 2, 0)
+    H_tensor_jax.block_until_ready()  # 1× ao final (sync único por batch)
+    return np.asarray(H_tensor_jax)
+
+
+def _build_H_tensor_batched_dispatch(
+    *,
+    strategy: str,
+    complex_dtype: str,
+    geom_homogeneous: bool,
+    n: int,
+    npt: int,
+    n_models: int,
+    n_pos: int,
+    nf: int,
+    nTR: int,
+    nAngles: int,
+    tr_arr,
+    dip_arr,
+    positions_z_np,
+    positions_z_jnp,
+    freqs_arr,
+    freqs_jnp,
+    krJ0J1_jnp,
+    wJ0_jnp,
+    wJ1_jnp,
+    hankel_filter: str,
+    rho_h_batch_jnp,
+    rho_v_batch_jnp,
+    h_arr_batch_jnp,
+    prof_arr_batch_jnp,
+    rho_h_batch_np,
+    rho_v_batch_np,
+    esp_batch_np,
+):
+    """Escolhe bucketed (geom compartilhada) vs unified e monta o H_tensor.
+
+    Núcleo do dispatcher de :func:`simulate_multi_jax_batched`, fatorado para
+    ser chamável por (sub)batch — permite o loop de ``jax_chunk_size_models``
+    (commit O4 chunking) reusar a MESMA lógica de escolha de estratégia por
+    fatia de modelos. NÃO emite o warning de fallback (responsabilidade do
+    caller, 1× por chamada — não por chunk).
+
+    Args:
+        strategy: ``cfg.jax_strategy`` (``"bucketed"``|``"unified"``).
+        geom_homogeneous: pré-computado pelo caller sobre o batch COMPLETO
+            (subset de homogêneo é homogêneo; conservador e correto).
+        n_models: tamanho deste (sub)batch (pode ser < n_models total no chunk).
+        (demais args: ver :func:`_build_H_tensor_batched_bucketed` /
+        :func:`_build_H_tensor_batched_unified`).
+
+    Returns:
+        ``np.ndarray`` ``(n_models, nTR, nAngles, n_pos, nf, 9)`` deste (sub)batch.
+    """
+    if strategy == "bucketed" and geom_homogeneous:
+        return _build_H_tensor_batched_bucketed(
+            n=n,
+            npt=npt,
+            n_models=n_models,
+            n_pos=n_pos,
+            nf=nf,
+            nTR=nTR,
+            nAngles=nAngles,
+            complex_dtype=complex_dtype,
+            rho_h_ref_np=rho_h_batch_np[0],
+            rho_v_ref_np=rho_v_batch_np[0],
+            esp_ref_np=esp_batch_np[0],
+            positions_z_np=positions_z_np,
+            freqs_arr=freqs_arr,
+            tr_arr=tr_arr,
+            dip_arr=dip_arr,
+            hankel_filter=hankel_filter,
+            rho_h_batch_jnp=rho_h_batch_jnp,
+            rho_v_batch_jnp=rho_v_batch_jnp,
+        )
+    return _build_H_tensor_batched_unified(
+        n=n,
+        npt=npt,
+        n_models=n_models,
+        n_pos=n_pos,
+        nf=nf,
+        nTR=nTR,
+        nAngles=nAngles,
+        complex_dtype=complex_dtype,
+        tr_arr=tr_arr,
+        dip_arr=dip_arr,
+        positions_z_jnp=positions_z_jnp,
+        freqs_jnp=freqs_jnp,
+        krJ0J1_jnp=krJ0J1_jnp,
+        wJ0_jnp=wJ0_jnp,
+        wJ1_jnp=wJ1_jnp,
+        rho_h_batch_jnp=rho_h_batch_jnp,
+        rho_v_batch_jnp=rho_v_batch_jnp,
+        h_arr_batch_jnp=h_arr_batch_jnp,
+        prof_arr_batch_jnp=prof_arr_batch_jnp,
     )
 
 
