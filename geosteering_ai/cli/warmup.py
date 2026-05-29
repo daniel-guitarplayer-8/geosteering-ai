@@ -219,10 +219,21 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         _warmup_numba_tier2_sync(verbose=args.verbose)
+    except (ModuleNotFoundError, ImportError) as e:
+        # Sprint O4 (v2.44): backend ausente (jax/numba não instalados) NÃO é
+        # falha de warmup — é ambiente sem os backends a aquecer. Warmup é
+        # observabilidade (priming de cache JIT/LLVM), nunca deve gatear o
+        # build. Loga aviso e retorna 0 (no-op). CI sem o extra `sim` segue.
+        logger.warning(
+            "Warmup pulado — backend ausente (%s): %s. "
+            "Instale o extra 'sim' (jax+numba) para aquecer.",
+            e.__class__.__name__,
+            e,
+        )
+        return 0
     except Exception as e:
-        # Diferente do background thread (silencioso), aqui propagamos a
-        # falha ao usuário via logger.error (D9) + exit code 1. CI detecta
-        # tanto pelo exit code quanto pela mensagem em stderr.
+        # Falha REAL de warmup (não dep ausente): propaga via logger.error
+        # (D9) + exit code 1. CI detecta tanto pelo exit code quanto stderr.
         logger.error("Warmup parcial (%s): %s", e.__class__.__name__, e)
         return 1
 

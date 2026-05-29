@@ -41,6 +41,14 @@ viz = [
 hpo = [
     "optuna>=3.0",
 ]
+# Sprint O4 (v2.44) — backends do simulador (JAX CPU + Numba). São deps de
+# RUNTIME do simulador (_jax/ e _numba/), antes não declaradas — a CI nunca
+# os instalava, derrubando o step geosteering-warmup. `jax` aqui é a base CPU;
+# em GPU instale `jax[cuda12]` separadamente (Colab/local), que sobrepõe.
+sim = [
+    "jax>=0.4.30",
+    "numba>=0.59",
+]
 # Sprint v2.39 — I2.7 — API REST MVP (FastAPI + Pydantic v2 + Uvicorn)
 api = [
     "fastapi>=0.110",
@@ -54,6 +62,9 @@ all = [
     "joblib>=1.2",
     "pandas>=2.0",
     "tqdm>=4.65",
+    # Sprint O4 — backends do simulador (JAX CPU + Numba)
+    "jax>=0.4.30",
+    "numba>=0.59",
     # Sprint v2.39 — API REST stack
     "fastapi>=0.110",
     "pydantic>=2.5",
@@ -63,6 +74,11 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-qt>=4.4",    # Sprint v2.33 — Qt GUI tests (qtbot fixture)
+    # Sprint O4 (v2.44): binding Qt — pytest-qt EXIGE PyQt6/PyQt5/PySide6 ao
+    # carregar (mesmo sem rodar GUI tests). Antes não declarado → 'pytest tests/'
+    # falhava com exit 4 na CI assim que o warmup parou de derrubar o job antes.
+    # Import headless basta p/ o plugin; GUI tests reais usam xvfb (step à parte).
+    "PyQt6>=6.6",
     "mypy>=1.0",
     # Multi-agent infrastructure (Etapa 1 Quality Mesh)
     "watchdog>=3.0",     # tools/file_watcher_daemon.py
