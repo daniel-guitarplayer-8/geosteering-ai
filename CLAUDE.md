@@ -8,7 +8,7 @@
 | **Versao** | v2.0 (arquitetura de software) |
 | **Autor** | Daniel Leal |
 | **Framework** | TensorFlow 2.x / Keras 3.x **PRIMÁRIO** (PyTorch via adapter opt-in — §75 doc aprofundamento; estratégia 3-tier em §75.10) |
-| **Ambiente** | VSCode + Claude Code (dev, Python 3.13) · GitHub (CI, Python 3.13) · Google Colab Pro+ GPU (exec, Python 3.13) |
+| **Ambiente** | VSCode + Claude Code (dev + **GPU local RTX A6000**, Python 3.13) · GitHub (CI, Python 3.13) — *Colab descontinuado para o simulador JAX GPU (v2.44); desenvolvimento em GPU agora é local* |
 | **Linguagem** | Python 3.13 · Variaveis em ingles · Comentarios/docs em PT-BR |
 | **Repositorio** | `github.com/daniel-leal/geosteering-ai` |
 | **Pacote** | `geosteering_ai/` (pip installable) |
@@ -23,9 +23,10 @@
 
 | Contexto | Versão | Ambiente |
 | :------- | :----- | :------- |
-| Desenvolvimento local | Python 3.13 | `~/Geosteering_AI_venv` |
-| CI/CD GitHub Actions | Python 3.13 (primária), 3.12 (fallback) | ubuntu-latest |
-| Google Colab GPU | Python 3.13 ou 3.10 a 3.12 | aceitar ambos |
+| Desenvolvimento local | Python 3.13 | `~/Geosteering_AI_venv` (CPU) |
+| **GPU local (simulador JAX)** | **Python 3.13** | **RTX A6000 48 GB · conda `Geosteering_AI` · JAX cuda12** |
+| CI/CD GitHub Actions | Python 3.13 (primária), 3.12 (fallback) | ubuntu-latest (CPU; jax[cpu]+numba) |
+| Google Colab GPU | — | **DESCONTINUADO (v2.44)** para o simulador JAX GPU |
 | PROIBIDO | Python 3.14+ | sem wheels PyQt6/JAX/SciPy |
 
 ### Setup local (primeira vez)
@@ -311,10 +312,11 @@ por desenvolvedores de software.
 
 ```
 1. Claude Code edita geosteering_ai/*.py (local)
-2. pytest tests/ (local, CPU)
+2. pytest tests/ (local, CPU + GPU local A6000)
 3. git commit + push → GitHub
 4. GitHub Actions CI: compile + pytest + mypy
-5. Google Colab: pip install git+...@tag → treinar com GPU
+5. GPU local (RTX A6000, conda `Geosteering_AI`): simular/treinar com GPU
+   (Colab descontinuado v2.44 — dev GPU do simulador JAX agora é local)
 ```
 
 ### Testes Obrigatorios

@@ -37,7 +37,9 @@
       "raw_json": "docs/perf_baselines/sprint_a16_jax_batched_benchmark_t4_20260523_181558.json",
       "report": "docs/reports/v2.43_jax_gpu_baseline_t4_2026-05-23.md",
       "threshold_pct": 90,
-      "notes": "Baseline canônica oficial do simulador JAX GPU. Qualquer alteração no caminho hot de _jax/ ou simulate_multi_jax_batched deve preservar ≥90% destes valores E manter paridade Fortran <1e-12 (pytest -m gpu 164/164 PASS)."
+      "notes": "Baseline canônica oficial do simulador JAX GPU. Qualquer alteração no caminho hot de _jax/ ou simulate_multi_jax_batched deve preservar ≥90% destes valores E manter paridade Fortran <1e-12 (pytest -m gpu 164/164 PASS).",
+      "deprecated": true,
+      "deprecated_note": "DEPRECADO (v2.44): medido em Google Colab T4/A100 PRÉ-O4 (batched-unified). Colab descontinuado para o simulador JAX GPU; o baseline oficial passa a ser jax_gpu_a6000_v244 (local, pós-O4). Mantido só como referência histórica."
     },
     "A_hot": {
       "throughput_mod_h": 6899537,
@@ -148,7 +150,9 @@
       "report": "docs/reports/v2.43_jax_gpu_baseline_a100_2026-05-23.md",
       "threshold_pct": 90,
       "status": "OFFICIAL_BASELINE",
-      "notes": "Baseline CANÔNICA OFICIAL do simulador JAX GPU A100. Supera T4 em todos os cenários (1.08-1.85×). Cenário H rodou pela 1ª vez (era OOM em T4). Qualquer alteração no caminho hot de _jax/ ou simulate_multi_jax_batched deve preservar ≥90% destes valores E manter paridade Fortran <1e-12 (pytest -m gpu 164/164 PASS)."
+      "notes": "Baseline CANÔNICA OFICIAL do simulador JAX GPU A100. Supera T4 em todos os cenários (1.08-1.85×). Cenário H rodou pela 1ª vez (era OOM em T4). Qualquer alteração no caminho hot de _jax/ ou simulate_multi_jax_batched deve preservar ≥90% destes valores E manter paridade Fortran <1e-12 (pytest -m gpu 164/164 PASS).",
+      "deprecated": true,
+      "deprecated_note": "DEPRECADO (v2.44): medido em Google Colab T4/A100 PRÉ-O4 (batched-unified). Colab descontinuado para o simulador JAX GPU; o baseline oficial passa a ser jax_gpu_a6000_v244 (local, pós-O4). Mantido só como referência histórica."
     },
     "A_hot": {
       "throughput_mod_h": 9128864,
@@ -282,41 +286,82 @@
   "threshold_pct": 90,
   "version": "v2.43",
   "notes": "Atualize manualmente após otimizações intencionais (>+5%). E_n200_warm exige medição pós-warmup explícito via 'geosteering-warmup --verbose'. jax_gpu_t4 e jax_gpu_a100 exigem re-medição em Colab T4/A100 via notebook validate_jax_gpu_v240.ipynb. jax_gpu_a100 é a baseline OFICIAL JAX GPU desde 2026-05-23.",
-  "jax_gpu_a6000_o4": {
+  "jax_gpu_a6000_v244": {
     "_meta": {
       "version": "v2.44",
-      "measured_at": "2026-05-29T00:00:00Z",
-      "hardware": "NVIDIA RTX A6000 48 GB, AMD Threadripper 7970X (32C/64T)",
-      "api": "simulate_multi_jax_batched (Sprint O4 batched-bucketed)",
-      "dtype": "complex128",
-      "jax": "0.7.2 cuda12",
-      "report": "docs/reports/v2.44_sprint_O4_batched_bucketed_2026-05-29.md",
-      "notes": "Referencia LOCAL A6000 do Sprint O4 (NAO e gate). Gate oficial permanece jax_gpu_t4 (re-medir em Colab T4 pos-O4). Mostra o ganho batched-bucketed vs batched-unified no regime on-the-fly/PINN."
+      "status": "OFICIAL (substitui T4/A100 Colab, deprecados)",
+      "hardware": "NVIDIA RTX A6000 48 GB · AMD Threadripper 7970X (32C/64T)",
+      "stack": "JAX 0.7.2 cuda12, Numba 0.65.1, complex128",
+      "n_iters": 3,
+      "n_models_batched": 16,
+      "chunk_size_models": 8,
+      "regimes": "single=1 modelo/chamada (Numba 4w16t, JAX loop); batched=N modelos (JAX vmap)",
+      "notes": "Baseline LOCAL pós-O4 (Colab descontinuado). H rodado com n_pos=20 (reduzido). Vantagem batched CRESCE com n_models: a 16 modelos é mista (JAX vence A/C/D/G, ~empata E/F, Numba vence B/H); a 32 modelos JAX vence A-G. csv: benchmarks/results/a6000_baseline_v2.44.csv",
+      "report": "docs/reports/v2.44_baseline_a6000_8cenarios_2026-05-29.md"
     },
-    "E_onthefly_32x600_unified": {
-      "throughput_mod_h": 65100,
-      "n_models": 32,
+    "A": {
+      "n_pos": 1,
+      "configs": 1,
+      "numba_4w16t_single_modh": 5171049,
+      "jax_loop_single_modh": 1764679,
+      "jax_batched_modh": 9390936,
+      "batched_vs_numba": 1.816
+    },
+    "B": {
+      "n_pos": 100,
+      "configs": 1,
+      "numba_4w16t_single_modh": 3173859,
+      "jax_loop_single_modh": 264214,
+      "jax_batched_modh": 1573229,
+      "batched_vs_numba": 0.496
+    },
+    "C": {
+      "n_pos": 100,
+      "configs": 4,
+      "numba_4w16t_single_modh": 1153922,
+      "jax_loop_single_modh": 263743,
+      "jax_batched_modh": 1453450,
+      "batched_vs_numba": 1.26
+    },
+    "D": {
+      "n_pos": 1,
+      "configs": 4,
+      "numba_4w16t_single_modh": 2027747,
+      "jax_loop_single_modh": 557186,
+      "jax_batched_modh": 3272164,
+      "batched_vs_numba": 1.614
+    },
+    "E": {
       "n_pos": 600,
-      "nf_nTR_nAng": "1x1x1",
-      "strategy": "unified (pre-O4 hardcoded)",
-      "notes": "Baseline batched-unified (gargalo on-the-fly pre-O4)."
+      "configs": 1,
+      "numba_4w16t_single_modh": 1048900,
+      "jax_loop_single_modh": 230630,
+      "jax_batched_modh": 1010264,
+      "batched_vs_numba": 0.963
     },
-    "E_onthefly_32x600_bucketed": {
-      "throughput_mod_h": 1466000,
-      "n_models": 32,
-      "n_pos": 600,
-      "nf_nTR_nAng": "1x1x1",
-      "strategy": "bucketed (O4)",
-      "speedup_vs_unified": 22.5,
-      "notes": "Sprint O4 batched-bucketed. Supera Numba 4w16t (~1.05e6) neste regime."
+    "F": {
+      "n_pos": 100,
+      "configs": 16,
+      "numba_4w16t_single_modh": 390901,
+      "jax_loop_single_modh": 66417,
+      "jax_batched_modh": 389644,
+      "batched_vs_numba": 0.997
     },
-    "H_512cfg_chunked": {
-      "throughput_mod_h": 32600,
-      "n_models": 16,
+    "G": {
+      "n_pos": 100,
+      "configs": 64,
+      "numba_4w16t_single_modh": 83378,
+      "jax_loop_single_modh": 17440,
+      "jax_batched_modh": 100668,
+      "batched_vs_numba": 1.207
+    },
+    "H": {
       "n_pos": 20,
-      "nf_nTR_nAng": "8x8x8",
-      "strategy": "bucketed + chunk_size_models=8",
-      "notes": "Cenario H (512 configs) roda SEM OOM via chunking (antes: OOM ~110 GB / pulado)."
+      "configs": 512,
+      "numba_4w16t_single_modh": 35338,
+      "jax_loop_single_modh": 5204,
+      "jax_batched_modh": 31402,
+      "batched_vs_numba": 0.889
     }
   }
 }
