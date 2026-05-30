@@ -551,6 +551,12 @@ class SimulationConfig:
     export_binary_dat: bool = False
     output_dir: str = "."
     output_filename: str = "simulation"
+    # Sprint v2.45 — geração de dataset no fluxo BATCHED JAX.
+    # Quando True, `simulate_multi_jax_batched` exporta 1 conjunto de arquivos
+    # .dat por modelo do batch ({output_filename}_model{i:06d}[_TR{j}].dat),
+    # via os writers Fortran-compatíveis. Caso de uso: gerar dataset sintético
+    # (modelo, H_tensor) em disco para treino. Default False (sem I/O).
+    export_per_model: bool = False
 
     # ┌───────────────────────────────────────────────────────────────┐
     # │  Grupo 8 — Feature F6: Compensação Midpoint (opt-in)          │
@@ -753,9 +759,9 @@ class SimulationConfig:
             f"mas reduz precisão — uso em produção apenas."
         )
 
-        assert self.device in _VALID_DEVICES, (
-            f"device={self.device!r} inválido. Opções: " f"{sorted(_VALID_DEVICES)}."
-        )
+        assert (
+            self.device in _VALID_DEVICES
+        ), f"device={self.device!r} inválido. Opções: {sorted(_VALID_DEVICES)}."
 
         assert self.hankel_filter in _VALID_HANKEL_FILTERS, (
             f"hankel_filter={self.hankel_filter!r} inválido. Opções: "
@@ -794,24 +800,22 @@ class SimulationConfig:
         # Se definidas, devem conter ≥ 1 elemento no range físico. Uma
         # lista vazia (len=0) é sempre erro de configuração.
         if self.frequencies_hz is not None:
-            assert len(self.frequencies_hz) >= 1, (
-                "frequencies_hz=[] inválido: se definido, deve conter "
-                "≥ 1 frequência."
-            )
+            assert (
+                len(self.frequencies_hz) >= 1
+            ), "frequencies_hz=[] inválido: se definido, deve conter ≥ 1 frequência."
             for i, f in enumerate(self.frequencies_hz):
-                assert fmin <= f <= fmax, (
-                    f"frequencies_hz[{i}]={f} Hz fora do range " f"[{fmin}, {fmax}]."
-                )
+                assert (
+                    fmin <= f <= fmax
+                ), f"frequencies_hz[{i}]={f} Hz fora do range [{fmin}, {fmax}]."
 
         if self.tr_spacings_m is not None:
-            assert len(self.tr_spacings_m) >= 1, (
-                "tr_spacings_m=[] inválido: se definido, deve conter "
-                "≥ 1 espaçamento."
-            )
+            assert (
+                len(self.tr_spacings_m) >= 1
+            ), "tr_spacings_m=[] inválido: se definido, deve conter ≥ 1 espaçamento."
             for i, s in enumerate(self.tr_spacings_m):
-                assert smin <= s <= smax, (
-                    f"tr_spacings_m[{i}]={s} m fora do range " f"[{smin}, {smax}]."
-                )
+                assert (
+                    smin <= s <= smax
+                ), f"tr_spacings_m[{i}]={s} m fora do range [{smin}, {smax}]."
 
         # ── Performance tuning ───────────────────────────────────────
         assert self.num_threads == -1 or self.num_threads >= 1, (
@@ -951,11 +955,11 @@ class SimulationConfig:
         # `output_dir` válido e um `output_filename` não-vazio. Não
         # validamos existência do diretório aqui (pode ser criado
         # tardiamente); apenas o path precisa ser uma string não-vazia.
-        if self.export_model_in or self.export_binary_dat:
+        if self.export_model_in or self.export_binary_dat or self.export_per_model:
             assert isinstance(self.output_dir, str) and self.output_dir, (
                 f"output_dir={self.output_dir!r} inválido: deve ser uma "
-                f"string não-vazia quando export_model_in ou "
-                f"export_binary_dat está ativo."
+                f"string não-vazia quando export_model_in, export_binary_dat "
+                f"ou export_per_model está ativo."
             )
             assert isinstance(self.output_filename, str) and self.output_filename, (
                 f"output_filename={self.output_filename!r} inválido: "
@@ -1025,9 +1029,9 @@ class SimulationConfig:
                 "tilted a 45° azimute 0."
             )
             for i, cfg in enumerate(self.tilted_configs):
-                assert len(cfg) == 2, (
-                    f"tilted_configs[{i}]={cfg!r} deve ser " f"(beta_graus, phi_graus)."
-                )
+                assert (
+                    len(cfg) == 2
+                ), f"tilted_configs[{i}]={cfg!r} deve ser (beta_graus, phi_graus)."
                 beta, phi = cfg
                 assert 0.0 <= float(beta) <= 90.0, (
                     f"tilted_configs[{i}].beta={beta}° fora do range "

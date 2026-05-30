@@ -150,6 +150,10 @@ class MultiSimulationResultJAX:
     tr_spacings_m: np.ndarray  # (nTR,) float64
     dip_degs: np.ndarray  # (nAngles,) float64
     unique_hordist_count: int = 0
+    # Sprint v2.45: paridade de campo com o MultiSimulationResult Numba (F5
+    # tilted-coil). O backend JAX não computa H_tilted (None); o campo existe
+    # para compat com os writers .dat (export_info_out lê result.H_tilted).
+    H_tilted: Optional[np.ndarray] = None
 
     def to_single(self):
         """Desembrulha resultado (nTR=1, nAngles=1) para ``SimulationResult``.
@@ -239,6 +243,9 @@ class MultiSimulationResultBatchedJAX:
     tr_spacings_m: np.ndarray  # (nTR,) float64
     dip_degs: np.ndarray  # (nAngles,) float64
     n_models: int = 0
+    # Sprint v2.45: compat F5 tilted-coil (None no backend JAX) — usado pelos
+    # writers .dat (export_info_out lê result.H_tilted).
+    H_tilted: Optional[np.ndarray] = None
 
     def get_model(self, i_model: int) -> MultiSimulationResultJAX:
         """Extrai resultado de um modelo individual como :class:`MultiSimulationResultJAX`.
@@ -1154,7 +1161,7 @@ def simulate_multi_jax_batched(
                 rho_h_at_obs[i_model, i_ang, i_pos] = rho_h_m[lay]
                 rho_v_at_obs[i_model, i_ang, i_pos] = rho_v_m[lay]
 
-    return MultiSimulationResultBatchedJAX(
+    result = MultiSimulationResultBatchedJAX(
         H_tensor=H_tensor_np,
         z_obs=z_obs,
         rho_h_at_obs=rho_h_at_obs,
@@ -1164,6 +1171,45 @@ def simulate_multi_jax_batched(
         dip_degs=dip_arr,
         n_models=n_models,
     )
+
+    # ── Sprint v2.45 — geração de dataset .dat por modelo (opt-in) ───────────
+    # Quando cfg.export_per_model=True, exporta 1 conjunto de .dat por modelo
+    # do batch via o writer Fortran-compatível (reusa export_multi_tr_dat).
+    # MultiSimulationResultJAX expõe H_tilted=None → compat com export_info_out.
+    if getattr(cfg, "export_per_model", False):
+        _export_batched_models_dat(result, cfg)
+
+    return result
+
+
+def _export_batched_models_dat(result, cfg) -> list:
+    """Exporta 1 conjunto de arquivos .dat por modelo de um batch JAX.
+
+    Itera ``result.get_model(i)`` (view NumPy, sem cópia) e chama
+    :func:`export_multi_tr_dat` por modelo, gerando
+    ``{output_filename}_model{i:06d}[_TR{j}].dat`` em ``cfg.output_dir``.
+
+    Args:
+        result: :class:`MultiSimulationResultBatchedJAX`.
+        cfg: :class:`SimulationConfig` com ``output_dir``/``output_filename``.
+
+    Returns:
+        Lista achatada de ``Path`` dos arquivos .dat criados (todos modelos).
+
+    Note:
+        Reusa o writer 22-col validado (paridade byte-exata vs tatu.x). O
+        ``MultiSimulationResultJAX`` tem ``H_tilted=None`` (compat
+        ``export_info_out``). Caso de uso: dataset sintético para treino.
+    """
+    from geosteering_ai.simulation.io.binary_dat_multi import export_multi_tr_dat
+
+    base = getattr(cfg, "output_filename", "simulation")
+    out_dir = getattr(cfg, "output_dir", ".")
+    paths: list = []
+    for i_model in range(result.n_models):
+        single = result.get_model(i_model)
+        paths.extend(export_multi_tr_dat(single, f"{base}_model{i_model:06d}", out_dir))
+    return paths
 
 
 # ──────────────────────────────────────────────────────────────────────────────
