@@ -219,14 +219,86 @@ def test_generate_batch_grid_covers_thickest_model():
 
 
 @jax_only
-def test_generate_batch_default_geometry_unique():
-    """Default (n_geometries=None) → geometria única por modelo (compat)."""
+def test_generate_batch_default_is_templates():
+    """Sprint A: default geometry_mode='templates' → grupos < n_models (batchável)."""
     from geosteering_ai.config import PipelineConfig
     from geosteering_ai.data.synthetic_generator import SyntheticDataGenerator
 
     gen = SyntheticDataGenerator(PipelineConfig(simulator_backend="jax"))
-    b = gen.generate_batch(n_models=5, n_positions=12, n_layers=3, seed=3)
-    assert b.metadata["n_geometry_groups"] == 5  # cada modelo é único
+    b = gen.generate_batch(n_models=64, n_positions=8, n_layers=4, seed=3)
+    assert b.metadata["geometry_mode"] == "templates"
+    # K = max(1, 64//32) = 2 → 2 geometrias distintas (muito < 64).
+    assert b.metadata["n_geometry_groups"] == 2
+    assert b.metadata["backend"] == "jax"  # batchável → fica no JAX
+
+
+@jax_only
+def test_geometry_mode_quantize_groups():
+    """geometry_mode='quantize' → esp arredondado compartilha → < n_models grupos."""
+    from geosteering_ai.config import PipelineConfig
+    from geosteering_ai.data.synthetic_generator import SyntheticDataGenerator
+
+    gen = SyntheticDataGenerator(PipelineConfig(simulator_backend="jax"))
+    b = gen.generate_batch(
+        n_models=40,
+        n_positions=8,
+        n_layers=4,
+        geometry_mode="quantize",
+        quantize_step=3.0,
+        numba_fallback=False,
+        seed=5,
+    )
+    assert b.metadata["geometry_mode"] == "quantize"
+    assert b.metadata["n_geometry_groups"] < 40  # quantização agrupa
+
+
+@jax_only
+def test_per_model_triggers_numba_fallback():
+    """geometry_mode='per_model' + jax → não-agrupável → fallback automático Numba."""
+    from geosteering_ai.config import PipelineConfig
+    from geosteering_ai.data.synthetic_generator import SyntheticDataGenerator
+
+    gen = SyntheticDataGenerator(PipelineConfig(simulator_backend="jax"))
+    b = gen.generate_batch(
+        n_models=6, n_positions=10, n_layers=4, geometry_mode="per_model", seed=3
+    )
+    assert b.metadata["n_geometry_groups"] == 6  # cada modelo único
+    assert b.metadata["backend"] == "numba"  # caiu p/ Numba (não-agrupável)
+    assert b.metadata["fallback"] is not None
+
+
+@jax_only
+def test_numba_fallback_disabled_stays_jax():
+    """numba_fallback=False força JAX-grouped mesmo degenerado (per_model)."""
+    from geosteering_ai.config import PipelineConfig
+    from geosteering_ai.data.synthetic_generator import SyntheticDataGenerator
+
+    gen = SyntheticDataGenerator(PipelineConfig(simulator_backend="jax"))
+    b = gen.generate_batch(
+        n_models=4,
+        n_positions=8,
+        n_layers=4,
+        geometry_mode="per_model",
+        numba_fallback=False,
+        seed=3,
+    )
+    assert b.metadata["backend"] == "jax"
+    assert b.metadata["fallback"] is None
+
+
+def test_group_by_geometry_helper():
+    """group_by_geometry: partição por esp.tobytes(), ordem 1ª ocorrência, cobertura."""
+    import numpy as np
+
+    from geosteering_ai.simulation import group_by_geometry
+
+    esp = np.array([[5.0, 3.0], [6.0, 2.0], [5.0, 3.0], [7.0, 1.0]])  # A,B,A,C
+    g = group_by_geometry(esp)
+    assert [list(x) for x in g] == [[0, 2], [1], [3]]
+    # esp vazio (n<=2) → 1 grupo trivial
+    assert len(group_by_geometry(np.zeros((3, 0)))) == 1
+    # cobertura sem repetição
+    assert sorted(np.concatenate(g).tolist()) == [0, 1, 2, 3]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -260,3 +332,55 @@ def test_generate_batch_jax_vs_numba_parity():
     # Paridade física do tensor H entre backends (invariante do projeto <1e-10).
     diff = np.abs(b_jax.H_tensor - b_num.H_tensor).max()
     assert diff < 1e-10, f"JAX vs Numba max|Δ|={diff:.2e}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (D4) to_feature_dataset — extração de features compacta (FV/GS)
+# ─────────────────────────────────────────────────────────────────────────────
+def _numba_gen():
+    from geosteering_ai.config import PipelineConfig
+    from geosteering_ai.data.synthetic_generator import SyntheticDataGenerator
+
+    return SyntheticDataGenerator(PipelineConfig(simulator_backend="numba"))
+
+
+def test_to_feature_dataset_raw_compact():
+    """Raw: H_tensor (…,9 complexas) → X=[z,Re/Im Hxx,Re/Im Hzz] (5) + y (2)."""
+    gen = _numba_gen()
+    b = gen.generate_batch(n_models=4, n_positions=12, n_layers=3, seed=1)
+    fd = gen.to_feature_dataset(b)  # apply_transforms=False (default)
+    assert fd.X.shape == (4, 12, 5) and fd.y.shape == (4, 12, 2)
+    assert fd.X.dtype == np.float32
+    assert fd.metadata["feature_view"] == "raw"
+    # col0 = z_obs (positions_z); col1 = Re(Hxx) = H[...,0].real.
+    assert np.allclose(fd.X[0, :, 0], b.positions_z.astype(np.float32))
+    assert np.allclose(
+        fd.X[:, :, 1], b.H_tensor[:, :, 0, 0].real.astype(np.float32), atol=1e-4
+    )
+
+
+def test_to_feature_dataset_transforms_and_gs():
+    """apply_transforms → decouple+FV; geosignal_families → +2 colunas por família."""
+    gen = _numba_gen()
+    b = gen.generate_batch(n_models=3, n_positions=10, n_layers=3, seed=2)
+    fd = gen.to_feature_dataset(b, apply_transforms=True, geosignal_families=["UHR"])
+    assert fd.metadata["decoupled"] is True
+    assert fd.X.shape[-1] == 5 + 2  # 5 base + UHR(att, phase)
+    assert fd.feature_names[-2:] == ["UHR_att", "UHR_phase"]
+
+
+def test_to_feature_dataset_multiconfig_shape():
+    """Multi-config → X (n_models, nTR*nAng*nf, n_pos, n_feat)."""
+    gen = _numba_gen()
+    b = gen.generate_batch(
+        n_models=3,
+        n_positions=8,
+        n_layers=3,
+        frequencies_hz=[2e4, 5e4],
+        dip_degs=[0.0, 30.0],
+        tr_spacings_m=[1.0],
+        seed=2,
+    )
+    fd = gen.to_feature_dataset(b)
+    assert fd.X.shape == (3, 1 * 2 * 2, 8, 5)  # 4 configs
+    assert fd.metadata["n_config"] == 4

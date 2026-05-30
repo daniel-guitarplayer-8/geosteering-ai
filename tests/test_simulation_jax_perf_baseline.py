@@ -240,10 +240,14 @@ _SCENARIOS_GATE = {
     "E": {"n_models": 50, "n_pos": 600, "n_freqs": 1, "n_tr": 1, "n_ang": 1},
     # Sprint v2.45: cobertura multi-dim (path loop-de-configs, 4×4×4=64 cfg).
     "G": {"n_models": 50, "n_pos": 100, "n_freqs": 4, "n_tr": 4, "n_ang": 4},
+    # Sprint A (A-jax-gpu-data-gen): regime de GERAÇÃO DE DATASET high-config
+    # HOMOGÊNEO a n≥32 — 18 cfg (3 freq × 2 TR × 3 dip), 600 pos. É o caminho
+    # bucketed (geometria compartilhada) que o gerador usa (1.87× Numba medido).
+    "DG": {"n_models": 64, "n_pos": 600, "n_freqs": 3, "n_tr": 2, "n_ang": 3},
 }
 
 
-@pytest.mark.parametrize("scenario", ["A", "B", "E", "G"])
+@pytest.mark.parametrize("scenario", ["A", "B", "E", "G", "DG"])
 def test_throughput_gpu_regression_gate(scenario: str) -> None:
     """Gate de regressão: throughput atual ≥ 90% da baseline da GPU em uso.
 
@@ -323,9 +327,9 @@ def test_baseline_file_structure_is_valid() -> None:
     with _BASELINE_PATH.open(encoding="utf-8") as fh:
         data = json.load(fh)
 
-    # Seção × cenários esperados (A6000 gate inclui G multi-dim).
+    # Seção × cenários esperados (A6000 gate inclui G multi-dim + DG data-gen).
     sections = {
-        "jax_gpu_a6000_gate": ("A_hot", "B_hot", "E_hot", "G_hot"),
+        "jax_gpu_a6000_gate": ("A_hot", "B_hot", "E_hot", "G_hot", "DG_hot"),
         "jax_gpu_t4": ("A_hot", "B_hot", "E_hot"),
         "jax_gpu_a100": ("A_hot", "B_hot", "E_hot"),
     }

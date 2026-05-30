@@ -1225,6 +1225,42 @@ def _export_batched_models_dat(result, cfg) -> list:
     return paths
 
 
+def group_by_geometry(esp_batch: np.ndarray) -> "list[np.ndarray]":
+    """Particiona um batch por geometria (``esp``) IDÊNTICA — chave ``esp.tobytes()``.
+
+    Núcleo do caminho batched p/ geologia HETEROGÊNEA (Sprint A): modelos com
+    ``esp`` bit-idêntico podem ir no MESMO ``jax.vmap`` bucketed (pré-condição de
+    geometria compartilhada). Pura NumPy, fora do trace JAX — determinística
+    (ordem de 1ª ocorrência de cada geometria).
+
+    Args:
+        esp_batch: ``(n_models, n-2)`` float64 — espessuras internas por modelo
+            (pode variar). Shape ``(n_models, 0)`` p/ ``n<=2`` → 1 grupo trivial
+            (todos compartilham ``b''``).
+
+    Returns:
+        Lista de arrays de índices (``int64``), um por geometria DISTINTA, na ORDEM
+        de 1ª ocorrência. A concatenação cobre ``[0, n_models)`` sem repetição.
+
+    Example:
+        >>> esp = np.array([[5.0, 3.0], [6.0, 2.0], [5.0, 3.0]])  # A, B, A
+        >>> [list(g) for g in group_by_geometry(esp)]
+        [[0, 2], [1]]
+
+    Note:
+        Igualdade BIT-EXATA (``tobytes``) — coerente com o guard interno do
+        bucketed (``np.allclose(esp, esp[0], atol=0.0, rtol=0.0)`` em
+        :func:`simulate_multi_jax_batched`). Geometrias "quase iguais" NÃO agrupam
+        (correto: ``camad_t``/``camad_r`` divergiriam → buckets distintos).
+        Reusado por :func:`simulate_multi_jax_batched_grouped`.
+    """
+    esp_np = np.asarray(esp_batch, dtype=np.float64)
+    groups: dict = {}
+    for i in range(esp_np.shape[0]):
+        groups.setdefault(esp_np[i].tobytes(), []).append(i)
+    return [np.asarray(idxs, dtype=np.int64) for idxs in groups.values()]
+
+
 def simulate_multi_jax_batched_grouped(
     rho_h_batch,
     rho_v_batch,
@@ -1310,16 +1346,12 @@ def simulate_multi_jax_batched_grouped(
         )
         cfg = dataclasses.replace(cfg, export_per_model=False)
 
-    # ── Particiona por geometria idêntica (chave concreta, fora do trace) ────
-    # dict preserva ordem de inserção (1ª ocorrência de cada esp) — determinístico.
-    groups: dict = {}
-    for i in range(n_models):
-        groups.setdefault(esp_np[i].tobytes(), []).append(i)
+    # ── Particiona por geometria idêntica (helper puro, fora do trace) ───────
+    index_groups = group_by_geometry(esp_np)
 
     # ── Roda cada grupo (esp homogêneo → bucketed rápido) ────────────────────
     H_per_model: list = [None] * n_models
-    for idxs in groups.values():
-        sel = np.asarray(idxs, dtype=np.int64)
+    for sel in index_groups:
         res = simulate_multi_jax_batched(
             rho_h_np[sel],
             rho_v_np[sel],
@@ -1331,14 +1363,14 @@ def simulate_multi_jax_batched_grouped(
             cfg=cfg,
             hankel_filter=hankel_filter,
         )
-        # res.H_tensor: (len(idxs), nTR, nAngles, n_pos, nf, 9) — espalha p/ ordem original.
-        for local_j, global_i in enumerate(idxs):
-            H_per_model[global_i] = res.H_tensor[local_j]
+        # res.H_tensor: (len(sel), nTR, nAngles, n_pos, nf, 9) — espalha p/ ordem original.
+        for local_j, global_i in enumerate(sel):
+            H_per_model[int(global_i)] = res.H_tensor[local_j]
 
     H_tensor = np.stack(H_per_model, axis=0)
     info = {
-        "n_groups": len(groups),
-        "group_sizes": [len(v) for v in groups.values()],
+        "n_groups": len(index_groups),
+        "group_sizes": [int(g.shape[0]) for g in index_groups],
     }
     return H_tensor, info
 
@@ -1788,4 +1820,5 @@ __all__ = [
     "simulate_multi_jax_batched",
     # Geração de dataset: batched p/ geometria heterogênea (agrupa por esp)
     "simulate_multi_jax_batched_grouped",
+    "group_by_geometry",
 ]

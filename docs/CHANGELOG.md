@@ -7,6 +7,42 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.47] — 2026-05-30 — Sprint A: A-jax-gpu-data-gen + agrupamento por geometria
+
+### Resumo
+
+Faz a geração de dataset usar o caminho **batched-bucketed rápido** para datasets
+REAIS (geologia variável), via 3 modos de geometria (templates default, quantize,
+fallback Numba) + helper `group_by_geometry` + extração de features (FV/GS) + gate de
+performance. **Medido: 1.89× Numba** (18 cfg, 600 pos, n=64). Paridade Fortran
+**<1e-13 c128 preservada** (53/53); revisão `/geosteering-code-reviewer` APROVAR.
+
+### Added
+
+- `group_by_geometry(esp_batch)` em `_jax/multi_forward.py` — partição PURA por
+  `esp.tobytes()` → `list[np.ndarray]`. `simulate_multi_jax_batched_grouped`
+  refatorado p/ usá-lo (DRY). Exportado.
+- `generate_batch`: `geometry_mode` ∈ {"templates"(default), "quantize", "per_model"}
+  + `quantize_step` + `numba_fallback` (auto quando geometria mal-agrupável) + warn
+  `n_models<32`. metadata: `geometry_mode`/`n_geometry_groups`/`fallback`.
+- `SyntheticDataGenerator.to_feature_dataset(batch, *, apply_transforms, feature_view,
+  geosignal_families, decouple)` + `FeatureDataset` dataclass — H_tensor (18 floats/pos)
+  → input_features (5) + output_targets (2); opcional decouple→FV→GS (reusa
+  `apply_feature_view`/`compute_geosignals`/`apply_decoupling`). `GeneratedBatch`
+  +`tr_spacings_m`/`dip_degs` (self-describing).
+- Gate de performance `DG` (data-gen high-config homogêneo, n=64, 600 pos, 18 cfg) em
+  `test_simulation_jax_perf_baseline.py` + `DG_hot` (122878 mod/h) em `perf_baseline.json`.
+
+### Notes
+
+- OOM-fix por design: o backend jax do gerador SEMPRE usa o caminho agrupado
+  (bucketed por grupo) — nunca o kernel `unified` (que OOMa 80 GB a 18cfg/600pos).
+- Fecha o backlog `A-jax-gpu-data-gen` (ROADMAP §0); desbloqueia `C-surrogate-train`.
+
+Relatório: `docs/reports/v2.47_sprint_a_datagen_geometry_grouping_2026-05-30.md`.
+
+---
+
 ## [v2.46] — 2026-05-30 — Geração de dataset no caminho batched JAX (agrupamento por geometria)
 
 ### Resumo

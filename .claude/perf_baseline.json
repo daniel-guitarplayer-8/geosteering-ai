@@ -411,6 +411,16 @@
       "n_tr": 4,
       "n_ang": 4,
       "gate_member": true
+    },
+    "DG_hot": {
+      "throughput_mod_h": 122878,
+      "threshold_90pct": 110590,
+      "n_models": 64,
+      "n_pos": 600,
+      "n_freqs": 3,
+      "n_tr": 2,
+      "n_ang": 3,
+      "gate_member": true
     }
   }
 }

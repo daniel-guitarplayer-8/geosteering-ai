@@ -163,6 +163,7 @@ try:
     from geosteering_ai.simulation._jax.multi_forward import (
         MultiSimulationResultBatchedJAX,
         MultiSimulationResultJAX,
+        group_by_geometry,
         simulate_multi_jax,
         simulate_multi_jax_batched,
         simulate_multi_jax_batched_grouped,
@@ -201,6 +202,7 @@ if _HAS_JAX_MULTI:
         "simulate_multi_jax_batched",
         # Geração de dataset: batched p/ geometria heterogênea (agrupa por esp)
         "simulate_multi_jax_batched_grouped",
+        "group_by_geometry",
     ]
 
 # Versão do subpacote. Sobe conforme Sprints concluídas.

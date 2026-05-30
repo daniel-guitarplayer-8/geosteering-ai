@@ -95,6 +95,9 @@ class GeneratedBatch:
         freqs_hz: (nf,) float64 — frequências usadas.
         dat_22col: (n_models·n_pos·nf,) estruturado ``DTYPE_22COL``.
         metadata: dict — tempo total, backend usado, seed.
+        tr_spacings_m: (nTR,) float64 — espaçamentos T-R (self-describing p/
+            extração de features por-config). Default array vazio (compat).
+        dip_degs: (nAng,) float64 — ângulos dip usados. Default array vazio.
     """
 
     H_tensor: np.ndarray
@@ -105,6 +108,8 @@ class GeneratedBatch:
     freqs_hz: np.ndarray
     dat_22col: np.ndarray
     metadata: dict = field(default_factory=dict)
+    tr_spacings_m: np.ndarray = field(default_factory=lambda: np.array([1.0]))
+    dip_degs: np.ndarray = field(default_factory=lambda: np.array([0.0]))
 
     @property
     def n_models(self) -> int:
@@ -113,6 +118,33 @@ class GeneratedBatch:
     @property
     def n_layers(self) -> int:
         return int(self.rho_h.shape[1])
+
+
+@dataclass(frozen=True)
+class FeatureDataset:
+    """Dataset COMPACTO de features extraído de um :class:`GeneratedBatch`.
+
+    Reduz o ``H_tensor`` (9 componentes complexas = 18 floats/posição) a um array
+    enxuto de input features (``input_features``) + targets (``output_targets``),
+    pronto p/ o ``DataPipeline``/treino.
+
+    Attributes:
+        X: ``(n_models, [n_config,] n_pos, n_features)`` float32 — input da rede.
+        y: ``(n_models, [n_config,] n_pos, n_targets)`` float32 — alvos (ρₕ/ρᵥ obs).
+        positions_z: ``(n_pos,)`` float64 — profundidades de medição.
+        feature_names: nomes das colunas de ``X``.
+        metadata: dict — input_features, output_targets, feature_view, GS, etc.
+    """
+
+    X: np.ndarray
+    y: np.ndarray
+    positions_z: np.ndarray
+    feature_names: list
+    metadata: dict = field(default_factory=dict)
+
+    @property
+    def n_models(self) -> int:
+        return int(self.X.shape[0])
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -177,6 +209,9 @@ class SyntheticDataGenerator:
         tr_spacings_m: Optional[Sequence[float]] = None,
         n_geometries: Optional[int] = None,
         jax_chunk_size_models: Optional[int] = None,
+        geometry_mode: Literal["templates", "quantize", "per_model"] = "templates",
+        quantize_step: Optional[float] = None,
+        numba_fallback: bool = True,
     ) -> GeneratedBatch:
         """Gera ``n_models`` modelos sintéticos com tensor H correspondente.
 
@@ -211,6 +246,19 @@ class SyntheticDataGenerator:
                 grupos grandes p/ limitar VRAM (ex.: 32–64). Recomendado quando
                 um grupo de geometria tem muitos modelos (ex.: ``n_geometries=1``
                 + ``n_models`` grande). ``None`` = batch monolítico por grupo.
+            geometry_mode: Como amostrar ``esp`` (reconcilia diversidade × GPU):
+                ``"templates"`` (DEFAULT, Opção A) — K geometrias distintas
+                replicadas (K=``n_geometries`` ou ``max(1, n_models//32)``); grupos
+                grandes batcháveis → bucketed rápido (1.87× Numba). ``"quantize"``
+                (Opção b) — ``esp`` contínuo arredondado a ``quantize_step``; mais
+                diverso, ainda agrupável. ``"per_model"`` — único por modelo (máx
+                diversidade; no JAX dispara ``numba_fallback``).
+            quantize_step: (Só ``geometry_mode="quantize"``) passo de quantização
+                de ``esp`` em metros. ``None`` → ``(thick_max-thick_min)/8``.
+            numba_fallback: Se ``True`` (default) e backend=jax com geometria
+                MAL-AGRUPÁVEL (>50% dos modelos em grupos próprios → JAX degenera),
+                cai para Numba 16w×4t automaticamente (Opção c automática). ``False``
+                força o caminho JAX-grouped mesmo degenerado.
 
         Returns:
             :class:`GeneratedBatch`. ``H_tensor`` tem shape
@@ -223,6 +271,12 @@ class SyntheticDataGenerator:
             Grid ``positions_z`` compartilhado entre modelos (batched exige).
             ``metadata["n_geometry_groups"]`` indica quão batchável era a
             geometria (1 = ótimo; ``n_models`` = sem compartilhamento).
+
+            **OOM-fix por design**: o backend JAX SEMPRE usa
+            :func:`simulate_multi_jax_batched_grouped` (cada grupo é homogêneo →
+            kernel BUCKETED). NUNCA roteia para o kernel ``unified`` (~7× lento +
+            OOM 80 GB a 18cfg/600pos). VRAM controlada por ``jax_chunk_size_models``
+            no eixo de modelos (não precisa de chunk de configs/posições).
         """
         from geosteering_ai.simulation import SimulationConfig, simulate_multi
         from geosteering_ai.simulation.io.binary_dat import DTYPE_22COL
@@ -251,21 +305,48 @@ class SyntheticDataGenerator:
                 rho_v_range[0], rho_v_range[1], size=(n_models, n_layers)
             )
 
-        # ── Amostragem de geometria (esp) — opcionalmente AGRUPÁVEL ──────────
-        # n_geometries=K → K templates replicados (modelos compartilham esp →
-        # destrava o bucketed no JAX). None → único por modelo (comportamento atual).
+        # ── Amostragem de geometria (esp) — modo de batchabilidade ───────────
+        # geometry_mode reconcilia diversidade geológica × velocidade GPU:
+        #   "templates" (DEFAULT, Opção A): K geometrias DISTINTAS replicadas →
+        #       grupos grandes batcháveis (bucketed rápido). K = n_geometries ou
+        #       max(1, n_models//32) (grupos ~32 ≈ crossover de ocupação GPU).
+        #   "quantize" (Opção b): esp contínuo arredondado a quantize_step → muitos
+        #       modelos compartilham esp quantizado → agrupável (mais diverso que
+        #       templates, menos que per_model).
+        #   "per_model": esp único por modelo (máx diversidade; cada modelo = 1
+        #       grupo → no JAX dispara fallback Numba, ver abaixo).
         n_esp = max(0, n_layers - 2)
         if n_esp == 0:
             esp_all = np.zeros((n_models, 0), dtype=np.float64)
-        elif n_geometries is not None:
-            n_geo = max(1, min(int(n_geometries), n_models))
+        elif geometry_mode == "templates":
+            n_geo = n_geometries if n_geometries is not None else max(1, n_models // 32)
+            n_geo = max(1, min(int(n_geo), n_models))
             templates = rng.uniform(
                 thickness_range[0], thickness_range[1], size=(n_geo, n_esp)
             )
             esp_all = templates[np.arange(n_models) % n_geo].copy()
-        else:
+        elif geometry_mode == "quantize":
+            step = (
+                float(quantize_step)
+                if quantize_step is not None
+                else (thickness_range[1] - thickness_range[0]) / 8.0
+            )
+            if step <= 0.0:
+                raise ValueError(f"quantize_step deve ser > 0 (recebido {step}).")
+            raw = rng.uniform(
+                thickness_range[0], thickness_range[1], size=(n_models, n_esp)
+            )
+            esp_all = np.clip(
+                np.round(raw / step) * step, thickness_range[0], thickness_range[1]
+            )
+        elif geometry_mode == "per_model":
             esp_all = rng.uniform(
                 thickness_range[0], thickness_range[1], size=(n_models, n_esp)
+            )
+        else:
+            raise ValueError(
+                f"geometry_mode inválido: {geometry_mode!r}. "
+                "Use 'templates' | 'quantize' | 'per_model'."
             )
 
         # ── Grid compartilhado + configs multi-dim ───────────────────────────
@@ -288,8 +369,33 @@ class SyntheticDataGenerator:
         nf, nTR, nAng = len(freqs), len(trs), len(dips)
         freqs_list = [float(f) for f in freqs]
 
-        # ── SimulationConfig por backend ─────────────────────────────────────
+        # ── Roteamento de backend + fallback Numba automático ────────────────
+        # (c) Fallback Numba: se backend=jax e a geometria é MAL-AGRUPÁVEL
+        # (n_grupos > 50% dos modelos → JAX-grouped degeneraria em ~1 modelo/grupo,
+        # sem ganho de batch), roteia p/ Numba 16w×4t (referência de paridade).
         backend = self.cfg.simulator_backend
+        fallback_reason: Optional[str] = None
+        geometry_n_groups: Optional[int] = None
+        if backend == "jax" and numba_fallback and n_esp > 0:
+            from geosteering_ai.simulation._jax.multi_forward import group_by_geometry
+
+            n_groups = len(group_by_geometry(esp_all))
+            geometry_n_groups = n_groups
+            if n_groups > 0.5 * n_models:
+                fallback_reason = (
+                    f"geometria mal-agrupável (n_grupos={n_groups}/{n_models}) → "
+                    "fallback p/ Numba 16w×4t (JAX-grouped degeneraria em per-model)"
+                )
+                logger.warning("generate_batch: %s", fallback_reason)
+                backend = "numba"
+        if backend == "jax" and n_models < 32:
+            logger.warning(
+                "generate_batch backend=jax com n_models=%d < 32: GPU subocupada "
+                "(crossover de ocupação ~n≥32). Considere n_models≥32 ou Numba.",
+                n_models,
+            )
+
+        # ── SimulationConfig do backend efetivo ──────────────────────────────
         if backend == "numba":
             sim_cfg = SimulationConfig(backend="numba", parallel=True)
         elif backend == "jax":
@@ -398,6 +504,8 @@ class SyntheticDataGenerator:
             positions_z=positions_z,
             freqs_hz=freqs,
             dat_22col=dat,
+            tr_spacings_m=np.asarray(trs, dtype=np.float64),
+            dip_degs=np.asarray(dips, dtype=np.float64),
             metadata={
                 "backend": backend,
                 "jax_mode": (self.cfg.simulator_jax_mode if backend == "jax" else None),
@@ -406,7 +514,160 @@ class SyntheticDataGenerator:
                 "throughput_mod_h": 3600.0 * n_models / elapsed if elapsed > 0 else 0.0,
                 "n_configs": nf * nTR * nAng,
                 "config_shape": {"nf": nf, "nTR": nTR, "nAng": nAng},
-                "n_geometry_groups": geom_info.get("n_groups"),
+                "geometry_mode": geometry_mode,
+                "n_geometry_groups": (
+                    geom_info.get("n_groups")
+                    if geom_info.get("n_groups") is not None
+                    else geometry_n_groups
+                ),
+                "fallback": fallback_reason,
+            },
+        )
+
+    def to_feature_dataset(
+        self,
+        batch: GeneratedBatch,
+        *,
+        apply_transforms: bool = False,
+        feature_view: Optional[str] = None,
+        geosignal_families: Optional[Sequence[str]] = None,
+        decouple: bool = True,
+        dtype: type = np.float32,
+    ) -> FeatureDataset:
+        """Extrai um dataset COMPACTO ``(X, y)`` de um :class:`GeneratedBatch`.
+
+        Compactação: ``H_tensor`` (9 componentes complexas = 18 floats/posição) →
+        ``input_features`` (default 5: ``[z, Re/Im Hxx, Re/Im Hzz]``) + ``output_targets``
+        (2: ρₕ/ρᵥ na profundidade de obs). Reusa as funções VALIDADAS da pipeline
+        (``apply_feature_view``/``compute_geosignals``/``apply_decoupling``).
+
+        Modos:
+          - ``apply_transforms=False`` (DEFAULT): ``X`` = ``input_features`` CRU →
+            alimenta o ``DataPipeline``, que aplica ruído→decouple→FV→GS on-the-fly
+            (caminho FÍSICO correto do treino — ruído é regerado por época).
+          - ``apply_transforms=True``: aplica decouple→FV→GS em CLEAN (dataset
+            "pronto" p/ inspeção/scaler em dados limpos; NÃO substitui o ruído
+            on-the-fly de treino).
+
+        Args:
+            batch: :class:`GeneratedBatch` de :meth:`generate_batch`.
+            apply_transforms: aplica decouple→FV→GS (default ``False`` = cru).
+            feature_view: nome da FV (default ``cfg.feature_view``). Só com transforms.
+            geosignal_families: famílias GS (ex.: ``["USD","UHR"]``). Só com transforms.
+            decouple: subtrai campo direto (ACp/ACx) antes de FV/GS (default ``True``).
+            dtype: dtype de saída (default ``float32`` — compacto p/ treino).
+
+        Returns:
+            :class:`FeatureDataset` com ``X``/``y`` compactos (config achatado se 1).
+
+        Note:
+            Mapa de componentes (``io/binary_dat.py``): Hxx=idx0, Hzz=idx8 no eixo
+            de 9; 22-col col(4+2c)=Re, col(5+2c)=Im. ``input_features``/``output_targets``
+            são índices 22-col (default ``[1,4,5,20,21]`` / ``[2,3]``).
+        """
+        from geosteering_ai.data.feature_views import apply_feature_view
+        from geosteering_ai.data.geosignals import compute_geosignals
+        from geosteering_ai.data.loading import apply_decoupling
+
+        cfg = self.cfg
+        input_features = list(cfg.input_features)
+        output_targets = list(cfg.output_targets)
+        view = feature_view if feature_view is not None else cfg.feature_view
+
+        positions_z = np.asarray(batch.positions_z, dtype=np.float64)
+        n_pos = positions_z.shape[0]
+
+        # ── Normaliza H p/ (n_models, n_config, n_pos, 9) ────────────────────
+        H = batch.H_tensor
+        if H.ndim == 4:  # (n_models, n_pos, nf, 9) — single TR/dip
+            n_models, _, nf, _ = H.shape
+            Hc = np.transpose(H, (0, 2, 1, 3)).reshape(n_models, nf, n_pos, 9)
+        elif H.ndim == 6:  # (n_models, nTR, nAng, n_pos, nf, 9)
+            n_models, nTR, nAng, _, nf, _ = H.shape
+            Hc = np.transpose(H, (0, 1, 2, 4, 3, 5)).reshape(
+                n_models, nTR * nAng * nf, n_pos, 9
+            )
+        else:
+            raise ValueError(f"H_tensor com ndim inesperado: {H.ndim}")
+        n_config = Hc.shape[1]
+
+        # ── ρ nos obs (model,pos) — config-independente (geom igual entre configs) ──
+        n_layers = batch.n_layers
+        rho_h_obs = np.empty((n_models, n_pos), dtype=np.float64)
+        rho_v_obs = np.empty((n_models, n_pos), dtype=np.float64)
+        for m in range(n_models):
+            for p in range(n_pos):
+                li = _find_layer_for_z(float(positions_z[p]), batch.esp[m], n_layers)
+                rho_h_obs[m, p] = batch.rho_h[m, li]
+                rho_v_obs[m, p] = batch.rho_v[m, li]
+
+        # ── Bloco 22-col (n_models, n_config, n_pos, 22) ─────────────────────
+        block = np.zeros((n_models, n_config, n_pos, 22), dtype=np.float64)
+        block[..., 1] = positions_z[None, None, :]
+        block[..., 2] = rho_h_obs[:, None, :]
+        block[..., 3] = rho_v_obs[:, None, :]
+        for c in range(9):
+            block[..., 4 + 2 * c] = Hc[..., c].real
+            block[..., 5 + 2 * c] = Hc[..., c].imag
+
+        # ── (opcional) decouple → FV → GS em CLEAN ───────────────────────────
+        if apply_transforms and decouple:
+            block = apply_decoupling(block.reshape(-1, 22), cfg).reshape(
+                n_models, n_config, n_pos, 22
+            )
+
+        x_base = block[..., input_features]  # (n_models, n_config, n_pos, n_in)
+        y = block[..., output_targets]
+        feature_names = [f"col{c}" for c in input_features]
+
+        if apply_transforms:
+            n_in = x_base.shape[-1]
+            x3 = x_base.reshape(n_models * n_config, n_pos, n_in)
+            h1 = (
+                (input_features.index(4), input_features.index(5))
+                if 4 in input_features and 5 in input_features
+                else None
+            )
+            h2 = (
+                (input_features.index(20), input_features.index(21))
+                if 20 in input_features and 21 in input_features
+                else None
+            )
+            if h1 is not None and h2 is not None:
+                x3 = apply_feature_view(x3, view, h1_cols=h1, h2_cols=h2)
+            x_base = x3.reshape(n_models, n_config, n_pos, x3.shape[-1])
+            if geosignal_families:
+                gs2 = compute_geosignals(
+                    block.reshape(-1, 22), list(geosignal_families), n_columns=22
+                )
+                gs = gs2.reshape(n_models, n_config, n_pos, -1)
+                x_base = np.concatenate([x_base, gs], axis=-1)
+                for fam in geosignal_families:
+                    feature_names += [f"{fam}_att", f"{fam}_phase"]
+
+        # ── Squeeze do eixo de config se single-config ──────────────────────
+        if n_config == 1:
+            x_out, y_out = x_base[:, 0], y[:, 0]
+        else:
+            x_out, y_out = x_base, y
+
+        return FeatureDataset(
+            X=np.asarray(x_out, dtype=dtype),
+            y=np.asarray(y_out, dtype=dtype),
+            positions_z=positions_z,
+            feature_names=feature_names,
+            metadata={
+                "input_features": input_features,
+                "output_targets": output_targets,
+                "feature_view": (view if apply_transforms else "raw"),
+                "geosignal_families": (
+                    list(geosignal_families)
+                    if (apply_transforms and geosignal_families)
+                    else None
+                ),
+                "decoupled": bool(apply_transforms and decouple),
+                "n_config": n_config,
+                "compaction": f"18 floats/pos -> {int(x_out.shape[-1])} features",
             },
         )
 
