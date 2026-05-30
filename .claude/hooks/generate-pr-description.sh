@@ -41,10 +41,17 @@ cd "$PROJECT_DIR"
 # Branch atual
 CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "desconhecida")
 
-# Verificar se base existe
+# Verificar se base existe. Fallback para o ref remoto `origin/<base>` quando
+# o ref local não existe — caso da CI (checkout de PR não cria branch local
+# `main`, só `origin/main` após fetch-depth:0). Um base genuinamente inválido
+# (não-local E não-remoto) ainda falha → preserva o gate de "base inválida".
 if ! git rev-parse --verify "$BASE_BRANCH" >/dev/null 2>&1; then
-    echo "[generate-pr-description] erro: branch base '$BASE_BRANCH' não existe" >&2
-    exit 1
+    if git rev-parse --verify "origin/$BASE_BRANCH" >/dev/null 2>&1; then
+        BASE_BRANCH="origin/$BASE_BRANCH"
+    else
+        echo "[generate-pr-description] erro: branch base '$BASE_BRANCH' não existe" >&2
+        exit 1
+    fi
 fi
 
 # Contagens

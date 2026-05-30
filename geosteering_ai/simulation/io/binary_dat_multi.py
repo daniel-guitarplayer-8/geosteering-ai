@@ -76,6 +76,7 @@ Note:
     Paridade byte-exata validada em 2026-04-14 via `xxd` contra saída
     real de `tatu.x` em modelo trivial (n=3, nTR=2, ntheta=1, nf=1).
 """
+
 from __future__ import annotations
 
 import logging
@@ -174,7 +175,7 @@ def export_multi_tr_dat(
     H = result.H_tensor
     if H.ndim != 5:
         raise ValueError(
-            f"H_tensor.ndim={H.ndim}; esperado 5 " f"(nTR, nAngles, n_pos, nf, 9)."
+            f"H_tensor.ndim={H.ndim}; esperado 5 (nTR, nAngles, n_pos, nf, 9)."
         )
     nTR, nAngles, n_pos, nf, ncomp = H.shape
     if ncomp != 9:
@@ -276,8 +277,11 @@ def export_info_out(
 
     _, nAngles, n_pos, nf, _ = result.H_tensor.shape
     nmaxmodel = 1  # simulate_multi gera 1 modelo geológico por chamada
-    # Paridade Fortran F7 flags: use_tilted, n_tilted
-    n_tilted = int(result.H_tilted.shape[0]) if result.H_tilted is not None else 0
+    # Paridade Fortran F7 flags: use_tilted, n_tilted.
+    # Sprint v2.45: `getattr` defensivo — o resultado JAX (MultiSimulationResultJAX)
+    # também expõe H_tilted=None, mas o getattr protege qualquer result sem o campo.
+    _h_tilted = getattr(result, "H_tilted", None)
+    n_tilted = int(_h_tilted.shape[0]) if _h_tilted is not None else 0
     use_tilted = 1 if n_tilted > 0 else 0
 
     lines: List[str] = []

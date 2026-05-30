@@ -363,5 +363,54 @@
       "jax_batched_modh": 31402,
       "batched_vs_numba": 0.889
     }
+  },
+  "jax_gpu_a6000_gate": {
+    "_meta": {
+      "version": "v2.45",
+      "status": "GATE OFICIAL (regressão throughput JAX GPU, A6000 local)",
+      "hardware": "NVIDIA RTX A6000 48 GB",
+      "method": "_measure_throughput_mod_h (simulate_multi_jax_batched, n_models=50, oklahoma_3-like 3 camadas, synthetic freqs, mediana de 3 runs hot)",
+      "notes": "Gate de REGRESSÃO (JAX throughput não pode cair). NÃO é o bench Numba-vs-JAX (esse é jax_gpu_a6000_v244). Medido 2026-05-29 no A6000 local."
+    },
+    "A_hot": {
+      "throughput_mod_h": 60562485,
+      "threshold_90pct": 54506236,
+      "n_models": 50,
+      "n_pos": 1,
+      "n_freqs": 1,
+      "n_tr": 1,
+      "n_ang": 1,
+      "gate_member": true
+    },
+    "B_hot": {
+      "throughput_mod_h": 8044672,
+      "threshold_90pct": 7240204,
+      "n_models": 50,
+      "n_pos": 100,
+      "n_freqs": 1,
+      "n_tr": 1,
+      "n_ang": 1,
+      "gate_member": true
+    },
+    "E_hot": {
+      "throughput_mod_h": 1690919,
+      "threshold_90pct": 1521827,
+      "n_models": 50,
+      "n_pos": 600,
+      "n_freqs": 1,
+      "n_tr": 1,
+      "n_ang": 1,
+      "gate_member": true
+    },
+    "G_hot": {
+      "throughput_mod_h": 104292,
+      "threshold_90pct": 93862,
+      "n_models": 50,
+      "n_pos": 100,
+      "n_freqs": 4,
+      "n_tr": 4,
+      "n_ang": 4,
+      "gate_member": true
+    }
   }
 }
