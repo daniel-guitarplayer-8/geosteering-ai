@@ -54,6 +54,12 @@ production_flags_gfortran  = -J$(build) -std=f2008 -pedantic -Wall -Wextra -Wimp
 # debug_O0 revela um problema matemático real (não artefato do compilador).
 debug_O0_flags_gfortran = -J$(build) -std=f2008 -pedantic -Wall -Wextra -Wimplicit-interface -fPIC \
 	-fmax-errors=1 -O0 -g -fno-fast-math -fsignaling-nans -fall-intrinsics
+# Portável (CI): igual a production mas SEM -march=native. Em Zen4 (Threadripper)
+# -march=native emite AVX-512; o runner GitHub (sem AVX-512) executa o binário e
+# dispara SIGILL "Illegal instruction". x86-64-v2 (SSE4.2) é baseline seguro e
+# amplamente compatível, preservando -O3 -ffast-math (paridade Fortran <1e-12).
+portable_flags_gfortran = -J$(build) -std=f2008 -pedantic -Wall -Wextra -Wimplicit-interface -fPIC \
+	-fmax-errors=1 -O3 -march=x86-64-v2 -ffast-math -funroll-loops -fall-intrinsics
 
 # Para o ifort:
 # development_flags_ifort = -fPIC -fmax-errors=1 -g
@@ -100,6 +106,12 @@ all: $(binary) run_python
 debug_O0:
 	$(MAKE) clean
 	$(MAKE) flags="$(debug_O0_flags_gfortran)" $(binary)
+
+# Build PORTÁVEL para CI (sem -march=native → evita SIGILL em runners sem
+# AVX-512). Uso: make clean && make portable  (ou make -C Fortran_Gerador portable)
+portable:
+	$(MAKE) clean
+	$(MAKE) flags="$(portable_flags_gfortran)" $(binary)
 
 clean:
 	rm -rf $(build)

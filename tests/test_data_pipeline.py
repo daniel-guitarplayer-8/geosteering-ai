@@ -819,13 +819,23 @@ class TestBuildTfDatasetV240:
         n, seq, feat, targets = 16, 10, 5, 2
         x = np.random.default_rng(42).normal(size=(n, seq, feat)).astype(np.float32)
         y = np.random.default_rng(43).normal(size=(n, seq, targets)).astype(np.float32)
+        # z_obs (profundidades) é campo OBRIGATÓRIO do PreparedData — shape
+        # (n_samples, seq_len) (ndim==2). Sem ele o construtor levanta TypeError.
+        z = (
+            np.random.default_rng(44)
+            .uniform(0.0, 150.0, size=(n, seq))
+            .astype(np.float32)
+        )
         prepared = PreparedData(
             x_train=x,
             y_train=y,
+            z_train=z,
             x_val=x[:4],
             y_val=y[:4],
+            z_val=z[:4],
             x_test=x[:4],
             y_test=y[:4],
+            z_test=z[:4],
         )
         return pipeline, prepared, tf
 
