@@ -1,0 +1,3 @@
+scenario,backend,regime,strategy,dtype,n_pos,n_iters,wall_s,mod_per_h
+H,numba,single,16w4t,complex128,600,2,2.091707,3.442165e+03
+H,jax_batched,batched,bucketed_k8_x16,complex128,600,2,304.917686,3.778069e+02

@@ -157,3 +157,45 @@ def test_export_per_model_default_off(tmp_path):
         cfg=SimulationConfig(backend="jax", output_dir=str(tmp_path)),
     )
     assert [p for p in os.listdir(tmp_path) if p.endswith(".dat")] == []
+
+
+def test_export_per_model_tilted_warns(tmp_path, caplog):
+    """Guard anti-pegadinha (revisão adversarial v2.45): export_per_model +
+    use_tilted_antennas no backend JAX batched (que não suporta F7) AVISA que o
+    dataset não conterá projeção inclinada — mas ainda exporta os .dat padrão.
+    """
+    import logging
+
+    n_models, n_pos = 2, 12
+    rho_h, rho_v, esp = _shared_geom_batch(n_models, seed=3)
+    cfg = SimulationConfig(
+        backend="jax",
+        jax_strategy="bucketed",
+        export_per_model=True,
+        use_tilted_antennas=True,
+        tilted_configs=((45.0, 0.0),),
+        output_dir=str(tmp_path),
+        output_filename="tilted_ds",
+    )
+    with caplog.at_level(
+        logging.WARNING, logger="geosteering_ai.simulation._jax.multi_forward"
+    ):
+        simulate_multi_jax_batched(
+            rho_h,
+            rho_v,
+            esp,
+            np.linspace(-5, 5, n_pos),
+            frequencies_hz=[20000.0],
+            tr_spacings_m=[1.0],
+            dip_degs=[0.0],
+            cfg=cfg,
+        )
+
+    # (1) o aviso foi emitido (não silencioso).
+    assert any(
+        "use_tilted_antennas" in r.message and r.levelno == logging.WARNING
+        for r in caplog.records
+    ), "esperado WARNING sobre tilted não-suportado no batched JAX"
+    # (2) ainda exporta os .dat padrão (graceful, sem crash).
+    dats = [p for p in os.listdir(tmp_path) if p.endswith(".dat")]
+    assert len(dats) == n_models

@@ -7,6 +7,52 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.45] — 2026-05-29 — Follow-ups pós-O4: CI verde, perf-gate A6000, dataset .dat, benchmarks
+
+### Resumo
+
+Sprint de consolidação com 6 follow-ups sobre o simulador EM 1D (Numba + JAX).
+**CI 100% verde** (18 falhas pré-existentes → 0; issue #44 fechada), **gate de
+regressão de performance local A6000** (substitui T4 deprecado), **geração de
+dataset `.dat` no fluxo batched JAX** e **caracterização experimental do crossover
+Numba×JAX** por nº de configs e batch-size (A6000, 600 n_pos). Paridade Fortran
+**<1e-13 c128 preservada** (margem CI 2.95e-14). Revisão multi-agente: zero
+regressão, zero quebra de paridade/fidelidade.
+
+### Added
+
+- `SimulationConfig.export_per_model` — `simulate_multi_jax_batched` exporta 1
+  conjunto de `.dat` (22-col Fortran) por modelo do batch (dataset sintético p/ treino),
+  reusando o writer validado `export_multi_tr_dat`.
+- Campo `H_tilted: Optional[np.ndarray]=None` em `MultiSimulationResultJAX` e
+  `MultiSimulationResultBatchedJAX` (compat `export_info_out`).
+- Gate de regressão JAX GPU local — `jax_gpu_a6000_gate` em `perf_baseline.json`
+  (A/B/E/G, n_models=50, thresholds 90%); detecção A6000/RTX em `test_simulation_jax_perf_baseline.py`.
+- Flag `--n-pos-all` no bench (`bench_numba_vs_jax_gpu.py`); alvo `portable`
+  (`-march=x86-64-v2`) no Makefile Fortran.
+- Guard de aviso: `export_per_model + use_tilted_antennas` no batched JAX (F7 não
+  suportado → dataset sem projeção inclinada) — `logger.warning` + teste.
+
+### Fixed
+
+- **CI verde (issue #44)**: 12 testes paridade Fortran SIGILL (`tatu.x` portável no
+  runner); 4 testes TF (fixture `PreparedData` sem `z_*`); warmup threshold (5s);
+  hook PR-desc resiliente a `origin/<base>` + `fetch-depth: 0`.
+
+### Decided (sem mudança de código)
+
+- **Item 2 — vmap real sobre grid de configs**: benchmarkado → **regressão 0.60–0.74×**
+  (força kernel unified ~6.9× mais lento). `jax_vmap_real=False` mantido como default.
+
+### Deprecated
+
+- Baselines Colab `jax_gpu_t4` / `jax_gpu_a100` (`_meta.deprecated=true`) — dev GPU
+  agora local A6000.
+
+Relatório: `docs/reports/v2.45_sprint_followups_2026-05-29.md`.
+
+---
+
 ## [v2.44] — 2026-05-29 — Sprint O4: Batched-Bucketed JAX GPU
 
 ### Resumo

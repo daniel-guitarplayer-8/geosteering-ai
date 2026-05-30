@@ -1177,6 +1177,19 @@ def simulate_multi_jax_batched(
     # do batch via o writer Fortran-compatível (reusa export_multi_tr_dat).
     # MultiSimulationResultJAX expõe H_tilted=None → compat com export_info_out.
     if getattr(cfg, "export_per_model", False):
+        # Guarda anti-pegadinha (Sprint v2.45, revisão adversarial): o backend
+        # JAX batched NÃO implementa antenas inclinadas (F7) — H_tilted é sempre
+        # None. Se o usuário pediu use_tilted_antennas=True, o dataset exportado
+        # NÃO conterá a projeção inclinada (silenciosamente). Avisa em vez de
+        # gerar um dataset "tilted" sem dados tilted. Use o backend Numba para F7.
+        if getattr(cfg, "use_tilted_antennas", False):
+            logger.warning(
+                "export_per_model=True com use_tilted_antennas=True no backend "
+                "JAX batched: o caminho batched não suporta antenas inclinadas "
+                "(F7) — os .dat exportados conterão APENAS as componentes "
+                "padrão (H_tilted ausente). Use o backend Numba para datasets "
+                "com projeção inclinada."
+            )
         _export_batched_models_dat(result, cfg)
 
     return result
