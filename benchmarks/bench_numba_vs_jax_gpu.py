@@ -371,6 +371,16 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--n-e", type=int, default=50, help="n_pos para cenário E")
     parser.add_argument("--n-h", type=int, default=10, help="n_pos para cenário H")
     parser.add_argument(
+        "--n-pos-all",
+        type=int,
+        default=None,
+        help=(
+            "Sprint v2.45: força o mesmo n_pos em TODOS os cenários (sobrepõe "
+            "canônico + --n-a/-e/-h). Ex.: --n-pos-all 600 (workload realista "
+            "uniforme). H a 600×512cfg é muito pesado."
+        ),
+    )
+    parser.add_argument(
         "--n-iters", type=int, default=5, help="Iterações por bench (default 5)"
     )
     parser.add_argument(
@@ -469,6 +479,10 @@ def main(argv: List[str] | None = None) -> int:
     # n_pos: canônico por cenário (B/C/D/F/G); A/E/H sobrescritos via flags.
     n_map = dict(_SCENARIO_NPOS_DEFAULT)
     n_map["A"], n_map["E"], n_map["H"] = args.n_a, args.n_e, args.n_h
+    # Sprint v2.45: --n-pos-all sobrepõe n_pos de TODOS os cenários (workload
+    # uniforme realista, e.g. 600). Tem precedência sobre canônico + --n-a/-e/-h.
+    if args.n_pos_all is not None:
+        n_map = {scen: args.n_pos_all for scen in n_map}
     for scen in scenarios:
         if scen not in _SCENARIO_BUILDERS:
             print(f"[bench-O2] cenário {scen!r} desconhecido, pulando.")
