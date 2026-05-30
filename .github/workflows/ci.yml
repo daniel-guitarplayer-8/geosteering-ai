@@ -15,6 +15,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        # Sprint v2.45: fetch-depth 0 traz todo o histórico + refs remotos
+        # (origin/main). O test_pr_description_hook usa `git log main..HEAD`;
+        # o checkout raso (depth=1) de PR não tem `main` → o hook agora cai
+        # para `origin/main` (presente só com fetch-depth: 0).
+        with:
+          fetch-depth: 0
 
       - name: Setup Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
