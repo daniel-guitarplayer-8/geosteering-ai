@@ -1225,6 +1225,124 @@ def _export_batched_models_dat(result, cfg) -> list:
     return paths
 
 
+def simulate_multi_jax_batched_grouped(
+    rho_h_batch,
+    rho_v_batch,
+    esp_batch,
+    positions_z,
+    *,
+    frequencies_hz: Optional[Sequence[float]] = None,
+    tr_spacings_m: Optional[Sequence[float]] = None,
+    dip_degs: Optional[Sequence[float]] = None,
+    cfg=None,
+    hankel_filter: str = "werthmuller_201pt",
+) -> Tuple[np.ndarray, dict]:
+    """Forward batched para geometria HETEROGÊNEA via AGRUPAMENTO por ``esp``.
+
+    Resolve a lacuna medida do caminho batched: quando os modelos do batch têm
+    ``esp`` (espessuras de camada) DISTINTOS, a pré-condição do kernel rápido
+    ``bucketed`` falha e :func:`simulate_multi_jax_batched` cai no kernel
+    ``unified`` — **~7× mais lento e propenso a OOM** (medido: 0.14× Numba,
+    80 GB a 18 cfg/600 pos; ver
+    ``docs/reports/v2.45_investigacao_jax_highconfig_dispatch_fusion_2026-05-30.md``).
+
+    Estratégia (toda a partição é NumPy CONCRETO, fora do trace):
+
+      ┌────────────────────────────────────────────────────────────────────┐
+      │  esp_batch (n_models, n-2) heterogêneo                              │
+      │     ↓  agrupa índices por  esp[i].tobytes()  (geometria idêntica)   │
+      │  grupos: {esp_A: [0,3,7], esp_B: [1,2], ...}                        │
+      │     ↓  por grupo → simulate_multi_jax_batched (geom HOMOGÊNEA)      │
+      │        → kernel BUCKETED rápido (1.5–1.9× Numba a n≥32)            │
+      │     ↓  reassembla H na ORDEM ORIGINAL de modelos                    │
+      └────────────────────────────────────────────────────────────────────┘
+
+    Modelos que compartilham geometria entram no MESMO ``jax.vmap`` (ocupação
+    da GPU). O ganho depende da cardinalidade de grupos: se todos compartilham
+    ``esp`` → 1 chamada bucketed (ótimo); se cada modelo é único → degenera em
+    ``n_models`` chamadas (sem ganho de batch, mas SEM o unified/OOM). Para
+    máxima performance, gere o batch com poucas geometrias distintas (amostre
+    ``esp`` por templates / quantizado).
+
+    Args:
+        rho_h_batch: ``(n_models, n)`` float64 — resistividades horizontais (Ω·m).
+        rho_v_batch: ``(n_models, n)`` float64 — resistividades verticais (Ω·m).
+        esp_batch: ``(n_models, n-2)`` float64 — espessuras internas (m). PODE
+            variar entre modelos (este é o ponto: agrupa as iguais).
+        positions_z: ``(n_pos,)`` float64 — profundidades TVD compartilhadas (m).
+        frequencies_hz: lista de frequências (Hz). Default: ``cfg`` / ``[20000]``.
+        tr_spacings_m: lista de espaçamentos T-R (m). Default: ``cfg`` / ``[1.0]``.
+        dip_degs: lista de ângulos dip (°). Default: ``[0.0]``.
+        cfg: :class:`SimulationConfig` p/ defaults + ``jax_strategy``/``dtype``/
+            ``jax_chunk_size_models``. Use ``jax_strategy="bucketed"`` (default).
+        hankel_filter: nome do filtro Hankel.
+
+    Returns:
+        Tupla ``(H_tensor, info)``:
+          - ``H_tensor``: ``np.ndarray`` ``(n_models, nTR, nAngles, n_pos, nf, 9)``
+            complex — na ORDEM ORIGINAL dos modelos.
+          - ``info``: ``dict`` com ``n_groups``, ``group_sizes`` (diagnóstico de
+            quão batchável era a geometria).
+
+    Note:
+        Paridade <1e-13 c128 PRESERVADA por construção: cada grupo é uma chamada
+        :func:`simulate_multi_jax_batched` (mesmo kernel ``_get_bucket_jit``,
+        já parity-tested); a reassembly é só reordenação de índices.
+        See Also: :func:`simulate_multi_jax_batched` (caminho homogêneo direto).
+    """
+    rho_h_np = np.asarray(rho_h_batch, dtype=np.float64)
+    rho_v_np = np.asarray(rho_v_batch, dtype=np.float64)
+    esp_np = np.asarray(esp_batch, dtype=np.float64)
+    n_models = rho_h_np.shape[0]
+    if n_models < 1:
+        raise ValueError("simulate_multi_jax_batched_grouped: batch vazio.")
+
+    # Defesa (revisão v2.45): export_per_model por GRUPO usaria índices de modelo
+    # LOCAIS ao grupo → colisão de nomes `_model000000.dat` entre grupos. Desabilita
+    # no caminho agrupado (o export deve ser feito pelo chamador c/ índices globais).
+    if cfg is not None and getattr(cfg, "export_per_model", False):
+        import dataclasses
+
+        logger.warning(
+            "simulate_multi_jax_batched_grouped: export_per_model=True ignorado no "
+            "caminho agrupado (evita colisão de nomes .dat entre grupos). Exporte "
+            "via o chamador com índices globais de modelo."
+        )
+        cfg = dataclasses.replace(cfg, export_per_model=False)
+
+    # ── Particiona por geometria idêntica (chave concreta, fora do trace) ────
+    # dict preserva ordem de inserção (1ª ocorrência de cada esp) — determinístico.
+    groups: dict = {}
+    for i in range(n_models):
+        groups.setdefault(esp_np[i].tobytes(), []).append(i)
+
+    # ── Roda cada grupo (esp homogêneo → bucketed rápido) ────────────────────
+    H_per_model: list = [None] * n_models
+    for idxs in groups.values():
+        sel = np.asarray(idxs, dtype=np.int64)
+        res = simulate_multi_jax_batched(
+            rho_h_np[sel],
+            rho_v_np[sel],
+            esp_np[sel],
+            positions_z,
+            frequencies_hz=frequencies_hz,
+            tr_spacings_m=tr_spacings_m,
+            dip_degs=dip_degs,
+            cfg=cfg,
+            hankel_filter=hankel_filter,
+        )
+        # res.H_tensor: (len(idxs), nTR, nAngles, n_pos, nf, 9) — espalha p/ ordem original.
+        for local_j, global_i in enumerate(idxs):
+            H_per_model[global_i] = res.H_tensor[local_j]
+
+    H_tensor = np.stack(H_per_model, axis=0)
+    info = {
+        "n_groups": len(groups),
+        "group_sizes": [len(v) for v in groups.values()],
+    }
+    return H_tensor, info
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Sprint O4 (v2.44) — Helpers de montagem do H_tensor batched por estratégia
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1668,4 +1786,6 @@ __all__ = [
     # Sprint A1.5 (v2.42): batched API sobre eixo n_models
     "MultiSimulationResultBatchedJAX",
     "simulate_multi_jax_batched",
+    # Geração de dataset: batched p/ geometria heterogênea (agrupa por esp)
+    "simulate_multi_jax_batched_grouped",
 ]

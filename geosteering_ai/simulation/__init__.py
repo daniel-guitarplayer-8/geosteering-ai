@@ -165,6 +165,7 @@ try:
         MultiSimulationResultJAX,
         simulate_multi_jax,
         simulate_multi_jax_batched,
+        simulate_multi_jax_batched_grouped,
     )
 
     _HAS_JAX_MULTI = True
@@ -198,6 +199,8 @@ if _HAS_JAX_MULTI:
         # Sprint A1.5 (v2.42): batched API sobre eixo n_models
         "MultiSimulationResultBatchedJAX",
         "simulate_multi_jax_batched",
+        # Geração de dataset: batched p/ geometria heterogênea (agrupa por esp)
+        "simulate_multi_jax_batched_grouped",
     ]
 
 # Versão do subpacote. Sobe conforme Sprints concluídas.

@@ -7,6 +7,44 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.46] — 2026-05-30 — Geração de dataset no caminho batched JAX (agrupamento por geometria)
+
+### Resumo
+
+Fecha a lacuna estrutural do caminho de treino (backlog `A-jax-gpu-data-gen`): o
+`SyntheticDataGenerator.generate_batch` fazia loop por-modelo, ignorava o caminho
+batched e gerava geometria heterogênea (que cairia no kernel *unified* ~7× lento +
+OOM). Agora usa o backend batched + **agrupamento por geometria**, com multi-config e
+controle de VRAM. Paridade Fortran **<1e-13 c128 preservada**; cross-backend JAX vs
+Numba **<1e-10**.
+
+### Added
+
+- `simulate_multi_jax_batched_grouped(rho_h, rho_v, esp, positions_z, *, frequencies_hz,
+  tr_spacings_m, dip_degs, cfg)` em `_jax/multi_forward.py` — particiona o batch por
+  `esp` idêntico → `simulate_multi_jax_batched` (bucketed) por grupo → reassembla na
+  ordem original. Retorna `(H_tensor (n_models,nTR,nAng,n_pos,nf,9), info)`. Exportado.
+- `SyntheticDataGenerator.generate_batch`: params `frequencies_hz`/`dip_degs`/
+  `tr_spacings_m` (multi-config), `n_geometries` (geometrias batcháveis, round-robin),
+  `jax_chunk_size_models` (VRAM). `metadata["n_geometry_groups"]` (diagnóstico).
+- `tests/test_synthetic_generator_batched.py` — 10 testes (grouping bit-exato <1e-13,
+  multi-config shape, n_geometries=K→K grupos, chunk, grid-max, JAX vs Numba <1e-10).
+
+### Changed
+
+- `generate_batch`: backend `jax` → grouped batched; `numba` → `simulate_multi` por
+  modelo. Shape retrocompatível `(n_models,n_pos,nf,9)` em single-config; grid
+  `positions_z` cobre o modelo mais espesso do batch.
+
+### Fixed
+
+- Path JAX antigo do gerador era inoperante (`SimulationConfig(use_native_dipoles=...)`
+  — kwarg inexistente → TypeError); agora roda e é validado <1e-10 vs Numba.
+
+Relatório: `docs/reports/v2.46_jax_datagen_batched_grouped_2026-05-30.md`.
+
+---
+
 ## [v2.45] — 2026-05-29 — Follow-ups pós-O4: CI verde, perf-gate A6000, dataset .dat, benchmarks
 
 ### Resumo

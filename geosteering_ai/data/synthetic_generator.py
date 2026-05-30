@@ -62,12 +62,13 @@ Note:
     replicam o comportamento de ``fifthBuildTIVModels.py``, mas em Python
     puro. Seed é deterministicamente propagada.
 """
+
 from __future__ import annotations
 
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal, Optional, Sequence
 
 import numpy as np
 
@@ -171,8 +172,20 @@ class SyntheticDataGenerator:
         thickness_range: tuple[float, float] = (1.0, 10.0),
         strategy: Literal["uniform", "log_uniform"] = "log_uniform",
         seed: int = 42,
+        frequencies_hz: Optional[Sequence[float]] = None,
+        dip_degs: Optional[Sequence[float]] = None,
+        tr_spacings_m: Optional[Sequence[float]] = None,
+        n_geometries: Optional[int] = None,
+        jax_chunk_size_models: Optional[int] = None,
     ) -> GeneratedBatch:
         """Gera ``n_models`` modelos sintéticos com tensor H correspondente.
+
+        Backend ``jax`` usa o caminho BATCHED + agrupado
+        (:func:`simulate_multi_jax_batched_grouped` — vmap sobre modelos +
+        agrupamento por geometria, 1.5–1.9× Numba a n≥32 quando há geometria
+        compartilhada). Backend ``numba`` itera por modelo via
+        :func:`simulate_multi` (paralelização interna por prange — ótimo p/ CPU).
+        Ambos suportam multi-config (frequência × dip × TR).
 
         Args:
             n_models: Número de modelos a gerar.
@@ -184,21 +197,39 @@ class SyntheticDataGenerator:
             strategy: Distribuição de amostragem. ``"log_uniform"`` (default)
                 é mais fiel ao comportamento físico em subsuperfície.
             seed: Semente para reprodutibilidade.
+            frequencies_hz: Lista de frequências (Hz). Default ``[cfg.frequency_hz]``.
+            dip_degs: Lista de ângulos dip (°). Default ``[0.0]``.
+            tr_spacings_m: Lista de espaçamentos T-R (m). Default
+                ``[cfg.spacing_meters]``.
+            n_geometries: Se definido (≤ ``n_models``), amostra K geometrias
+                (``esp``) DISTINTAS e as replica entre os modelos (round-robin),
+                fazendo modelos COMPARTILHAREM geometria → ativa o caminho
+                bucketed rápido no backend JAX. ``None`` (default) = geometria
+                única por modelo (cada modelo é um grupo → correto, mas sem
+                ganho de batch; ainda evita o kernel unified/OOM via agrupamento).
+            jax_chunk_size_models: (Só backend JAX) fatia o eixo de modelos em
+                grupos grandes p/ limitar VRAM (ex.: 32–64). Recomendado quando
+                um grupo de geometria tem muitos modelos (ex.: ``n_geometries=1``
+                + ``n_models`` grande). ``None`` = batch monolítico por grupo.
 
         Returns:
-            :class:`GeneratedBatch` com tensor H e metadados.
+            :class:`GeneratedBatch`. ``H_tensor`` tem shape
+            ``(n_models, n_pos, nf, 9)`` quando ``nTR==nAng==1`` (compat
+            retroativa), ou ``(n_models, nTR, nAng, n_pos, nf, 9)`` em
+            multi-config. ``dat_22col`` cobre a config de referência
+            (TR₀, dip₀, freq₀).
 
         Note:
-            Todos os modelos usam o mesmo grid ``positions_z`` uniforme
-            entre 0 m e ``(n_layers-1) * thickness_mean`` m.
-            Frequência única lida de ``cfg.frequency_hz``.
+            Grid ``positions_z`` compartilhado entre modelos (batched exige).
+            ``metadata["n_geometry_groups"]`` indica quão batchável era a
+            geometria (1 = ótimo; ``n_models`` = sem compartilhamento).
         """
-        from geosteering_ai.simulation import SimulationConfig, simulate
+        from geosteering_ai.simulation import SimulationConfig, simulate_multi
         from geosteering_ai.simulation.io.binary_dat import DTYPE_22COL
 
         rng = np.random.default_rng(seed)
 
-        # Amostragem
+        # ── Amostragem de resistividades (ρₕ, ρᵥ) ────────────────────────────
         if strategy == "log_uniform":
             log_h = rng.uniform(
                 np.log10(rho_h_range[0]),
@@ -219,66 +250,121 @@ class SyntheticDataGenerator:
             rho_v_all = rng.uniform(
                 rho_v_range[0], rho_v_range[1], size=(n_models, n_layers)
             )
-        if n_layers >= 3:
-            esp_all = rng.uniform(
-                thickness_range[0], thickness_range[1], size=(n_models, n_layers - 2)
-            )
-        else:
-            esp_all = np.zeros((n_models, 0), dtype=np.float64)
 
-        # Grid comum
+        # ── Amostragem de geometria (esp) — opcionalmente AGRUPÁVEL ──────────
+        # n_geometries=K → K templates replicados (modelos compartilham esp →
+        # destrava o bucketed no JAX). None → único por modelo (comportamento atual).
+        n_esp = max(0, n_layers - 2)
+        if n_esp == 0:
+            esp_all = np.zeros((n_models, 0), dtype=np.float64)
+        elif n_geometries is not None:
+            n_geo = max(1, min(int(n_geometries), n_models))
+            templates = rng.uniform(
+                thickness_range[0], thickness_range[1], size=(n_geo, n_esp)
+            )
+            esp_all = templates[np.arange(n_models) % n_geo].copy()
+        else:
+            esp_all = rng.uniform(
+                thickness_range[0], thickness_range[1], size=(n_models, n_esp)
+            )
+
+        # ── Grid compartilhado + configs multi-dim ───────────────────────────
+        # Grid cobre o modelo MAIS ESPESSO do batch (não só o modelo 0) — com
+        # geometria heterogênea/round-robin outros modelos podem ser mais espessos.
         total_thick = (
-            float(esp_all[0].sum())
+            float(esp_all.sum(axis=1).max())
             if esp_all.shape[1] > 0
-            else float((thickness_range[0] + thickness_range[1]) / 2)
+            else (thickness_range[0] + thickness_range[1]) / 2.0
         )
         positions_z = np.linspace(-1.0, total_thick + 1.0, n_positions)
-        freqs = np.array([self.cfg.frequency_hz], dtype=np.float64)
+        freqs = np.asarray(
+            frequencies_hz if frequencies_hz is not None else [self.cfg.frequency_hz],
+            dtype=np.float64,
+        )
+        trs = list(
+            tr_spacings_m if tr_spacings_m is not None else [self.cfg.spacing_meters]
+        )
+        dips = list(dip_degs if dip_degs is not None else [0.0])
+        nf, nTR, nAng = len(freqs), len(trs), len(dips)
+        freqs_list = [float(f) for f in freqs]
 
-        # Backend selection
-        if self.cfg.simulator_backend == "numba":
+        # ── SimulationConfig por backend ─────────────────────────────────────
+        backend = self.cfg.simulator_backend
+        if backend == "numba":
+            sim_cfg = SimulationConfig(backend="numba", parallel=True)
+        elif backend == "jax":
             sim_cfg = SimulationConfig(
-                frequency_hz=self.cfg.frequency_hz,
-                tr_spacing_m=self.cfg.spacing_meters,
-                backend="numba",
-                parallel=True,
-            )
-        elif self.cfg.simulator_backend == "jax":
-            use_native = self.cfg.simulator_jax_mode == "native"
-            sim_cfg = SimulationConfig(
-                frequency_hz=self.cfg.frequency_hz,
-                tr_spacing_m=self.cfg.spacing_meters,
                 backend="jax",
-                use_native_dipoles=use_native,
+                jax_strategy="bucketed",
+                dtype="complex128",
+                jax_chunk_size_models=jax_chunk_size_models,
             )
         else:
-            raise ValueError(f"Backend inesperado: {self.cfg.simulator_backend}")
+            raise ValueError(f"Backend inesperado: {backend}")
 
-        # Loop por modelo (prange via backend; paralelização interna)
+        # Aviso anti-pegadinha: em multi-config, o .dat 22-col cobre só a config
+        # de referência (TR₀, dip₀, freq₀) — o tensor H completo preserva tudo.
+        if nf * nTR * nAng > 1:
+            logger.warning(
+                "generate_batch multi-config (%d configs): dat_22col cobre apenas "
+                "(TR0, dip0, freq0); o H_tensor completo retém todas as configs.",
+                nf * nTR * nAng,
+            )
+
+        # ── Simulação (caminho batched) ──────────────────────────────────────
+        # H6 canônico: (n_models, nTR, nAng, n_pos, nf, 9).
         t0 = time.perf_counter()
-        H_batch = np.empty((n_models, n_positions, 1, 9), dtype=np.complex128)
-        for i in range(n_models):
-            rho_h_i = rho_h_all[i]
-            rho_v_i = rho_v_all[i]
-            esp_i = esp_all[i]
-            res = simulate(
-                rho_h=rho_h_i,
-                rho_v=rho_v_i,
-                esp=esp_i,
-                positions_z=positions_z,
+        geom_info: dict = {}
+        if backend == "jax":
+            from geosteering_ai.simulation import simulate_multi_jax_batched_grouped
+
+            H6, geom_info = simulate_multi_jax_batched_grouped(
+                rho_h_all,
+                rho_v_all,
+                esp_all,
+                positions_z,
+                frequencies_hz=freqs_list,
+                tr_spacings_m=trs,
+                dip_degs=dips,
                 cfg=sim_cfg,
             )
-            H = res.H_tensor
-            if H.ndim == 2:
-                H = H[:, np.newaxis, :]
-            H_batch[i] = H
-
+            H6 = np.asarray(H6)
+        else:  # numba — itera por modelo (cada chamada paraleliza via prange)
+            H6 = np.empty(
+                (n_models, nTR, nAng, n_positions, nf, 9), dtype=np.complex128
+            )
+            for i in range(n_models):
+                res = simulate_multi(
+                    rho_h=rho_h_all[i],
+                    rho_v=rho_v_all[i],
+                    esp=esp_all[i],
+                    positions_z=positions_z,
+                    frequencies_hz=freqs_list,
+                    tr_spacings_m=trs,
+                    dip_degs=dips,
+                    cfg=sim_cfg,
+                )
+                # 1 modelo (sem `models=`) → MultiSimulationResult (arm com H_tensor)
+                # da union; `getattr` evita o erro union-attr do mypy + checa em runtime.
+                H_i = getattr(res, "H_tensor", None)
+                if H_i is None:  # pragma: no cover — guarda defensiva
+                    raise TypeError(
+                        "simulate_multi retornou tipo sem H_tensor (esperado "
+                        "MultiSimulationResult para 1 modelo)."
+                    )
+                H6[i] = np.asarray(H_i)
         elapsed = time.perf_counter() - t0
 
-        # Monta .dat 22-col compatível
+        # ── Squeeze p/ compat retroativa (single-TR & single-dip) ────────────
+        if nTR == 1 and nAng == 1:
+            H_out = H6[:, 0, 0]  # (n_models, n_pos, nf, 9)
+        else:
+            H_out = H6  # (n_models, nTR, nAng, n_pos, nf, 9)
+
+        # ── .dat 22-col — config de referência (TR₀, dip₀, freq₀) ────────────
+        H_ref = H6[:, 0, 0, :, 0, :]  # (n_models, n_pos, 9)
         total_recs = n_models * n_positions
         dat = np.zeros(total_recs, dtype=DTYPE_22COL)
-        idx = 0
         field_pairs = [
             ("Re_Hxx", "Im_Hxx"),
             ("Re_Hxy", "Im_Hxy"),
@@ -290,23 +376,22 @@ class SyntheticDataGenerator:
             ("Re_Hzy", "Im_Hzy"),
             ("Re_Hzz", "Im_Hzz"),
         ]
+        idx = 0
         for m in range(n_models):
             for p in range(n_positions):
                 dat[idx]["i"] = idx + 1
                 dat[idx]["z_obs"] = positions_z[p]
-                # Encontra camada do receptor (simplificação: posição -> índice)
-                # Usamos receptor = camada com topo mais próximo de z_obs.
-                z = positions_z[p]
-                layer_idx = _find_layer_for_z(z, esp_all[m], n_layers)
+                # Receptor = camada cujo topo é mais próximo de z_obs (simplificação).
+                layer_idx = _find_layer_for_z(positions_z[p], esp_all[m], n_layers)
                 dat[idx]["rho_h"] = rho_h_all[m, layer_idx]
                 dat[idx]["rho_v"] = rho_v_all[m, layer_idx]
                 for c, (re_n, im_n) in enumerate(field_pairs):
-                    dat[idx][re_n] = H_batch[m, p, 0, c].real
-                    dat[idx][im_n] = H_batch[m, p, 0, c].imag
+                    dat[idx][re_n] = H_ref[m, p, c].real
+                    dat[idx][im_n] = H_ref[m, p, c].imag
                 idx += 1
 
         return GeneratedBatch(
-            H_tensor=H_batch,
+            H_tensor=H_out,
             rho_h=rho_h_all,
             rho_v=rho_v_all,
             esp=esp_all,
@@ -314,15 +399,14 @@ class SyntheticDataGenerator:
             freqs_hz=freqs,
             dat_22col=dat,
             metadata={
-                "backend": self.cfg.simulator_backend,
-                "jax_mode": (
-                    self.cfg.simulator_jax_mode
-                    if self.cfg.simulator_backend == "jax"
-                    else None
-                ),
+                "backend": backend,
+                "jax_mode": (self.cfg.simulator_jax_mode if backend == "jax" else None),
                 "elapsed_s": elapsed,
                 "seed": seed,
                 "throughput_mod_h": 3600.0 * n_models / elapsed if elapsed > 0 else 0.0,
+                "n_configs": nf * nTR * nAng,
+                "config_shape": {"nf": nf, "nTR": nTR, "nAng": nAng},
+                "n_geometry_groups": geom_info.get("n_groups"),
             },
         )
 
