@@ -12,19 +12,21 @@
 """Teste T1.6 — gate automático de throughput JAX GPU vs baseline da GPU em uso.
 
 **Motivação**: sem um gate automático de performance, qualquer otimização que
-acidentalmente DEGRADE throughput pode passar por CI sem alarme. Baselines
-oficiais v2.43 estão registradas em ``.claude/perf_baseline.json`` em duas
-seções: ``jax_gpu_t4`` e ``jax_gpu_a100``. O gate detecta a GPU em uso e
-compara contra a seção apropriada (evita falso positivo de regressão quando
-T4 roda contra threshold A100, que é ~1.32× maior em A).
+acidentalmente DEGRADE throughput pode passar por CI sem alarme. O gate oficial
+(v2.44+) compara contra ``jax_gpu_a6000_gate`` em ``.claude/perf_baseline.json``
+— a baseline LOCAL do A6000 (Colab descontinuado). As seções legado
+``jax_gpu_t4``/``jax_gpu_a100`` permanecem só como fallback se essas GPUs forem
+detectadas. O gate detecta a GPU em uso (default A6000 local) e compara contra
+a seção apropriada.
 
-**Cenários cobertos** (subset do gate oficial A/B/E):
+**Cenários cobertos** (gate A6000 — A/B/E single-config + G multi-dim):
 
   - **A**: n_models=50, n_pos=1, nf=1, nTR=1, nAng=1
   - **B**: n_models=50, n_pos=100, nf=1, nTR=1, nAng=1
   - **E**: n_models=50, n_pos=600, nf=1, nTR=1, nAng=1
+  - **G**: n_models=50, n_pos=100, nf=4, nTR=4, nAng=4 (64 cfg, loop-de-configs)
 
-Thresholds variam por hardware — consulte ``perf_baseline.json``.
+Thresholds (90% do baseline medido) por hardware — consulte ``perf_baseline.json``.
 
 **Metodologia**:
   - 1 warmup (descartado)
@@ -33,7 +35,7 @@ Thresholds variam por hardware — consulte ``perf_baseline.json``.
   - SKIP gracioso se baseline JSON ou seção do hardware ausente
 
 **Markers**: ``@pytest.mark.gpu`` + ``@pytest.mark.slow`` (não roda em CI
-rápido — apenas em pre-release Colab T4/A100).
+rápido CPU — apenas localmente no A6000).
 """
 
 from __future__ import annotations
@@ -82,24 +84,30 @@ def _detect_gpu_baseline_key() -> str:
     positivos de regressão.
 
     Returns:
-        ``"jax_gpu_a100"`` se A100 detectada, ``"jax_gpu_t4"`` se T4,
-        ``"jax_gpu_a100"`` como fallback conservador (oficial canônica).
+        ``"jax_gpu_a6000_gate"`` para A6000/RTX (DEFAULT local — Colab
+        descontinuado v2.44), ``"jax_gpu_a100"``/``"jax_gpu_t4"`` apenas se
+        explicitamente detectadas (legado). Fallback → A6000 (dev é local).
     """
     if not HAS_JAX:
-        return "jax_gpu_a100"
+        return "jax_gpu_a6000_gate"
     try:
         device = jax.devices()[0]
         kind = (getattr(device, "device_kind", "") or "").lower()
         # Fallback: alguns backends expõem só via str(device)
         if not kind:
             kind = str(device).lower()
+        # A6000 local é o ambiente GPU canônico (v2.44+). device_kind =
+        # "NVIDIA RTX A6000". T4/A100 são legado (Colab descontinuado).
+        if "a6000" in kind or "rtx" in kind:
+            return "jax_gpu_a6000_gate"
         if "a100" in kind:
             return "jax_gpu_a100"
         if "t4" in kind:
             return "jax_gpu_t4"
     except Exception:
         pass
-    return "jax_gpu_a100"
+    # Default LOCAL: A6000 (dev GPU não-Colab).
+    return "jax_gpu_a6000_gate"
 
 
 def _load_baseline(section: str | None = None) -> dict[str, Any] | None:
@@ -230,10 +238,12 @@ _SCENARIOS_GATE = {
     "A": {"n_models": 50, "n_pos": 1, "n_freqs": 1, "n_tr": 1, "n_ang": 1},
     "B": {"n_models": 50, "n_pos": 100, "n_freqs": 1, "n_tr": 1, "n_ang": 1},
     "E": {"n_models": 50, "n_pos": 600, "n_freqs": 1, "n_tr": 1, "n_ang": 1},
+    # Sprint v2.45: cobertura multi-dim (path loop-de-configs, 4×4×4=64 cfg).
+    "G": {"n_models": 50, "n_pos": 100, "n_freqs": 4, "n_tr": 4, "n_ang": 4},
 }
 
 
-@pytest.mark.parametrize("scenario", ["A", "B", "E"])
+@pytest.mark.parametrize("scenario", ["A", "B", "E", "G"])
 def test_throughput_gpu_regression_gate(scenario: str) -> None:
     """Gate de regressão: throughput atual ≥ 90% da baseline da GPU em uso.
 
@@ -303,8 +313,9 @@ def test_throughput_gpu_regression_gate(scenario: str) -> None:
 def test_baseline_file_structure_is_valid() -> None:
     """Sanity check: baseline JSON existe E tem estrutura mínima esperada.
 
-    Valida ambas as seções (T4 e A100) — falha indica corrupção do arquivo
-    de baseline (não regressão de performance). Roda sempre, mesmo em CPU.
+    Valida a seção GATE A6000 (oficial v2.44+) e as legado T4/A100 — falha
+    indica corrupção do arquivo de baseline (não regressão de performance).
+    Roda sempre, mesmo em CPU.
     """
     if not _BASELINE_PATH.exists():
         pytest.skip(f".claude/perf_baseline.json ausente em {_BASELINE_PATH}")
@@ -312,11 +323,17 @@ def test_baseline_file_structure_is_valid() -> None:
     with _BASELINE_PATH.open(encoding="utf-8") as fh:
         data = json.load(fh)
 
-    for section in ("jax_gpu_t4", "jax_gpu_a100"):
+    # Seção × cenários esperados (A6000 gate inclui G multi-dim).
+    sections = {
+        "jax_gpu_a6000_gate": ("A_hot", "B_hot", "E_hot", "G_hot"),
+        "jax_gpu_t4": ("A_hot", "B_hot", "E_hot"),
+        "jax_gpu_a100": ("A_hot", "B_hot", "E_hot"),
+    }
+    for section, scenarios in sections.items():
         assert section in data, f"Seção {section!r} faltando na baseline"
         block = data[section]
         assert "_meta" in block, f"Subsection '_meta' faltando em {section}"
-        for scen in ("A_hot", "B_hot", "E_hot"):
+        for scen in scenarios:
             assert scen in block, f"Cenário {scen} faltando em {section}"
             assert (
                 "threshold_90pct" in block[scen]
