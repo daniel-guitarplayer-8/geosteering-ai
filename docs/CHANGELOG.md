@@ -7,6 +7,44 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.48] — 2026-05-31 — Sprint B: A-jax-gpu-dispatcher (simulate_batch backend="auto")
+
+### Resumo
+
+Generaliza o roteamento da Sprint A num **dispatcher reutilizável**
+`simulate_batch(..., backend="auto")` que codifica a árvore de decisão medida
+(v2.45–v2.47): roteia automaticamente entre JAX GPU (bucketed/grouped) e Numba
+16w×4t por GPU-disponível × n_models × agrupabilidade da geometria, com guard
+contra o kernel `unified` em high-config (OOM). Overhead **+0.3%**. Paridade
+Fortran **<1e-13 c128 preservada** (53/53); revisão code-reviewer APROVAR.
+
+### Added
+
+- `geosteering_ai/simulation/dispatch.py`::`simulate_batch(rho_h_batch, rho_v_batch,
+  esp_batch, positions_z, *, frequencies_hz, tr_spacings_m, dip_degs, backend="auto",
+  numba_fallback, n_models_gpu_threshold=32, dtype, jax_chunk_size_models, jax_strategy,
+  hankel_filter)` — dispatcher batched. Helpers `_resolve_backend` (árvore pura),
+  `_jax_gpu_available` (`jax.devices()`), `_simulate_batch_numba`. Import jax LAZY
+  (numba-only OK). Exportado em `simulation`.
+- `"auto"` em `PipelineConfig.simulator_backend`; guard device='gpu' relaxado p/ `{jax, auto}`.
+- `tests/test_simulation_dispatch.py` — 12 testes (8 ramos da árvore + guard unified +
+  paridade cross-backend <1e-10 + dispatcher==grouped direto).
+
+### Changed
+
+- `SyntheticDataGenerator.generate_batch` refatorado p/ usar `simulate_batch` (DRY,
+  −49 linhas; comportamento Sprint A para `backend="jax"` preservado).
+
+### Notes
+
+- Guard anti-unified: `jax_strategy="unified"` em high-config (n_pos≥300, n_configs≥9)
+  → `ValueError` (impede OOM 80 GB). O caminho JAX SEMPRE usa grouped → unified nunca atingido.
+- Fecha `A-jax-gpu-dispatcher` (ROADMAP §0); `C-surrogate-train` desbloqueado.
+
+Relatório: `docs/reports/v2.48_sprint_b_dispatcher_2026-05-31.md`.
+
+---
+
 ## [v2.47] — 2026-05-30 — Sprint A: A-jax-gpu-data-gen + agrupamento por geometria
 
 ### Resumo

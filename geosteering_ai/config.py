@@ -10,7 +10,7 @@
 # ║  Config: PipelineConfig dataclass — PONTO UNICO DE VERDADE                ║
 # ║                                                                            ║
 # ║  Proposito:                                                                ║
-# ║    • PipelineConfig dataclass: substitui 574 globals().get() do legado    ║
+# ║    • PipelineConfig dataclass: substitui 574 acessos globais do legado    ║
 # ║    • Validacao fail-fast de Errata v4.4.5 + v5.0.15 em __post_init__     ║
 # ║    • 5 presets (baseline, robusto, nstage, geosinais_p4, realtime)        ║
 # ║    • Serializacao YAML para reprodutibilidade (from_yaml/to_yaml)         ║
@@ -25,7 +25,7 @@
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """PipelineConfig — Ponto unico de verdade para todas as FLAGS do pipeline.
 
-Substitui 574 chamadas globals().get() por um dataclass tipado, validado,
+Substitui 574 acessos globais (legados) por um dataclass tipado, validado,
 e serializavel. Errata v4.4.5 e v5.0.15 sao verificadas no __post_init__
 (fail-fast). Presets disponiveis via metodos de classe.
 
@@ -719,7 +719,9 @@ class PipelineConfig:
         ), "TARGET_SCALING DEVE ser 'log10' (NUNCA 'log')"
 
         # ── Errata v2.0.14c (simulator backend — Sprint 6.1) ──────────
-        _valid_backends = {"fortran_f2py", "numba", "jax"}
+        # Sprint B (A-jax-gpu-dispatcher): "auto" roteia JAX GPU ⇄ Numba CPU via
+        # a árvore de decisão medida (simulate_batch); geometria/n_models decidem.
+        _valid_backends = {"fortran_f2py", "numba", "jax", "auto"}
         assert self.simulator_backend in _valid_backends, (
             f"simulator_backend={self.simulator_backend!r} inválido. "
             f"Opções: {_valid_backends}."
@@ -739,10 +741,11 @@ class PipelineConfig:
             f"simulator_jax_mode={self.simulator_jax_mode!r} inválido. "
             f"Opções: {_valid_jax_modes}."
         )
-        # Mutual exclusivity: fortran_f2py + gpu inválido; numba + gpu inválido
+        # Mutual exclusivity: fortran_f2py + gpu inválido; numba + gpu inválido.
+        # "auto" é permitido com gpu (o dispatcher decide JAX-GPU vs Numba-CPU).
         if self.simulator_device == "gpu":
-            assert self.simulator_backend == "jax", (
-                f"simulator_device='gpu' requer simulator_backend='jax' "
+            assert self.simulator_backend in {"jax", "auto"}, (
+                f"simulator_device='gpu' requer simulator_backend='jax' ou 'auto' "
                 f"(Numba e Fortran são CPU-only). "
                 f"Obtido: backend={self.simulator_backend!r}."
             )

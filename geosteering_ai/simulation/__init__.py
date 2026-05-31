@@ -146,6 +146,11 @@ from geosteering_ai.simulation._workers import (
     release_pool,
 )
 from geosteering_ai.simulation.config import SimulationConfig
+
+# Sprint B (A-jax-gpu-dispatcher): dispatcher batched JAX GPU ⇄ Numba CPU.
+# Import direto (não-lazy): dispatch.py importa jax LAZY internamente, então
+# funciona em ambientes Numba-only.
+from geosteering_ai.simulation.dispatch import simulate_batch
 from geosteering_ai.simulation.filters import FilterLoader, HankelFilter
 from geosteering_ai.simulation.forward import SimulationResult, simulate
 from geosteering_ai.simulation.multi_forward import (
@@ -191,6 +196,7 @@ __all__ = [
     "release_numba_cache",
     "release_pool",
     "simulate",
+    "simulate_batch",
     "simulate_multi",
 ]
 if _HAS_JAX_MULTI:

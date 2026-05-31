@@ -66,7 +66,6 @@ Note:
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Sequence
 
@@ -278,7 +277,7 @@ class SyntheticDataGenerator:
             OOM 80 GB a 18cfg/600pos). VRAM controlada por ``jax_chunk_size_models``
             no eixo de modelos (não precisa de chunk de configs/posições).
         """
-        from geosteering_ai.simulation import SimulationConfig, simulate_multi
+        from geosteering_ai.simulation import simulate_batch
         from geosteering_ai.simulation.io.binary_dat import DTYPE_22COL
 
         rng = np.random.default_rng(seed)
@@ -369,45 +368,6 @@ class SyntheticDataGenerator:
         nf, nTR, nAng = len(freqs), len(trs), len(dips)
         freqs_list = [float(f) for f in freqs]
 
-        # ── Roteamento de backend + fallback Numba automático ────────────────
-        # (c) Fallback Numba: se backend=jax e a geometria é MAL-AGRUPÁVEL
-        # (n_grupos > 50% dos modelos → JAX-grouped degeneraria em ~1 modelo/grupo,
-        # sem ganho de batch), roteia p/ Numba 16w×4t (referência de paridade).
-        backend = self.cfg.simulator_backend
-        fallback_reason: Optional[str] = None
-        geometry_n_groups: Optional[int] = None
-        if backend == "jax" and numba_fallback and n_esp > 0:
-            from geosteering_ai.simulation._jax.multi_forward import group_by_geometry
-
-            n_groups = len(group_by_geometry(esp_all))
-            geometry_n_groups = n_groups
-            if n_groups > 0.5 * n_models:
-                fallback_reason = (
-                    f"geometria mal-agrupável (n_grupos={n_groups}/{n_models}) → "
-                    "fallback p/ Numba 16w×4t (JAX-grouped degeneraria em per-model)"
-                )
-                logger.warning("generate_batch: %s", fallback_reason)
-                backend = "numba"
-        if backend == "jax" and n_models < 32:
-            logger.warning(
-                "generate_batch backend=jax com n_models=%d < 32: GPU subocupada "
-                "(crossover de ocupação ~n≥32). Considere n_models≥32 ou Numba.",
-                n_models,
-            )
-
-        # ── SimulationConfig do backend efetivo ──────────────────────────────
-        if backend == "numba":
-            sim_cfg = SimulationConfig(backend="numba", parallel=True)
-        elif backend == "jax":
-            sim_cfg = SimulationConfig(
-                backend="jax",
-                jax_strategy="bucketed",
-                dtype="complex128",
-                jax_chunk_size_models=jax_chunk_size_models,
-            )
-        else:
-            raise ValueError(f"Backend inesperado: {backend}")
-
         # Aviso anti-pegadinha: em multi-config, o .dat 22-col cobre só a config
         # de referência (TR₀, dip₀, freq₀) — o tensor H completo preserva tudo.
         if nf * nTR * nAng > 1:
@@ -417,49 +377,35 @@ class SyntheticDataGenerator:
                 nf * nTR * nAng,
             )
 
-        # ── Simulação (caminho batched) ──────────────────────────────────────
-        # H6 canônico: (n_models, nTR, nAng, n_pos, nf, 9).
-        t0 = time.perf_counter()
-        geom_info: dict = {}
-        if backend == "jax":
-            from geosteering_ai.simulation import simulate_multi_jax_batched_grouped
-
-            H6, geom_info = simulate_multi_jax_batched_grouped(
-                rho_h_all,
-                rho_v_all,
-                esp_all,
-                positions_z,
-                frequencies_hz=freqs_list,
-                tr_spacings_m=trs,
-                dip_degs=dips,
-                cfg=sim_cfg,
-            )
-            H6 = np.asarray(H6)
-        else:  # numba — itera por modelo (cada chamada paraleliza via prange)
-            H6 = np.empty(
-                (n_models, nTR, nAng, n_positions, nf, 9), dtype=np.complex128
-            )
-            for i in range(n_models):
-                res = simulate_multi(
-                    rho_h=rho_h_all[i],
-                    rho_v=rho_v_all[i],
-                    esp=esp_all[i],
-                    positions_z=positions_z,
-                    frequencies_hz=freqs_list,
-                    tr_spacings_m=trs,
-                    dip_degs=dips,
-                    cfg=sim_cfg,
-                )
-                # 1 modelo (sem `models=`) → MultiSimulationResult (arm com H_tensor)
-                # da union; `getattr` evita o erro union-attr do mypy + checa em runtime.
-                H_i = getattr(res, "H_tensor", None)
-                if H_i is None:  # pragma: no cover — guarda defensiva
-                    raise TypeError(
-                        "simulate_multi retornou tipo sem H_tensor (esperado "
-                        "MultiSimulationResult para 1 modelo)."
-                    )
-                H6[i] = np.asarray(H_i)
-        elapsed = time.perf_counter() - t0
+        # ── Simulação batched via DISPATCHER (Sprint B) ──────────────────────
+        # Reusa `simulate_batch` (árvore de decisão JAX GPU ⇄ Numba 16w×4t). Para
+        # `simulator_backend` ∈ {"jax","numba","auto"}. "jax" preserva o
+        # comportamento Sprint A (forçado + `numba_fallback` p/ geometria
+        # não-agrupável + warn n<32); "auto" aplica a árvore estrita. H6 canônico:
+        # (n_models, nTR, nAng, n_pos, nf, 9).
+        H6, disp_info = simulate_batch(
+            rho_h_all,
+            rho_v_all,
+            esp_all,
+            positions_z,
+            frequencies_hz=freqs_list,
+            tr_spacings_m=trs,
+            dip_degs=dips,
+            backend=self.cfg.simulator_backend,
+            numba_fallback=numba_fallback,
+            dtype="complex128",
+            jax_chunk_size_models=jax_chunk_size_models,
+        )
+        elapsed = disp_info["elapsed_s"]
+        backend = disp_info["backend"]
+        geometry_n_groups = disp_info["n_geometry_groups"]
+        geom_info = {"n_groups": geometry_n_groups}
+        # "fallback" só quando o backend pedido (jax/auto) caiu p/ Numba.
+        fallback_reason = (
+            disp_info["reason"]
+            if (self.cfg.simulator_backend in ("jax", "auto") and backend == "numba")
+            else None
+        )
 
         # ── Squeeze p/ compat retroativa (single-TR & single-dip) ────────────
         if nTR == 1 and nAng == 1:
