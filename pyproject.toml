@@ -55,6 +55,31 @@ api = [
     "pydantic>=2.5",
     "uvicorn[standard]>=0.27",
 ]
+# Spec 0004 (keystone Fase 0) — fundação GUI `geosteering_ai/gui/`. Binding Qt6
+# MÍNIMO compartilhado pelo Simulation Manager e pelo futuro Geosteering AI Studio.
+# OPT-IN: o `core` (models/losses/training/inference/data/simulation) NUNCA importa
+# Qt — só apps GUI dependem deste extra. PyQt6 é o default do projeto; `gui.qt_compat`
+# também detecta PySide6 (a escolha de binding comercial é ADR futuro — D-A do blueprint).
+gui = [
+    "PyQt6>=6.6",
+]
+# Backends de plotagem opcionais do Simulation Manager (`sm_plot_backends/`):
+# pyqtgraph (Qt-native, realtime 30 fps) + plotly (HTML interativo). Ambos são
+# lazy-imported com guarda `is_available()` — o pacote funciona sem eles, e
+# `available_backends()` simplesmente os omite quando ausentes.
+# OPT-IN DELIBERADO: este grupo NÃO entra em `all` nem no conjunto instalado
+# pela CI (`[dev,viz,train,hpo,sim]`) — é GUI/pesado (~150 MB com WebEngine) e
+# o caminho de testes degrada graciosamente sem ele. Risco de drift de
+# resolução num runner CPU limpo também recomenda mantê-lo isolado.
+# PyQt6-WebEngine (QWebEngineView) + kaleido (export estático) habilitam o
+# PlotlyCanvas por completo. Combo validado: pyqtgraph 0.14 · plotly 6.8 ·
+# PyQt6-WebEngine 6.11 · kaleido 1.3 (Python 3.13).
+gui-plot = [
+    "pyqtgraph>=0.13",
+    "plotly>=5.20",
+    "PyQt6-WebEngine>=6.6",   # QWebEngineView — necessário p/ o PlotlyCanvas
+    "kaleido>=0.2",           # export estático de imagem do Plotly (opcional)
+]
 all = [
     "tensorflow>=2.13",
     "matplotlib>=3.5",
