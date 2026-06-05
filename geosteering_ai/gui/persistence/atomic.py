@@ -79,6 +79,11 @@ def atomic_write_text(
         PRESERVADO — sem isto, o ``0600`` do ``mkstemp`` regrediria um arquivo
         legível por grupo/outros para privado. Arquivos NOVOS ficam ``0600``
         (privado ao usuário), apropriado para estado de sessão.
+
+    Note:
+        Se ``path`` for um symlink, ``os.replace`` substitui o PRÓPRIO symlink por
+        um arquivo regular (semântica POSIX ``rename(2)``) — não escreve no alvo do
+        link. Use caminhos reais para ``.session``.
     """
     target = os.fspath(path)
     parent = os.path.dirname(target) or "."
@@ -94,7 +99,15 @@ def atomic_write_text(
     # Temporário no MESMO diretório → garante rename intra-FS no os.replace.
     fd, tmp_path = tempfile.mkstemp(dir=parent, prefix=".tmp-", suffix=".part")
     try:
-        with os.fdopen(fd, "w", encoding=encoding) as handle:
+        # Se `os.fdopen` falhar (ex.: encoding inválido), ele NÃO assume o fd →
+        # fechamos manualmente p/ evitar vazamento de descritor; senão o `with`
+        # (abaixo) é dono do fd e o fecha.
+        try:
+            handle = os.fdopen(fd, "w", encoding=encoding)
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
             handle.write(text)
             handle.flush()
             try:

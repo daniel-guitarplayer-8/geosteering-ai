@@ -104,12 +104,14 @@ class SessionDocument:
                 do ``json.dumps`` (a responsabilidade de manter o estado
                 JSON-serializável é de quem o popula).
         """
+        # `extra` PRIMEIRO; o envelope (schema_version/data) sobrescreve em seguida.
+        # Assim uma chave reservada acidentalmente em `extra` (ex.: atribuída
+        # diretamente a doc.extra) NÃO corrompe o envelope canônico.
         payload: dict[str, Any] = {
+            **self.extra,  # chaves top-level futuras preservadas (forward-compat)
             "schema_version": self.schema_version,
             "data": self.data,
         }
-        # Re-emite chaves top-level futuras preservadas (forward-compat).
-        payload.update(self.extra)
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
     @classmethod
@@ -124,7 +126,9 @@ class SessionDocument:
             top-level desconhecidas vão para ``extra`` (preservadas).
 
         Raises:
-            ValueError: se o JSON não for um objeto (dict) no topo.
+            ValueError: se o JSON não for um objeto (dict) no topo, se
+                ``schema_version`` não for ``int``, ou se ``data`` não for ``dict``.
+            json.JSONDecodeError: se ``text`` não for JSON válido.
         """
         obj = json.loads(text)
         if not isinstance(obj, dict):
@@ -132,6 +136,12 @@ class SessionDocument:
                 f"`.session` inválido: esperado objeto JSON no topo, obtido {type(obj).__name__}."
             )
         schema_version = obj.get("schema_version", 1)
+        # bool é subclasse de int → excluir explicitamente (True/False não é versão).
+        if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+            raise ValueError(
+                f"`.session` inválido: 'schema_version' deve ser int, "
+                f"obtido {type(schema_version).__name__}."
+            )
         data = obj.get("data", {})
         if not isinstance(data, dict):
             raise ValueError(
@@ -159,6 +169,12 @@ class SessionDocument:
 
         Returns:
             O :class:`SessionDocument` reconstruído (forward-compat).
+
+        Raises:
+            OSError: se o arquivo não puder ser aberto/lido (ex.: ausente, permissão).
+            UnicodeDecodeError: se o arquivo não for UTF-8 válido.
+            json.JSONDecodeError: se o conteúdo não for JSON válido.
+            ValueError: se a estrutura do ``.session`` for inválida (ver :meth:`from_json`).
         """
         with open(os.fspath(path), encoding="utf-8") as handle:
             return cls.from_json(handle.read())

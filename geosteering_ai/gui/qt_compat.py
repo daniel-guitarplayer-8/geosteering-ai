@@ -345,5 +345,6 @@ __all__ = [
     "detect_os_dark_mode",
     "enforce_c_locale",
     "format_float",
+    "load_qwebengineview",
     "make_double_spin",
 ]

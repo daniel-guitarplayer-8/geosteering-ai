@@ -91,6 +91,34 @@ def test_atomic_write_preserves_existing_permissions(tmp_path):
     assert mode == 0o644, f"modo regrediu para {oct(mode)} (esperado 0o644)"
 
 
+def test_atomic_write_fdopen_failure_no_fd_leak(tmp_path, monkeypatch):
+    """code-review: se os.fdopen falhar, o fd do mkstemp É FECHADO (sem leak) + sem .tmp."""
+    import geosteering_ai.gui.persistence.atomic as atomic_mod
+
+    captured: dict[str, int] = {}
+    real_mkstemp = atomic_mod.tempfile.mkstemp
+
+    def spy_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        captured["fd"] = fd
+        return fd, path
+
+    def boom(*args, **kwargs):  # fdopen NÃO assume o fd (como uma falha real)
+        raise OSError("falha simulada no fdopen")
+
+    monkeypatch.setattr(atomic_mod.tempfile, "mkstemp", spy_mkstemp)
+    monkeypatch.setattr(atomic_mod.os, "fdopen", boom)
+    with pytest.raises(OSError):
+        atomic_mod.atomic_write_text(str(tmp_path / "x.session"), "NOVO")
+
+    # o fix fechou o fd → fechá-lo de novo deve falhar (sem o fix, o fd vazaria
+    # e este os.close teria sucesso, falhando o teste).
+    with pytest.raises(OSError):
+        os.close(captured["fd"])
+    leftovers = [f for f in os.listdir(tmp_path) if f.startswith(".tmp-")]
+    assert leftovers == [], f"temporários residuais: {leftovers}"
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # RF-2 — SessionDocument (puro, sem pickle)
 # ════════════════════════════════════════════════════════════════════════════
@@ -152,6 +180,27 @@ def test_session_document_from_json_non_dict_data_raises():
 
     with pytest.raises(ValueError):
         SessionDocument.from_json('{"schema_version": 1, "data": 5}')
+
+
+def test_session_document_from_json_non_int_schema_version_raises():
+    """code-review: from_json com schema_version não-int (ex.: "2") levanta ValueError."""
+    from geosteering_ai.gui.persistence.session import SessionDocument
+
+    with pytest.raises(ValueError):
+        SessionDocument.from_json('{"schema_version": "2", "data": {}}')
+
+
+def test_session_document_extra_cannot_override_envelope():
+    """code-review: chave reservada em `extra` NÃO sobrescreve o envelope no to_json."""
+    import json
+
+    from geosteering_ai.gui.persistence.session import SessionDocument
+
+    doc = SessionDocument(schema_version=1, data={"real": 1})
+    doc.extra = {"schema_version": 999, "data": {"hijack": True}}  # malicioso/acidental
+    payload = json.loads(doc.to_json())
+    assert payload["schema_version"] == 1  # envelope canônico vence
+    assert payload["data"] == {"real": 1}
 
 
 def test_session_document_post_init_rejects_non_dict():
