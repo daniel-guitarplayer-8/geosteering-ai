@@ -145,6 +145,45 @@ if not _try_pyqt6():
         )
 
 
+# ── QtWebEngine — loader sob demanda (módulo Qt PESADO e OPCIONAL) ─────────
+
+
+def load_qwebengineview() -> Any:
+    """Importa ``QWebEngineView`` do binding Qt ativo (PyQt6 ou PySide6).
+
+    ``QtWebEngine`` é um módulo Qt **pesado** (~150 MB, Chromium embutido) e
+    **opcional** — por isso NÃO é importado no carregamento de ``qt_compat``.
+    Esta função o resolve sob demanda (lazy), respeitando o binding detectado
+    em :data:`QT_BINDING`. Único ponto de decisão de binding para QtWebEngine
+    (evita ``from PyQt6.QtWebEngineWidgets import …`` hardcoded espalhado).
+
+    Usado pelo backend Plotly (``gui/plot_backends/plotly_canvas.py``), que
+    renderiza HTML interativo num ``QWebEngineView``.
+
+    Returns:
+        A classe ``QWebEngineView`` do binding Qt ativo.
+
+    Raises:
+        ImportError: se nenhum binding Qt6 foi detectado, ou se o módulo
+            QtWebEngine não está instalado (ex.: falta ``PyQt6-WebEngine``).
+
+    Note:
+        PyQt6 exige o pacote separado ``PyQt6-WebEngine``; PySide6 já o inclui.
+    """
+    if QT_BINDING not in ("PyQt6", "PySide6"):
+        raise ImportError(
+            "QtWebEngine indisponível: nenhum binding Qt6 detectado "
+            f"(QT_BINDING={QT_BINDING!r})."
+        )
+    # importlib evita o dual ``from PyQt6/PySide6 import QWebEngineView`` (cujos
+    # tipos divergem p/ mypy); ModuleNotFoundError (subclasse de ImportError) é
+    # levantado se o módulo QtWebEngine não estiver instalado.
+    import importlib
+
+    module = importlib.import_module(f"{QT_BINDING}.QtWebEngineWidgets")
+    return module.QWebEngineView
+
+
 # ── Locale — ponto como separador decimal (jamais vírgula) ────────────────
 
 
