@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from geosteering_ai.gui.persistence.plot_cache import LRUPlotCache
+from geosteering_ai.gui.plot_backends.base import PlotBackend  # str-Enum PURO (sem Qt)
 from geosteering_ai.gui.viewmodels.base import BaseViewModel
 from geosteering_ai.gui.viewmodels.signal import VMSignal
 
@@ -105,6 +106,7 @@ class ResultsViewModel(BaseViewModel):
         self,
         page_size: int = _DEFAULT_PAGE_SIZE,
         cache: Optional[LRUPlotCache] = None,
+        plot_backend: PlotBackend = PlotBackend.MATPLOTLIB,
     ) -> None:
         """Inicializa sem resultado (galeria vazia).
 
@@ -112,6 +114,8 @@ class ResultsViewModel(BaseViewModel):
             page_size: nº de modelos por página da galeria (default 12).
             cache: LRU de curvas (default ``LRUPlotCache(maxlen=256)``) — bounded
                 por contagem; injetável p/ teste.
+            plot_backend: backend de plot inicial (default ``MATPLOTLIB``); a View
+                recria o canvas ao trocar.
         """
         super().__init__()
         self._result: Optional[Dict[str, Any]] = None
@@ -123,6 +127,7 @@ class ResultsViewModel(BaseViewModel):
         self._dip_index: int = 0
         self._freq_index: int = 0
         self._page: int = 0
+        self._plot_backend: PlotBackend = plot_backend
         self._page_size: int = max(1, int(page_size))
         # ``is not None`` (NÃO ``cache or ...``): um LRUPlotCache VAZIO é falsy
         # (``__len__`` == 0) e seria descartado pelo ``or``.
@@ -318,3 +323,14 @@ class ResultsViewModel(BaseViewModel):
     def page(self, value: int) -> None:
         hi = max(0, self.n_pages - 1)
         self._set("_page", int(np.clip(int(value), 0, hi)))
+
+    @property
+    def plot_backend(self) -> PlotBackend:
+        """Backend de plot da galeria (matplotlib/pyqtgraph/…). A View recria o canvas."""
+        return self._plot_backend
+
+    @plot_backend.setter
+    def plot_backend(self, value: PlotBackend | str) -> None:
+        # ``PlotBackend(value)`` aceita o enum OU sua str (".value") — útil ao
+        # restaurar de um ``.session`` (onde vira string JSON).
+        self._set("_plot_backend", PlotBackend(value))

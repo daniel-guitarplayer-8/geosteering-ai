@@ -32,7 +32,12 @@ from apps.sim_manager.perspectives.simulation.results_viewmodel import (
     PLOT_KINDS,
     ResultsViewModel,
 )
-from geosteering_ai.gui.plot_backends import AxisConfig, PlotBackend, make_canvas
+from geosteering_ai.gui.plot_backends import (
+    AxisConfig,
+    PlotBackend,
+    available_backends,
+    make_canvas,
+)
 from geosteering_ai.gui.qt_compat import QtWidgets
 
 __all__ = ["ResultsView"]
@@ -59,6 +64,13 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         self._vm = vm
 
         # ── Seletores ────────────────────────────────────────────────────────
+        # Backend de plot (matplotlib ↔ pyqtgraph ↔ …): só os disponíveis no env.
+        self._backend = QtWidgets.QComboBox()
+        self._backend.addItems([b.value for b in available_backends()])
+        self._backend.setCurrentText(vm.plot_backend.value)
+        self._backend.setToolTip(
+            "Motor de plotagem: matplotlib (publicação) ou PyQtGraph (interativo)."
+        )
         self._cmp = QtWidgets.QComboBox()
         self._cmp.addItems(list(COMPONENT_NAMES))
         self._cmp.setToolTip("Componente do tensor H (Hxx..Hzz).")
@@ -78,12 +90,15 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         self._page_lbl = QtWidgets.QLabel("—")
 
         # ── Canvas (galeria via grade de subplots) ───────────────────────────
-        self._canvas = make_canvas(PlotBackend.MATPLOTLIB, parent=self)
+        self._active_backend = vm.plot_backend  # backend do canvas atual
+        self._canvas = make_canvas(self._active_backend, parent=self)
         # Fundo escuro p/ casar com o tema (o canvas não é alcançável pelo QSS).
         self._canvas.set_dark_mode(True)
 
         # ── Layout ────────────────────────────────────────────────────────────
         bar = QtWidgets.QHBoxLayout()
+        bar.addWidget(QtWidgets.QLabel("Plot:"))
+        bar.addWidget(self._backend)
         bar.addWidget(QtWidgets.QLabel("Comp.:"))
         bar.addWidget(self._cmp)
         bar.addWidget(QtWidgets.QLabel("Modo:"))
@@ -95,11 +110,12 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         bar.addWidget(self._prev)
         bar.addWidget(self._page_lbl)
         bar.addWidget(self._next)
-        root = QtWidgets.QVBoxLayout(self)
-        root.addLayout(bar)
-        root.addWidget(self._canvas.widget(), stretch=1)
+        self._root = QtWidgets.QVBoxLayout(self)
+        self._root.addLayout(bar)
+        self._root.addWidget(self._canvas.widget(), stretch=1)
 
         # ── Binding ──────────────────────────────────────────────────────────
+        self._backend.currentTextChanged.connect(self._on_backend_changed)
         self._cmp.currentIndexChanged.connect(self._on_cmp_changed)
         self._kind.currentIndexChanged.connect(self._on_kind_changed)
         self._tr.valueChanged.connect(self._on_tr_changed)
@@ -112,6 +128,12 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         self._render()
 
     # ── Slots de seletor (empurram p/ o VM; o VM clampa e re-emite) ──────────
+    def _on_backend_changed(self, text: str) -> None:
+        try:
+            self._vm.plot_backend = PlotBackend(text)
+        except ValueError:
+            pass  # texto inválido (não deveria ocorrer — combo só lista válidos)
+
     def _on_cmp_changed(self, idx: int) -> None:
         self._vm.component_index = idx
 
@@ -156,15 +178,31 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         self._kind.blockSignals(True)
         self._kind.setCurrentIndex(PLOT_KINDS.index(self._vm.plot_kind))
         self._kind.blockSignals(False)
+        self._backend.blockSignals(True)
+        self._backend.setCurrentText(self._vm.plot_backend.value)
+        self._backend.blockSignals(False)
         # paginação
         n_pages = self._vm.n_pages
         self._page_lbl.setText(f"{self._vm.page + 1}/{n_pages}" if n_pages else "—")
         self._prev.setEnabled(self._vm.page > 0)
         self._next.setEnabled(self._vm.page < n_pages - 1)
 
+    def _rebuild_canvas(self) -> None:
+        """Recria o canvas quando o backend muda (substitui no layout, sem leak)."""
+        old = self._canvas
+        self._canvas = make_canvas(self._vm.plot_backend, parent=self)
+        self._canvas.set_dark_mode(True)
+        self._root.replaceWidget(old.widget(), self._canvas.widget())
+        old.widget().setParent(None)
+        old.widget().deleteLater()
+        self._active_backend = self._vm.plot_backend
+
     def _render(self, *_: Any) -> None:
         """Re-monta a grade da galeria (modelos da página) + sincroniza seletores."""
         self._sync_controls()
+        # Backend trocado → recria o canvas ANTES de plotar.
+        if self._vm.plot_backend != self._active_backend:
+            self._rebuild_canvas()
         self._canvas.clear()
         models = self._vm.page_models()
         depth = self._vm.depth

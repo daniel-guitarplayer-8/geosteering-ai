@@ -570,6 +570,8 @@ class SimulationViewModel(BaseViewModel):
             "min_thickness": self._min_thickness,
             "generator": self._generator,
             "rng_seed": self._rng_seed,
+            # Preferência da galeria (str do enum) — reproduzível.
+            "plot_backend": self.results.plot_backend.value,
         }
 
     def load_session_dict(self, data: Dict[str, Any]) -> None:
@@ -608,3 +610,6 @@ class SimulationViewModel(BaseViewModel):
         ):
             if key in data:
                 setattr(self, key, data[key])
+        # Preferência da galeria (sub-VM results) — aceita str do enum.
+        if "plot_backend" in data:
+            self.results.plot_backend = data["plot_backend"]
