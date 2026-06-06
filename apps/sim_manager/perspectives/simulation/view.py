@@ -143,6 +143,15 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             "(Fatia 5), N grande roda lento — a UI fica responsiva (off-thread)."
         )
 
+        # Backend de simulação (spec 0012): numba (in-thread) | jax | auto (subprocesso).
+        self._sim_backend = QtWidgets.QComboBox()
+        self._sim_backend.addItems(["numba", "jax", "auto"])
+        self._sim_backend.setCurrentText(vm.backend)
+        self._sim_backend.setToolTip(
+            "Motor de simulação: numba (CPU, in-thread) · jax (GPU, subprocesso TLS-safe) "
+            "· auto (decide GPU/CPU por tamanho/geometria). jax/auto rodam em subprocesso."
+        )
+
         # ── Geologia estocástica (Fatia 3) ───────────────────────────────────
         self._geology_box = self._build_geology_group(vm)
 
@@ -164,6 +173,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         form.addRow("tj:", self._tj)
         form.addRow("p_med:", self._p_med)
         form.addRow("Nº modelos:", self._n_models)
+        form.addRow("Backend:", self._sim_backend)
         form.addRow("Posições derivadas:", self._n_pos_label)
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(self._run_btn)
@@ -316,6 +326,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.tj = self._tj.value()
         self._vm.p_med = self._p_med.value()
         self._vm.n_models = self._n_models.value()
+        self._vm.backend = self._sim_backend.currentText()
         # ── Geologia estocástica (Fatia 3) ───────────────────────────────────
         self._vm.geology_mode = self._geo_mode.currentText()
         self._vm.generator = self._geo_generator.currentText()
@@ -440,6 +451,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.tj = self._tj.value()
         self._vm.p_med = self._p_med.value()
         self._vm.n_models = self._n_models.value()
+        self._vm.backend = self._sim_backend.currentText()
         self._vm.geology_mode = self._geo_mode.currentText()
         self._vm.generator = self._geo_generator.currentText()
         self._vm.rho_h_distribution = self._geo_distr.currentText()
@@ -467,6 +479,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._tj.setValue(self._vm.tj)
         self._p_med.setValue(self._vm.p_med)
         self._n_models.setValue(self._vm.n_models)
+        self._sim_backend.setCurrentText(self._vm.backend)
         self._geo_mode.setCurrentText(self._vm.geology_mode)
         self._geo_generator.setCurrentText(self._vm.generator)
         self._geo_distr.setCurrentText(self._vm.rho_h_distribution)

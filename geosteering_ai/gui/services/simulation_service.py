@@ -42,12 +42,27 @@ class SimulationService(BaseService):
         ``run`` retorna IMEDIATAMENTE (não-bloqueante); o resultado chega depois
         via ``self.finished`` na MAIN thread. Erros (ex.: parâmetro inválido na
         física) chegam via ``self.error``. A física é INTOCADA — só orquestração.
+
+    Roteamento de backend (spec 0012):
+      ┌──────────────┬──────────────────────────────────────────────────────────┐
+      │ "numba"      │ in-thread (QThread) — rápido, sem spawn (caminho da Fatia 2)│
+      │ "jax"/"auto" │ SUBPROCESSO spawn — isola JAX/CUDA (TLS-safe; QThread       │
+      │              │ crasharia ao init CUDA). "auto" pode resolver p/ jax.       │
+      └──────────────┴──────────────────────────────────────────────────────────┘
     """
 
+    # Backends que (podem) inicializar JAX → exigem subprocesso (TLS-safe).
+    _SUBPROCESS_BACKENDS = ("jax", "auto")
+
     def run(self, request: SimRequest) -> None:
-        """Dispara a simulação off-thread (não-bloqueante).
+        """Dispara a simulação off-thread (não-bloqueante); roteia por backend.
 
         Args:
             request: a requisição (já validada pelo ViewModel).
         """
-        self._run_async(_run_simulation, request)
+        if request.backend in self._SUBPROCESS_BACKENDS:
+            # jax/auto podem init CUDA → subprocesso isolado (a QThread crasharia).
+            self._run_in_subprocess(_run_simulation, request)
+        else:
+            # numba não crasha na QThread → caminho in-thread (rápido, sem spawn).
+            self._run_async(_run_simulation, request)

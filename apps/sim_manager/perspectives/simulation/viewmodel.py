@@ -51,6 +51,11 @@ _RHO_DISTRIBUTIONS = ("loguni", "uniform")
 _LAMBDA_MIN_PHYS = 1.0
 _N_LAYERS_MIN_PHYS = 3  # inclui 2 semi-espaços
 
+# Backends de simulação (spec 0012). "numba" roda in-thread; "jax"/"auto" rodam
+# num subprocesso (TLS-safe — JAX numa QThread crasha). Default "numba" (rápido,
+# sem spawn; sem regressão). O usuário opta por jax/auto p/ GPU.
+_BACKENDS = ("numba", "jax", "auto")
+
 # Errata física — validação fail-fast no VM. ESPELHA O SIMULADOR (não a errata
 # do pipeline DL): a rota deste app é simulate_batch, cujo gate efetivo é
 # ``_validate_multi_inputs`` + ``SimulationConfig`` — NÃO o ``PipelineConfig`` do
@@ -119,6 +124,7 @@ class SimulationViewModel(BaseViewModel):
         "_min_thickness",
         "_generator",
         "_rng_seed",
+        "_backend",
     )
 
     def __init__(self, service: Any) -> None:
@@ -158,6 +164,9 @@ class SimulationViewModel(BaseViewModel):
         # — cada execução gera um ensemble TIV distinto. Reprodutibilidade é
         # opt-in (o usuário desmarca "Semente aleatória" e fixa um inteiro).
         self._rng_seed: Optional[int] = None
+        # Backend de simulação (spec 0012). Default "numba" (in-thread, rápido, sem
+        # spawn); "jax"/"auto" rodam em subprocesso (GPU, TLS-safe).
+        self._backend: str = "numba"
         self._status: str = "idle"
         self._last_result: Optional[Dict[str, Any]] = None
         self.result_ready: VMSignal = VMSignal()
@@ -349,6 +358,15 @@ class SimulationViewModel(BaseViewModel):
         self._set("_rng_seed", None if value is None else int(value))
 
     @property
+    def backend(self) -> str:
+        """Backend de simulação: ``numba`` (in-thread) | ``jax`` | ``auto`` (subprocesso)."""
+        return self._backend
+
+    @backend.setter
+    def backend(self, value: str) -> None:
+        self._set("_backend", str(value))
+
+    @property
     def status(self) -> str:
         """Estado atual: idle | running | done | error (read-only)."""
         return self._status
@@ -415,6 +433,10 @@ class SimulationViewModel(BaseViewModel):
             errors.append(f"p_med ({self._p_med:g} m) deve ser > 0.")
         if self._n_models < 1:
             errors.append(f"nº de modelos ({self._n_models}) deve ser ≥ 1.")
+        if self._backend not in _BACKENDS:
+            errors.append(
+                f"Backend {self._backend!r} inválido (use {list(_BACKENDS)})."
+            )
         # ── Guardrail de recurso: n_pos derivado não pode explodir (OOM) ─────
         # self.n_pos já guarda dips-vazio/p_med≤0/tj≤0 (retorna 0) → só dispara
         # o teto quando a geometria é válida mas degenerada (dip≈90°).
@@ -511,7 +533,7 @@ class SimulationViewModel(BaseViewModel):
             tj=self._tj,
             p_med=self._p_med,
             n_models=self._n_models,
-            backend="numba",
+            backend=self._backend,
             geology_mode=self._geology_mode,
             n_layers_min=self._n_layers_min,
             n_layers_max=self._n_layers_max,
@@ -570,6 +592,7 @@ class SimulationViewModel(BaseViewModel):
             "min_thickness": self._min_thickness,
             "generator": self._generator,
             "rng_seed": self._rng_seed,
+            "backend": self._backend,
             # Preferência da galeria (str do enum) — reproduzível.
             "plot_backend": self.results.plot_backend.value,
         }
@@ -607,6 +630,7 @@ class SimulationViewModel(BaseViewModel):
             "min_thickness",
             "generator",
             "rng_seed",
+            "backend",
         ):
             if key in data:
                 setattr(self, key, data[key])
