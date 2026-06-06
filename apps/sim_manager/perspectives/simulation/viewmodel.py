@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from apps.sim_manager.perspectives.simulation.results_viewmodel import ResultsViewModel
 from geosteering_ai.gui.services.sim_request import SimRequest, compute_n_pos
 from geosteering_ai.gui.services.stochastic_geology import GENERATORS_AVAILABLE
 from geosteering_ai.gui.viewmodels.base import BaseViewModel
@@ -160,6 +161,8 @@ class SimulationViewModel(BaseViewModel):
         self._status: str = "idle"
         self._last_result: Optional[Dict[str, Any]] = None
         self.result_ready: VMSignal = VMSignal()
+        # Sub-VM PURO da galeria de resultados (Fatia 4) — alimentado ao concluir.
+        self.results: ResultsViewModel = ResultsViewModel()
         # Liga-se aos VMSignals do service (pub/sub puro — sem Qt aqui).
         service.finished.connect(self._on_sim_finished)
         service.error.connect(self._on_sim_error)
@@ -529,9 +532,79 @@ class SimulationViewModel(BaseViewModel):
     # ── Callbacks do service (rodam na MAIN thread) ──────────────────────────
     def _on_sim_finished(self, result: Dict[str, Any]) -> None:
         self._last_result = result
+        self.results.set_result(result)  # alimenta a galeria (Fatia 4)
         self._set("_status", "done")
         self.result_ready.emit(result)
 
     def _on_sim_error(self, message: str) -> None:
         self._last_result = {"error": message}
         self._set("_status", "error")
+
+    # ── Persistência .session (params; resultado reproduzível pela seed) ─────
+    def to_session_dict(self) -> Dict[str, Any]:
+        """Serializa os PARAMS atuais (JSON-serializável) p/ ``.session``.
+
+        NÃO inclui o H6 (grande/complexo) — a simulação é reproduzível pela seed.
+
+        Returns:
+            dict com listas/escalares (tuplas viram listas).
+        """
+        return {
+            "frequencies": list(self._frequencies),
+            "dips": list(self._dips),
+            "tr_spacings": list(self._tr_spacings),
+            "h1": self._h1,
+            "tj": self._tj,
+            "p_med": self._p_med,
+            "n_models": self._n_models,
+            "geology_mode": self._geology_mode,
+            "n_layers_fixed": self._n_layers_fixed,
+            "n_layers_min": self._n_layers_min,
+            "n_layers_max": self._n_layers_max,
+            "rho_h_min": self._rho_h_min,
+            "rho_h_max": self._rho_h_max,
+            "rho_h_distribution": self._rho_h_distribution,
+            "anisotropic": self._anisotropic,
+            "lambda_min": self._lambda_min,
+            "lambda_max": self._lambda_max,
+            "min_thickness": self._min_thickness,
+            "generator": self._generator,
+            "rng_seed": self._rng_seed,
+        }
+
+    def load_session_dict(self, data: Dict[str, Any]) -> None:
+        """Repopula os params a partir de um dict de ``.session`` (via setters).
+
+        Usa os setters (coerção + ``changed`` → a View sincroniza). Chaves
+        ausentes são ignoradas (forward/backward-compat).
+
+        Args:
+            data: dict de :meth:`to_session_dict` (ou um ``.session`` carregado).
+        """
+        if "frequencies" in data:
+            self.frequencies = data["frequencies"]
+        if "dips" in data:
+            self.dips = data["dips"]
+        if "tr_spacings" in data:
+            self.tr_spacings = data["tr_spacings"]
+        for key in (
+            "h1",
+            "tj",
+            "p_med",
+            "n_models",
+            "geology_mode",
+            "n_layers_fixed",
+            "n_layers_min",
+            "n_layers_max",
+            "rho_h_min",
+            "rho_h_max",
+            "rho_h_distribution",
+            "anisotropic",
+            "lambda_min",
+            "lambda_max",
+            "min_thickness",
+            "generator",
+            "rng_seed",
+        ):
+            if key in data:
+                setattr(self, key, data[key])

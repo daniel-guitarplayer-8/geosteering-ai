@@ -23,16 +23,15 @@
 # ║  EXPORTS                                                                  ║
 # ║    SimulatorView                                                          ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-"""``SimulatorView`` — View Qt (inputs multi-config + geologia + Run + plot), VM (0011c)."""
+"""``SimulatorView`` — View Qt (inputs + geologia + Run + galeria + .session), VM (0011d)."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Tuple
 
-import numpy as np
-
+from apps.sim_manager.perspectives.simulation.results_view import ResultsView
 from apps.sim_manager.perspectives.simulation.viewmodel import SimulationViewModel
-from geosteering_ai.gui.plot_backends import AxisConfig, PlotBackend, make_canvas
+from geosteering_ai.gui.persistence.session import SessionDocument
 from geosteering_ai.gui.qt_compat import QtWidgets
 from geosteering_ai.gui.services.sim_request import compute_n_pos
 from geosteering_ai.gui.services.stochastic_geology import GENERATORS_AVAILABLE
@@ -149,10 +148,12 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
 
         self._n_pos_label = QtWidgets.QLabel("n_pos: —")
         self._run_btn = QtWidgets.QPushButton("Run")
+        self._save_btn = QtWidgets.QPushButton("Salvar sessão…")
+        self._open_btn = QtWidgets.QPushButton("Abrir sessão…")
         self._status = QtWidgets.QLabel("idle")
 
-        # ── Canvas (matplotlib via plot_backends) ────────────────────────────
-        self._canvas = make_canvas(PlotBackend.MATPLOTLIB, parent=self)
+        # ── Galeria do ensemble (Fatia 4) — substitui o plot único ───────────
+        self._results = ResultsView(vm.results, parent=self)
 
         # ── Layout ────────────────────────────────────────────────────────────
         form = QtWidgets.QFormLayout()
@@ -166,18 +167,21 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         form.addRow("Posições derivadas:", self._n_pos_label)
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(self._run_btn)
+        controls.addWidget(self._save_btn)
+        controls.addWidget(self._open_btn)
         controls.addWidget(self._status)
         controls.addStretch(1)
         root = QtWidgets.QVBoxLayout(self)
         root.addLayout(form)
         root.addWidget(self._geology_box)
         root.addLayout(controls)
-        root.addWidget(self._canvas.widget(), stretch=1)
+        root.addWidget(self._results, stretch=1)
 
         # ── Binding ──────────────────────────────────────────────────────────
         self._run_btn.clicked.connect(self._on_run_clicked)
+        self._save_btn.clicked.connect(self._on_save_session)
+        self._open_btn.clicked.connect(self._on_open_session)
         self._vm.changed.connect(self._on_vm_changed)
-        self._vm.result_ready.connect(self._on_result_ready)
         # n_pos derivado: recalcula ao editar dips/tj/p_med (convenção Fortran).
         self._dips.textChanged.connect(self._refresh_n_pos)
         self._tj.valueChanged.connect(self._refresh_n_pos)
@@ -390,34 +394,94 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         else:
             self._status.setText(state)
 
-    def _on_result_ready(self, result: Dict[str, Any]) -> None:
-        """Plota a resposta EM (Re do 1º canal, modelo 0) vs. profundidade.
-
-        NOTA: exibe só o modelo 0 do ensemble — a galeria multi-modelo +
-        seleção de canal/componente/plot-kind é a Fatia 4 (ResultsView).
-        """
-        # Guard defensivo: o contrato do Service garante o shape, mas a View não
-        # confia cegamente (resultado malformado → status, sem crash).
-        h6 = result.get("H6")
-        positions_z = result.get("positions_z")
-        if h6 is None or positions_z is None or getattr(h6, "ndim", 0) != 6:
-            self._status.setText("resultado inválido")
-            return
-        n_models = int(h6.shape[0])
-        # H6: (n_models, nTR, nAng, n_pos, nf, 9) — modelo 0, TR0, dip0, freq0, canal 0.
-        curve = np.real(h6[0, 0, 0, :, 0, 0])
-
-        self._canvas.clear()
-        grid = self._canvas.add_subplot_grid(1, 1)
-        ax = grid[0][0]
-        self._canvas.plot_line(ax, curve, positions_z, label="Re(H₀)")
-        self._canvas.set_axis_config(
-            ax,
-            AxisConfig(
-                title=f"Resposta EM — modelo 0 de {n_models}",
-                xlabel="Re(H₀)",
-                ylabel="Profundidade z (m)",
-                invert_y=True,
-            ),
+    # ── Persistência .session (params; resultado reproduzível pela seed) ─────
+    def _on_save_session(self) -> None:
+        """Salva os params atuais num ``.session`` (JSON, sem pickle)."""
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Salvar sessão", "", "Sessão (*.session)"
         )
-        self._canvas.draw()
+        if not path:
+            return
+        if not path.endswith(".session"):
+            path += ".session"
+        # coleta os inputs ATUAIS para o VM (sem disparar run) antes de serializar.
+        self._push_inputs_to_vm()
+        try:
+            SessionDocument(data=self._vm.to_session_dict()).save(path)
+            self._status.setText(f"sessão salva: {path}")
+        except OSError as exc:
+            self._status.setText(f"falha ao salvar: {exc}")
+
+    def _on_open_session(self) -> None:
+        """Abre um ``.session`` e repopula os params (+ os widgets de input)."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Abrir sessão", "", "Sessão (*.session)"
+        )
+        if not path:
+            return
+        try:
+            doc = SessionDocument.load(path)
+        except (OSError, ValueError) as exc:
+            self._status.setText(f"falha ao abrir: {exc}")
+            return
+        self._vm.load_session_dict(doc.data)
+        self._sync_inputs_from_vm()
+        self._status.setText(f"sessão carregada: {path}")
+
+    def _push_inputs_to_vm(self) -> None:
+        """Copia os widgets de input para o VM (sem disparar run) — pré-serialização."""
+        try:
+            self._vm.frequencies = _parse_csv_floats(self._freqs.text())
+            self._vm.dips = _parse_csv_floats(self._dips.text())
+            self._vm.tr_spacings = _parse_csv_floats(self._trs.text())
+        except ValueError:
+            pass  # mantém o último válido; a validação real é no Run
+        self._vm.h1 = self._h1.value()
+        self._vm.tj = self._tj.value()
+        self._vm.p_med = self._p_med.value()
+        self._vm.n_models = self._n_models.value()
+        self._vm.geology_mode = self._geo_mode.currentText()
+        self._vm.generator = self._geo_generator.currentText()
+        self._vm.rho_h_distribution = self._geo_distr.currentText()
+        self._vm.rho_h_min = self._geo_rho_min.value()
+        self._vm.rho_h_max = self._geo_rho_max.value()
+        self._vm.anisotropic = self._geo_aniso.isChecked()
+        self._vm.lambda_min = self._geo_lambda_min.value()
+        self._vm.lambda_max = self._geo_lambda_max.value()
+        self._vm.min_thickness = self._geo_min_thick.value()
+        self._vm.n_layers_fixed = (
+            self._geo_nlf.value() if self._geo_nlf_check.isChecked() else None
+        )
+        self._vm.n_layers_min = self._geo_nl_min.value()
+        self._vm.n_layers_max = self._geo_nl_max.value() + 1
+        self._vm.rng_seed = (
+            None if self._geo_seed_random.isChecked() else self._geo_seed.value()
+        )
+
+    def _sync_inputs_from_vm(self) -> None:
+        """Reflete o estado do VM nos widgets de input (após abrir uma sessão)."""
+        self._freqs.setText(self._fmt_csv(self._vm.frequencies))
+        self._dips.setText(self._fmt_csv(self._vm.dips))
+        self._trs.setText(self._fmt_csv(self._vm.tr_spacings))
+        self._h1.setValue(self._vm.h1)
+        self._tj.setValue(self._vm.tj)
+        self._p_med.setValue(self._vm.p_med)
+        self._n_models.setValue(self._vm.n_models)
+        self._geo_mode.setCurrentText(self._vm.geology_mode)
+        self._geo_generator.setCurrentText(self._vm.generator)
+        self._geo_distr.setCurrentText(self._vm.rho_h_distribution)
+        self._geo_rho_min.setValue(self._vm.rho_h_min)
+        self._geo_rho_max.setValue(self._vm.rho_h_max)
+        self._geo_aniso.setChecked(self._vm.anisotropic)
+        self._geo_lambda_min.setValue(self._vm.lambda_min)
+        self._geo_lambda_max.setValue(self._vm.lambda_max)
+        self._geo_min_thick.setValue(self._vm.min_thickness)
+        self._geo_nlf_check.setChecked(self._vm.n_layers_fixed is not None)
+        if self._vm.n_layers_fixed is not None:
+            self._geo_nlf.setValue(self._vm.n_layers_fixed)
+        self._geo_nl_min.setValue(self._vm.n_layers_min)
+        self._geo_nl_max.setValue(self._vm.n_layers_max - 1)  # exclusive → inclusive
+        self._geo_seed_random.setChecked(self._vm.rng_seed is None)
+        if self._vm.rng_seed is not None:
+            self._geo_seed.setValue(self._vm.rng_seed)
+        self._refresh_n_pos()
