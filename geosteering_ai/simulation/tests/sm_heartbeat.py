@@ -8,7 +8,7 @@
 # ║  Criação     : 2026-04-29 (v2.11)                                         ║
 # ║  Status      : Produção (modo Debug — opt-in via env var ou menu)        ║
 # ║  Framework   : QTimer (Qt event loop) + time.perf_counter (monotônico)   ║
-# ║  Dependências: sm_qt_compat (camada PyQt6/PySide6)                        ║
+# ║  Dependências: gui.qt_compat (camada PyQt6/PySide6)                       ║
 # ║  ---------------------------------------------------------------------    ║
 # ║  FINALIDADE                                                               ║
 # ║    Detecta gaps no event loop da main thread Qt (= GUI travada). Um      ║
@@ -73,6 +73,7 @@ Note:
     detecta QUAL fase causou. Use os dois juntos para diagnóstico
     completo no relatório de profiling.
 """
+
 from __future__ import annotations
 
 import os
@@ -80,7 +81,7 @@ import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from .sm_qt_compat import QObject, QtCore, Signal
+from geosteering_ai.gui.qt_compat import QObject, QtCore, Signal
 
 # ──────────────────────────────────────────────────────────────────────────
 # Defaults — calibrados para 60 FPS (16ms paint budget Qt6)
@@ -152,7 +153,9 @@ class HeartbeatReport:
         - ``sum_gap_ms < 200ms``
         - ``total_gaps < 5``
         """
-        return self.max_gap_ms < 50.0 and self.sum_gap_ms < 200.0 and self.total_gaps < 5
+        return (
+            self.max_gap_ms < 50.0 and self.sum_gap_ms < 200.0 and self.total_gaps < 5
+        )
 
     def format_summary(self) -> str:
         """Formata sumário em string single-line para log/console.

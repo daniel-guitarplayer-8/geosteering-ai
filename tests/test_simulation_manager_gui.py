@@ -45,7 +45,7 @@ import pytest
 # ambientes sem GUI (raro mas possível). Ordem canônica: importorskip primeiro.
 pytest.importorskip("pytestqt", reason="pytest-qt not installed")
 try:
-    from geosteering_ai.simulation.tests.sm_qt_compat import QT_BINDING  # noqa: E402
+    from geosteering_ai.gui.qt_compat import QT_BINDING  # noqa: E402
 
     if QT_BINDING is None:
         pytest.skip(
@@ -76,7 +76,7 @@ def test_qt_binding_is_pyqt6_or_pyside6(qt_binding: str) -> None:
 
 def test_qt_compat_exports_signal_slot() -> None:
     """T2: ``sm_qt_compat`` exporta ``Signal``, ``Slot``, ``QtCore``."""
-    from geosteering_ai.simulation.tests import sm_qt_compat
+    from geosteering_ai.gui import qt_compat as sm_qt_compat
 
     assert hasattr(sm_qt_compat, "Signal")
     assert hasattr(sm_qt_compat, "Slot")
@@ -171,7 +171,7 @@ def test_sim_request_dataclass_defaults_directly() -> None:
 
 def test_simulation_thread_is_qthread_subclass() -> None:
     """T7: SimulationThread herda de QThread."""
-    from geosteering_ai.simulation.tests.sm_qt_compat import QThread
+    from geosteering_ai.gui.qt_compat import QThread
     from geosteering_ai.simulation.tests.sm_workers import SimulationThread
 
     assert issubclass(SimulationThread, QThread)
@@ -311,7 +311,7 @@ def test_qt_app_can_process_events(qapp, qtbot) -> None:
     Usa ``qapp`` fixture do pytest-qt (canônica) em vez de ``QApplication.instance()``
     para garantir robustez se a API interna mudar no futuro.
     """
-    from geosteering_ai.simulation.tests.sm_qt_compat import QtCore
+    from geosteering_ai.gui.qt_compat import QtCore
 
     assert qapp is not None, "Fixture qapp não retornou QApplication válida"
 

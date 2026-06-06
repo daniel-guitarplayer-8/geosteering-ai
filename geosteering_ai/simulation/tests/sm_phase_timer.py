@@ -8,7 +8,7 @@
 # ║  Criação     : 2026-04-29 (v2.11)                                         ║
 # ║  Status      : Produção                                                   ║
 # ║  Framework   : Qt6 (Signal/Slot) + time.perf_counter (monotônico)         ║
-# ║  Dependências: sm_qt_compat (camada PyQt6/PySide6)                        ║
+# ║  Dependências: gui.qt_compat (camada PyQt6/PySide6)                       ║
 # ║  ---------------------------------------------------------------------    ║
 # ║  FINALIDADE                                                               ║
 # ║    Mede e expõe via Qt signals o tempo gasto em cada fase do ciclo de    ║
@@ -70,13 +70,14 @@ Note:
     Fases podem se sobrepor (ex.: ``simulation`` enquanto ``save_dat``
     ainda roda em outra thread). Use ``end(name)`` explicitamente.
 """
+
 from __future__ import annotations
 
 import threading
 import time
 from typing import Dict, List, Optional
 
-from .sm_qt_compat import QObject, Signal
+from geosteering_ai.gui.qt_compat import QObject, Signal
 
 # ──────────────────────────────────────────────────────────────────────────
 # Constantes — fases canônicas do ciclo de simulação

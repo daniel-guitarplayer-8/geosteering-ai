@@ -19,7 +19,7 @@ import pytest
 
 def test_default_max_bytes_in_expected_range() -> None:
     """``default_max_bytes()`` retorna valor entre 500 MB e 4 GB (piso/teto)."""
-    from geosteering_ai.simulation.tests.sm_plot_cache import default_max_bytes
+    from geosteering_ai.gui.persistence.plot_cache import default_max_bytes
 
     val = default_max_bytes()
     assert 500e6 <= val <= 4e9, (
@@ -45,7 +45,7 @@ def test_default_max_bytes_fallback_without_psutil(monkeypatch) -> None:
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    from geosteering_ai.simulation.tests.sm_plot_cache import default_max_bytes
+    from geosteering_ai.gui.persistence.plot_cache import default_max_bytes
 
     assert default_max_bytes() == 500e6, (
         "Fallback sem psutil deve retornar EXATAMENTE 500 MB "
@@ -55,7 +55,7 @@ def test_default_max_bytes_fallback_without_psutil(monkeypatch) -> None:
 
 def test_lru_cache_accepts_none_max_bytes() -> None:
     """``LRUPlotCache(max_bytes=None)`` deve usar ``default_max_bytes()``."""
-    from geosteering_ai.simulation.tests.sm_plot_cache import (
+    from geosteering_ai.gui.persistence.plot_cache import (
         LRUPlotCache,
         default_max_bytes,
     )
@@ -69,7 +69,7 @@ def test_lru_cache_accepts_none_max_bytes() -> None:
 
 def test_lru_cache_backward_compat_500mb() -> None:
     """Retrocompatibilidade: ``max_bytes=500e6`` mantém o comportamento histórico."""
-    from geosteering_ai.simulation.tests.sm_plot_cache import LRUPlotCache
+    from geosteering_ai.gui.persistence.plot_cache import LRUPlotCache
 
     cache = LRUPlotCache(maxlen=3, max_bytes=500e6)
     assert cache.max_bytes == 500e6
@@ -79,7 +79,7 @@ def test_lru_cache_custom_max_bytes_evicts_correctly() -> None:
     """Política LRU eviction funciona com novos limites custom — testa
     eviction por maxlen E por bytes.
     """
-    from geosteering_ai.simulation.tests.sm_plot_cache import LRUPlotCache
+    from geosteering_ai.gui.persistence.plot_cache import LRUPlotCache
 
     # ── Cenário A: eviction por maxlen ────────────────────────────────
     small = {"H_stack": np.zeros((100, 100), dtype=np.complex128)}  # ~160 KB
@@ -114,7 +114,7 @@ def test_lru_cache_custom_max_bytes_evicts_correctly() -> None:
 
 def test_lru_cache_was_too_big_with_higher_limit() -> None:
     """Tensor que excederia 500 MB cabe se ``max_bytes`` aumentado para 2 GB."""
-    from geosteering_ai.simulation.tests.sm_plot_cache import LRUPlotCache
+    from geosteering_ai.gui.persistence.plot_cache import LRUPlotCache
 
     # Cria tensor falso de ~600 MB (não cabe em 500 MB, cabe em 2 GB)
     n = int(np.sqrt(600 * 1024 * 1024 / 16))  # complex128 = 16 bytes/elem
@@ -143,7 +143,7 @@ def test_lru_cache_was_too_big_with_higher_limit() -> None:
 
 def test_lru_cache_validates_negative_max_bytes() -> None:
     """``max_bytes < 0`` ainda dispara ``ValueError`` (validação preservada)."""
-    from geosteering_ai.simulation.tests.sm_plot_cache import LRUPlotCache
+    from geosteering_ai.gui.persistence.plot_cache import LRUPlotCache
 
     with pytest.raises(ValueError, match="max_bytes must be >= 0"):
         LRUPlotCache(maxlen=3, max_bytes=-1.0)

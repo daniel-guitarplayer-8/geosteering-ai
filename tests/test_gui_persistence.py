@@ -233,27 +233,16 @@ def test_package_qt_free_api():
     )
 
 
-def test_shim_plot_cache_identity():
-    """AC-3.2 — sm_plot_cache (legado) re-exporta os MESMOS objetos de gui.persistence."""
-    from geosteering_ai.gui.persistence.plot_cache import LRUPlotCache as GuiLRU
-    from geosteering_ai.gui.persistence.plot_cache import default_max_bytes as GuiDMB
-    from geosteering_ai.simulation.tests.sm_plot_cache import LRUPlotCache as ShimLRU
-    from geosteering_ai.simulation.tests.sm_plot_cache import (
-        default_max_bytes as ShimDMB,
-    )
+def test_persistence_shims_removed():
+    """Spec 0011 Fase 0 — os shims sm_plot_cache/sm_snapshot_persist foram REMOVIDOS."""
+    import importlib
 
-    assert ShimLRU is GuiLRU
-    assert ShimDMB is GuiDMB
-
-
-def test_shim_snapshot_persist_identity():
-    """AC-3.2 — sm_snapshot_persist (legado) re-exporta o MESMO SnapshotPersistThread."""
-    from geosteering_ai.gui.persistence.snapshot import SnapshotPersistThread as GuiSPT
-    from geosteering_ai.simulation.tests.sm_snapshot_persist import (
-        SnapshotPersistThread as ShimSPT,
-    )
-
-    assert ShimSPT is GuiSPT
+    for old in (
+        "geosteering_ai.simulation.tests.sm_plot_cache",
+        "geosteering_ai.simulation.tests.sm_snapshot_persist",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old)
 
 
 def test_snapshot_run_uses_atomic_write():

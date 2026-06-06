@@ -63,7 +63,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .sm_qt_compat import (
+from geosteering_ai.gui.qt_compat import (
     QT_AVAILABLE,
     QT_BINDING,
     QtCore,
@@ -95,7 +95,10 @@ if QT_AVAILABLE:
         ModelGenerationThread,
     )
     from .sm_phase_timer import PhaseTimer
-    from .sm_plot_cache import LRUPlotCache, default_max_bytes
+    from geosteering_ai.gui.persistence.plot_cache import (
+        LRUPlotCache,
+        default_max_bytes,
+    )
     from .sm_plots import (
         COMPONENT_NAMES,
         PLOT_KINDS,
@@ -109,7 +112,7 @@ if QT_AVAILABLE:
         plot_resistivity_profile,
         plot_tensor_full,
     )
-    from .sm_snapshot_persist import SnapshotPersistThread
+    from geosteering_ai.gui.persistence.snapshot import SnapshotPersistThread
     from .sm_workers import (
         NumbaPrimer,
         SaveArtifactsThread,
@@ -5446,7 +5449,7 @@ class ResultsPage(QtWidgets.QWidget):
         # refator das funções plot_* (v2.6c). Por ora, emite info-toast e
         # mantém matplotlib funcional.
         try:
-            from .sm_plot_backends import make_canvas
+            from geosteering_ai.gui.plot_backends import make_canvas
 
             test_canvas = make_canvas(backend, parent=None)
             del test_canvas  # apenas valida disponibilidade
@@ -6638,7 +6641,7 @@ class PreferencesPage(QtWidgets.QWidget):
         # instalados (lazy import por backend). Default = matplotlib.
         self.combo_plot_backend = QtWidgets.QComboBox()
         try:
-            from .sm_plot_backends import available_backends
+            from geosteering_ai.gui.plot_backends import available_backends
 
             # Vispy marcado como "(experimental)" — sem axes/labels nativos
             backends = [
@@ -9868,8 +9871,8 @@ def _run_smoke_test() -> int:
         check(False, f"v2.6 P3 dat_viewer ({exc})")
 
     try:
-        # P3 — sm_plot_backends + factory + 4 backends declarados
-        from .sm_plot_backends import (
+        # P3 — gui.plot_backends + factory + 4 backends declarados
+        from geosteering_ai.gui.plot_backends import (
             PlotBackend,
             PlotCanvas,
             available_backends,
@@ -10105,9 +10108,9 @@ def _run_smoke_test() -> int:
     # ── v2.7a smoke tests: PyQt6+PySide6 migration + bug fixes ────────────
     print("\n── v2.7a: Migração PyQt6+PySide6 ──")
 
-    # T1: sm_qt_compat não usa PyQt5 — binding deve ser PyQt6 ou PySide6
+    # T1: gui.qt_compat não usa PyQt5 — binding deve ser PyQt6 ou PySide6
     try:
-        from geosteering_ai.simulation.tests.sm_qt_compat import QT_BINDING
+        from geosteering_ai.gui.qt_compat import QT_BINDING
 
         check(
             QT_BINDING in {"PyQt6", "PySide6"},
@@ -10118,7 +10121,7 @@ def _run_smoke_test() -> int:
 
     # T2: constantes ALIGN_*/ORIENT_* removidas de sm_qt_compat.__all__
     try:
-        import geosteering_ai.simulation.tests.sm_qt_compat as _compat
+        import geosteering_ai.gui.qt_compat as _compat
 
         removed = {
             "ALIGN_LEFT",
@@ -10138,7 +10141,7 @@ def _run_smoke_test() -> int:
 
     # T3: detect_os_dark_mode() retorna bool sem exceção
     try:
-        from geosteering_ai.simulation.tests.sm_qt_compat import detect_os_dark_mode
+        from geosteering_ai.gui.qt_compat import detect_os_dark_mode
 
         result = detect_os_dark_mode()
         check(
@@ -10166,7 +10169,7 @@ def _run_smoke_test() -> int:
     try:
         import inspect
 
-        from geosteering_ai.simulation.tests.sm_plot_backends.pyqtgraph_canvas import (
+        from geosteering_ai.gui.plot_backends.pyqtgraph_canvas import (
             PyQtGraphCanvas,
         )
 
@@ -10467,7 +10470,7 @@ def _run_smoke_test() -> int:
 
     # ── v2.11 T20: SnapshotPersistThread async I/O ─────────────────────────
     try:
-        from .sm_snapshot_persist import SnapshotPersistThread
+        from geosteering_ai.gui.persistence.snapshot import SnapshotPersistThread
 
         st = SnapshotPersistThread('{"k": 1}', "/tmp/v211_smoke_test.json")
         check(

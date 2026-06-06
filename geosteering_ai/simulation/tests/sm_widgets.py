@@ -20,16 +20,17 @@
 # ║    • QPropertyAnimation em _on_toggled() — animação de 180ms             ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 """Widgets Qt reutilizáveis (v2.7a)."""
+
 from __future__ import annotations
 
 from typing import Optional
 
-from .sm_qt_compat import QtCore, QtWidgets, Signal
+from geosteering_ai.gui.qt_compat import QtCore, QtWidgets, Signal
 
 __all__ = ["CollapsibleGroupBox"]
 
 # ── Signal compatível com PyQt6 e PySide6 ────────────────────────────────
-# sm_qt_compat exporta Signal = pyqtSignal (PyQt6) ou Signal (PySide6).
+# gui.qt_compat exporta Signal = pyqtSignal (PyQt6) ou Signal (PySide6).
 # Usado como atributo de classe na definição abaixo.
 _Signal = Signal  # alias para clareza dentro da definição da classe
 

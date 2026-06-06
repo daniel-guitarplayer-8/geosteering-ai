@@ -78,7 +78,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .sm_qt_compat import QObject, QThread, Signal
+from geosteering_ai.gui.qt_compat import QObject, QThread, Signal
 
 # ──────────────────────────────────────────────────────────────────────────
 # Estruturas de configuração

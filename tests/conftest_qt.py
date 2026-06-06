@@ -85,7 +85,7 @@ def qt_binding() -> str:
         ...     if qt_binding == "PyQt6":
         ...         assert ...
     """
-    from geosteering_ai.simulation.tests.sm_qt_compat import QT_BINDING
+    from geosteering_ai.gui.qt_compat import QT_BINDING
 
     if QT_BINDING is None:
         raise RuntimeError(

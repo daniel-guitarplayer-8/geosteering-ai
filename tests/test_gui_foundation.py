@@ -17,9 +17,8 @@
 # ║  MAPA AC → TESTE                                                          ║
 # ║    AC-1.1 novo caminho importa ........ test_gui_qt_compat_imports        ║
 # ║    AC-1.2 pacote gui importável ....... test_gui_package_importable       ║
-# ║    AC-1.3 __all__ completo (16) ....... test_gui_qt_compat_all_complete   ║
-# ║    AC-2.1 shim antigo importa ......... test_legacy_shim_imports          ║
-# ║    AC-2.2 identidade re-exportada ..... test_shim_reexports_same_objects  ║
+# ║    AC-1.3 __all__ completo ............ test_gui_qt_compat_all_complete   ║
+# ║    Spec 0011 F0: shim REMOVIDO ........ test_legacy_shim_removed          ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 """Testes da spec 0004 — fundação ``geosteering_ai/gui/`` (extração de qt_compat).
 
@@ -34,7 +33,8 @@ import importlib
 
 import pytest
 
-# Os 16 símbolos públicos do contrato de ``qt_compat`` (spec 0004 §3).
+# Símbolos públicos do contrato de ``qt_compat`` (spec 0004 §3 + ``load_qwebengineview``
+# adicionado no code-review de 0006/0007).
 EXPECTED_SYMBOLS = {
     "QObject",
     "QT_AVAILABLE",
@@ -51,6 +51,7 @@ EXPECTED_SYMBOLS = {
     "detect_os_dark_mode",
     "enforce_c_locale",
     "format_float",
+    "load_qwebengineview",
     "make_double_spin",
 }
 
@@ -79,46 +80,22 @@ def test_gui_qt_compat_imports():
 
 
 def test_gui_qt_compat_all_complete():
-    """AC-1.3 — ``__all__`` tem os 16 nomes E todos são atributos reais."""
+    """AC-1.3 — ``__all__`` tem todos os nomes esperados E são atributos reais."""
     qc = importlib.import_module(_NEW)
     assert set(qc.__all__) == EXPECTED_SYMBOLS
     for name in qc.__all__:
         assert hasattr(qc, name), f"{name} em __all__ mas ausente no módulo"
 
 
-# ── AC-2.x — caminho ANTIGO (shim de retrocompat) ────────────────────────────
-def test_legacy_shim_imports():
-    """AC-2.1 — o caminho ANTIGO (shim) ainda importa os símbolos."""
-    from geosteering_ai.simulation.tests.sm_qt_compat import (  # noqa: F401
-        QT_BINDING,
-        QtCore,
-        QThread,
-        QtWidgets,
-        Signal,
-    )
+# ── De-shim (spec 0011 Fase 0) — o caminho ANTIGO foi REMOVIDO ───────────────
+def test_legacy_shim_removed():
+    """Spec 0011 Fase 0 — o shim antigo (``sm_qt_compat``) foi REMOVIDO.
 
-
-def test_shim_reexports_same_objects():
-    """AC-2.2 — o shim re-exporta os MESMOS objetos (identidade) do módulo canônico.
-
-    ``gui.qt_compat.X is sm_qt_compat.X`` para os 16 símbolos (referência, não cópia).
+    Os consumidores migraram para ``gui.qt_compat`` diretamente; o caminho antigo
+    não existe mais (importá-lo levanta ``ModuleNotFoundError``).
     """
-    new = importlib.import_module(_NEW)
-    old = importlib.import_module(_OLD)
-    # __all__ idêntico nos dois caminhos.
-    assert set(old.__all__) == set(new.__all__) == EXPECTED_SYMBOLS
-    # Identidade de CADA símbolo re-exportado (mesma referência, não cópia).
-    for name in EXPECTED_SYMBOLS:
-        assert getattr(old, name) is getattr(
-            new, name
-        ), f"{name}: identidade quebrada entre gui.qt_compat e o shim"
-
-
-def test_shim_is_distinct_module():
-    """O shim é um MÓDULO distinto (re-export por valor, não alias sys.modules)."""
-    new = importlib.import_module(_NEW)
-    old = importlib.import_module(_OLD)
-    assert old is not new  # módulos diferentes; símbolos idênticos (test acima)
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(_OLD)
 
 
 def test_binding_resolved_when_qt_available():

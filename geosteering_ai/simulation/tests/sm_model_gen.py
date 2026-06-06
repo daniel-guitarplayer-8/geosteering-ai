@@ -59,6 +59,7 @@ Example:
         >>> len(models), models[0]["n_layers"]
         (100, 20)
 """
+
 from __future__ import annotations
 
 import logging
@@ -167,7 +168,9 @@ class GenConfig:
         if self.n_layers_fixed is not None and self.n_layers_fixed < 3:
             raise ValueError("n_layers_fixed deve ser ≥ 3 (inclui 2 semi-espaços).")
         if self.rho_h_min <= 0 or self.rho_h_max <= self.rho_h_min:
-            raise ValueError("Intervalo de ρh inválido (precisa ρ_min>0 e ρ_max>ρ_min).")
+            raise ValueError(
+                "Intervalo de ρh inválido (precisa ρ_min>0 e ρ_max>ρ_min)."
+            )
         if self.lambda_min < 1.0:
             raise ValueError("λ mínimo deve ser ≥ 1.0 (ρᵥ ≥ ρₕ em TIV física).")
         if self.generator not in GENERATORS_AVAILABLE:
@@ -216,7 +219,9 @@ def _samples_halton(rng: np.random.Generator, n_dim: int, seed: int) -> np.ndarr
     return rng.random(n_dim)
 
 
-def _samples_niederreiter(rng: np.random.Generator, n_dim: int, seed: int) -> np.ndarray:
+def _samples_niederreiter(
+    rng: np.random.Generator, n_dim: int, seed: int
+) -> np.ndarray:
     """Aproximação Niederreiter via Halton (scipy não traz Niederreiter nativo)."""
     # SciPy < 1.12 não tem classe Niederreiter; Halton é o substituto mais próximo.
     if _HAS_SCIPY_QMC:
@@ -479,9 +484,9 @@ def generate_models(
 # A 500 modelos/chunk × 0.5ms/modelo = 250ms por chunk → 4 chunks/segundo.
 DEFAULT_GEN_CHUNK_SIZE: int = 500
 
-# Lazy import of Qt — sm_qt_compat deve existir no mesmo pacote.
+# Lazy import of Qt — via gui.qt_compat (spec 0011 Fase 0).
 try:
-    from .sm_qt_compat import QThread, Signal  # type: ignore
+    from geosteering_ai.gui.qt_compat import QThread, Signal  # type: ignore
 
     _HAS_QT = True
 except Exception:  # pragma: no cover

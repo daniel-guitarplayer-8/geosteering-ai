@@ -38,11 +38,12 @@
 # ║    vermelho e impedem o accept().                                         ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 """Caixa de diálogo modal para inserção manual de camadas TIV."""
+
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
-from .sm_qt_compat import QT_AVAILABLE, QtCore, QtGui, QtWidgets
+from geosteering_ai.gui.qt_compat import QtCore, QtGui, QtWidgets
 
 __all__ = ["LayersManualDialog"]
 

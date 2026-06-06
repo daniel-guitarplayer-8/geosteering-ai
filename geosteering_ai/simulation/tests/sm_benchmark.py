@@ -46,7 +46,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from .sm_model_gen import GenConfig, generate_models
-from .sm_qt_compat import QObject, QThread, Signal
+from geosteering_ai.gui.qt_compat import QObject, QThread, Signal
 from .sm_workers import run_fortran_chunk, run_numba_chunk
 
 # ──────────────────────────────────────────────────────────────────────────

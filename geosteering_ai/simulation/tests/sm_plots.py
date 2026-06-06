@@ -63,6 +63,7 @@ Note:
     decimal (jamais vírgula), em linha com a convenção científica e os
     testes automatizados da suite.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -70,7 +71,7 @@ from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .sm_qt_compat import QtGui, QtWidgets, detect_os_dark_mode
+from geosteering_ai.gui.qt_compat import QtGui, QtWidgets, detect_os_dark_mode
 
 # Import matplotlib com backend Qt — fallback leve se matplotlib ausente
 try:
@@ -311,7 +312,9 @@ class EMCanvas(QtWidgets.QWidget):
             self.canvas = None
             return
 
-        self.figure = Figure(figsize=figsize, constrained_layout=True, dpi=self.style.dpi)
+        self.figure = Figure(
+            figsize=figsize, constrained_layout=True, dpi=self.style.dpi
+        )
         self.canvas = FigureCanvasQTAgg(self.figure)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -779,10 +782,14 @@ def plot_tensor_full(
         i for i in range(nTR) if tr_mask is None or (i < len(tr_mask) and tr_mask[i])
     ]
     ang_sel = [
-        i for i in range(nAng) if ang_mask is None or (i < len(ang_mask) and ang_mask[i])
+        i
+        for i in range(nAng)
+        if ang_mask is None or (i < len(ang_mask) and ang_mask[i])
     ]
     freq_sel = [
-        i for i in range(nf) if freq_mask is None or (i < len(freq_mask) and freq_mask[i])
+        i
+        for i in range(nf)
+        if freq_mask is None or (i < len(freq_mask) and freq_mask[i])
     ]
     if not tr_sel or not ang_sel or not freq_sel:
         ax = canvas.figure.add_subplot(1, 1, 1)
@@ -1131,7 +1138,9 @@ def plot_em_profile(
         ]
     else:
         _tr_sel = [
-            i for i in range(nTR) if tr_mask is None or (i < len(tr_mask) and tr_mask[i])
+            i
+            for i in range(nTR)
+            if tr_mask is None or (i < len(tr_mask) and tr_mask[i])
         ]
         _ang_sel = [
             i
@@ -1144,7 +1153,10 @@ def plot_em_profile(
             if freq_mask is None or (i < len(freq_mask) and freq_mask[i])
         ]
         combo_iter_em = [
-            (itr, iang, ifq) for itr in _tr_sel for iang in _ang_sel for ifq in _freq_sel
+            (itr, iang, ifq)
+            for itr in _tr_sel
+            for iang in _ang_sel
+            for ifq in _freq_sel
         ]
     # v2.8: kind vem diretamente do combo_kind_mode selecionado pelo usuário.
     # scale_mode modula COMO magnitude/fase é computada (log10/dB/linear/rad),
@@ -1293,12 +1305,16 @@ def plot_benchmark_compare(
     canvas.figure.clear()
     H_list: List[Tuple[np.ndarray, str, str, float, Optional[str], str]] = []
     if H_numba is not None:
-        H_list.append((H_numba, "Numba", "-", style.line_width, None, style.color_numba))
+        H_list.append(
+            (H_numba, "Numba", "-", style.line_width, None, style.color_numba)
+        )
     if H_fortran is not None:
         H_list.append((H_fortran, "Fortran", "", 0.0, "o", style.color_fortran))
     if not H_list:
         ax = canvas.figure.add_subplot(1, 1, 1)
-        ax.text(0.5, 0.5, "Sem dados para comparar.", ha="center", transform=ax.transAxes)
+        ax.text(
+            0.5, 0.5, "Sem dados para comparar.", ha="center", transform=ax.transAxes
+        )
         canvas.draw()
         return
 
@@ -1387,7 +1403,9 @@ def plot_benchmark_compare(
 GEOSIGNAL_NAMES = ("USD", "UAD", "UHR", "UHA", "U3DF")
 
 
-def _compute_geosignal(name: str, H_slice: np.ndarray, eps: float = 1e-20) -> np.ndarray:
+def _compute_geosignal(
+    name: str, H_slice: np.ndarray, eps: float = 1e-20
+) -> np.ndarray:
     """Computa um dos 5 geosinais canônicos como quantidade COMPLEXA.
 
     Cada sinal é retornado como array complex128; chamador extrai
@@ -1528,10 +1546,14 @@ def plot_geosignals(
         i for i in range(nTR) if tr_mask is None or (i < len(tr_mask) and tr_mask[i])
     ]
     ang_sel = [
-        i for i in range(nAng) if ang_mask is None or (i < len(ang_mask) and ang_mask[i])
+        i
+        for i in range(nAng)
+        if ang_mask is None or (i < len(ang_mask) and ang_mask[i])
     ]
     freq_sel = [
-        i for i in range(nf) if freq_mask is None or (i < len(freq_mask) and freq_mask[i])
+        i
+        for i in range(nf)
+        if freq_mask is None or (i < len(freq_mask) and freq_mask[i])
     ]
     if not tr_sel or not ang_sel or not freq_sel:
         ax = canvas.figure.add_subplot(1, 1, 1)
@@ -1748,7 +1770,9 @@ def plot_anisotropy(
     centers = 0.5 * (y_edges[:-1] + y_edges[1:])
 
     _draw_layer_boundaries(ax, thick_arr, style)
-    ax.step(lam, centers, where="mid", color=style.color_rho_v, lw=style.line_width + 0.3)
+    ax.step(
+        lam, centers, where="mid", color=style.color_rho_v, lw=style.line_width + 0.3
+    )
     ax.set_xlabel(r"$\lambda = \sqrt{\rho_v/\rho_h}$")
     ax.set_ylabel("Profundidade (m)")
     ax.invert_yaxis()

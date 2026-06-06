@@ -33,7 +33,7 @@ def test_parameters_page_has_seed_widgets() -> None:
     funcional (modelos sempre idênticos) que esta versão corrigiu.
     """
     from geosteering_ai.simulation.tests.simulation_manager import ParametersPage
-    from geosteering_ai.simulation.tests.sm_qt_compat import QtWidgets
+    from geosteering_ai.gui.qt_compat import QtWidgets
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     assert app is not None

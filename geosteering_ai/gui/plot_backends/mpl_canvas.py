@@ -57,7 +57,7 @@ class MatplotlibCanvas(PlotCanvas):
         style: PlotStyle opcional aplicado em construção
 
     Example:
-        >>> from sm_plot_backends import make_canvas, PlotBackend
+        >>> from geosteering_ai.gui.plot_backends import make_canvas, PlotBackend
         >>> canvas = make_canvas(PlotBackend.MATPLOTLIB, parent=self)
         >>> axes = canvas.add_subplot_grid(3, 6, sharey=True)
         >>> canvas.plot_line(axes[0][0], x, y, label="Re(Hxx)")

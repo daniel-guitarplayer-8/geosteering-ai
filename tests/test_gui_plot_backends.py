@@ -136,34 +136,14 @@ def test_pyqtgraph_canvas_smoke(offscreen_app):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# RF-2 — shim de retrocompat (zero regressão do Simulation Manager)
+# De-shim (spec 0011 Fase 0) — o shim de plot_backends foi REMOVIDO
 # ════════════════════════════════════════════════════════════════════════════
-def test_shim_reexports_same_objects():
-    """AC-2.1/2.2 — o caminho legado importa e re-exporta os MESMOS objetos."""
-    import geosteering_ai.gui.plot_backends as gui_pb
-    from geosteering_ai.simulation.tests.sm_plot_backends import (
-        PlotBackend,
-        PlotCanvas,
-        available_backends,
-        make_canvas,
-    )
+def test_plot_backends_shim_removed():
+    """Spec 0011 Fase 0 — o shim ``sm_plot_backends`` foi removido (consumidores em gui/)."""
+    import importlib
 
-    assert make_canvas is gui_pb.make_canvas  # identidade (re-export, não redefinição)
-    assert PlotCanvas is gui_pb.PlotCanvas
-    assert available_backends is gui_pb.available_backends
-    assert PlotBackend is gui_pb.PlotBackend
-
-
-def test_shim_submodule_pyqtgraph_canvas():
-    """AC-2.3 — acesso direto ao submódulo (como o monólito faz) é o MESMO objeto."""
-    from geosteering_ai.gui.plot_backends.pyqtgraph_canvas import (
-        PyQtGraphCanvas as Gui_PG,
-    )
-    from geosteering_ai.simulation.tests.sm_plot_backends.pyqtgraph_canvas import (
-        PyQtGraphCanvas as Shim_PG,
-    )
-
-    assert Shim_PG is Gui_PG
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("geosteering_ai.simulation.tests.sm_plot_backends")
 
 
 # ════════════════════════════════════════════════════════════════════════════
