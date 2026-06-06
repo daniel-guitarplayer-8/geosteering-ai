@@ -389,6 +389,26 @@ def test_service_is_busy_during_run_then_idle(qtbot):
     qtbot.waitUntil(lambda: not service.is_busy(), timeout=3000)  # False após
 
 
+@pytest.mark.gui
+def test_service_threads_bounded_across_runs(qtbot):
+    """Revisão 0011a #10 — BaseService NÃO acumula refs de threads mortas.
+
+    Pruning em ``_run_async`` (antes de adicionar) + nos slots ``_on_worker_*``
+    (após a entrega) mantém ``_threads`` enxuto através de N simulações sequenciais.
+    is_busy() é predicado PURO (não muta _threads) — pruning ali soltaria um
+    worker com ``finished`` em-voo (resultado perdido).
+    """
+    from geosteering_ai.gui.services.base import BaseService
+
+    service = BaseService()
+    for _ in range(6):
+        service._run_async(lambda: 1)
+        qtbot.waitUntil(lambda: not service.is_busy(), timeout=5000)
+    # Não acumulou: ≤ 2 (a última + uma possível pendente de prune), NÃO 6.
+    qtbot.waitUntil(lambda: len(service._threads) <= 2, timeout=5000)
+    assert len(service._threads) <= 2
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # RF-5 — end-to-end real (perspectiva → run → result_ready) (qtbot)
 # ════════════════════════════════════════════════════════════════════════════
