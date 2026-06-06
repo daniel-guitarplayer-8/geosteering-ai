@@ -24,6 +24,9 @@
 
 from __future__ import annotations
 
+import threading
+from typing import Any
+
 from geosteering_ai.gui.services.base import BaseService
 from geosteering_ai.gui.services.sim_request import SimRequest, _run_simulation
 
@@ -54,15 +57,48 @@ class SimulationService(BaseService):
     # Backends que (podem) inicializar JAX → exigem subprocesso (TLS-safe).
     _SUBPROCESS_BACKENDS = ("jax", "auto")
 
+    def __init__(self, *, parent: Any = None) -> None:
+        super().__init__(parent=parent)
+        # Eventos cooperativos (Fatia 6a) — só atuam no caminho numba in-thread
+        # (memória compartilhada com a QThread). cancel: set=cancelar. pause:
+        # set=rodando / clear=pausado. No subprocesso (jax) NÃO são usados (v1).
+        self._cancel_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._pause_event.set()  # default: rodando (não pausado)
+
     def run(self, request: SimRequest) -> None:
         """Dispara a simulação off-thread (não-bloqueante); roteia por backend.
 
         Args:
             request: a requisição (já validada pelo ViewModel).
         """
+        # Reseta o controle cooperativo para esta run (limpa cancel; despausa).
+        self._cancel_event.clear()
+        self._pause_event.set()
         if request.backend in self._SUBPROCESS_BACKENDS:
             # jax/auto podem init CUDA → subprocesso isolado (a QThread crasharia).
+            # Progresso/cancel intra-run NÃO cruzam o processo (v1) — só finished/error.
             self._run_in_subprocess(_run_simulation, request)
         else:
-            # numba não crasha na QThread → caminho in-thread (rápido, sem spawn).
-            self._run_async(_run_simulation, request)
+            # numba in-thread (rápido, sem spawn): progresso por-grupo + cancel/pause
+            # cooperativos via os eventos (memória compartilhada com a QThread).
+            self._run_async(
+                _run_simulation,
+                request,
+                report_progress=True,
+                cancel_event=self._cancel_event,
+                pause_event=self._pause_event,
+            )
+
+    def request_cancel(self) -> None:
+        """Solicita cancelamento cooperativo (numba: aborta entre grupos)."""
+        self._cancel_event.set()
+        self._pause_event.set()  # despausa p/ o loop de espera ver o cancel e sair
+
+    def request_pause(self) -> None:
+        """Pausa cooperativa (numba: bloqueia entre grupos). No-op p/ jax (v1)."""
+        self._pause_event.clear()
+
+    def request_resume(self) -> None:
+        """Retoma de uma pausa cooperativa."""
+        self._pause_event.set()

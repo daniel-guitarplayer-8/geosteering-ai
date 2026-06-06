@@ -30,12 +30,43 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
 __all__ = ["SimRequest", "compute_n_pos"]
+
+# Tipo do callback de progresso: ``progress_callback(done, total)`` (Fatia 6a). É
+# injetado pelo ``Worker`` (emite ``signals.progress`` → QueuedConnection → VM). No
+# caminho jax/subprocesso fica ``None`` (não cruza o limite de processo no v1).
+_ProgressCb = Optional[Callable[[int, int], None]]
+
+
+def _await_resume_or_cancel(cancel_event: Any, pause_event: Any) -> bool:
+    """Coopera com pause/cancel ENTRE grupos (Fatia 6a). Retorna ``True`` se cancelado.
+
+    Bloqueia (sleep cooperativo) enquanto ``pause_event`` estiver LIMPO (pausado),
+    saindo imediatamente se ``cancel_event`` for setado. NÃO interrompe o kernel
+    (a chamada ``simulate_batch`` é atômica) — só atua nas fronteiras de grupo, o
+    que preserva a fidelidade (um grupo simulado é sempre completo ou descartado).
+
+    Args:
+        cancel_event: ``threading.Event`` (set = cancelar) ou ``None``.
+        pause_event: ``threading.Event`` (set = rodando / clear = pausado) ou ``None``.
+
+    Returns:
+        ``True`` se o cancelamento foi solicitado; ``False`` caso contrário.
+    """
+    if cancel_event is not None and cancel_event.is_set():
+        return True
+    if pause_event is not None:
+        while not pause_event.is_set():
+            if cancel_event is not None and cancel_event.is_set():
+                return True
+            time.sleep(0.05)  # espera cooperativa (worker thread; não trava a UI)
+    return False
 
 
 def compute_n_pos(tj: float, p_med: float, dip0_deg: float) -> int:
@@ -239,7 +270,10 @@ def _simulate_grouped(
     models: List[Dict[str, Any]],
     positions_z: np.ndarray,
     request: SimRequest,
-) -> Tuple[np.ndarray, Dict[str, Any]]:
+    progress_callback: _ProgressCb = None,
+    cancel_event: Any = None,
+    pause_event: Any = None,
+) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
     """Simula modelos RAGGED agrupando por ``n_layers`` e reassembla ``H6``.
 
     ``simulate_batch`` exige batch RETANGULAR (``n_layers`` uniforme). Modelos com
@@ -248,14 +282,21 @@ def _simulate_grouped(
     Fatia 5), e o ``H6`` de cada grupo é colocado de volta no índice ORIGINAL do
     modelo (a ordem do batch final == ordem de ``models``).
 
+    Feedback (Fatia 6a): emite progresso POR-GRUPO via ``progress_callback`` e
+    coopera com ``cancel_event``/``pause_event`` ENTRE grupos (a chamada do kernel
+    é atômica — o cancel descarta o resultado parcial, nunca o corrompe).
+
     Args:
         models: lista de dicts ``MODEL_KEYS`` (possivelmente ragged).
         positions_z: ``(n_pos,)`` float64 — compartilhado por todos (convenção Fortran).
         request: a requisição (freqs/dips/TRs/backend).
+        progress_callback: ``f(done, total)`` chamado por grupo concluído (ou ``None``).
+        cancel_event/pause_event: ``threading.Event`` cooperativos (ou ``None``).
 
     Returns:
         ``(H6, info)`` — ``H6`` shape ``(n_models, nTR, nAng, n_pos, nf, 9)`` na
-        ordem original; ``info`` agrega os dispatchers por grupo.
+        ordem original; ``info`` agrega os dispatchers por grupo. Se cancelado,
+        ``(None, {"cancelled": True})`` (resultado parcial descartado).
     """
     from collections import defaultdict
 
@@ -271,9 +312,16 @@ def _simulate_grouped(
     for i, m in enumerate(models):
         groups[int(m["n_layers"])].append(i)
 
+    if progress_callback is not None:
+        progress_callback(0, n_models)  # estado inicial (0%)
+
     h6_out: Optional[np.ndarray] = None
     info_by_group: Dict[str, Any] = {}
+    models_done = 0
     for n_layers, idxs in sorted(groups.items()):
+        # Pause/cancel cooperativo ANTES de cada grupo (kernel é atômico).
+        if _await_resume_or_cancel(cancel_event, pause_event):
+            return None, {"cancelled": True}
         # Empilha o grupo em arrays RETANGULARES (mesmo n_layers).
         rho_h = np.array([models[i]["rho_h"] for i in idxs], dtype=np.float64)  # (g, L)
         rho_v = np.array([models[i]["rho_v"] for i in idxs], dtype=np.float64)  # (g, L)
@@ -296,12 +344,20 @@ def _simulate_grouped(
         for local, original_idx in enumerate(idxs):
             h6_out[original_idx] = h6_g[local]  # reassembla na ORDEM original
         info_by_group[str(n_layers)] = info_g
+        models_done += len(idxs)
+        if progress_callback is not None:
+            progress_callback(models_done, n_models)  # progresso por grupo concluído
 
     assert h6_out is not None  # n_models ≥ 1 garante ≥ 1 grupo
     return h6_out, {"groups": info_by_group, "n_groups": len(groups)}
 
 
-def _run_simulation(request: SimRequest) -> Dict[str, Any]:
+def _run_simulation(
+    request: SimRequest,
+    progress_callback: _ProgressCb = None,
+    cancel_event: Any = None,
+    pause_event: Any = None,
+) -> Dict[str, Any]:
     """Roda ``simulate_batch`` (na worker thread) e empacota o resultado.
 
     PURO/picklable (módulo-nível) — chamável direto em teste de fidelidade SEM Qt.
@@ -309,10 +365,15 @@ def _run_simulation(request: SimRequest) -> Dict[str, Any]:
 
     Args:
         request: a requisição validada.
+        progress_callback: ``f(done, total)`` p/ feedback de progresso (Fatia 6a;
+            ``None`` no caminho jax/subprocesso — não cruza o limite de processo).
+        cancel_event/pause_event: ``threading.Event`` cooperativos (numba in-thread;
+            ``None`` no subprocesso). Cancel entre grupos → resultado ``cancelled``.
 
     Returns:
         dict com ``H6`` (n_models, nTR, nAng, n_pos, nf, 9) complexo, ``positions_z``,
-        ``info`` (dispatcher) e ``backend`` efetivo.
+        ``info`` (dispatcher) e ``backend`` efetivo. Se cancelado, ``{"cancelled":
+        True, "backend": ...}`` (sem ``H6`` — resultado parcial descartado).
 
     Modos (``request.geology_mode``):
       ┌──────────────┬─────────────────────────────────────────────────────────┐
@@ -332,12 +393,19 @@ def _run_simulation(request: SimRequest) -> Dict[str, Any]:
         # Geração estocástica (pode ser ragged) → agrupa por n_layers.
         positions_z = _compute_positions_z(request)
         models = _generate_stochastic_models(request)
-        h6, info = _simulate_grouped(models, positions_z, request)
+        h6, info = _simulate_grouped(
+            models, positions_z, request, progress_callback, cancel_event, pause_event
+        )
+        if info.get("cancelled"):
+            return {"cancelled": True, "backend": request.backend}
     else:
         # Geologia FIXA (Fatia 2) — batch retangular, 1 chamada. ``_build_batch``
         # já deriva ``positions_z`` (convenção Fortran) — não recomputa.
         from geosteering_ai.simulation import simulate_batch  # lazy (Numba pesado)
 
+        # Cancel/pause cooperativo antes da única chamada (kernel é atômico).
+        if _await_resume_or_cancel(cancel_event, pause_event):
+            return {"cancelled": True, "backend": request.backend}
         rho_h, rho_v, esp, positions_z = _build_batch(request)
         h6, info = simulate_batch(
             rho_h,
@@ -349,6 +417,8 @@ def _run_simulation(request: SimRequest) -> Dict[str, Any]:
             dip_degs=list(request.dip_degs),
             backend=request.backend,
         )
+        if progress_callback is not None:
+            progress_callback(request.n_models, request.n_models)  # 100%
     return {
         "H6": h6,
         "positions_z": positions_z,

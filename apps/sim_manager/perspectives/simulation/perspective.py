@@ -35,6 +35,13 @@ if TYPE_CHECKING:  # pragma: no cover — só type-checking (via qt_compat, não
 __all__ = ["SimulationPerspective"]
 
 
+def _history_label(result: dict) -> str:
+    """Rótulo curto de um resultado p/ o Histórico da sidebar (Fatia 6a)."""
+    h6 = result.get("H6")
+    n = getattr(h6, "shape", (None,))[0] if h6 is not None else "?"
+    return f"sim · backend={result.get('backend', '?')} · {n} modelo(s)"
+
+
 class SimulationPerspective(Perspective):
     """Perspectiva Simulação — cria SimulationVM (Service injetado) + SimulatorView."""
 
@@ -68,4 +75,12 @@ class SimulationPerspective(Perspective):
         from apps.sim_manager.perspectives.simulation.view import SimulatorView
 
         viewmodel = self.build_viewmodel(ctx)
+        # Liga o feedback (Fatia 6a) à secondary sidebar do shell (Histórico/Log),
+        # via ctx.extras — sem acoplar o ViewModel (puro) ao shell.
+        sidebar = ctx.extras.get("secondary_sidebar")
+        if sidebar is not None:
+            viewmodel.log_entry.connect(sidebar.append_log)
+            viewmodel.result_ready.connect(
+                lambda result: sidebar.add_history_item(_history_label(result))
+            )
         return SimulatorView(viewmodel)

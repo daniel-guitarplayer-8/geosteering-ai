@@ -156,10 +156,24 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._geology_box = self._build_geology_group(vm)
 
         self._n_pos_label = QtWidgets.QLabel("n_pos: —")
-        self._run_btn = QtWidgets.QPushButton("Run")
+        # ── Execução & feedback (Fatia 6a) ───────────────────────────────────
+        self._run_btn = QtWidgets.QPushButton("▶  Iniciar")
+        self._run_btn.setProperty("role", "primary")  # pill accent (QSS)
+        self._pause_btn = QtWidgets.QPushButton("⏸  Pausar")
+        self._pause_btn.setCheckable(True)
+        self._pause_btn.setEnabled(False)
+        self._pause_btn.setToolTip(
+            "Pausa/retoma entre grupos (cooperativo; backend numba). No-op p/ jax."
+        )
+        self._cancel_btn = QtWidgets.QPushButton("⏹  Cancelar")
+        self._cancel_btn.setProperty("role", "danger")  # pill vermelho (QSS)
+        self._cancel_btn.setEnabled(False)
+        self._progress_bar = QtWidgets.QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
         self._save_btn = QtWidgets.QPushButton("Salvar sessão…")
         self._open_btn = QtWidgets.QPushButton("Abrir sessão…")
-        self._status = QtWidgets.QLabel("idle")
+        self._status = QtWidgets.QLabel("● ocioso")
 
         # ── Galeria do ensemble (Fatia 4) — substitui o plot único ───────────
         self._results = ResultsView(vm.results, parent=self)
@@ -175,20 +189,29 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         form.addRow("Nº modelos:", self._n_models)
         form.addRow("Backend:", self._sim_backend)
         form.addRow("Posições derivadas:", self._n_pos_label)
-        controls = QtWidgets.QHBoxLayout()
-        controls.addWidget(self._run_btn)
-        controls.addWidget(self._save_btn)
-        controls.addWidget(self._open_btn)
-        controls.addWidget(self._status)
-        controls.addStretch(1)
+        # Linha 1: execução (Iniciar/Pausar/Cancelar) + progresso.
+        exec_row = QtWidgets.QHBoxLayout()
+        exec_row.addWidget(self._run_btn)
+        exec_row.addWidget(self._pause_btn)
+        exec_row.addWidget(self._cancel_btn)
+        exec_row.addWidget(self._progress_bar, stretch=1)
+        # Linha 2: sessão + status (estado · elapsed · throughput).
+        session_row = QtWidgets.QHBoxLayout()
+        session_row.addWidget(self._save_btn)
+        session_row.addWidget(self._open_btn)
+        session_row.addWidget(self._status)
+        session_row.addStretch(1)
         root = QtWidgets.QVBoxLayout(self)
         root.addLayout(form)
         root.addWidget(self._geology_box)
-        root.addLayout(controls)
+        root.addLayout(exec_row)
+        root.addLayout(session_row)
         root.addWidget(self._results, stretch=1)
 
         # ── Binding ──────────────────────────────────────────────────────────
         self._run_btn.clicked.connect(self._on_run_clicked)
+        self._pause_btn.clicked.connect(self._on_pause_clicked)
+        self._cancel_btn.clicked.connect(self._on_cancel_clicked)
         self._save_btn.clicked.connect(self._on_save_session)
         self._open_btn.clicked.connect(self._on_open_session)
         self._vm.changed.connect(self._on_vm_changed)
@@ -386,24 +409,52 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         ):
             w.setEnabled(enabled)
 
+    def _on_pause_clicked(self) -> None:
+        """Toggle Pausar/Retomar (cooperativo; numba). Delega ao ViewModel."""
+        if self._pause_btn.isChecked():
+            self._vm.request_pause()
+            self._pause_btn.setText("▶  Retomar")
+        else:
+            self._vm.request_resume()
+            self._pause_btn.setText("⏸  Pausar")
+
+    def _on_cancel_clicked(self) -> None:
+        """Solicita o cancelamento cooperativo da simulação em voo."""
+        self._vm.request_cancel()
+
     def _on_vm_changed(self, name: str, value: Any) -> None:
-        """Reflete mudanças de estado do VM (status/botão/cor + msg de erro)."""
-        if name != "_status":
+        """Reflete o estado do VM: botões, barra de progresso e status (Fatia 6a)."""
+        if name not in ("_status", "_progress"):
             return
-        state = str(value)
-        self._run_btn.setEnabled(state != "running")
-        # Cor por estado (erro vermelho, running azul, done verde).
-        color = {"error": "#c0392b", "running": "#2980b9", "done": "#27ae60"}.get(
-            state, ""
-        )
+        state = self._vm.status
+        running = state == "running"
+        # Botões por estado (1 simulação por vez; o guard real vive no VM).
+        self._run_btn.setEnabled(not running)
+        self._pause_btn.setEnabled(running)
+        self._cancel_btn.setEnabled(running)
+        if not running and self._pause_btn.isChecked():
+            self._pause_btn.setChecked(False)
+            self._pause_btn.setText("⏸  Pausar")
+        # Barra de progresso (0–100%).
+        total = max(1, self._vm.progress_total)
+        self._progress_bar.setValue(int(100 * self._vm.progress_done / total))
+        # Status: estado · elapsed · throughput (ou mensagem de erro).
+        color = {
+            "error": "#ef4444",
+            "running": "#6366f1",
+            "done": "#10b981",
+            "cancelled": "#f59e0b",
+        }.get(state, "")
         self._status.setStyleSheet(f"color: {color};" if color else "")
         if state == "error":
-            # Mostra a mensagem de erro (validação ou física), não só "error".
             lr = self._vm.last_result or {}
             msg = lr.get("error") or "; ".join(lr.get("errors", [])) or "erro"
             self._status.setText(f"[ERRO] {msg}")
         else:
-            self._status.setText(state)
+            info = self._vm.status_display
+            self._status.setText(
+                f"{info['state']} · {info['elapsed']} · {info['throughput']}"
+            )
 
     # ── Persistência .session (params; resultado reproduzível pela seed) ─────
     def _on_save_session(self) -> None:

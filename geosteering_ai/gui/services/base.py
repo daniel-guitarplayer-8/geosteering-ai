@@ -105,7 +105,13 @@ class BaseService(QObject):  # type: ignore[misc] # QObject é Any (qt_compat) �
         # thread seria abortada no meio do trabalho.
         self._threads: List[Tuple[Any, Worker]] = []
 
-    def _run_async(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    def _run_async(
+        self,
+        fn: Callable[..., Any],
+        *args: Any,
+        report_progress: bool = False,
+        **kwargs: Any,
+    ) -> None:
         """Roda ``fn(*args, **kwargs)`` num ``Worker`` off-thread.
 
         Os sinais do Worker são conectados a slots DESTE QObject (main thread) →
@@ -113,9 +119,12 @@ class BaseService(QObject):  # type: ignore[misc] # QObject é Any (qt_compat) �
 
         Args:
             fn: callable pesado (módulo-nível, ex.: ``_run_simulation``).
+            report_progress: se ``True``, o Worker injeta ``progress_callback=`` em
+                ``fn`` (feedback de progresso → ``progress`` VMSignal; Fatia 6a). Só
+                no caminho in-thread (numba) — o subprocesso (jax) não usa.
             *args/**kwargs: argumentos repassados a ``fn``.
         """
-        worker = Worker(fn, *args, **kwargs)
+        worker = Worker(fn, *args, report_progress=report_progress, **kwargs)
         # QueuedConnection EXPLÍCITA: o worker emite na worker thread; o slot DEVE
         # rodar na main thread (afinidade deste QObject). AUTO já resolveria assim,
         # mas explícito blinda contra regressão se a afinidade mudar num refactor.

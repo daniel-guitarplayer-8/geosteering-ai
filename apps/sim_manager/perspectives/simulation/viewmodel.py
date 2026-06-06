@@ -33,6 +33,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from apps.sim_manager.perspectives.simulation.results_viewmodel import ResultsViewModel
@@ -170,11 +171,22 @@ class SimulationViewModel(BaseViewModel):
         self._status: str = "idle"
         self._last_result: Optional[Dict[str, Any]] = None
         self.result_ready: VMSignal = VMSignal()
+        # ── Fatia 6a — feedback de execução (progresso/timing/log) ───────────
+        self._progress_done: int = 0
+        self._progress_total: int = 0
+        self._sim_start_time: float = 0.0
+        self._sim_elapsed_s: float = 0.0
+        self._sim_throughput: float = 0.0  # modelos/s
+        # Log textual (string por linha) — a perspectiva liga à secondary sidebar.
+        self.log_entry: VMSignal = VMSignal()
         # Sub-VM PURO da galeria de resultados (Fatia 4) — alimentado ao concluir.
         self.results: ResultsViewModel = ResultsViewModel()
         # Liga-se aos VMSignals do service (pub/sub puro — sem Qt aqui).
         service.finished.connect(self._on_sim_finished)
         service.error.connect(self._on_sim_error)
+        # Progresso é opcional no contrato do service (stubs de teste podem não tê-lo).
+        if hasattr(service, "progress"):
+            service.progress.connect(self._on_progress)
 
     # ── Properties multi-valor (setters emitem ``changed`` via _set) ─────────
     @property
@@ -548,18 +560,115 @@ class SimulationViewModel(BaseViewModel):
             generator=self._generator,
             rng_seed=self._rng_seed,
         )
+        # Reseta o feedback de execução (Fatia 6a) ANTES de iniciar.
+        self._progress_done = 0
+        self._progress_total = max(1, int(self._n_models))
+        self._sim_start_time = time.time()
+        self._sim_elapsed_s = 0.0
+        self._sim_throughput = 0.0
+        self.log_entry.emit(
+            f"▶ Iniciando: {self._n_models} modelo(s) · backend={self._backend} · "
+            f"geologia={self._geology_mode}"
+        )
         self._set("_status", "running")
         self._service.run(request)
 
+    # ── Controle de execução (Fatia 6a) ─────────────────────────────────────
+    def request_cancel(self) -> None:
+        """Solicita cancelamento cooperativo (só enquanto ``running``)."""
+        if self._status != "running":
+            return
+        if hasattr(self._service, "request_cancel"):
+            self._service.request_cancel()
+        self.log_entry.emit("⏹ Cancelamento solicitado…")
+
+    def request_pause(self) -> None:
+        """Pausa cooperativa (numba). No-op se não houver suporte no service."""
+        if self._status != "running":
+            return
+        if hasattr(self._service, "request_pause"):
+            self._service.request_pause()
+        self.log_entry.emit("⏸ Pausado.")
+
+    def request_resume(self) -> None:
+        """Retoma de uma pausa cooperativa."""
+        if self._status != "running":
+            return
+        if hasattr(self._service, "request_resume"):
+            self._service.request_resume()
+        self.log_entry.emit("▶ Retomado.")
+
+    @property
+    def progress_done(self) -> int:
+        """Nº de modelos concluídos na simulação em voo (Fatia 6a)."""
+        return self._progress_done
+
+    @property
+    def progress_total(self) -> int:
+        """Nº total de modelos da simulação em voo (≥1)."""
+        return self._progress_total
+
+    @property
+    def status_display(self) -> Dict[str, str]:
+        """Snapshot ATÔMICO p/ a status bar (estado/elapsed/throughput) — PURO.
+
+        Calculado num único método (evita race entre properties lidas em momentos
+        diferentes pela View). Strings prontas para exibição.
+        """
+        labels = {
+            "idle": "● ocioso",
+            "running": "◉ executando",
+            "done": "✓ concluído",
+            "error": "✕ erro",
+            "cancelled": "⏹ cancelado",
+        }
+        elapsed = "—"
+        throughput = "—"
+        if self._status in ("running", "done"):
+            elapsed = f"{self._sim_elapsed_s:.1f} s"
+            if self._sim_throughput > 0.0:
+                throughput = f"{self._sim_throughput:.0f} mod/s"
+        return {
+            "state": labels.get(self._status, self._status),
+            "elapsed": elapsed,
+            "throughput": throughput,
+        }
+
     # ── Callbacks do service (rodam na MAIN thread) ──────────────────────────
+    def _on_progress(self, done: int, total: int) -> None:
+        """Atualiza progresso + timing/throughput (Fatia 6a). Roda na MAIN thread."""
+        self._progress_done = int(done)
+        self._progress_total = max(1, int(total))
+        self._sim_elapsed_s = max(0.0, time.time() - self._sim_start_time)
+        if self._sim_elapsed_s > 0.0:
+            self._sim_throughput = self._progress_done / self._sim_elapsed_s
+        # Sinaliza a View (chave "_progress" — não usa _set p/ não exigir membership).
+        self.changed.emit("_progress", self._progress_done)
+
     def _on_sim_finished(self, result: Dict[str, Any]) -> None:
+        # Resultado de cancelamento (Fatia 6a): NÃO alimenta a galeria nem result_ready.
+        if result.get("cancelled"):
+            self._last_result = result
+            self.log_entry.emit("⏹ Simulação cancelada (resultado parcial descartado).")
+            self._set("_status", "cancelled")
+            return
+        self._sim_elapsed_s = max(0.0, time.time() - self._sim_start_time)
+        n = max(1, int(self._n_models))
+        if self._sim_elapsed_s > 0.0:
+            self._sim_throughput = n / self._sim_elapsed_s
+        self._progress_done = self._progress_total  # garante 100% no fim
         self._last_result = result
         self.results.set_result(result)  # alimenta a galeria (Fatia 4)
+        self.log_entry.emit(
+            f"✓ Concluído: {n} modelo(s) em {self._sim_elapsed_s:.1f} s "
+            f"({self._sim_throughput:.0f} mod/s)"
+        )
         self._set("_status", "done")
         self.result_ready.emit(result)
 
     def _on_sim_error(self, message: str) -> None:
         self._last_result = {"error": message}
+        self.log_entry.emit(f"✕ Erro: {message}")
         self._set("_status", "error")
 
     # ── Persistência .session (params; resultado reproduzível pela seed) ─────

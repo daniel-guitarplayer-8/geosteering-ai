@@ -85,18 +85,29 @@ class Worker(QObject):  # type: ignore[misc] # QObject é Any (qt_compat) → my
         (a thread nunca propaga exceção não-tratada).
     """
 
-    def __init__(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        fn: Callable[..., Any],
+        *args: Any,
+        report_progress: bool = False,
+        **kwargs: Any,
+    ) -> None:
         """Captura o callable + argumentos (não inicia nada).
 
         Args:
             fn: o callable PESADO a rodar off-thread.
             *args: posicionais repassados a ``fn``.
+            report_progress: se ``True``, injeta ``progress_callback=`` (que emite
+                ``signals.progress``) ao chamar ``fn`` — feedback de progresso
+                cross-thread via QueuedConnection (Fatia 6a). ``fn`` DEVE aceitar
+                o kwarg ``progress_callback`` (ex.: ``_run_simulation``).
             **kwargs: nomeados repassados a ``fn``.
         """
         super().__init__()
         self._fn = fn
         self._args = args
         self._kwargs = kwargs
+        self._report_progress = report_progress
         self.signals = WorkerSignals()
 
     def run(self) -> None:  # noqa: D401 — slot Qt
@@ -105,8 +116,13 @@ class Worker(QObject):  # type: ignore[misc] # QObject é Any (qt_compat) → my
         NÃO chame diretamente — conecte a ``QThread.started`` (ver
         :func:`run_in_thread`). Captura QUALQUER exceção (guard de topo da thread).
         """
+        kwargs = dict(self._kwargs)
+        if self._report_progress:
+            # ``signals.progress.emit`` é o callback: emitido na worker thread,
+            # entregue na main via QueuedConnection (afinidade do receptor).
+            kwargs["progress_callback"] = self.signals.progress.emit
         try:
-            result = self._fn(*self._args, **self._kwargs)
+            result = self._fn(*self._args, **kwargs)
         except BaseException as exc:  # noqa: BLE001 — guard de topo: nada escapa da thread
             self.signals.error.emit(str(exc))
             return
