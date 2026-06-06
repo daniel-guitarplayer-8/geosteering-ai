@@ -58,6 +58,16 @@ def _make_sim_vm():
     return SimulationViewModel(service=StubService())
 
 
+def _suicide() -> None:
+    """Mata o subprocesso SEM levantar exceção Python (simula OOM/segfault/driver).
+
+    ``os._exit`` encerra o intérprete imediatamente — o pool não recebe nem
+    resultado nem exceção marshalada → ``BrokenProcessPool``. Módulo-nível p/ ser
+    picklável pelo spawn.
+    """
+    os._exit(1)
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # AC-5 — VM backend (validação + run monta SimRequest) — PURO, sem GPU
 # ════════════════════════════════════════════════════════════════════════════
@@ -94,6 +104,19 @@ def test_session_roundtrip_includes_backend():
     vm2 = _make_sim_vm()
     vm2.load_session_dict(json.loads(blob))
     assert vm2.backend == "auto"
+
+
+def test_load_session_clamps_invalid_backend():
+    """Review 0012 #3 — .session corrompido c/ backend inválido cai p/ 'numba' no load.
+
+    Um .session editado à mão pode trazer ``backend="cuda"``. Carregá-lo às cegas
+    deixaria o combo (só {numba,jax,auto}) dessincronizado do VM e só estouraria no
+    run(). O load deve sanear → "numba" (estado válido + combo sincronizado).
+    """
+    vm = _make_sim_vm()
+    vm.load_session_dict({"backend": "cuda", "n_models": 2})
+    assert vm.backend == "numba"  # saneado no load (não "cuda")
+    assert vm.validate() == []  # estado válido (não reprovado no run)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -167,6 +190,24 @@ def test_pool_run_executes_in_subprocess():
     child_pid = _pool_run(os.getpid, (), {})
     assert isinstance(child_pid, int) and child_pid > 0
     assert child_pid != os.getpid()  # rodou noutro processo (spawn)
+
+
+def test_pool_run_wraps_broken_pool_with_clear_message():
+    """Review 0012 #2 — morte abrupta do subprocesso → RuntimeError acionável.
+
+    Se o worker morre sem devolver exceção (OOM killer/GPU OOM/crash do driver
+    CUDA/segfault), o stdlib levanta ``BrokenProcessPool`` com msg críptica
+    ("terminated abruptly"). ``_pool_run`` deve re-levantar como ``RuntimeError``
+    com causa acionável (mencionando memória/CUDA + sugestão de mitigação), que o
+    Worker capta → error VMSignal → UI mostra algo útil.
+    """
+    from geosteering_ai.gui.services.base import _pool_run
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _pool_run(_suicide, (), {})
+    msg = str(exc_info.value).lower()
+    assert "subprocesso" in msg
+    assert "numba" in msg  # sugere a mitigação (cair p/ numba)
 
 
 @_needs_gpu

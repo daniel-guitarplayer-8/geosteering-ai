@@ -634,6 +634,14 @@ class SimulationViewModel(BaseViewModel):
         ):
             if key in data:
                 setattr(self, key, data[key])
+        # ── Saneia o backend vindo do .session ────────────────────────────────
+        # Um .session corrompido/editado à mão pode trazer um backend inválido
+        # (ex.: "cuda"). O combo da View só tem {numba,jax,auto} → setCurrentText
+        # ignoraria silenciosamente (combo dessincronizado do VM) e o erro só
+        # apareceria no run(). Aqui caímos p/ "numba" no load (via setter → emite
+        # changed → o combo sincroniza), em vez de carregar um estado inválido.
+        if self._backend not in _BACKENDS:
+            self.backend = "numba"
         # Preferência da galeria (sub-VM results) — aceita str do enum.
         if "plot_backend" in data:
             self.results.plot_backend = data["plot_backend"]

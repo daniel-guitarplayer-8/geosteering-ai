@@ -65,10 +65,21 @@ def _pool_run(fn: Callable[..., Any], args: tuple, kwargs: dict) -> Any:
     """
     import multiprocessing
     from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures.process import BrokenProcessPool
 
     ctx = multiprocessing.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
-        return pool.submit(fn, *args, **kwargs).result()
+    try:
+        with ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
+            return pool.submit(fn, *args, **kwargs).result()
+    except BrokenProcessPool as exc:
+        # Worker morreu sem devolver exceção Python (OOM killer/GPU OOM/crash do
+        # driver CUDA/segfault). A msg padrão ("terminated abruptly") não ajuda —
+        # re-levanta com causa acionável (o Worker capta → error VMSignal → UI).
+        raise RuntimeError(
+            "O subprocesso de simulação encerrou abruptamente — provável falta de "
+            "memória (GPU/CPU), crash do driver CUDA ou segfault. Tente um batch "
+            "menor (nº de modelos) ou o backend 'numba'."
+        ) from exc
 
 
 class BaseService(QObject):  # type: ignore[misc] # QObject é Any (qt_compat) → mypy
