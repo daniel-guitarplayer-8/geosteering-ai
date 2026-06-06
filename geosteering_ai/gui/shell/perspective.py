@@ -51,7 +51,9 @@ from geosteering_ai.gui.viewmodels.base import BaseViewModel
 if (
     TYPE_CHECKING
 ):  # pragma: no cover — só para type-checking; nunca importado em runtime
-    from PyQt6.QtWidgets import QWidget
+    # Via qt_compat (NÃO PyQt6 direto): acesso Qt agnóstico ao binding (PyQt6
+    # primário / PySide6 fallback). Em runtime o bloco nunca executa.
+    from geosteering_ai.gui.qt_compat import QtWidgets
 
 __all__ = ["Perspective"]
 
@@ -88,7 +90,7 @@ class Perspective(ABC):
     order: int = 0
 
     @abstractmethod
-    def build_view(self, ctx: AppContext) -> "QWidget":
+    def build_view(self, ctx: AppContext) -> "QtWidgets.QWidget":
         """Cria a View (``QWidget`` Qt) e faz o binding aos sinais do ViewModel.
 
         Args:

@@ -29,8 +29,8 @@ from geosteering_ai.gui.services import SimulationService
 from geosteering_ai.gui.shell.context import AppContext
 from geosteering_ai.gui.shell.perspective import Perspective
 
-if TYPE_CHECKING:  # pragma: no cover — só type-checking
-    from PyQt6.QtWidgets import QWidget
+if TYPE_CHECKING:  # pragma: no cover — só type-checking (via qt_compat, não PyQt6)
+    from geosteering_ai.gui.qt_compat import QtWidgets
 
 __all__ = ["SimulationPerspective"]
 
@@ -54,7 +54,7 @@ class SimulationPerspective(Perspective):
         """
         return SimulationViewModel(service=SimulationService())
 
-    def build_view(self, ctx: AppContext) -> "QWidget":
+    def build_view(self, ctx: AppContext) -> "QtWidgets.QWidget":
         """Cria a View Qt ligada a um ViewModel novo (via :meth:`build_viewmodel`).
 
         Args:
