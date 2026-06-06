@@ -79,6 +79,8 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
 
         # ── Canvas (galeria via grade de subplots) ───────────────────────────
         self._canvas = make_canvas(PlotBackend.MATPLOTLIB, parent=self)
+        # Fundo escuro p/ casar com o tema (o canvas não é alcançável pelo QSS).
+        self._canvas.set_dark_mode(True)
 
         # ── Layout ────────────────────────────────────────────────────────────
         bar = QtWidgets.QHBoxLayout()

@@ -37,6 +37,7 @@ from geosteering_ai.gui.qt_compat import (
     enforce_c_locale,
 )
 from geosteering_ai.gui.shell.context import AppContext
+from geosteering_ai.gui.theme import apply_theme
 
 __all__ = ["main"]
 
@@ -62,6 +63,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Locale C: ponto decimal nos QDoubleSpinBox (paridade c/ o monólito; evita
     # que um locale pt-BR mostre/parseie "1,5" e divirja do CSV Python float()).
     enforce_c_locale(app)
+    # Tema profissional (dark, paleta Google Antigravity) — QSS global.
+    apply_theme(app)
 
     ctx = AppContext(app_name=_APP_NAME)
     window = SM_MainWindow(ctx)
