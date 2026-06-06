@@ -396,3 +396,41 @@ def test_results_view_backend_toggle_rebuilds_canvas(qtbot):
     # volta p/ matplotlib
     view._on_backend_changed("matplotlib")
     assert view._active_backend == PlotBackend.MATPLOTLIB
+
+
+@pytest.mark.gui
+def test_results_view_falls_back_when_backend_unavailable(qtbot, monkeypatch):
+    """Revisão quick-wins — backend sem deps (.session) → fallback p/ matplotlib, sem crash.
+
+    Um ``.session`` pode carregar um backend enum-válido mas com deps ausentes
+    (ex.: "plotly" sem WebEngine). ``make_canvas`` levanta ImportError; a View
+    DEVE cair p/ matplotlib (sem quebrar a galeria) e reconciliar o VM.
+    """
+    from apps.sim_manager.perspectives.simulation import results_view as rv_mod
+    from apps.sim_manager.perspectives.simulation.results_view import ResultsView
+    from geosteering_ai.gui.plot_backends.base import PlotBackend
+
+    orig_make = rv_mod.make_canvas
+
+    def fake_make(backend, **kw):
+        if backend != PlotBackend.MATPLOTLIB:
+            raise ImportError(
+                f"dep ausente p/ {backend}"
+            )  # simula backend indisponível
+        return orig_make(backend, **kw)
+
+    monkeypatch.setattr(rv_mod, "make_canvas", fake_make)
+
+    # (1) construção com backend "indisponível" → fallback no __init__ (sem crash)
+    rvm = _make_results_vm()
+    rvm.plot_backend = PlotBackend.PYQTGRAPH  # "indisponível" via fake
+    view = ResultsView(rvm)
+    qtbot.addWidget(view)
+    assert view._active_backend == PlotBackend.MATPLOTLIB
+    assert rvm.plot_backend == PlotBackend.MATPLOTLIB  # VM reconciliado
+
+    # (2) toggle runtime p/ backend indisponível → fallback no _rebuild (sem crash)
+    rvm.set_result(_result(n_models=2))
+    view._on_backend_changed("pyqtgraph")  # fake faz ImportError → fallback
+    assert view._active_backend == PlotBackend.MATPLOTLIB
+    assert rvm.plot_backend == PlotBackend.MATPLOTLIB

@@ -90,10 +90,12 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         self._page_lbl = QtWidgets.QLabel("—")
 
         # ── Canvas (galeria via grade de subplots) ───────────────────────────
-        self._active_backend = vm.plot_backend  # backend do canvas atual
-        self._canvas = make_canvas(self._active_backend, parent=self)
-        # Fundo escuro p/ casar com o tema (o canvas não é alcançável pelo QSS).
-        self._canvas.set_dark_mode(True)
+        # Cria o canvas com FALLBACK p/ matplotlib se o backend pedido não tiver
+        # deps (ex.: .session com "plotly" sem WebEngine) — reconcilia o VM p/ o
+        # backend efetivo (combo segue via _sync_controls no _render inicial).
+        self._canvas, self._active_backend = self._build_canvas(vm.plot_backend)
+        if vm.plot_backend != self._active_backend:
+            vm.plot_backend = self._active_backend  # binding ainda não conectado
 
         # ── Layout ────────────────────────────────────────────────────────────
         bar = QtWidgets.QHBoxLayout()
@@ -187,15 +189,44 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         self._prev.setEnabled(self._vm.page > 0)
         self._next.setEnabled(self._vm.page < n_pages - 1)
 
+    def _build_canvas(self, backend: PlotBackend) -> tuple[Any, PlotBackend]:
+        """Cria um canvas do ``backend``, com FALLBACK p/ matplotlib se faltar dep.
+
+        ``make_canvas`` levanta ``ImportError`` p/ backend sem deps (ex.: "plotly"
+        sem WebEngine — alcançável via ``.session``). Aqui caímos p/ MATPLOTLIB
+        (sempre disponível) em vez de quebrar a galeria. Já aplica ``set_dark_mode``.
+
+        Args:
+            backend: backend desejado.
+
+        Returns:
+            ``(canvas, backend_efetivo)`` — ``backend_efetivo`` = MATPLOTLIB no fallback.
+        """
+        try:
+            canvas = make_canvas(backend, parent=self)
+            effective = backend
+        except ImportError:
+            effective = PlotBackend.MATPLOTLIB
+            canvas = make_canvas(effective, parent=self)
+        canvas.set_dark_mode(True)
+        return canvas, effective
+
     def _rebuild_canvas(self) -> None:
-        """Recria o canvas quando o backend muda (substitui no layout, sem leak)."""
+        """Recria o canvas quando o backend muda (substitui no layout, sem leak).
+
+        Usa :meth:`_build_canvas` (fallback p/ matplotlib se as deps faltarem) e
+        RECONCILIA o VM com o backend efetivo — assim ``_active_backend`` sempre
+        avança (sem re-tentar o backend quebrado a cada ``_render``).
+        """
         old = self._canvas
-        self._canvas = make_canvas(self._vm.plot_backend, parent=self)
-        self._canvas.set_dark_mode(True)
+        self._canvas, self._active_backend = self._build_canvas(self._vm.plot_backend)
         self._root.replaceWidget(old.widget(), self._canvas.widget())
         old.widget().setParent(None)
         old.widget().deleteLater()
-        self._active_backend = self._vm.plot_backend
+        # Fallback ocorreu → reconcilia o VM (combo/estado convergem; sem recursão:
+        # plot_backend passa a == _active_backend, então o próximo _render não rebuilda).
+        if self._vm.plot_backend != self._active_backend:
+            self._vm.plot_backend = self._active_backend
 
     def _render(self, *_: Any) -> None:
         """Re-monta a grade da galeria (modelos da página) + sincroniza seletores."""
