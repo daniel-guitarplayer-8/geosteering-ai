@@ -5,8 +5,8 @@ Backlog-Code: F-mvc-split
 Trilha-Dominante: F
 Produtos: [SM]
 Converge-Em: n/a   # migração de imports; não toca cálculo EM
-Status: planejado
-Released-As:
+Status: implementado
+Released-As: v2.57
 Constituicao: 1.0
 Autor: Daniel Leal
 Data: 2026-06-05

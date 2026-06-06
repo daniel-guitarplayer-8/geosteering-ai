@@ -5,8 +5,8 @@ Backlog-Code: F-mvc-split
 Trilha-Dominante: F
 Produtos: [SM, STU]
 Converge-Em: gui.plot_backends + gui.persistence  # reuso; sem física nova
-Status: planejado
-Released-As:
+Status: implementado
+Released-As: v2.57
 Constituicao: 1.0
 Autor: Daniel Leal
 Data: 2026-06-06

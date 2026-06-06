@@ -124,8 +124,12 @@ Use-a para descobrir onde está cada tipo de informação.
 | Simulador Python (Numba+JAX) | `geosteering_ai/simulation/` | `docs/reference/analise_cenarios_otimizacao_simulador_numba.md` |
 | API REST | `geosteering_ai/api/` | docstrings inline + `docs/reports/v2.39_api_rest_dockerfile_*.md` |
 | CLI | `geosteering_ai/cli/` | `geosteering-cli --help` |
+| **Fundação GUI MVVM** (compartilhada SM + Studio) | `geosteering_ai/gui/` | specs 0004-0007 · `docs/reference/qt_designer_ui_workflow.md` |
+| **Simulation Manager MVVM** | `apps/sim_manager/` | specs 0011a-d, 0012, 0013+ · `python -m apps.sim_manager.app` |
 | MCP Colab Bridge | `.claude/commands/geosteering-colab-mcp.md` | skill própria |
+
+> **Specs implementadas (v2.57, GUI/SM MVVM):** 0004-0007 (fundação `gui/`), 0011/0011a-d (SM MVVM Fatias 0-4), 0012 (JAX-GPU TLS-safe). Em andamento: 0013 (shell Antigravity), 0014 (Fatia 6a), 0015 (Fatia 6b). Ver `specs/` (front-matter `Status`/`Released-As`).
 
 ---
 
-*Última atualização: 2026-05-18 (refactor v2.40.2 — ADR-0001).*
+*Última atualização: 2026-06-06 (merge GUI/SM MVVM v2.57 à main — specs 0004-0012; ADR-0001).*
