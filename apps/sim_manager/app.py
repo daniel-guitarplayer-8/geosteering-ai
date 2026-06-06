@@ -37,11 +37,22 @@ from geosteering_ai.gui.qt_compat import (
     enforce_c_locale,
 )
 from geosteering_ai.gui.shell.context import AppContext
+from geosteering_ai.gui.shell.placeholder import PlaceholderPerspective
 from geosteering_ai.gui.theme import apply_theme
 
 __all__ = ["main"]
 
 _APP_NAME = "Geosteering AI — Simulation Manager"
+
+# Scaffolds das próximas perspectivas (rail Antigravity) — itens cinza "em breve"
+# que tornam a organização de TODOS os recursos do SM monólito visível já agora.
+# Cada um será habilitado pela sua fatia (paridade total = Fatias 6c-6i).
+_SCAFFOLD_PERSPECTIVES = (
+    ("results", "Resultados", "📊", 1, "Fatia 6d"),
+    ("benchmark", "Benchmark", "⚡", 2, "Fatia 6g"),
+    ("analysis", "Análise", "🔬", 3, "Fatia 6f"),
+    ("preferences", "Preferências", "⚙", 4, "Fatia 6h"),
+)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -69,7 +80,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     ctx = AppContext(app_name=_APP_NAME)
     window = SM_MainWindow(ctx)
     window.add_perspective(SimulationPerspective())
-    window.resize(960, 720)
+    # Scaffolds "em breve" na activity rail (organização visível de todos os recursos).
+    for pid, title, glyph, order, roadmap in _SCAFFOLD_PERSPECTIVES:
+        window.add_perspective(
+            PlaceholderPerspective(
+                id=pid, title=title, icon_glyph=glyph, order=order, roadmap=roadmap
+            )
+        )
+    window.resize(1180, 800)  # rail + perspectiva + secondary sidebar
     window.show()
     return int(app.exec())
 

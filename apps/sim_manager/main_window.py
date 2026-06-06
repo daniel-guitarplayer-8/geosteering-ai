@@ -19,19 +19,21 @@
 # ║  EXPORTS                                                                  ║
 # ║    SM_MainWindow                                                          ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-"""``SM_MainWindow`` — casca QMainWindow do Simulation Manager MVVM (0011a)."""
+"""``SM_MainWindow`` — casca QMainWindow do Simulation Manager MVVM (0011a/0013)."""
 
 from __future__ import annotations
 
-from geosteering_ai.gui.shell.main_window_base import MainWindowBase
+from geosteering_ai.gui.shell.antigravity_window import AntigravityMainWindow
 
 __all__ = ["SM_MainWindow"]
 
 
-class SM_MainWindow(MainWindowBase):
-    """Janela principal do Simulation Manager (MVVM) — hospeda as perspectivas.
+class SM_MainWindow(AntigravityMainWindow):
+    """Janela principal do Simulation Manager (MVVM) — shell Antigravity.
 
     Note:
-        Walking skeleton: herda ``MainWindowBase`` (abas lazy + statusbar). Menu
-        ``.session`` e toolbar próprios são fatias futuras da 0011.
+        Spec 0013: herda ``AntigravityMainWindow`` (activity rail + perspectivas
+        empilhadas + secondary sidebar Histórico/Log/Artifacts + status bar com
+        accent). Hospeda a perspectiva Simulação + scaffolds das próximas fatias.
+        Menu ``.session`` e toolbar próprios são fatias futuras.
     """

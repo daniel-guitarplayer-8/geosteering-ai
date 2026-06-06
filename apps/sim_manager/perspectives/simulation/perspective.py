@@ -41,6 +41,7 @@ class SimulationPerspective(Perspective):
     id = "simulation"
     title = "Simulação"
     icon = "flask"
+    icon_glyph = "🧪"  # ícone na activity rail Antigravity (spec 0013)
     order = 0
 
     def build_viewmodel(self, ctx: AppContext) -> SimulationViewModel:

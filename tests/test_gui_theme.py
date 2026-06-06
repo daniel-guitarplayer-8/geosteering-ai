@@ -61,10 +61,13 @@ def test_tokens_are_valid_hex():
     """Todos os tokens de COR são ``#rrggbb`` válidos."""
     from geosteering_ai.gui.theme import ANTIGRAVITY_DARK
 
+    # Campo de cor = str que começa com '#' (robusto a novos tokens não-cor:
+    # font_*, spacing_*, radius_*, etc. — spec 0013 ampliou a escala).
     color_fields = [
         f.name
         for f in fields(ANTIGRAVITY_DARK)
-        if f.name not in ("font_family", "font_size_base", "radius", "radius_sm")
+        if isinstance(getattr(ANTIGRAVITY_DARK, f.name), str)
+        and getattr(ANTIGRAVITY_DARK, f.name).startswith("#")
     ]
     assert color_fields  # sanidade
     for name in color_fields:
