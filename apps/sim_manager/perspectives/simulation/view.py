@@ -4,25 +4,26 @@
 # ║  ---------------------------------------------------------------------    ║
 # ║  Módulo      : SimulatorView — View Qt da perspectiva Simulação           ║
 # ║  Projeto     : Geosteering AI v2.0                                        ║
-# ║  Subsistema  : SM app (MVVM) — perspectiva Simulação (spec 0011b)         ║
-# ║  Versão      : v0.2                                                       ║
+# ║  Subsistema  : SM app (MVVM) — perspectiva Simulação (spec 0011c)         ║
+# ║  Versão      : v0.3                                                       ║
 # ║  Autor       : Daniel Leal                                                ║
-# ║  Status      : Produção — params completos (Fatia 2)                       ║
+# ║  Status      : Produção — geração estocástica (Fatia 3)                    ║
 # ║  Framework   : Qt6 via gui.qt_compat + gui.plot_backends                   ║
-# ║  Dependências: gui.qt_compat, gui.plot_backends, .viewmodel                ║
+# ║  Dependências: gui.qt_compat, gui.plot_backends, gui.services, .viewmodel   ║
 # ║  Padrão      : View (MVVM) — sem lógica; faz binding aos VMSignals do VM   ║
 # ║  ---------------------------------------------------------------------    ║
 # ║  FINALIDADE                                                               ║
 # ║    Inputs multi-config (freqs/dips/TRs via CSV) + geometria (h1/tj/p_med/  ║
-# ║    nº modelos via spinbox) + label de ``n_pos`` derivado + Run + status +  ║
-# ║    um PlotCanvas. Ao Run: copia os inputs para o ViewModel e chama          ║
+# ║    nº modelos) + grupo de GEOLOGIA estocástica (gerador, ranges ρₕ/λ,       ║
+# ║    distribuição, n_layers, espessura, seed) + label de ``n_pos`` + Run +    ║
+# ║    status + PlotCanvas. Ao Run: copia os inputs para o ViewModel e chama    ║
 # ║    vm.run(). Liga-se a ``vm.changed`` (status/botão) e ``vm.result_ready``  ║
 # ║    (plota a resposta EM do modelo 0). Sem lógica de domínio.              ║
 # ║                                                                           ║
 # ║  EXPORTS                                                                  ║
 # ║    SimulatorView                                                          ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-"""``SimulatorView`` — View Qt (inputs multi-config + Run + plot) ligada ao VM (0011b)."""
+"""``SimulatorView`` — View Qt (inputs multi-config + geologia + Run + plot), VM (0011c)."""
 
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ from apps.sim_manager.perspectives.simulation.viewmodel import SimulationViewMod
 from geosteering_ai.gui.plot_backends import AxisConfig, PlotBackend, make_canvas
 from geosteering_ai.gui.qt_compat import QtWidgets
 from geosteering_ai.gui.services.sim_request import compute_n_pos
+from geosteering_ai.gui.services.stochastic_geology import GENERATORS_AVAILABLE
 
 __all__ = ["SimulatorView"]
 
@@ -110,6 +112,9 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._n_models.setRange(1, 100)
         self._n_models.setValue(vm.n_models)
 
+        # ── Geologia estocástica (Fatia 3) ───────────────────────────────────
+        self._geology_box = self._build_geology_group(vm)
+
         self._n_pos_label = QtWidgets.QLabel("n_pos: —")
         self._run_btn = QtWidgets.QPushButton("Run")
         self._status = QtWidgets.QLabel("idle")
@@ -133,6 +138,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         controls.addStretch(1)
         root = QtWidgets.QVBoxLayout(self)
         root.addLayout(form)
+        root.addWidget(self._geology_box)
         root.addLayout(controls)
         root.addWidget(self._canvas.widget(), stretch=1)
 
@@ -151,6 +157,93 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
     def _fmt_csv(values: Tuple[float, ...]) -> str:
         """Formata uma tupla de floats em CSV (``(20000.0,) → "20000"``)."""
         return ", ".join(f"{v:g}" for v in values)
+
+    def _build_geology_group(self, vm: SimulationViewModel) -> Any:
+        """Constrói o QGroupBox de geologia estocástica (widgets + valores iniciais).
+
+        Espelha os recursos do SM monolítico (combo gerador, ranges ρₕ/λ,
+        distribuição, n_layers fixo/range, espessura mínima, seed). A validação
+        de ranges é do VM; aqui só coletamos os valores.
+        """
+        # combos
+        self._geo_mode = QtWidgets.QComboBox()
+        self._geo_mode.addItems(["stochastic", "fixed"])
+        self._geo_mode.setCurrentText(vm.geology_mode)
+        self._geo_generator = QtWidgets.QComboBox()
+        self._geo_generator.addItems(list(GENERATORS_AVAILABLE))
+        self._geo_generator.setCurrentText(vm.generator)
+        self._geo_distr = QtWidgets.QComboBox()
+        self._geo_distr.addItems(["loguni", "uniform"])
+        self._geo_distr.setCurrentText(vm.rho_h_distribution)
+        # ρₕ range
+        self._geo_rho_min = QtWidgets.QDoubleSpinBox()
+        self._geo_rho_min.setRange(0.001, 1.0e6)
+        self._geo_rho_min.setDecimals(3)
+        self._geo_rho_min.setValue(vm.rho_h_min)
+        self._geo_rho_min.setSuffix(" Ω·m")
+        self._geo_rho_max = QtWidgets.QDoubleSpinBox()
+        self._geo_rho_max.setRange(0.001, 1.0e6)
+        self._geo_rho_max.setDecimals(3)
+        self._geo_rho_max.setValue(vm.rho_h_max)
+        self._geo_rho_max.setSuffix(" Ω·m")
+        # anisotropia λ
+        self._geo_aniso = QtWidgets.QCheckBox("Anisotrópico (ρᵥ=λ²·ρₕ)")
+        self._geo_aniso.setChecked(vm.anisotropic)
+        self._geo_lambda_min = QtWidgets.QDoubleSpinBox()
+        self._geo_lambda_min.setRange(1.0, 5.0)
+        self._geo_lambda_min.setDecimals(3)
+        self._geo_lambda_min.setValue(vm.lambda_min)
+        self._geo_lambda_max = QtWidgets.QDoubleSpinBox()
+        self._geo_lambda_max.setRange(1.0, 5.0)
+        self._geo_lambda_max.setDecimals(3)
+        self._geo_lambda_max.setValue(vm.lambda_max)
+        # n_layers (fixo OU range)
+        self._geo_nlf_check = QtWidgets.QCheckBox("n_layers fixo")
+        self._geo_nlf_check.setChecked(vm.n_layers_fixed is not None)
+        self._geo_nlf = QtWidgets.QSpinBox()
+        self._geo_nlf.setRange(3, 200)
+        self._geo_nlf.setValue(
+            vm.n_layers_fixed if vm.n_layers_fixed is not None else 5
+        )
+        self._geo_nl_min = QtWidgets.QSpinBox()
+        self._geo_nl_min.setRange(3, 200)
+        self._geo_nl_min.setValue(vm.n_layers_min)
+        self._geo_nl_max = QtWidgets.QSpinBox()
+        self._geo_nl_max.setRange(4, 201)
+        self._geo_nl_max.setValue(vm.n_layers_max)
+        # espessura mínima
+        self._geo_min_thick = QtWidgets.QDoubleSpinBox()
+        self._geo_min_thick.setRange(0.01, 100.0)
+        self._geo_min_thick.setDecimals(2)
+        self._geo_min_thick.setValue(vm.min_thickness)
+        self._geo_min_thick.setSuffix(" m")
+        # seed
+        self._geo_seed_random = QtWidgets.QCheckBox("Semente aleatória")
+        self._geo_seed_random.setChecked(vm.rng_seed is None)
+        self._geo_seed = QtWidgets.QSpinBox()
+        self._geo_seed.setRange(0, 2_147_483_647)
+        self._geo_seed.setValue(vm.rng_seed if vm.rng_seed is not None else 42)
+
+        # layout em form
+        gform = QtWidgets.QFormLayout()
+        gform.addRow("Modo:", self._geo_mode)
+        gform.addRow("Gerador:", self._geo_generator)
+        gform.addRow("Distribuição ρₕ:", self._geo_distr)
+        gform.addRow("ρₕ mín:", self._geo_rho_min)
+        gform.addRow("ρₕ máx:", self._geo_rho_max)
+        gform.addRow("", self._geo_aniso)
+        gform.addRow("λ mín:", self._geo_lambda_min)
+        gform.addRow("λ máx:", self._geo_lambda_max)
+        gform.addRow("", self._geo_nlf_check)
+        gform.addRow("n_layers (fixo):", self._geo_nlf)
+        gform.addRow("n_layers mín:", self._geo_nl_min)
+        gform.addRow("n_layers máx:", self._geo_nl_max)
+        gform.addRow("Espessura mín:", self._geo_min_thick)
+        gform.addRow("", self._geo_seed_random)
+        gform.addRow("Semente (fixa):", self._geo_seed)
+        box = QtWidgets.QGroupBox("Geologia estocástica")
+        box.setLayout(gform)
+        return box
 
     # ── Slots ─────────────────────────────────────────────────────────────────
     def _on_run_clicked(self) -> None:
@@ -173,6 +266,24 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.tj = self._tj.value()
         self._vm.p_med = self._p_med.value()
         self._vm.n_models = self._n_models.value()
+        # ── Geologia estocástica (Fatia 3) ───────────────────────────────────
+        self._vm.geology_mode = self._geo_mode.currentText()
+        self._vm.generator = self._geo_generator.currentText()
+        self._vm.rho_h_distribution = self._geo_distr.currentText()
+        self._vm.rho_h_min = self._geo_rho_min.value()
+        self._vm.rho_h_max = self._geo_rho_max.value()
+        self._vm.anisotropic = self._geo_aniso.isChecked()
+        self._vm.lambda_min = self._geo_lambda_min.value()
+        self._vm.lambda_max = self._geo_lambda_max.value()
+        self._vm.min_thickness = self._geo_min_thick.value()
+        self._vm.n_layers_fixed = (
+            self._geo_nlf.value() if self._geo_nlf_check.isChecked() else None
+        )
+        self._vm.n_layers_min = self._geo_nl_min.value()
+        self._vm.n_layers_max = self._geo_nl_max.value()
+        self._vm.rng_seed = (
+            None if self._geo_seed_random.isChecked() else self._geo_seed.value()
+        )
         self._vm.run()
 
     def _refresh_n_pos(self, *_: Any) -> None:

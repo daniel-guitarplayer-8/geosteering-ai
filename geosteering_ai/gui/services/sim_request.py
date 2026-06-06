@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -66,21 +66,36 @@ def compute_n_pos(tj: float, p_med: float, dip0_deg: float) -> int:
 
 @dataclass(frozen=True)
 class SimRequest:
-    """Requisição de simulação (Fatia 2 — params completos da ParametersPage).
+    """Requisição de simulação (Fatia 2 params + Fatia 3 geologia estocástica).
 
     Attributes:
         frequencies_hz: frequências em Hz (range do simulador [10, 2e6]; default 20 kHz).
         tr_spacings_m: espaçamentos transmissor-receptor em m (range [0.1, 50]; default 1.0).
         dip_degs: ângulos de mergulho em graus (range [0, 90]; default 0°).
         h1: altura do 1º ponto-médio acima da interface (m) — convenção Fortran.
-        tj: janela de investigação (m) — extensão da varredura de profundidade.
+        tj: janela de investigação (m) — extensão da varredura de profundidade; também
+            é o ``total_depth`` da geologia estocástica (Σ espessuras = tj).
         p_med: passo entre medidas (m).
-        n_models: nº de modelos no batch (pequeno no skeleton; default 2).
-        backend: ``"numba"`` no skeleton (evita JAX/TLS); auto/jax = fatia 5.
+        n_models: nº de modelos no batch (default 2).
+        backend: ``"numba"`` (evita JAX/TLS); auto/jax = Fatia 5.
+        geology_mode: ``"fixed"`` (geologia 3-camadas determinística da Fatia 2) ou
+            ``"stochastic"`` (gera N modelos TIV via gui.services.stochastic_geology).
+        n_layers_min/max: range de camadas amostradas (incl/excl) quando não-fixo.
+        n_layers_fixed: se ≥3, força todos os modelos a esse nº de camadas.
+        rho_h_min/max: range de ρₕ (Ω·m) da geração estocástica.
+        rho_h_distribution: ``"loguni"`` (log-uniforme) ou ``"uniform"``.
+        anisotropic: se ``True``, ρᵥ=λ²·ρₕ com λ∈[lambda_min,lambda_max]; senão ρᵥ=ρₕ.
+        lambda_min/max: range do fator de anisotropia λ (≥1, TIV física).
+        min_thickness: piso de espessura por camada (m).
+        generator: gerador estocástico (sobol/halton/niederreiter/mersenne_twister/
+            uniform/normal/box_muller — ver ``GENERATORS_AVAILABLE``).
+        normal_mu_log/sigma_log: parâmetros log-normal quando ``generator="normal"``.
+        rng_seed: ``None`` (semente aleatória a cada run) ou int (reprodutível).
 
     Note:
         ``h1``/``tj``/``p_med`` (+ ``dip_degs[0]``) determinam ``positions_z`` pela
-        convenção Fortran (ver :func:`_compute_positions_z`).
+        convenção Fortran (ver :func:`_compute_positions_z`). Os campos de geologia só
+        têm efeito quando ``geology_mode="stochastic"``.
     """
 
     frequencies_hz: Tuple[float, ...] = (20000.0,)
@@ -91,6 +106,22 @@ class SimRequest:
     p_med: float = 1.0
     n_models: int = 2
     backend: str = "numba"
+    # ── Fatia 3 — geologia estocástica (ver gui/services/stochastic_geology) ──
+    geology_mode: str = "fixed"  # "fixed" (determinístico) | "stochastic"
+    n_layers_min: int = 3
+    n_layers_max: int = 11
+    n_layers_fixed: Optional[int] = None
+    rho_h_min: float = 1.0
+    rho_h_max: float = 1000.0
+    rho_h_distribution: str = "loguni"  # "loguni" | "uniform"
+    anisotropic: bool = True
+    lambda_min: float = 1.0
+    lambda_max: float = math.sqrt(2.0)
+    min_thickness: float = 1.0
+    generator: str = "sobol"
+    normal_mu_log: float = 2.0
+    normal_sigma_log: float = 1.0
+    rng_seed: Optional[int] = None
 
 
 # Modelo TIV de referência (3 camadas): ρₕ por camada + λ²=2 (anisotropia branda,
@@ -144,6 +175,132 @@ def _build_batch(
     return rho_h, rho_v, esp, positions_z
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Fatia 3 — geração estocástica (gerador PURO compartilhado com o monólito)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _genconfig_from_request(request: SimRequest) -> Any:
+    """Constrói um ``GenConfig`` (gerador puro) a partir do ``SimRequest``.
+
+    ``total_depth`` = ``request.tj`` (a Σ das espessuras casa a janela de
+    investigação; ``positions_z`` cobre ``[-h1, tj-h1]``, interfaces em ``[0, tj]``).
+
+    Args:
+        request: a requisição (campos de geologia).
+
+    Returns:
+        ``GenConfig`` (de :mod:`gui.services.stochastic_geology`).
+    """
+    from geosteering_ai.gui.services.stochastic_geology import GenConfig
+
+    return GenConfig(
+        total_depth=request.tj,
+        n_layers_min=request.n_layers_min,
+        n_layers_max=request.n_layers_max,
+        n_layers_fixed=request.n_layers_fixed,
+        rho_h_min=request.rho_h_min,
+        rho_h_max=request.rho_h_max,
+        rho_h_distribution=request.rho_h_distribution,
+        anisotropic=request.anisotropic,
+        lambda_min=request.lambda_min,
+        lambda_max=request.lambda_max,
+        min_thickness=request.min_thickness,
+        generator=request.generator,
+        normal_mu_log=request.normal_mu_log,
+        normal_sigma_log=request.normal_sigma_log,
+    )
+
+
+def _generate_stochastic_models(request: SimRequest) -> List[Dict[str, Any]]:
+    """Gera ``n_models`` perfis TIV estocásticos (lista de dicts ``MODEL_KEYS``).
+
+    Usa o gerador PURO compartilhado (extraído de ``sm_model_gen`` em 0011c).
+    Pode ser RAGGED (``n_layers`` variável) quando ``n_layers_fixed is None`` —
+    o agrupamento por ``n_layers`` é feito em :func:`_simulate_grouped`.
+
+    Args:
+        request: a requisição (campos de geologia + ``n_models``/``rng_seed``).
+
+    Returns:
+        Lista de dicts ``{"n_layers", "rho_h", "rho_v", "lambda", "thicknesses"}``.
+    """
+    from geosteering_ai.gui.services.stochastic_geology import generate_models
+
+    cfg = _genconfig_from_request(request)
+    # ``generate_models`` é sem anotação de retorno (Any) → tipa local p/ mypy.
+    models: List[Dict[str, Any]] = generate_models(
+        cfg, max(1, int(request.n_models)), rng_seed=request.rng_seed
+    )
+    return models
+
+
+def _simulate_grouped(
+    models: List[Dict[str, Any]],
+    positions_z: np.ndarray,
+    request: SimRequest,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Simula modelos RAGGED agrupando por ``n_layers`` e reassembla ``H6``.
+
+    ``simulate_batch`` exige batch RETANGULAR (``n_layers`` uniforme). Modelos com
+    ``n_layers`` diferentes vão em grupos distintos: cada grupo é um
+    ``simulate_batch`` (caminho Numba serial da Fatia 2 — SEM pool, adiado p/
+    Fatia 5), e o ``H6`` de cada grupo é colocado de volta no índice ORIGINAL do
+    modelo (a ordem do batch final == ordem de ``models``).
+
+    Args:
+        models: lista de dicts ``MODEL_KEYS`` (possivelmente ragged).
+        positions_z: ``(n_pos,)`` float64 — compartilhado por todos (convenção Fortran).
+        request: a requisição (freqs/dips/TRs/backend).
+
+    Returns:
+        ``(H6, info)`` — ``H6`` shape ``(n_models, nTR, nAng, n_pos, nf, 9)`` na
+        ordem original; ``info`` agrega os dispatchers por grupo.
+    """
+    from collections import defaultdict
+
+    from geosteering_ai.simulation import simulate_batch  # lazy (Numba pesado)
+
+    n_models = len(models)
+    freqs = list(request.frequencies_hz)
+    trs = list(request.tr_spacings_m)
+    dips = list(request.dip_degs)
+
+    # Agrupa índices ORIGINAIS por n_layers (sorted p/ determinismo do dict order).
+    groups: Dict[int, List[int]] = defaultdict(list)
+    for i, m in enumerate(models):
+        groups[int(m["n_layers"])].append(i)
+
+    h6_out: Optional[np.ndarray] = None
+    info_by_group: Dict[str, Any] = {}
+    for n_layers, idxs in sorted(groups.items()):
+        # Empilha o grupo em arrays RETANGULARES (mesmo n_layers).
+        rho_h = np.array([models[i]["rho_h"] for i in idxs], dtype=np.float64)  # (g, L)
+        rho_v = np.array([models[i]["rho_v"] for i in idxs], dtype=np.float64)  # (g, L)
+        esp = np.array(
+            [models[i]["thicknesses"] for i in idxs], dtype=np.float64
+        )  # (g, L-2)
+        h6_g, info_g = simulate_batch(
+            rho_h,
+            rho_v,
+            esp,
+            positions_z,
+            frequencies_hz=freqs,
+            tr_spacings_m=trs,
+            dip_degs=dips,
+            backend=request.backend,
+        )
+        if h6_out is None:
+            # 1º grupo define o shape downstream (nTR, nAng, n_pos, nf, 9).
+            h6_out = np.empty((n_models,) + h6_g.shape[1:], dtype=h6_g.dtype)
+        for local, original_idx in enumerate(idxs):
+            h6_out[original_idx] = h6_g[local]  # reassembla na ORDEM original
+        info_by_group[str(n_layers)] = info_g
+
+    assert h6_out is not None  # n_models ≥ 1 garante ≥ 1 grupo
+    return h6_out, {"groups": info_by_group, "n_groups": len(groups)}
+
+
 def _run_simulation(request: SimRequest) -> Dict[str, Any]:
     """Roda ``simulate_batch`` (na worker thread) e empacota o resultado.
 
@@ -157,6 +314,13 @@ def _run_simulation(request: SimRequest) -> Dict[str, Any]:
         dict com ``H6`` (n_models, nTR, nAng, n_pos, nf, 9) complexo, ``positions_z``,
         ``info`` (dispatcher) e ``backend`` efetivo.
 
+    Modos (``request.geology_mode``):
+      ┌──────────────┬─────────────────────────────────────────────────────────┐
+      │ "fixed"      │ geologia 3-camadas determinística (Fatia 2) — 1 batch    │
+      │ "stochastic" │ N modelos TIV (gerador puro) → agrupa por n_layers →     │
+      │              │ simulate_batch por grupo → reassembla (Fatia 3)          │
+      └──────────────┴─────────────────────────────────────────────────────────┘
+
     Note:
         A 1ª chamada dispara o JIT warmup do Numba (~1-30 s); as seguintes são
         rápidas (cache ``.nbc``). DÍVIDA (Fatia 5): o Numba ``prange`` (parallel,
@@ -164,19 +328,27 @@ def _run_simulation(request: SimRequest) -> Dict[str, Any]:
         (pools distintos), mas a arquitetura manda ``ProcessPoolExecutor`` para
         CPU-bound em produção (isola o pool Numba, melhor p/ multi-sim concorrente).
     """
-    from geosteering_ai.simulation import simulate_batch  # lazy (Numba pesado)
+    if request.geology_mode == "stochastic":
+        # Geração estocástica (pode ser ragged) → agrupa por n_layers.
+        positions_z = _compute_positions_z(request)
+        models = _generate_stochastic_models(request)
+        h6, info = _simulate_grouped(models, positions_z, request)
+    else:
+        # Geologia FIXA (Fatia 2) — batch retangular, 1 chamada. ``_build_batch``
+        # já deriva ``positions_z`` (convenção Fortran) — não recomputa.
+        from geosteering_ai.simulation import simulate_batch  # lazy (Numba pesado)
 
-    rho_h, rho_v, esp, positions_z = _build_batch(request)
-    h6, info = simulate_batch(
-        rho_h,
-        rho_v,
-        esp,
-        positions_z,
-        frequencies_hz=list(request.frequencies_hz),
-        tr_spacings_m=list(request.tr_spacings_m),
-        dip_degs=list(request.dip_degs),
-        backend=request.backend,
-    )
+        rho_h, rho_v, esp, positions_z = _build_batch(request)
+        h6, info = simulate_batch(
+            rho_h,
+            rho_v,
+            esp,
+            positions_z,
+            frequencies_hz=list(request.frequencies_hz),
+            tr_spacings_m=list(request.tr_spacings_m),
+            dip_degs=list(request.dip_degs),
+            backend=request.backend,
+        )
     return {
         "H6": h6,
         "positions_z": positions_z,
