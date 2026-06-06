@@ -487,7 +487,14 @@ class SimulationViewModel(BaseViewModel):
 
         Em erro de validação NÃO chama o service: status → ``"error"`` e
         ``last_result = {"errors": [...]}``.
+
+        Guard de re-entrância: se já há uma simulação em voo (``status ==
+        "running"``), retorna sem despachar — o invariante "1 simulação por vez"
+        vive AQUI (camada VM), não num efeito colateral de ``setEnabled`` na View
+        (que depende do filtro de eventos do Qt e não cobre chamadas programáticas).
         """
+        if self._status == "running":
+            return
         errors = self.validate()
         if errors:
             self._last_result = {"errors": errors}

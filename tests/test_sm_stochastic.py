@@ -307,3 +307,77 @@ def test_vm_defaults_to_random_seed():
     """
     vm = _make_vm()
     assert vm.rng_seed is None, "VM deve nascer com semente aleatória (None), não fixa."
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Correções de paridade/bugs (revisão SM MVVM ↔ monólito)
+# ════════════════════════════════════════════════════════════════════════════
+def test_vm_run_guards_reentrancy():
+    """BUG B2 — run() é guardado contra re-entrância (1 simulação por vez).
+
+    Com status="running" (1ª run despachada, sem finished), uma 2ª run() não
+    despacha um SEGUNDO worker — o invariante vive na camada VM, não na View.
+    """
+    vm = _make_vm()
+    vm.run()  # status → running; stub registra 1
+    assert len(vm._service.requests) == 1
+    assert vm.status == "running"
+    vm.run()  # guard: status running → no-op
+    assert len(vm._service.requests) == 1  # NÃO despachou de novo
+
+
+def test_parse_csv_accepts_comma_and_semicolon():
+    """G14 — _parse_csv_floats aceita ',' e ';' (paridade _parse_float_list)."""
+    from apps.sim_manager.perspectives.simulation.view import _parse_csv_floats
+
+    assert _parse_csv_floats("20000, 40000") == (20000.0, 40000.0)
+    assert _parse_csv_floats("20000; 40000") == (20000.0, 40000.0)
+    assert _parse_csv_floats("1, 2; 3") == (1.0, 2.0, 3.0)
+    assert _parse_csv_floats("  ") == ()  # vazio → tupla vazia (VM valida depois)
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="não numérico"):
+        _parse_csv_floats("1, abc")
+
+
+@pytest.mark.gui
+def test_view_n_layers_max_inclusive_conversion(qtbot):
+    """BUG B1 — a View trata n_layers_max INCLUSIVE (+1 p/ o exclusive do VM/monólito).
+
+    Init: VM exclusive=11 → spin mostra 10 (inclusive). Run: spin=11 (inclusive)
+    → VM/SimRequest recebe 12 (exclusive), igual ao build_gen_config do monólito.
+    """
+    from apps.sim_manager.perspectives.simulation.view import SimulatorView
+
+    vm = _make_vm()  # _n_layers_max default = 11 (exclusive)
+    view = SimulatorView(vm)
+    qtbot.addWidget(view)
+    # init: spin inclusive = exclusive − 1
+    assert view._geo_nl_max.value() == vm.n_layers_max - 1 == 10
+    # run com spin inclusive = 11 + modo sampled → VM exclusive = 12
+    view._geo_mode.setCurrentText("stochastic")
+    view._geo_nlf_check.setChecked(False)  # amostra [min, max)
+    view._geo_nl_min.setValue(3)
+    view._geo_nl_max.setValue(11)  # INCLUSIVE
+    view._on_run_clicked()
+    req = vm._service.requests[-1]
+    assert (
+        req.n_layers_max == 12
+    ), "spin inclusive 11 → exclusive 12 (paridade monólito)"
+
+
+@pytest.mark.gui
+def test_view_geology_disabled_in_fixed_mode(qtbot):
+    """BUG B4 — os campos de geologia ficam desabilitados no modo 'fixed' (UX reativa)."""
+    from apps.sim_manager.perspectives.simulation.view import SimulatorView
+
+    vm = _make_vm()
+    view = SimulatorView(vm)
+    qtbot.addWidget(view)
+    view._geo_mode.setCurrentText("fixed")
+    assert not view._geo_generator.isEnabled()
+    assert not view._geo_rho_min.isEnabled()
+    assert not view._geo_seed.isEnabled()
+    view._geo_mode.setCurrentText("stochastic")
+    assert view._geo_generator.isEnabled()
+    assert view._geo_rho_min.isEnabled()

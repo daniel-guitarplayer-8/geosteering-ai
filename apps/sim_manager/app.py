@@ -34,6 +34,7 @@ from geosteering_ai.gui.qt_compat import (
     QT_AVAILABLE,
     QT_IMPORT_ERROR,
     QtWidgets,
+    enforce_c_locale,
 )
 from geosteering_ai.gui.shell.context import AppContext
 
@@ -58,6 +59,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     args = argv if argv is not None else sys.argv
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(args)
+    # Locale C: ponto decimal nos QDoubleSpinBox (paridade c/ o monólito; evita
+    # que um locale pt-BR mostre/parseie "1,5" e divirja do CSV Python float()).
+    enforce_c_locale(app)
 
     ctx = AppContext(app_name=_APP_NAME)
     window = SM_MainWindow(ctx)

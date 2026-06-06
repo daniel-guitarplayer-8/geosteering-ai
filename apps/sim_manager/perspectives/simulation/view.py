@@ -54,7 +54,8 @@ def _parse_csv_floats(text: str) -> Tuple[float, ...]:
             PT-BR; o chamador exibe no status, sem crash).
     """
     out = []
-    for tok in text.split(","):
+    # ``;`` é aceito como separador (paridade c/ o monólito ``_parse_float_list``).
+    for tok in text.replace(";", ",").split(","):
         tok = tok.strip()
         if not tok:
             continue
@@ -84,33 +85,64 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         # ── Inputs de listas (CSV multi-config) ──────────────────────────────
         self._freqs = QtWidgets.QLineEdit(self._fmt_csv(vm.frequencies))
         self._freqs.setPlaceholderText("ex.: 20000, 40000")
+        self._freqs.setToolTip(
+            "Frequências (Hz), separadas por vírgula. Range [10, 2e6]."
+        )
         self._dips = QtWidgets.QLineEdit(self._fmt_csv(vm.dips))
         self._dips.setPlaceholderText("ex.: 0, 30")
+        self._dips.setToolTip(
+            "Ângulos de mergulho (°), separados por vírgula. Range [0, 90]."
+        )
         self._trs = QtWidgets.QLineEdit(self._fmt_csv(vm.tr_spacings))
         self._trs.setPlaceholderText("ex.: 1.0, 2.0")
+        self._trs.setToolTip(
+            "Espaçamentos T-R (m), separados por vírgula. Range [0.1, 50]."
+        )
 
         # ── Geometria Fortran (spinboxes) + nº modelos ───────────────────────
+        # Ranges/steps espelham a ParametersPage do monólito (simulation_manager.py
+        # :1112-1114) p/ guardrail visual consistente.
         self._h1 = QtWidgets.QDoubleSpinBox()
-        self._h1.setRange(0.01, 1000.0)
-        self._h1.setDecimals(2)
+        self._h1.setRange(0.1, 500.0)
+        self._h1.setDecimals(3)
+        self._h1.setSingleStep(0.5)
         self._h1.setValue(vm.h1)
         self._h1.setSuffix(" m")
+        self._h1.setToolTip(
+            "Altura do 1º ponto-médio T-R acima da 1ª interface (convenção Fortran). "
+            "z_obs começa em −h1 (interfaces em z=0)."
+        )
 
         self._tj = QtWidgets.QDoubleSpinBox()
-        self._tj.setRange(0.1, 10000.0)
+        self._tj.setRange(1.0, 5000.0)
         self._tj.setDecimals(2)
+        self._tj.setSingleStep(1.0)
         self._tj.setValue(vm.tj)
         self._tj.setSuffix(" m")
+        self._tj.setToolTip(
+            "Janela de investigação (m). Também é o total_depth da geologia "
+            "estocástica (Σ espessuras = tj). n_pos = ceil(tj/(p_med·cos dip₀))."
+        )
 
         self._p_med = QtWidgets.QDoubleSpinBox()
-        self._p_med.setRange(0.01, 100.0)
-        self._p_med.setDecimals(2)
+        self._p_med.setRange(0.01, 10.0)
+        self._p_med.setDecimals(3)
+        self._p_med.setSingleStep(0.01)
         self._p_med.setValue(vm.p_med)
         self._p_med.setSuffix(" m")
+        self._p_med.setToolTip("Passo entre medidas (m). Menor passo ⇒ mais posições.")
 
         self._n_models = QtWidgets.QSpinBox()
-        self._n_models.setRange(1, 100)
+        # Paridade com o monólito (spin_nmodels: 1–10M, passo 100). O cap antigo
+        # de 100 impedia ensembles grandes. NOTA: sem ProcessPool (Fatia 5), N
+        # grande roda lento (off-thread, UI responsiva) — sem barra de progresso ainda.
+        self._n_models.setRange(1, 10_000_000)
+        self._n_models.setSingleStep(100)
         self._n_models.setValue(vm.n_models)
+        self._n_models.setToolTip(
+            "Nº de perfis geológicos a gerar/simular (1–10M). Sem ProcessPool "
+            "(Fatia 5), N grande roda lento — a UI fica responsiva (off-thread)."
+        )
 
         # ── Geologia estocástica (Fatia 3) ───────────────────────────────────
         self._geology_box = self._build_geology_group(vm)
@@ -151,6 +183,10 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._tj.valueChanged.connect(self._refresh_n_pos)
         self._p_med.valueChanged.connect(self._refresh_n_pos)
         self._refresh_n_pos()
+        # Geologia: habilita os campos só no modo "stochastic" (UX reativa —
+        # no modo "fixed" eles são ignorados, então ficam desabilitados/cinza).
+        self._geo_mode.currentTextChanged.connect(self._on_geology_mode_changed)
+        self._on_geology_mode_changed(self._geo_mode.currentText())
 
     # ── Helpers ─────────────────────────────────────────────────────────────────
     @staticmethod
@@ -192,10 +228,12 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._geo_lambda_min = QtWidgets.QDoubleSpinBox()
         self._geo_lambda_min.setRange(1.0, 5.0)
         self._geo_lambda_min.setDecimals(3)
+        self._geo_lambda_min.setSingleStep(0.05)  # passo do monólito
         self._geo_lambda_min.setValue(vm.lambda_min)
         self._geo_lambda_max = QtWidgets.QDoubleSpinBox()
         self._geo_lambda_max.setRange(1.0, 5.0)
         self._geo_lambda_max.setDecimals(3)
+        self._geo_lambda_max.setSingleStep(0.05)
         self._geo_lambda_max.setValue(vm.lambda_max)
         # n_layers (fixo OU range)
         self._geo_nlf_check = QtWidgets.QCheckBox("n_layers fixo")
@@ -208,9 +246,17 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._geo_nl_min = QtWidgets.QSpinBox()
         self._geo_nl_min.setRange(3, 200)
         self._geo_nl_min.setValue(vm.n_layers_min)
+        self._geo_nl_min.setToolTip("Nº mínimo de camadas (inclui 2 semi-espaços).")
+        # n_layers máx é INCLUSIVE na UI (paridade c/ o monólito, que faz value()+1
+        # ao montar GenConfig). O VM guarda EXCLUSIVE; convertemos aqui (init −1,
+        # copy-back +1) — assim "máx = N" significa "até N camadas", como no monólito.
         self._geo_nl_max = QtWidgets.QSpinBox()
-        self._geo_nl_max.setRange(4, 201)
-        self._geo_nl_max.setValue(vm.n_layers_max)
+        self._geo_nl_max.setRange(3, 200)
+        self._geo_nl_max.setValue(vm.n_layers_max - 1)
+        self._geo_nl_max.setToolTip(
+            "Nº máximo de camadas (INCLUSIVE — 'até N'). Internamente vira o bound "
+            "exclusive do gerador (N+1)."
+        )
         # espessura mínima
         self._geo_min_thick = QtWidgets.QDoubleSpinBox()
         self._geo_min_thick.setRange(0.01, 100.0)
@@ -280,7 +326,8 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             self._geo_nlf.value() if self._geo_nlf_check.isChecked() else None
         )
         self._vm.n_layers_min = self._geo_nl_min.value()
-        self._vm.n_layers_max = self._geo_nl_max.value()
+        # spin INCLUSIVE → bound EXCLUSIVE do gerador (paridade monólito build_gen_config).
+        self._vm.n_layers_max = self._geo_nl_max.value() + 1
         self._vm.rng_seed = (
             None if self._geo_seed_random.isChecked() else self._geo_seed.value()
         )
@@ -303,14 +350,52 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             return
         self._n_pos_label.setText(f"n_pos: {compute_n_pos(tj, p_med, dips[0])}")
 
+    def _on_geology_mode_changed(self, text: str) -> None:
+        """Habilita os campos de geologia só no modo ``"stochastic"`` (UX reativa)."""
+        enabled = text == "stochastic"
+        for w in (
+            self._geo_generator,
+            self._geo_distr,
+            self._geo_rho_min,
+            self._geo_rho_max,
+            self._geo_aniso,
+            self._geo_lambda_min,
+            self._geo_lambda_max,
+            self._geo_nlf_check,
+            self._geo_nlf,
+            self._geo_nl_min,
+            self._geo_nl_max,
+            self._geo_min_thick,
+            self._geo_seed_random,
+            self._geo_seed,
+        ):
+            w.setEnabled(enabled)
+
     def _on_vm_changed(self, name: str, value: Any) -> None:
-        """Reflete mudanças de estado do VM (status/botão)."""
-        if name == "_status":
-            self._status.setText(str(value))
-            self._run_btn.setEnabled(value != "running")
+        """Reflete mudanças de estado do VM (status/botão/cor + msg de erro)."""
+        if name != "_status":
+            return
+        state = str(value)
+        self._run_btn.setEnabled(state != "running")
+        # Cor por estado (erro vermelho, running azul, done verde).
+        color = {"error": "#c0392b", "running": "#2980b9", "done": "#27ae60"}.get(
+            state, ""
+        )
+        self._status.setStyleSheet(f"color: {color};" if color else "")
+        if state == "error":
+            # Mostra a mensagem de erro (validação ou física), não só "error".
+            lr = self._vm.last_result or {}
+            msg = lr.get("error") or "; ".join(lr.get("errors", [])) or "erro"
+            self._status.setText(f"[ERRO] {msg}")
+        else:
+            self._status.setText(state)
 
     def _on_result_ready(self, result: Dict[str, Any]) -> None:
-        """Plota a resposta EM (Re do 1º canal, modelo 0) vs. profundidade."""
+        """Plota a resposta EM (Re do 1º canal, modelo 0) vs. profundidade.
+
+        NOTA: exibe só o modelo 0 do ensemble — a galeria multi-modelo +
+        seleção de canal/componente/plot-kind é a Fatia 4 (ResultsView).
+        """
         # Guard defensivo: o contrato do Service garante o shape, mas a View não
         # confia cegamente (resultado malformado → status, sem crash).
         h6 = result.get("H6")
@@ -318,6 +403,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         if h6 is None or positions_z is None or getattr(h6, "ndim", 0) != 6:
             self._status.setText("resultado inválido")
             return
+        n_models = int(h6.shape[0])
         # H6: (n_models, nTR, nAng, n_pos, nf, 9) — modelo 0, TR0, dip0, freq0, canal 0.
         curve = np.real(h6[0, 0, 0, :, 0, 0])
 
@@ -328,7 +414,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._canvas.set_axis_config(
             ax,
             AxisConfig(
-                title="Resposta EM — modelo 0",
+                title=f"Resposta EM — modelo 0 de {n_models}",
                 xlabel="Re(H₀)",
                 ylabel="Profundidade z (m)",
                 invert_y=True,
