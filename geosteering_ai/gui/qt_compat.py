@@ -184,6 +184,72 @@ def load_qwebengineview() -> Any:
     return module.QWebEngineView
 
 
+# ── Qt Designer (.ui) — loader único, binding-agnóstico ───────────────────
+
+
+def load_ui(ui_path: Any, parent: Optional[Any] = None) -> Any:
+    """Carrega um arquivo ``.ui`` (Qt Designer/Qt Creator) no binding Qt ativo.
+
+    **Composição, não herança múltipla:** retorna a *widget de topo* descrita no
+    ``.ui``; a View fina embute essa widget e acessa os filhos por ``objectName``
+    (``ui.runButton``, ``ui.freqsEdit``, …). Esse padrão funciona IDÊNTICO em
+    PyQt6 e PySide6 — diferente do ``baseinstance`` (herança múltipla) do PyQt,
+    que não tem equivalente direto no ``QUiLoader`` do PySide. Único ponto de
+    decisão de binding para ``.ui`` (evita ``from PyQt6.uic import loadUi``
+    hardcoded espalhado, que cravaria o binding e quebraria o fallback PySide6).
+
+    Args:
+        ui_path: caminho do arquivo ``.ui`` (str ou ``os.PathLike``).
+        parent: widget pai opcional para a widget carregada.
+
+    Returns:
+        A widget de topo do ``.ui`` (ex.: o ``QWidget`` raiz). Os filhos são
+        acessíveis por atributo via ``objectName`` (PyQt) ou ``findChild`` (ambos).
+
+    Raises:
+        ImportError: se nenhum binding Qt6 foi detectado.
+        OSError: se o arquivo ``.ui`` não puder ser aberto (PySide6).
+        RuntimeError: se o parsing do ``.ui`` falhar (PySide6).
+
+    Example:
+        >>> from geosteering_ai.gui.qt_compat import load_ui
+        >>> ui = load_ui("apps/sim_manager/perspectives/simulation/simulator.ui")
+        >>> ui.runButton.clicked.connect(on_run)   # acesso por objectName
+    """
+    path_str = str(ui_path)
+    if QT_BINDING == "PyQt6":
+        # uic.loadUi(path) devolve a widget de topo (sem baseinstance = nova widget).
+        from PyQt6 import uic  # type: ignore[attr-defined]
+
+        widget = uic.loadUi(path_str)
+        if parent is not None:
+            widget.setParent(parent)
+        return widget
+    if QT_BINDING == "PySide6":
+        # QUiLoader.load(QFile) devolve a widget; não popula instância existente.
+        from PySide6.QtCore import QFile, QIODevice  # type: ignore[attr-defined]
+        from PySide6.QtUiTools import QUiLoader  # type: ignore[attr-defined]
+
+        loader = QUiLoader()
+        qfile = QFile(path_str)
+        if not qfile.open(QIODevice.OpenModeFlag.ReadOnly):
+            raise OSError(
+                f"não foi possível abrir o .ui {path_str!r}: {qfile.errorString()}"
+            )
+        try:
+            widget = loader.load(qfile, parent)
+        finally:
+            qfile.close()
+        if widget is None:
+            raise RuntimeError(
+                f"QUiLoader falhou ao carregar {path_str!r}: {loader.errorString()}"
+            )
+        return widget
+    raise ImportError(
+        f"load_ui indisponível: nenhum binding Qt6 detectado (QT_BINDING={QT_BINDING!r})."
+    )
+
+
 # ── Locale — ponto como separador decimal (jamais vírgula) ────────────────
 
 
@@ -345,6 +411,7 @@ __all__ = [
     "detect_os_dark_mode",
     "enforce_c_locale",
     "format_float",
+    "load_ui",
     "load_qwebengineview",
     "make_double_spin",
 ]

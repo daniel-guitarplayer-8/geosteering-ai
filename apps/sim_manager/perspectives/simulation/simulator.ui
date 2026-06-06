@@ -1,0 +1,654 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ════════════════════════════════════════════════════════════════════════════
+  apps/sim_manager/perspectives/simulation/simulator.ui
+  ────────────────────────────────────────────────────────────────────────────
+  Projeto    : Geosteering AI v2.0 — Simulation Manager MVVM
+  Finalidade : Esqueleto VISUAL (camada View) da tela "Simulador", editável no
+               Qt Designer / Qt Creator (Qt6). Reproduz fielmente o conteúdo da
+               aba "Simulador" do SM MONOLÍTICO (ParametersPage + SimulatorPage),
+               organizado em 2 colunas (Parâmetros | Simulador).
+  Carregar   : geosteering_ai.gui.qt_compat.load_ui("…/simulator.ui")
+  ────────────────────────────────────────────────────────────────────────────
+  MVVM       : este .ui descreve SOMENTE a View (widgets/layout). NÃO contém
+               lógica de domínio. O ViewModel (puro, sem Qt) permanece intocado.
+               objectNames são o CONTRATO de binding (a View fina conecta sinais
+               e lê valores por estes nomes).
+  ────────────────────────────────────────────────────────────────────────────
+  Estado dos painéis (paridade SM MVVM × monólito — ver UI_DESIGNER_WORKFLOW):
+    [JÁ NO MVVM]  geometryBox · generationBox · backendCombo(numba/jax/auto)
+    [DESIGN-ALVO] canonicalBox(6c) · hankelBox(6b) · parallelBox(6h) ·
+                  executionBox(6a) · logBox(6a) · historyBox(6c) · fortran(6h)
+  Os "design-alvo" são alvos das próximas fatias (6a-6h); estão aqui para você
+  desenhar a tela COMPLETA no Designer, mas ainda não têm binding no ViewModel.
+  ════════════════════════════════════════════════════════════════════════════
+-->
+<ui version="4.0">
+ <class>SimulatorForm</class>
+ <widget class="QWidget" name="SimulatorForm">
+  <property name="windowTitle">
+   <string>Simulador — Geosteering AI</string>
+  </property>
+  <layout class="QHBoxLayout" name="rootLayout">
+   <item>
+    <!-- ══════════ COLUNA ESQUERDA: PARÂMETROS ══════════ -->
+    <layout class="QVBoxLayout" name="paramsColumn">
+     <item>
+      <widget class="QGroupBox" name="geometryBox">
+       <property name="title">
+        <string>Geometria da ferramenta e aquisição</string>
+       </property>
+       <layout class="QFormLayout" name="geometryForm">
+        <item row="0" column="0">
+         <widget class="QLabel" name="freqModeLabel">
+          <property name="text"><string>Modo de frequência:</string></property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <layout class="QHBoxLayout" name="freqModeLayout">
+          <item>
+           <widget class="QRadioButton" name="freqFixedRadio">
+            <property name="text"><string>Frequência fixa</string></property>
+            <property name="checked"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QRadioButton" name="hankelFactorRadio">
+            <property name="text"><string>Fator de Hankel</string></property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item row="1" column="0">
+         <widget class="QLabel" name="freqsLabel">
+          <property name="text"><string>Frequências (Hz):</string></property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="QLineEdit" name="freqsEdit">
+          <property name="placeholderText"><string>ex.: 20000, 40000</string></property>
+          <property name="toolTip"><string>Frequências (Hz), separadas por vírgula. Range [10, 2e6].</string></property>
+         </widget>
+        </item>
+        <item row="2" column="0">
+         <widget class="QLabel" name="dipsLabel">
+          <property name="text"><string>Dips (°):</string></property>
+         </widget>
+        </item>
+        <item row="2" column="1">
+         <widget class="QLineEdit" name="dipsEdit">
+          <property name="placeholderText"><string>ex.: 0, 30</string></property>
+          <property name="toolTip"><string>Ângulos de mergulho (°), separados por vírgula. Range [0, 90].</string></property>
+         </widget>
+        </item>
+        <item row="3" column="0">
+         <widget class="QLabel" name="trsLabel">
+          <property name="text"><string>Espaçamentos T-R (m):</string></property>
+         </widget>
+        </item>
+        <item row="3" column="1">
+         <widget class="QLineEdit" name="trsEdit">
+          <property name="placeholderText"><string>ex.: 1.0, 2.0</string></property>
+          <property name="toolTip"><string>Espaçamentos T-R (m), separados por vírgula. Range [0.1, 50].</string></property>
+         </widget>
+        </item>
+        <item row="4" column="0">
+         <widget class="QLabel" name="h1Label">
+          <property name="text"><string>h1:</string></property>
+         </widget>
+        </item>
+        <item row="4" column="1">
+         <widget class="QDoubleSpinBox" name="h1Spin">
+          <property name="decimals"><number>3</number></property>
+          <property name="minimum"><double>0.100000000000000</double></property>
+          <property name="maximum"><double>500.000000000000000</double></property>
+          <property name="singleStep"><double>0.500000000000000</double></property>
+          <property name="value"><double>10.000000000000000</double></property>
+          <property name="suffix"><string> m</string></property>
+          <property name="toolTip"><string>Altura do 1º ponto-médio T-R acima da 1ª interface (convenção Fortran). z_obs começa em −h1.</string></property>
+         </widget>
+        </item>
+        <item row="5" column="0">
+         <widget class="QLabel" name="tjLabel">
+          <property name="text"><string>tj:</string></property>
+         </widget>
+        </item>
+        <item row="5" column="1">
+         <widget class="QDoubleSpinBox" name="tjSpin">
+          <property name="decimals"><number>2</number></property>
+          <property name="minimum"><double>1.000000000000000</double></property>
+          <property name="maximum"><double>5000.000000000000000</double></property>
+          <property name="singleStep"><double>1.000000000000000</double></property>
+          <property name="value"><double>30.000000000000000</double></property>
+          <property name="suffix"><string> m</string></property>
+          <property name="toolTip"><string>Janela de investigação (m). Também é o total_depth da geologia estocástica. n_pos = ceil(tj/(p_med·cos dip₀)).</string></property>
+         </widget>
+        </item>
+        <item row="6" column="0">
+         <widget class="QLabel" name="pMedLabel">
+          <property name="text"><string>p_med:</string></property>
+         </widget>
+        </item>
+        <item row="6" column="1">
+         <widget class="QDoubleSpinBox" name="pMedSpin">
+          <property name="decimals"><number>3</number></property>
+          <property name="minimum"><double>0.010000000000000</double></property>
+          <property name="maximum"><double>10.000000000000000</double></property>
+          <property name="singleStep"><double>0.010000000000000</double></property>
+          <property name="value"><double>1.000000000000000</double></property>
+          <property name="suffix"><string> m</string></property>
+          <property name="toolTip"><string>Passo entre medidas (m). Menor passo ⇒ mais posições.</string></property>
+         </widget>
+        </item>
+        <item row="7" column="0">
+         <widget class="QLabel" name="nModelsLabel">
+          <property name="text"><string>Nº modelos:</string></property>
+         </widget>
+        </item>
+        <item row="7" column="1">
+         <widget class="QSpinBox" name="nModelsSpin">
+          <property name="minimum"><number>1</number></property>
+          <property name="maximum"><number>10000000</number></property>
+          <property name="singleStep"><number>100</number></property>
+          <property name="value"><number>100</number></property>
+          <property name="toolTip"><string>Nº de perfis geológicos a gerar/simular (1–10M).</string></property>
+         </widget>
+        </item>
+        <item row="8" column="0">
+         <widget class="QLabel" name="nPosCaption">
+          <property name="text"><string>Posições derivadas:</string></property>
+         </widget>
+        </item>
+        <item row="8" column="1">
+         <widget class="QLabel" name="nPosLabel">
+          <property name="text"><string>n_pos: —</string></property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <widget class="QGroupBox" name="canonicalBox">
+       <property name="title">
+        <string>Perfil pré-configurado (design-alvo · Fatia 6b)</string>
+       </property>
+       <layout class="QFormLayout" name="canonicalForm">
+        <item row="0" column="0">
+         <widget class="QLabel" name="canonicalLabel">
+          <property name="text"><string>Perfil canônico:</string></property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QComboBox" name="canonicalCombo">
+          <item><property name="text"><string>—</string></property></item>
+          <item><property name="text"><string>Oklahoma 3 camadas</string></property></item>
+          <item><property name="text"><string>Oklahoma 5 camadas</string></property></item>
+          <item><property name="text"><string>Oklahoma 28 camadas</string></property></item>
+          <item><property name="text"><string>Resistive Annular</string></property></item>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="QCheckBox" name="autoGeoCheck">
+          <property name="text"><string>Auto-geometria a partir do perfil</string></property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <widget class="QGroupBox" name="generationBox">
+       <property name="title">
+        <string>Geração de modelos e geologia estocástica</string>
+       </property>
+       <layout class="QFormLayout" name="generationForm">
+        <item row="0" column="0">
+         <widget class="QLabel" name="genModeLabel">
+          <property name="text"><string>Modo de geração:</string></property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <layout class="QHBoxLayout" name="genModeLayout">
+          <item>
+           <widget class="QRadioButton" name="genRandomRadio">
+            <property name="text"><string>Aleatório (samplers)</string></property>
+            <property name="checked"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QRadioButton" name="genManualRadio">
+            <property name="text"><string>Manual</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="editLayersButton">
+            <property name="text"><string>Editar camadas…</string></property>
+            <property name="toolTip"><string>Abre o editor manual de camadas (ρh/ρv/espessura). Design-alvo: Fatia 6b.</string></property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item row="1" column="0">
+         <widget class="QLabel" name="geoModeLabel">
+          <property name="text"><string>Modo de geologia:</string></property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="QComboBox" name="geoModeCombo">
+          <item><property name="text"><string>stochastic</string></property></item>
+          <item><property name="text"><string>fixed</string></property></item>
+         </widget>
+        </item>
+        <item row="2" column="0">
+         <widget class="QLabel" name="geoGeneratorLabel">
+          <property name="text"><string>Gerador:</string></property>
+         </widget>
+        </item>
+        <item row="2" column="1">
+         <widget class="QComboBox" name="geoGeneratorCombo">
+          <property name="toolTip"><string>A lista REAL vem de GENERATORS_AVAILABLE em runtime; estes itens são só o design.</string></property>
+          <item><property name="text"><string>sobol</string></property></item>
+          <item><property name="text"><string>halton</string></property></item>
+          <item><property name="text"><string>niederreiter</string></property></item>
+          <item><property name="text"><string>mersenne</string></property></item>
+          <item><property name="text"><string>uniform</string></property></item>
+          <item><property name="text"><string>normal</string></property></item>
+          <item><property name="text"><string>box_muller</string></property></item>
+         </widget>
+        </item>
+        <item row="3" column="0">
+         <widget class="QLabel" name="geoDistrLabel">
+          <property name="text"><string>Distribuição ρₕ:</string></property>
+         </widget>
+        </item>
+        <item row="3" column="1">
+         <widget class="QComboBox" name="geoDistrCombo">
+          <item><property name="text"><string>loguni</string></property></item>
+          <item><property name="text"><string>uniform</string></property></item>
+         </widget>
+        </item>
+        <item row="4" column="0">
+         <widget class="QLabel" name="geoRhoMinLabel">
+          <property name="text"><string>ρₕ mín:</string></property>
+         </widget>
+        </item>
+        <item row="4" column="1">
+         <widget class="QDoubleSpinBox" name="geoRhoMinSpin">
+          <property name="decimals"><number>3</number></property>
+          <property name="minimum"><double>0.001000000000000</double></property>
+          <property name="maximum"><double>1000000.000000000000000</double></property>
+          <property name="value"><double>1.000000000000000</double></property>
+          <property name="suffix"><string> Ω·m</string></property>
+         </widget>
+        </item>
+        <item row="5" column="0">
+         <widget class="QLabel" name="geoRhoMaxLabel">
+          <property name="text"><string>ρₕ máx:</string></property>
+         </widget>
+        </item>
+        <item row="5" column="1">
+         <widget class="QDoubleSpinBox" name="geoRhoMaxSpin">
+          <property name="decimals"><number>3</number></property>
+          <property name="minimum"><double>0.001000000000000</double></property>
+          <property name="maximum"><double>1000000.000000000000000</double></property>
+          <property name="value"><double>1000.000000000000000</double></property>
+          <property name="suffix"><string> Ω·m</string></property>
+         </widget>
+        </item>
+        <item row="6" column="1">
+         <widget class="QCheckBox" name="geoAnisoCheck">
+          <property name="text"><string>Anisotrópico (ρᵥ=λ²·ρₕ)</string></property>
+         </widget>
+        </item>
+        <item row="7" column="0">
+         <widget class="QLabel" name="geoLambdaMinLabel">
+          <property name="text"><string>λ mín:</string></property>
+         </widget>
+        </item>
+        <item row="7" column="1">
+         <widget class="QDoubleSpinBox" name="geoLambdaMinSpin">
+          <property name="decimals"><number>3</number></property>
+          <property name="minimum"><double>1.000000000000000</double></property>
+          <property name="maximum"><double>5.000000000000000</double></property>
+          <property name="singleStep"><double>0.050000000000000</double></property>
+          <property name="value"><double>1.000000000000000</double></property>
+         </widget>
+        </item>
+        <item row="8" column="0">
+         <widget class="QLabel" name="geoLambdaMaxLabel">
+          <property name="text"><string>λ máx:</string></property>
+         </widget>
+        </item>
+        <item row="8" column="1">
+         <widget class="QDoubleSpinBox" name="geoLambdaMaxSpin">
+          <property name="decimals"><number>3</number></property>
+          <property name="minimum"><double>1.000000000000000</double></property>
+          <property name="maximum"><double>5.000000000000000</double></property>
+          <property name="singleStep"><double>0.050000000000000</double></property>
+          <property name="value"><double>1.414000000000000</double></property>
+         </widget>
+        </item>
+        <item row="9" column="1">
+         <widget class="QCheckBox" name="geoNlfCheck">
+          <property name="text"><string>n_layers fixo</string></property>
+         </widget>
+        </item>
+        <item row="10" column="0">
+         <widget class="QLabel" name="geoNlfLabel">
+          <property name="text"><string>n_layers (fixo):</string></property>
+         </widget>
+        </item>
+        <item row="10" column="1">
+         <widget class="QSpinBox" name="geoNlfSpin">
+          <property name="minimum"><number>3</number></property>
+          <property name="maximum"><number>200</number></property>
+          <property name="value"><number>5</number></property>
+         </widget>
+        </item>
+        <item row="11" column="0">
+         <widget class="QLabel" name="geoNlMinLabel">
+          <property name="text"><string>n_layers mín:</string></property>
+         </widget>
+        </item>
+        <item row="11" column="1">
+         <widget class="QSpinBox" name="geoNlMinSpin">
+          <property name="minimum"><number>3</number></property>
+          <property name="maximum"><number>200</number></property>
+          <property name="value"><number>3</number></property>
+          <property name="toolTip"><string>Nº mínimo de camadas (inclui 2 semi-espaços).</string></property>
+         </widget>
+        </item>
+        <item row="12" column="0">
+         <widget class="QLabel" name="geoNlMaxLabel">
+          <property name="text"><string>n_layers máx:</string></property>
+         </widget>
+        </item>
+        <item row="12" column="1">
+         <widget class="QSpinBox" name="geoNlMaxSpin">
+          <property name="minimum"><number>3</number></property>
+          <property name="maximum"><number>200</number></property>
+          <property name="value"><number>10</number></property>
+          <property name="toolTip"><string>Nº máximo de camadas (INCLUSIVE — 'até N'). Internamente vira o bound exclusive do gerador (N+1).</string></property>
+         </widget>
+        </item>
+        <item row="13" column="0">
+         <widget class="QLabel" name="geoMinThickLabel">
+          <property name="text"><string>Espessura mín:</string></property>
+         </widget>
+        </item>
+        <item row="13" column="1">
+         <widget class="QDoubleSpinBox" name="geoMinThickSpin">
+          <property name="decimals"><number>2</number></property>
+          <property name="minimum"><double>0.010000000000000</double></property>
+          <property name="maximum"><double>100.000000000000000</double></property>
+          <property name="value"><double>1.000000000000000</double></property>
+          <property name="suffix"><string> m</string></property>
+         </widget>
+        </item>
+        <item row="14" column="1">
+         <widget class="QCheckBox" name="geoSeedRandomCheck">
+          <property name="text"><string>Semente aleatória</string></property>
+          <property name="checked"><bool>true</bool></property>
+         </widget>
+        </item>
+        <item row="15" column="0">
+         <widget class="QLabel" name="geoSeedLabel">
+          <property name="text"><string>Semente (fixa):</string></property>
+         </widget>
+        </item>
+        <item row="15" column="1">
+         <widget class="QSpinBox" name="geoSeedSpin">
+          <property name="minimum"><number>0</number></property>
+          <property name="maximum"><number>2147483647</number></property>
+          <property name="value"><number>42</number></property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <widget class="QGroupBox" name="hankelBox">
+       <property name="title">
+        <string>Filtros de Hankel (design-alvo · Fatia 6b)</string>
+       </property>
+       <layout class="QFormLayout" name="hankelForm">
+        <item row="0" column="0">
+         <widget class="QLabel" name="hankelModeLabel">
+          <property name="text"><string>Modo:</string></property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <layout class="QHBoxLayout" name="hankelModeLayout">
+          <item>
+           <widget class="QRadioButton" name="hankelAutoRadio">
+            <property name="text"><string>Auto</string></property>
+            <property name="checked"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QRadioButton" name="hankelManualRadio">
+            <property name="text"><string>Manual (path/ordem)</string></property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item row="1" column="0">
+         <widget class="QLabel" name="hankelPathLabel">
+          <property name="text"><string>Arquivo .npz:</string></property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="QLineEdit" name="hankelPathEdit">
+          <property name="placeholderText"><string>caminho do filtro de Hankel (.npz)</string></property>
+         </widget>
+        </item>
+        <item row="2" column="0">
+         <widget class="QLabel" name="hankelOrderLabel">
+          <property name="text"><string>Ordem:</string></property>
+         </widget>
+        </item>
+        <item row="2" column="1">
+         <widget class="QSpinBox" name="hankelOrderSpin">
+          <property name="minimum"><number>1</number></property>
+          <property name="maximum"><number>10</number></property>
+          <property name="value"><number>3</number></property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <spacer name="paramsSpacer">
+       <property name="orientation"><enum>Qt::Vertical</enum></property>
+       <property name="sizeHint" stdset="0">
+        <size><width>20</width><height>20</height></size>
+       </property>
+      </spacer>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <!-- ══════════ COLUNA DIREITA: SIMULADOR ══════════ -->
+    <layout class="QVBoxLayout" name="simColumn">
+     <item>
+      <widget class="QGroupBox" name="backendBox">
+       <property name="title">
+        <string>Backend de simulação</string>
+       </property>
+       <layout class="QFormLayout" name="backendForm">
+        <item row="0" column="0">
+         <widget class="QLabel" name="backendLabel">
+          <property name="text"><string>Motor:</string></property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QComboBox" name="backendCombo">
+          <property name="toolTip"><string>numba (CPU, in-thread) · jax (GPU, subprocesso TLS-safe) · auto (decide) · fortran (design-alvo · Fatia 6h).</string></property>
+          <item><property name="text"><string>numba</string></property></item>
+          <item><property name="text"><string>jax</string></property></item>
+          <item><property name="text"><string>auto</string></property></item>
+          <item><property name="text"><string>fortran</string></property></item>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <widget class="QGroupBox" name="parallelBox">
+       <property name="title">
+        <string>Paralelismo (design-alvo · Fatia 6h)</string>
+       </property>
+       <layout class="QFormLayout" name="parallelForm">
+        <item row="0" column="0">
+         <widget class="QLabel" name="workersLabel">
+          <property name="text"><string>Workers:</string></property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QSpinBox" name="workersSpin">
+          <property name="minimum"><number>1</number></property>
+          <property name="maximum"><number>256</number></property>
+          <property name="value"><number>2</number></property>
+         </widget>
+        </item>
+        <item row="1" column="0">
+         <widget class="QLabel" name="threadsLabel">
+          <property name="text"><string>Threads/worker:</string></property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="QSpinBox" name="threadsSpin">
+          <property name="minimum"><number>1</number></property>
+          <property name="maximum"><number>256</number></property>
+          <property name="value"><number>2</number></property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <widget class="QGroupBox" name="executionBox">
+       <property name="title">
+        <string>Execução (progresso/cancel: design-alvo · Fatia 6a)</string>
+       </property>
+       <layout class="QVBoxLayout" name="executionLayout">
+        <item>
+         <layout class="QHBoxLayout" name="execButtonsLayout">
+          <item>
+           <widget class="QPushButton" name="runButton">
+            <property name="text"><string>Run</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="pauseButton">
+            <property name="text"><string>Pausar</string></property>
+            <property name="enabled"><bool>false</bool></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="resumeButton">
+            <property name="text"><string>Retomar</string></property>
+            <property name="enabled"><bool>false</bool></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="cancelButton">
+            <property name="text"><string>Cancelar</string></property>
+            <property name="enabled"><bool>false</bool></property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="sessionButtonsLayout">
+          <item>
+           <widget class="QPushButton" name="saveButton">
+            <property name="text"><string>Salvar sessão…</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="openButton">
+            <property name="text"><string>Abrir sessão…</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="statusLabel">
+            <property name="text"><string>idle</string></property>
+           </widget>
+          </item>
+          <item>
+           <spacer name="statusSpacer">
+            <property name="orientation"><enum>Qt::Horizontal</enum></property>
+            <property name="sizeHint" stdset="0">
+             <size><width>40</width><height>20</height></size>
+            </property>
+           </spacer>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <widget class="QProgressBar" name="progressBar">
+          <property name="value"><number>0</number></property>
+         </widget>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="outputLayout">
+          <item>
+           <widget class="QLabel" name="outputDirLabel">
+            <property name="text"><string>Saída:</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLineEdit" name="outputDirEdit">
+            <property name="placeholderText"><string>Diretório de saída (.dat/.out)</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="browseOutButton">
+            <property name="text"><string>…</string></property>
+            <property name="maximumWidth"><number>32</number></property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <widget class="QGroupBox" name="logBox">
+       <property name="title">
+        <string>Log (design-alvo · Fatia 6a)</string>
+       </property>
+       <layout class="QVBoxLayout" name="logLayout">
+        <item>
+         <widget class="QPlainTextEdit" name="logEdit">
+          <property name="readOnly"><bool>true</bool></property>
+          <property name="placeholderText"><string>Log da simulação…</string></property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <widget class="QGroupBox" name="historyBox">
+       <property name="title">
+        <string>Histórico de simulações (design-alvo · Fatia 6c)</string>
+       </property>
+       <layout class="QVBoxLayout" name="historyLayout">
+        <item>
+         <widget class="QLineEdit" name="historySearchEdit">
+          <property name="placeholderText"><string>Filtrar histórico…</string></property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QListWidget" name="historyList"/>
+        </item>
+       </layout>
+      </widget>
+     </item>
+    </layout>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

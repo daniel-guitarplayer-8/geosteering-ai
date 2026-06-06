@@ -34,7 +34,7 @@ import importlib
 import pytest
 
 # Símbolos públicos do contrato de ``qt_compat`` (spec 0004 §3 + ``load_qwebengineview``
-# adicionado no code-review de 0006/0007).
+# adicionado no code-review de 0006/0007 + ``load_ui`` adicionado p/ fluxo Qt Designer).
 EXPECTED_SYMBOLS = {
     "QObject",
     "QT_AVAILABLE",
@@ -51,6 +51,7 @@ EXPECTED_SYMBOLS = {
     "detect_os_dark_mode",
     "enforce_c_locale",
     "format_float",
+    "load_ui",
     "load_qwebengineview",
     "make_double_spin",
 }
