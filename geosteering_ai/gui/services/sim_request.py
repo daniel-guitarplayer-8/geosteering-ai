@@ -436,6 +436,15 @@ def _run_simulation(
         )
         if info.get("cancelled"):
             return {"cancelled": True, "backend": request.backend}
+        # Geologia por modelo (Fatia 6d — perfis ρ/λ). Já gerada; só expõe (ragged OK).
+        geology = [
+            {
+                "rho_h": np.asarray(m["rho_h"], dtype=np.float64),
+                "rho_v": np.asarray(m["rho_v"], dtype=np.float64),
+                "thicknesses": np.asarray(m["thicknesses"], dtype=np.float64),
+            }
+            for m in models
+        ]
     else:
         # Geologia FIXA (Fatia 2) — batch retangular, 1 chamada. ``_build_batch``
         # já deriva ``positions_z`` (convenção Fortran) — não recomputa.
@@ -458,9 +467,17 @@ def _run_simulation(
         )
         if progress_callback is not None:
             progress_callback(request.n_models, request.n_models)  # 100%
+        # Geologia por modelo (Fatia 6d) — extraída do batch fixo (n, n_layers).
+        geology = [
+            {"rho_h": rho_h[i], "rho_v": rho_v[i], "thicknesses": esp[i]}
+            for i in range(rho_h.shape[0])
+        ]
     return {
         "H6": h6,
         "positions_z": positions_z,
         "info": info,
         "backend": request.backend,
+        # ── Fatia 6d — geologia por modelo (perfis ρ/λ) + nº modelos ─────────
+        "geology": geology,
+        "n_models": len(geology),
     }
