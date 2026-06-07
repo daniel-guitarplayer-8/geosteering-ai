@@ -73,6 +73,35 @@ def test_geosignal_all_names_and_errors():
         compute_geosignal("USD", np.ones((2, 3), dtype=np.complex128))
 
 
+def test_geosignal_bit_identical_to_monolith_incl_near_pole():
+    """compute_geosignal ≡ monólito ``_compute_geosignal`` BIT-A-BIT, inclusive no polo.
+
+    Guarda anti-regressão da revisão adversarial (0017): a versão antiga usava
+    ``den + ε`` (aditivo) em USD/UHR, divergindo do monólito (``np.where(|den|<ε,ε,den)``)
+    no regime |den|≲ε. Testes com magnitudes NORMAIS mascaravam o bug — aqui forçamos
+    denominadores quase-singulares (|·|<ε), zero exato e valores normais.
+    """
+    from geosteering_ai.simulation.tests.sm_plots import (
+        _compute_geosignal as _monolith_geosignal,
+    )
+
+    rng = np.random.default_rng(3)
+    h9 = (rng.standard_normal((6, 9)) + 1j * rng.standard_normal((6, 9))).astype(
+        np.complex128
+    )
+    # Denominadores patológicos: |Hyy|<ε (USD), |Hzz|<ε (UHR), zero exato, Hxy=Hyx (U3DF).
+    h9[1, 4] = 5e-21 + 3e-21j  # |Hyy| < ε
+    h9[2, 8] = -2e-21 + 1e-21j  # |Hzz| < ε
+    h9[3, 4] = 0.0  # Hyy exatamente zero
+    h9[4, 8] = 0.0  # Hzz exatamente zero
+    h9[5, 1] = h9[5, 3]  # Hxy == Hyx → den U3DF = ε
+    for name in GEOSIGNALS:
+        got = compute_geosignal(name, h9)
+        exp = _monolith_geosignal(name, h9)
+        # Mesma fórmula → bit-a-bit; tolera só ruído de fp (≪ 1e-12 sagrado).
+        assert np.max(np.abs(got - exp)) < 1e-12, name
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Perfis ρ/λ — step via cumsum(esp)
 # ════════════════════════════════════════════════════════════════════════════

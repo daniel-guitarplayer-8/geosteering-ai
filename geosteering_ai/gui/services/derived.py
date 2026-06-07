@@ -78,12 +78,17 @@ def compute_geosignal(name: str, h9: np.ndarray) -> np.ndarray:
     hyx = h9[..., _HYX]
     hyy = h9[..., _HYY]
     hzz = h9[..., _HZZ]
+    # ── Guarda de divisão BYTE-FIEL ao monólito (sm_plots.py:1435/1439) ──────
+    # USD/UHR são RAZÕES: o monólito SUBSTITUI o denominador por ε quando |den|<ε
+    # (np.where), NÃO soma ε. Somar ε (den+ε) diverge no regime |den|≲ε (erro até
+    # dezenas de % → quebra a paridade <1e-12). U3DF é a única razão com ε ADITIVO
+    # (o monólito soma ε ao denominador-soma, :1444) — preservado abaixo.
     if name == "USD":
-        return hxx / (hyy + _EPS)  # type: ignore[no-any-return]  # numpy → Any
+        return hxx / np.where(np.abs(hyy) < _EPS, _EPS, hyy)  # type: ignore[no-any-return]
     if name == "UAD":
         return hxx - hyy  # type: ignore[no-any-return]
     if name == "UHR":
-        return hxz / (hzz + _EPS)  # type: ignore[no-any-return]
+        return hxz / np.where(np.abs(hzz) < _EPS, _EPS, hzz)  # type: ignore[no-any-return]
     if name == "UHA":
         return hxz - hzz  # type: ignore[no-any-return]
     if name == "U3DF":

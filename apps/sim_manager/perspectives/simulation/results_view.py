@@ -372,13 +372,21 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         img, extent, label = res
         try:
             handle = self._canvas.plot_image(ax, img, extent=extent, cmap="viridis")
-            self._canvas.set_colorbar(ax, handle, label=label)
         except NotImplementedError:
             # plotly/vispy não suportam imagem → aviso claro (sem crash).
             self._empty_subplot(
                 ax, f"heatmap indisponível ({self._active_backend.value})"
             )
             return
+        except Exception:  # noqa: BLE001 — render robusto: degrada, não derruba a galeria
+            self._empty_subplot(ax, "erro ao renderizar heatmap")
+            return
+        # Colorbar é COSMÉTICA: uma falha aqui (versão do backend, etc.) não deve
+        # descartar a imagem já desenhada nem derrubar o render.
+        try:
+            self._canvas.set_colorbar(ax, handle, label=label)
+        except Exception:  # noqa: BLE001 — sem colorbar; imagem permanece
+            pass
         self._canvas.set_axis_config(
             ax,
             AxisConfig(

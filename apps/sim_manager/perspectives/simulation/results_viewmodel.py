@@ -248,8 +248,12 @@ class ResultsViewModel(BaseViewModel):
 
     @property
     def component_name(self) -> str:
-        """(Compat) Nome de componente (Hxx..Hzz) — geosinal cai no clip a 0..8."""
-        return COMPONENT_NAMES[int(np.clip(self._channel_index, 0, 8))]
+        """(Compat) Alias de :attr:`channel_name` — nome do canal selecionado.
+
+        Antes clipava geosinais a 0..8 (retornava um nome de componente espúrio);
+        agora reflete o canal REAL (componente OU geosinal) — sem coerção silenciosa.
+        """
+        return self.channel_name
 
     @property
     def last_result(self) -> Optional[Dict[str, Any]]:

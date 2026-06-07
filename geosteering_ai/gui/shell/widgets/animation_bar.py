@@ -147,7 +147,12 @@ class AnimationBar(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any 
             self._stop()
 
     def _on_speed_changed(self, _idx: int) -> None:
-        self._timer.setInterval(self._interval_ms())
+        # Qt NÃO troca o intervalo de um timer EM CURSO até o próximo timeout — se
+        # estiver tocando, reinicia para aplicar a nova velocidade imediatamente.
+        interval = self._interval_ms()
+        self._timer.setInterval(interval)
+        if self._timer.isActive():
+            self._timer.start(interval)
 
     def _on_slider_changed(self, value: int) -> None:
         self._refresh_label()

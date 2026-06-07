@@ -70,7 +70,10 @@ class ExperimentsService(QObject):  # type: ignore[misc] # QObject é Any (qt_co
         self.error: VMSignal = VMSignal()
         self.cache_updated: VMSignal = VMSignal()
         self._cache = LRUPlotCache(maxlen=3, max_bytes=default_max_bytes())
-        self._save_thread: Optional[Any] = None  # mantém ref viva da QThread
+        self._save_thread: Optional[Any] = None  # última QThread (compat)
+        # Refs vivas de TODAS as saves em voo: um 2º save NÃO pode soltar a ref do
+        # 1º antes do término (o GC abortaria a QThread em curso → write corrompido).
+        self._save_threads: set = set()
 
     # ── Experimento (criar/carregar/salvar) ───────────────────────────────
     def create_experiment(
@@ -115,7 +118,11 @@ class ExperimentsService(QObject):  # type: ignore[misc] # QObject é Any (qt_co
         # finaliza+solta a thread ao terminar (sem deleteLater — segue worker.py).
         thread.finished_ok.connect(thread.quit)
         thread.error.connect(thread.quit)
-        self._save_thread = thread  # ref viva (senão o GC aborta a QThread)
+        # Mantém a ref enquanto a thread roda; solta SÓ quando o loop termina
+        # (QThread.finished) — sem race com um save concorrente.
+        self._save_threads.add(thread)
+        thread.finished.connect(lambda t=thread: self._save_threads.discard(t))
+        self._save_thread = thread  # ref da última (compat)
         thread.start()
 
     def make_snapshot(
