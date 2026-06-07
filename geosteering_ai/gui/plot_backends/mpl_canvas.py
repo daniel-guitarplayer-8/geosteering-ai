@@ -249,7 +249,12 @@ class MatplotlibCanvas(PlotCanvas):
             ax.set_ylabel(cfg.ylabel)
         if cfg.invert_y and not ax.yaxis_inverted():
             ax.invert_yaxis()
-        ax.grid(cfg.grid, alpha=0.35)
+        # ``alpha`` só com grid ligado — ``ax.grid(False, alpha=...)`` emite
+        # UserWarning ("line properties supplied" → grid reativado) no matplotlib.
+        if cfg.grid:
+            ax.grid(True, alpha=0.35)
+        else:
+            ax.grid(False)
         if cfg.log_x:
             ax.set_xscale("log")
         if cfg.log_y:

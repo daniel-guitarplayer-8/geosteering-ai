@@ -655,9 +655,37 @@
      <item>
       <widget class="QGroupBox" name="historyBox">
        <property name="title">
-        <string>Histórico de simulações (design-alvo · Fatia 6c)</string>
+        <string>Experimentos e histórico (design-alvo · Fatia 6c)</string>
        </property>
        <layout class="QVBoxLayout" name="historyLayout">
+        <item>
+         <layout class="QHBoxLayout" name="experimentButtonsLayout">
+          <item>
+           <widget class="QPushButton" name="expNewButton">
+            <property name="text"><string>Novo</string></property>
+            <property name="toolTip"><string>Cria um novo experimento (.exp.json).</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="expOpenButton">
+            <property name="text"><string>Abrir</string></property>
+            <property name="toolTip"><string>Abre um experimento salvo.</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="expSaveButton">
+            <property name="text"><string>Salvar</string></property>
+            <property name="toolTip"><string>Salva o experimento atual (snapshots + params).</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="expCloseButton">
+            <property name="text"><string>Fechar</string></property>
+            <property name="toolTip"><string>Fecha o experimento atual.</string></property>
+           </widget>
+          </item>
+         </layout>
+        </item>
         <item>
          <widget class="QLineEdit" name="historySearchEdit">
           <property name="placeholderText"><string>Filtrar histórico…</string></property>
@@ -665,6 +693,105 @@
         </item>
         <item>
          <widget class="QListWidget" name="historyList"/>
+        </item>
+        <item>
+         <widget class="QPushButton" name="expClearButton">
+          <property name="text"><string>Limpar histórico</string></property>
+          <property name="toolTip"><string>Remove todos os snapshots do experimento (pede confirmação).</string></property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item>
+      <widget class="QGroupBox" name="resultsBox">
+       <property name="title">
+        <string>Galeria de resultados (design-alvo · Fatia 6d)</string>
+       </property>
+       <layout class="QVBoxLayout" name="resultsLayout">
+        <item>
+         <layout class="QHBoxLayout" name="galleryControlsLayout">
+          <item>
+           <widget class="QLabel" name="plotBackendLabel">
+            <property name="text"><string>Plot:</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QComboBox" name="plotBackendCombo">
+            <property name="toolTip"><string>Motor de plotagem: PyQtGraph (interativo, default) ou matplotlib (publicação).</string></property>
+            <item><property name="text"><string>pyqtgraph</string></property></item>
+            <item><property name="text"><string>matplotlib</string></property></item>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="plotModeLabel">
+            <property name="text"><string>Modo:</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QComboBox" name="plotModeCombo">
+            <property name="toolTip"><string>O que plotar: curvas, perfil ρ, anisotropia λ ou heatmap do ensemble.</string></property>
+            <item><property name="text"><string>Curvas</string></property></item>
+            <item><property name="text"><string>Perfil ρ</string></property></item>
+            <item><property name="text"><string>Anisotropia λ</string></property></item>
+            <item><property name="text"><string>Heatmap ensemble</string></property></item>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="channelControlsLayout">
+          <item>
+           <widget class="QLabel" name="channelLabel">
+            <property name="text"><string>Canal:</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QComboBox" name="channelCombo">
+            <property name="toolTip"><string>Canal: componente do tensor H (Hxx..Hzz) ou geosinal (USD/UAD/UHR/UHA/U3DF).</string></property>
+            <item><property name="text"><string>Hxx</string></property></item>
+            <item><property name="text"><string>Hzz</string></property></item>
+            <item><property name="text"><string>USD</string></property></item>
+            <item><property name="text"><string>U3DF</string></property></item>
+           </widget>
+          </item>
+          <item>
+           <widget class="QComboBox" name="plotKindCombo">
+            <property name="toolTip"><string>Transform: Re / Im / |H| / fase.</string></property>
+            <item><property name="text"><string>Re</string></property></item>
+            <item><property name="text"><string>Im</string></property></item>
+            <item><property name="text"><string>|H|</string></property></item>
+            <item><property name="text"><string>Fase (°)</string></property></item>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="animationLayout">
+          <item>
+           <widget class="QPushButton" name="animPlayButton">
+            <property name="text"><string>▶</string></property>
+            <property name="checkable"><bool>true</bool></property>
+            <property name="maximumSize"><size><width>40</width><height>16777215</height></size></property>
+            <property name="toolTip"><string>Play/Pause — varre os modelos do ensemble (single-model playback).</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QSlider" name="animSlider">
+            <property name="orientation"><enum>Qt::Horizontal</enum></property>
+            <property name="toolTip"><string>Modelo em foco da animação.</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QComboBox" name="animSpeedCombo">
+            <property name="toolTip"><string>Velocidade do playback (frames por segundo).</string></property>
+            <item><property name="text"><string>1 fps</string></property></item>
+            <item><property name="text"><string>5 fps</string></property></item>
+            <item><property name="text"><string>10 fps</string></property></item>
+            <item><property name="text"><string>20 fps</string></property></item>
+           </widget>
+          </item>
+         </layout>
         </item>
        </layout>
       </widget>

@@ -35,10 +35,22 @@ import numpy as np
 
 from geosteering_ai.gui.persistence.plot_cache import LRUPlotCache
 from geosteering_ai.gui.plot_backends.base import PlotBackend  # str-Enum PURO (sem Qt)
+from geosteering_ai.gui.services.derived import (  # PUROS (numpy; sem Qt)
+    GEOSIGNALS,
+    compute_geosignal,
+    lambda_profile,
+    rho_profile,
+)
 from geosteering_ai.gui.viewmodels.base import BaseViewModel
 from geosteering_ai.gui.viewmodels.signal import VMSignal
 
-__all__ = ["ResultsViewModel", "COMPONENT_NAMES", "PLOT_KINDS"]
+__all__ = [
+    "ResultsViewModel",
+    "COMPONENT_NAMES",
+    "CHANNELS",
+    "PLOT_KINDS",
+    "PLOT_MODES",
+]
 
 # Ordem canônica das 9 componentes no eixo −1 do H6 (multi_forward.py:395):
 # [Hxx, Hxy, Hxz, Hyx, Hyy, Hyz, Hzx, Hzy, Hzz] — index 0=Hxx … 8=Hzz.
@@ -54,8 +66,17 @@ COMPONENT_NAMES: Tuple[str, ...] = (
     "Hzz",
 )
 
+# Canais plotáveis: 9 componentes cruas (Hxx..Hzz) + 5 geosinais derivados
+# (USD/UAD/UHR/UHA/U3DF — byte-fiéis, ver gui/services/derived.py). Os índices
+# 0..8 são componentes; 9..13 são geosinais (Fatia 6d).
+CHANNELS: Tuple[str, ...] = COMPONENT_NAMES + GEOSIGNALS
+
 # Modos de plot (transform aplicado à componente complexa selecionada).
 PLOT_KINDS: Tuple[str, ...] = ("re", "im", "mag", "phase")
+
+# Modos da galeria (o QUE plotar): curvas do canal, perfil ρ(z), anisotropia λ(z),
+# ou heatmap do ensemble (imagem n_models × n_pos do canal/transform atuais).
+PLOT_MODES: Tuple[str, ...] = ("curve", "rho", "lambda", "heatmap")
 
 
 def _kind_transform(kind: str, h: np.ndarray) -> np.ndarray:
@@ -94,12 +115,14 @@ class ResultsViewModel(BaseViewModel):
     """
 
     _STATE_FIELDS = (
-        "_component_index",
+        "_channel_index",
         "_plot_kind",
+        "_plot_mode",
         "_tr_index",
         "_dip_index",
         "_freq_index",
         "_page",
+        "_focus_model",
     )
 
     def __init__(
@@ -122,12 +145,14 @@ class ResultsViewModel(BaseViewModel):
         self._result: Optional[Dict[str, Any]] = None
         self._h6: Optional[np.ndarray] = None
         self._positions_z: Optional[np.ndarray] = None
-        self._component_index: int = 0
+        self._channel_index: int = 0  # 0..8 componentes; 9..13 geosinais (CHANNELS)
         self._plot_kind: str = "re"
+        self._plot_mode: str = "curve"  # curve | rho | lambda | heatmap (PLOT_MODES)
         self._tr_index: int = 0
         self._dip_index: int = 0
         self._freq_index: int = 0
         self._page: int = 0
+        self._focus_model: int = 0  # modelo em foco (animation bar — single-model)
         self._plot_backend: PlotBackend = plot_backend
         self._page_size: int = max(1, int(page_size))
         # ``is not None`` (NÃO ``cache or ...``): um LRUPlotCache VAZIO é falsy
@@ -166,12 +191,13 @@ class ResultsViewModel(BaseViewModel):
         # Re-clampa seletores aos novos dims (preserva onde couber).
         dims = self.dims
         if dims is not None:
-            _n_models, n_tr, n_ang, _n_pos, n_f = dims
-            self._component_index = int(np.clip(self._component_index, 0, 8))
+            n_models, n_tr, n_ang, _n_pos, n_f = dims
+            self._channel_index = int(np.clip(self._channel_index, 0, len(CHANNELS) - 1))
             self._tr_index = int(np.clip(self._tr_index, 0, n_tr - 1))
             self._dip_index = int(np.clip(self._dip_index, 0, n_ang - 1))
             self._freq_index = int(np.clip(self._freq_index, 0, n_f - 1))
             self._page = int(np.clip(self._page, 0, max(0, self.n_pages - 1)))
+            self._focus_model = int(np.clip(self._focus_model, 0, n_models - 1))
         self.results_changed.emit(result)
 
     # ── Properties derivadas (read-only) ─────────────────────────────────────
@@ -211,9 +237,19 @@ class ResultsViewModel(BaseViewModel):
         return self._positions_z
 
     @property
+    def channel_name(self) -> str:
+        """Nome do canal selecionado (Hxx..Hzz OU geosinal USD..U3DF)."""
+        return CHANNELS[int(np.clip(self._channel_index, 0, len(CHANNELS) - 1))]
+
+    @property
+    def is_geosignal(self) -> bool:
+        """``True`` se o canal atual é um geosinal derivado (índice ≥ 9)."""
+        return self._channel_index >= len(COMPONENT_NAMES)
+
+    @property
     def component_name(self) -> str:
-        """Nome da componente selecionada (Hxx..Hzz)."""
-        return COMPONENT_NAMES[int(np.clip(self._component_index, 0, 8))]
+        """(Compat) Nome de componente (Hxx..Hzz) — geosinal cai no clip a 0..8."""
+        return COMPONENT_NAMES[int(np.clip(self._channel_index, 0, 8))]
 
     @property
     def last_result(self) -> Optional[Dict[str, Any]]:
@@ -228,11 +264,12 @@ class ResultsViewModel(BaseViewModel):
         return list(range(start, min(start + self._page_size, self.n_models)))
 
     def curve_for(self, model_index: int) -> np.ndarray:
-        """Curva ``(n_pos,)`` do modelo na config/componente/plot-kind atuais.
+        """Curva ``(n_pos,)`` do modelo no canal/plot-kind atuais (componente OU geosinal).
 
-        ``transform(H6[m, tr_index, dip_index, :, freq_index, component_index])``
-        com ``transform`` = Re/Im/|·|/fase(°). Memorizada num LRU (mesma chave =
-        mesmo array, vindo do cache).
+        Para um canal componente (0..8): ``H6[m, tr, dip, :, freq, ch]``. Para um
+        geosinal (9..13): extrai as 9 componentes ``H6[m, tr, dip, :, freq, :]`` e
+        aplica :func:`compute_geosignal` (byte-fiel). Em ambos os casos aplica
+        ``transform`` = Re/Im/|·|/fase(°) e memoriza num LRU.
 
         Args:
             model_index: índice do modelo (0 ≤ m < n_models).
@@ -248,33 +285,116 @@ class ResultsViewModel(BaseViewModel):
         if not (0 <= model_index < self.n_models):
             raise IndexError(f"model_index {model_index} fora de [0, {self.n_models}).")
         key = (
-            f"{model_index}|{self._component_index}|{self._plot_kind}"
+            f"{model_index}|c{self._channel_index}|{self._plot_kind}"
             f"|{self._tr_index}|{self._dip_index}|{self._freq_index}"
         )
         cached = self._cache.get(key)
         if cached is not None:
             return cached["curve"]  # type: ignore[no-any-return]
-        h = self._h6[
-            model_index,
-            self._tr_index,
-            self._dip_index,
-            :,
-            self._freq_index,
-            self._component_index,
-        ]
+        if self._channel_index < len(COMPONENT_NAMES):
+            # Componente crua (índice 0..8 no eixo −1 do H6).
+            h = self._h6[
+                model_index,
+                self._tr_index,
+                self._dip_index,
+                :,
+                self._freq_index,
+                self._channel_index,
+            ]
+        else:
+            # Geosinal: precisa das 9 componentes (eixo −1 inteiro) → derived.
+            h9 = self._h6[
+                model_index, self._tr_index, self._dip_index, :, self._freq_index, :
+            ]
+            h = compute_geosignal(self.channel_name, h9)
         curve = _kind_transform(self._plot_kind, h)
         self._cache.put(key, {"curve": curve})
         return curve
 
+    # ── Perfis ρ/λ + heatmap de ensemble (Fatia 6d) ──────────────────────────
+    def geology_for(self, model_index: int) -> Optional[Dict[str, Any]]:
+        """Geologia do modelo (``{rho_h, rho_v, thicknesses}``) ou ``None`` (ausente)."""
+        if not isinstance(self._result, dict):
+            return None
+        geo = self._result.get("geology")
+        if not isinstance(geo, list) or not (0 <= model_index < len(geo)):
+            return None
+        entry = geo[model_index]
+        return entry if isinstance(entry, dict) else None
+
+    def rho_curves_for(
+        self, model_index: int
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """``(depth, ρₕ(z), ρᵥ(z))`` step do modelo, ou ``None`` se faltam dados.
+
+        Usa a geologia exposta por ``_run_simulation`` (Fatia 6d) + ``positions_z``;
+        os perfis são step-functions via :func:`rho_profile` (interfaces ``cumsum``).
+        """
+        geo = self.geology_for(model_index)
+        if geo is None or self._positions_z is None:
+            return None
+        z = np.asarray(self._positions_z, dtype=float)
+        rho_h = rho_profile(z, geo["rho_h"], geo["thicknesses"])
+        rho_v = rho_profile(z, geo["rho_v"], geo["thicknesses"])
+        return z, rho_h, rho_v
+
+    def lambda_curve_for(
+        self, model_index: int
+    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """``(depth, λ(z))`` step (anisotropia TIV ``√(ρᵥ/ρₕ)≥1``) ou ``None`` (sem dados)."""
+        geo = self.geology_for(model_index)
+        if geo is None or self._positions_z is None:
+            return None
+        z = np.asarray(self._positions_z, dtype=float)
+        lam = lambda_profile(z, geo["rho_h"], geo["rho_v"], geo["thicknesses"])
+        return z, lam
+
+    def ensemble_image(
+        self,
+    ) -> Optional[Tuple[np.ndarray, Tuple[float, float, float, float], str]]:
+        """Heatmap do ensemble: imagem ``(n_models × n_pos)`` do canal/transform atuais.
+
+        Empilha :meth:`curve_for` de TODOS os modelos (linha = modelo, coluna =
+        posição/profundidade) — imagem multidimensional interativa (showcase 6d).
+
+        Returns:
+            ``(img, extent, label)`` — ``img`` ``(n_models, n_pos)``; ``extent`` =
+            ``(z_min, z_max, n_models−0.5, −0.5)`` (origin=upper: modelo 0 no topo);
+            ``label`` = canal+transform. ``None`` se sem resultado/profundidade.
+        """
+        if self._h6 is None or self._positions_z is None or self.n_models == 0:
+            return None
+        rows = [self.curve_for(m) for m in range(self.n_models)]
+        img = np.vstack(rows)
+        z = np.asarray(self._positions_z, dtype=float)
+        z_min = float(z.min()) if z.size else 0.0
+        z_max = float(z.max()) if z.size else 1.0
+        extent = (z_min, z_max, float(self.n_models) - 0.5, -0.5)
+        kind_label = {"re": "Re", "im": "Im", "mag": "|·|", "phase": "fase°"}.get(
+            self._plot_kind, self._plot_kind
+        )
+        label = f"{kind_label} {self.channel_name}"
+        return img, extent, label
+
     # ── Properties de seletor (setters clampam + emitem ``changed``) ─────────
     @property
+    def channel_index(self) -> int:
+        """Índice do canal (0..8 componentes Hxx..Hzz; 9..13 geosinais USD..U3DF)."""
+        return self._channel_index
+
+    @channel_index.setter
+    def channel_index(self, value: int) -> None:
+        self._set("_channel_index", int(np.clip(int(value), 0, len(CHANNELS) - 1)))
+
+    @property
     def component_index(self) -> int:
-        """Índice da componente (0=Hxx … 8=Hzz)."""
-        return self._component_index
+        """(Compat) Índice de componente (0=Hxx … 8=Hzz) — alias de ``channel_index``."""
+        return self._channel_index
 
     @component_index.setter
     def component_index(self, value: int) -> None:
-        self._set("_component_index", int(np.clip(int(value), 0, 8)))
+        # Compat: componentes vivem em 0..8 (clip preserva o contrato legado).
+        self._set("_channel_index", int(np.clip(int(value), 0, 8)))
 
     @property
     def plot_kind(self) -> str:
@@ -284,6 +404,15 @@ class ResultsViewModel(BaseViewModel):
     @plot_kind.setter
     def plot_kind(self, value: str) -> None:
         self._set("_plot_kind", value if value in PLOT_KINDS else "re")
+
+    @property
+    def plot_mode(self) -> str:
+        """Modo da galeria: curve | rho | lambda | heatmap (o QUE plotar)."""
+        return self._plot_mode
+
+    @plot_mode.setter
+    def plot_mode(self, value: str) -> None:
+        self._set("_plot_mode", value if value in PLOT_MODES else "curve")
 
     @property
     def tr_index(self) -> int:
@@ -324,6 +453,16 @@ class ResultsViewModel(BaseViewModel):
     def page(self, value: int) -> None:
         hi = max(0, self.n_pages - 1)
         self._set("_page", int(np.clip(int(value), 0, hi)))
+
+    @property
+    def focus_model(self) -> int:
+        """Modelo em foco (animation bar — varre o ensemble em single-model playback)."""
+        return self._focus_model
+
+    @focus_model.setter
+    def focus_model(self, value: int) -> None:
+        hi = max(0, self.n_models - 1)
+        self._set("_focus_model", int(np.clip(int(value), 0, hi)))
 
     @property
     def plot_backend(self) -> PlotBackend:

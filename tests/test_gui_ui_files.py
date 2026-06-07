@@ -93,8 +93,22 @@ _BINDING_CONTRACT = (
     "outputDirEdit",
     "browseOutButton",
     "logEdit",
+    # experimentos & histórico (Fatia 6c)
+    "expNewButton",
+    "expOpenButton",
+    "expSaveButton",
+    "expCloseButton",
+    "expClearButton",
     "historyList",
     "historySearchEdit",
+    # galeria de resultados (Fatia 6d)
+    "plotBackendCombo",
+    "plotModeCombo",
+    "channelCombo",
+    "plotKindCombo",
+    "animPlayButton",
+    "animSlider",
+    "animSpeedCombo",
 )
 
 pytestmark = pytest.mark.skipif(
