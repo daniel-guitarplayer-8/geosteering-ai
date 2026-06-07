@@ -30,7 +30,12 @@ escrever código Python. Subcomandos:
 
 - ``geosteering-cli simulate``  — gera modelos sintéticos via ``simulate_multi``
 - ``geosteering-cli benchmark`` — executa cenários A/B/C/D/E/F/G e reporta mod/h
-- ``geosteering-cli version``   — exibe versão atual do Simulation Manager
+- ``geosteering-cli version``   — exibe a versão atual da Geosteering AI CLI
+
+Seleção de backend (``simulate``/``benchmark``): ``--backend {numba,jax,auto}``.
+``auto`` (spec 0003) delega à árvore medida do dispatcher (GPU + n≥32 + geometria
+agrupável → ``jax``; senão ``numba``). O default atual é ``numba`` (com aviso de
+deprecação); mudará para ``auto`` em v2.57.0.
 
 Entry point relacionado (Sprint v2.32, módulo separado):
 
@@ -40,7 +45,7 @@ Entry point relacionado (Sprint v2.32, módulo separado):
 Uso típico::
 
     $ geosteering-cli version
-    Geosteering AI Simulation Manager v2.32
+    Geosteering AI CLI v2.56
 
     $ geosteering-cli simulate --models 100 --workers 4 --out /tmp/sim
     Simulando 100 modelos com 4 workers...

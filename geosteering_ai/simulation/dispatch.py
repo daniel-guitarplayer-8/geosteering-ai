@@ -335,6 +335,12 @@ def simulate_batch(
             jax_strategy="bucketed",  # FORÇA bucketed — guard anti-unified
             dtype=dtype,
             jax_chunk_size_models=jax_chunk_size_models,
+            # n_workers/threads explícitos (INERTES no JAX — vmap/XLA não os
+            # consomem) só para PULAR o auto-detect de paralelismo Numba do
+            # __post_init__ (config.py:834), que loga "Sprint v2.23 A.2 —
+            # auto-detect: n_workers=…" de forma inútil/ruidosa no caminho JAX.
+            n_workers=1,
+            threads_per_worker=1,
         )
         H6, grp_info = simulate_multi_jax_batched_grouped(
             rho_h_np,

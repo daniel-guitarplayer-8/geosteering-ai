@@ -60,7 +60,11 @@ jobs:
 
       # Sprint v2.34 — isola cold-start JIT/LLVM do tempo medido em benchmarks
       - name: Warm up JIT/LLVM cache (Sprint v2.32+)
-        run: geosteering-warmup --verbose
+        # Runner GitHub é CPU-only → `--auto` detecta ausência de GPU e PULA o
+        # warmup JAX-nativo (Sprint v2.51) graciosamente; só aquece Numba/LLVM.
+        # Em runner self-hosted com GPU, use `geosteering-warmup --verbose --jax`
+        # ANTES do gate de throughput p/ popular o cache XLA persistente.
+        run: geosteering-warmup --verbose --auto
         timeout-minutes: 5
 
       - name: Run tests (CPU-only)

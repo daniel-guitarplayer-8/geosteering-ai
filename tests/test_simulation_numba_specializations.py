@@ -196,19 +196,24 @@ class TestNumbaCacheDir:
     def test_numba_cache_dir_set_after_cli_import(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Importar cli.main sem NUMBA_CACHE_DIR pré-setado define o default tmpfs."""
+        """Importar cli.main sem NUMBA_CACHE_DIR pré-setado define o default.
+
+        Sprint v2.52: o default virou ESTÁVEL ``~/.cache/geosteering/numba_cache``
+        (sobrevive reboot) com fallback ``$TMPDIR/geosteering_numba_cache``. Ambos
+        terminam em ``numba_cache`` — a asserção aceita os dois.
+        """
         monkeypatch.delenv("NUMBA_CACHE_DIR", raising=False)
         self._reimport_cli_main()
 
         cache_dir = os.environ.get("NUMBA_CACHE_DIR", "")
         assert cache_dir, "NUMBA_CACHE_DIR não foi setado por cli/main.py"
-        assert cache_dir.endswith("geosteering_numba_cache"), (
-            f"NUMBA_CACHE_DIR esperado terminar em 'geosteering_numba_cache', "
-            f"recebido: {cache_dir!r}"
+        assert cache_dir.endswith("numba_cache"), (
+            f"NUMBA_CACHE_DIR esperado terminar em 'numba_cache' "
+            f"(estável ~/.cache ou fallback $TMPDIR), recebido: {cache_dir!r}"
         )
-        assert os.path.isdir(
-            cache_dir
-        ), f"Diretório NUMBA_CACHE_DIR={cache_dir!r} não foi criado em disco"
+        assert os.path.isdir(cache_dir), (
+            f"Diretório NUMBA_CACHE_DIR={cache_dir!r} não foi criado em disco"
+        )
 
     def test_numba_cache_dir_user_override_preserved(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path

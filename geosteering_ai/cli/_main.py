@@ -4,8 +4,8 @@
 # ║  ---------------------------------------------------------------------    ║
 # ║  Módulo      : Dispatcher principal da CLI (argparse top-level)           ║
 # ║  Projeto     : Geosteering AI v2.0                                        ║
-# ║  Subsistema  : CLI MVP (Sprint v2.32 — entry point geosteering-warmup)    ║
-# ║  Versão      : v2.32                                                      ║
+# ║  Subsistema  : CLI MVP (Sprint v2.56 — wall-clock JAX + --jax-chunk-size)  ║
+# ║  Versão      : v2.56                                                      ║
 # ║  Autor       : Daniel Leal                                                ║
 # ║  Criação     : 2026-05-10                                                 ║
 # ║  Status      : Produção — MVP                                             ║
@@ -21,7 +21,7 @@
 # ║    overhead de `--help` permaneça <5s mesmo no primeiro uso.              ║
 # ║                                                                           ║
 # ║  EXPORTS                                                                  ║
-# ║    SIMULATION_MANAGER_VERSION: string da versão (sincronizada manual)    ║
+# ║    GEOSTEERING_CLI_VERSION: string da versão (sincronizada manual)       ║
 # ║    build_parser: constrói o ArgumentParser com todos os subparsers       ║
 # ║    main: ponto de entrada (recebe argv ou sys.argv[1:])                  ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
@@ -54,32 +54,69 @@ import time
 # do usuário via `export JAX_PLATFORMS=cuda` ou `JAX_PLATFORMS=metal`.
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-# NUMBA_CACHE_DIR em tmpfs: `cache=True` em @njit armazena LLVM bitcode (.nbc),
-# não código de máquina. Cada novo processo Python ainda recompila o bitcode →
-# assembly nativo no backend LLVM (~111 s para 16 .nbc no projeto). Apontar
-# NUMBA_CACHE_DIR para /tmp (tmpfs no macOS/Linux) mantém os .nbc em memória
-# após a primeira leitura, reduzindo I/O em invocações subsequentes. Impacto:
-# −10-30 s em SSD; mais em HDD. Pode ser sobrescrito via `export NUMBA_CACHE_DIR=`.
+# ──────────────────────────────────────────────────────────────────────────────
+# Sprint v2.55 — Teto de threads ANTES de qualquer import pesado (mitigação TLS)
+# ──────────────────────────────────────────────────────────────────────────────
+# Quando o backend JAX inicializa o CUDA no MESMO processo (cuBLAS/cuDNN/NCCL via
+# dlopen consomem o *surplus de TLS estático* fixo do glibc) e, em seguida, o Numba
+# `@njit(parallel=True)/prange` cria seu pool libgomp com `NUMBA_NUM_THREADS` threads
+# (default = os.cpu_count() lógico = 64 no Threadripper), cada thread aloca um slot
+# de TLS estático via `_dl_allocate_tls_init` → ESTOURA → crash
+# `Inconsistency detected by ld.so: ... Assertion 'listp != NULL' failed`.
+# Limitar NUMBA_NUM_THREADS (a cores FÍSICOS — sem oversubscription de HT) reduz o
+# nº de allocs de TLS para caber no surplus. `OMP/OPENBLAS=1` cortam runtimes
+# concorrentes que também consomem TLS no re-import. `setdefault` preserva override
+# do usuário. NÃO regride o throughput do POOL: `_workers._acquire_pool` sobrescreve
+# `NUMBA_NUM_THREADS` por worker antes do spawn. Espelha
+# `scripts/diagnose_numba_warmup.py` (mitigação validada por bissecção: 4 threads OK,
+# 64 CRASHA). Ref: relatório v2.55.
+os.environ.setdefault("NUMBA_NUM_THREADS", str(max(1, (os.cpu_count() or 4) // 2)))
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+# NUMBA_CACHE_DIR: `cache=True` em @njit armazena LLVM bitcode (.nbc), não código
+# de máquina. Cada novo processo Python ainda recompila o bitcode → assembly nativo
+# no backend LLVM (~111 s para 16 .nbc no projeto). Sprint v2.52 (warmup Numba): o
+# default vira ESTÁVEL `~/.cache/geosteering/numba_cache` (sobrevive REBOOT) em vez
+# de tmpfs (efêmero — apagado no reboot → 1º run pós-reboot re-pagava a compilação
+# COMPLETA ~300-600 s; com dir estável o .nbc persiste → pós-reboot ~111 s). Fallback
+# gracioso p/ `$TMPDIR/geosteering_numba_cache` se o home não for gravável (CI/
+# containers). Pode ser sobrescrito via `export NUMBA_CACHE_DIR=`.
 if "NUMBA_CACHE_DIR" not in os.environ:
-    _default_numba_cache_dir = os.path.join(
+    _stable_numba_cache_dir = os.path.join(
+        os.path.expanduser("~"), ".cache", "geosteering", "numba_cache"
+    )
+    _fallback_numba_cache_dir = os.path.join(
         tempfile.gettempdir(), "geosteering_numba_cache"
     )
-    try:
-        # Permissões 0o700: somente o dono lê/escreve/executa — evita que
-        # outros usuários em sistemas multi-tenant injetem .nbc maliciosos
-        # (CodeRabbit major finding v2.31). chmod explícito após makedirs
-        # blinda contra `umask` ou diretório pré-existente com permissões
-        # frouxas (compat: mantém o cache se já existe e ajusta o modo).
-        os.makedirs(_default_numba_cache_dir, mode=0o700, exist_ok=True)
-        os.chmod(_default_numba_cache_dir, 0o700)
-        os.environ["NUMBA_CACHE_DIR"] = _default_numba_cache_dir
-    except OSError:
-        # Falha rara (permissões em /tmp) — Numba cai no default $CWD/__pycache__
-        pass
+    for _candidate_numba_cache_dir in (
+        _stable_numba_cache_dir,
+        _fallback_numba_cache_dir,
+    ):
+        try:
+            # Permissões 0o700: somente o dono lê/escreve/executa — evita que
+            # outros usuários em sistemas multi-tenant injetem .nbc maliciosos
+            # (CodeRabbit major finding v2.31). chmod explícito após makedirs
+            # blinda contra `umask` ou diretório pré-existente com permissões
+            # frouxas (compat: mantém o cache se já existe e ajusta o modo).
+            os.makedirs(_candidate_numba_cache_dir, mode=0o700, exist_ok=True)
+            os.chmod(_candidate_numba_cache_dir, 0o700)
+            os.environ["NUMBA_CACHE_DIR"] = _candidate_numba_cache_dir
+            break
+        except OSError:
+            # Candidato não-gravável — tenta o próximo; se ambos falham, Numba
+            # cai no default $CWD/__pycache__ (raro).
+            continue
 
 # Versão exibida pelo subcomando `version` — sincronizada manualmente
 # com CLAUDE.md linha 16 ao final de cada sprint.
-SIMULATION_MANAGER_VERSION = "v2.37"
+#
+# NOTA DE PRODUTO (2026-06-05): a CLI ("Geosteering AI CLI") e o Simulation
+# Manager são produtos SEPARADOS. Esta constante reporta a versão da CLI; o
+# nome do produto exibido ao usuário é "Geosteering AI CLI" (nunca mais
+# "Simulation Manager"). A unificação do esquema de versionamento entre os
+# produtos é decisão pendente (QP1 do relatório de portfólio).
+GEOSTEERING_CLI_VERSION = "v2.56"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -150,22 +187,131 @@ def _warmup_numba_tier2_sync(verbose: bool = False) -> None:
 
 
 def _warmup_numba_tier2_background() -> None:
-    """Wrapper silencioso de ``_warmup_numba_tier2_sync`` para daemon thread.
+    """Wrapper silencioso de warmup Numba para daemon thread.
 
-    Captura toda exceção: warmup é best-effort, não crítico para a CLI.
-    Falhas (e.g. JAX ausente) não devem propagar para o usuário que apenas
-    invocou ``geosteering-cli simulate``.
+    Sprint v2.52: aponta para o warmup Numba de cobertura completa
+    (``warmup_numba_simulator``, JAX-independente, aquece os kernels prange de
+    produção) em vez do legado ``_warmup_numba_tier2_sync`` (callback JAX, 3-pos).
+    Usa ``n_positions`` pequeno (64) para um daemon barato. Captura toda exceção:
+    warmup é best-effort, não crítico para a CLI — falhas (e.g. backend ausente)
+    não devem propagar para o usuário que apenas invocou ``geosteering-cli simulate``.
 
     Note:
         Para warmup com erros visíveis ao usuário, use o entry point
-        ``geosteering-warmup`` (Sprint v2.32), que chama
-        ``_warmup_numba_tier2_sync`` diretamente e propaga exceções.
+        ``geosteering-warmup`` (Sprint v2.32+), que chama o warmup diretamente
+        e propaga exceções.
     """
     try:
-        _warmup_numba_tier2_sync(verbose=False)
+        from geosteering_ai.simulation._numba.warmup import warmup_numba_simulator
+
+        warmup_numba_simulator(n_layers=5, n_positions=64, verbose=False)
     except Exception:
         # Silent fail — warmup é best-effort, não crítico para CLI
         pass
+
+
+def _add_common_backend_args(p: argparse.ArgumentParser) -> None:
+    """Adiciona os argumentos de backend/observabilidade comuns (v2.53).
+
+    Compartilhados entre ``simulate`` e ``benchmark`` para manter a UX
+    consistente (DRY): seleção de backend, dtype/estratégia JAX, warmup,
+    saída JSON, repetições e comparação de backends.
+
+    Args:
+        p: Subparser (``simulate`` ou ``benchmark``) a receber os argumentos.
+
+    Returns:
+        None. Efeito colateral: registra os argumentos em ``p``.
+    """
+    p.add_argument(
+        "--backend",
+        choices=["numba", "jax", "auto"],
+        # Sentinela: None = usuário NÃO escolheu → default implícito "numba" +
+        # DeprecationWarning (spec 0003). Escolha explícita silencia o aviso.
+        default=None,
+        help=(
+            "backend de simulação: numba (CPU) | jax (GPU) | auto (escolhe via a "
+            "árvore medida do dispatcher — GPU+n≥32+geometria agrupável → jax, "
+            "senão numba). Default atual: numba (com aviso de deprecação); o "
+            "default mudará para 'auto' em v2.57.0."
+        ),
+    )
+    p.add_argument(
+        "--dtype",
+        choices=["complex128", "complex64"],
+        default="complex128",
+        help="dtype complexo do caminho JAX (default: complex128 — paridade)",
+    )
+    p.add_argument(
+        "--jax-strategy",
+        choices=["bucketed", "unified"],
+        default="bucketed",
+        help="estratégia do kernel JAX (default: bucketed — seguro/anti-OOM)",
+    )
+    p.add_argument(
+        "--warmup",
+        action="store_true",
+        help="aquece o backend (JIT/XLA) antes da medição cronometrada",
+    )
+    p.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emite os resultados como JSON no stdout (além/no lugar da tabela)",
+    )
+    p.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        metavar="N",
+        help="N execuções hot + mediana do throughput (default: 1)",
+    )
+    p.add_argument(
+        "--compare-backends",
+        action="store_true",
+        help="roda numba E jax lado-a-lado (throughput, speedup, paridade max|Δ|)",
+    )
+    # ── Geometria dos modelos sintéticos (batchabilidade no JAX) — v2.54 ──
+    # O JAX-grouped só satura a GPU quando muitos modelos COMPARTILHAM geometria
+    # (esp). 'per-model' (default) = esp único por modelo → no JAX cai p/ Numba
+    # (não-agrupável). 'templates'/'quantized' criam compartilhamento → JAX vence.
+    p.add_argument(
+        "--geometry",
+        choices=["per-model", "templates", "quantized"],
+        default="per-model",
+        help=(
+            "amostragem de geometria (esp): per-model (padrão, esp único/modelo) "
+            "| templates (K geometrias replicadas → JAX agrupável/rápido) "
+            "| quantized (esp arredondado → agrupável parcial)"
+        ),
+    )
+    p.add_argument(
+        "--n-geometries",
+        type=int,
+        default=None,
+        metavar="K",
+        help=(
+            "(só --geometry templates) nº de geometrias distintas K "
+            "(default: max(1, n_models//32))"
+        ),
+    )
+    p.add_argument(
+        "--quantize-step",
+        type=float,
+        default=None,
+        metavar="M",
+        help="(só --geometry quantized) passo de quantização de esp em metros",
+    )
+    p.add_argument(
+        "--jax-chunk-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "(só JAX) fragmenta o eixo de modelos do vmap em chunks de N "
+            "(anti-OOM em high-config G/H). Default: auto (64 em high-config)"
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -197,8 +343,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="geosteering-cli",
         description=(
-            "CLI MVP do Geosteering AI v2.0 — Simulation Manager "
-            f"{SIMULATION_MANAGER_VERSION}. "
+            "Geosteering AI CLI "
+            f"{GEOSTEERING_CLI_VERSION}. "
             "Permite executar simulações forward EM 1D TIV e benchmarks "
             "sem escrever código Python."
         ),
@@ -281,10 +427,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="diretório de saída (default: não grava arquivos)",
     )
     p_sim.add_argument(
+        "--format",
+        dest="out_format",
+        choices=["npz", "dat", "none"],
+        default="npz",
+        help=(
+            "formato de gravação quando --out é fornecido: npz (default), "
+            "dat (.dat/.out 22-col Fortran-compat) ou none (só tabela)"
+        ),
+    )
+    p_sim.add_argument(
         "--quiet",
         action="store_true",
-        help="suprime saída informativa (mantém erros)",
+        help="suprime saída informativa e a tabela de resultados (mantém erros)",
     )
+    _add_common_backend_args(p_sim)
 
     # ── benchmark ──────────────────────────────────────────────────
     p_bench = sub.add_parser(
@@ -349,11 +506,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="threads por worker (default: auto-detect)",
     )
+    p_bench.add_argument(
+        "--list-scenarios",
+        action="store_true",
+        help="lista os cenários disponíveis (A–H) e sai",
+    )
+    p_bench.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suprime a tabela de resultados (mantém a linha grep-able mod/h)",
+    )
+    _add_common_backend_args(p_bench)
 
     # ── version ────────────────────────────────────────────────────
     sub.add_parser(
         "version",
-        help="Exibe versão do Simulation Manager",
+        help="Exibe a versão da Geosteering AI CLI",
     )
 
     return parser
@@ -390,7 +558,7 @@ def main(argv: list[str] | None = None) -> int:
         >>> import sys
         >>> # Em produção, chamada via entry point pip:
         >>> # $ geosteering-cli version
-        >>> # >>> Geosteering AI Simulation Manager v2.24
+        >>> # >>> Geosteering AI CLI v2.56
     """
     # Logging centralizado (W4 do code-review): config no main, não nos
     # handlers — evita reconfigurar logger raiz quando handlers forem
@@ -423,7 +591,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "version":
         # CLI: stdout limpo é parte do contrato (D9 exception documentada)
-        print(f"Geosteering AI Simulation Manager {SIMULATION_MANAGER_VERSION}")
+        print(f"Geosteering AI CLI {GEOSTEERING_CLI_VERSION}")
         return 0
 
     if args.command == "simulate":

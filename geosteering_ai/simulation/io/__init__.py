@@ -64,6 +64,7 @@ Example:
         >>> thicknesses = np.array([1.52])
         >>> path = export_model_in(cfg, rho_h, rho_v, thicknesses)
 """
+
 from __future__ import annotations
 
 from geosteering_ai.simulation.io.binary_dat import (
@@ -76,6 +77,11 @@ from geosteering_ai.simulation.io.model_in import (
     read_model_in,
     simulate_from_model_in,
 )
+from geosteering_ai.simulation.io.tensor_dat import (
+    compute_nmeds_per_angle,
+    write_dat_from_tensor,
+    write_out_file,
+)
 
 __all__ = [
     "DTYPE_22COL",
@@ -85,4 +91,8 @@ __all__ = [
     # Sprint 3.3.4+ — leitor + runner
     "read_model_in",
     "simulate_from_model_in",
+    # Sprint v2.53 — escritor vetorizado de tensor 6D → .dat/.out 22-col
+    "compute_nmeds_per_angle",
+    "write_dat_from_tensor",
+    "write_out_file",
 ]

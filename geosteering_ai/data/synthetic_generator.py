@@ -211,6 +211,7 @@ class SyntheticDataGenerator:
         geometry_mode: Literal["templates", "quantize", "per_model"] = "templates",
         quantize_step: Optional[float] = None,
         numba_fallback: bool = True,
+        build_dat_22col: bool = True,
     ) -> GeneratedBatch:
         """Gera ``n_models`` modelos sintéticos com tensor H correspondente.
 
@@ -258,6 +259,12 @@ class SyntheticDataGenerator:
                 MAL-AGRUPÁVEL (>50% dos modelos em grupos próprios → JAX degenera),
                 cai para Numba 16w×4t automaticamente (Opção c automática). ``False``
                 força o caminho JAX-grouped mesmo degenerado.
+            build_dat_22col: Se ``True`` (default, compat retroativa) monta o array
+                estruturado ``dat_22col`` (config de referência TR₀/dip₀/freq₀). Se
+                ``False``, PULA essa montagem e retorna ``dat_22col`` vazio
+                ``np.zeros(0, DTYPE_22COL)`` — usado pelo caminho on-the-fly do
+                surrogate (:func:`~geosteering_ai.data.surrogate_data.generate_surrogate_dataset`),
+                que consome ``H_tensor``/``esp`` diretamente e não precisa do ``.dat``.
 
         Returns:
             :class:`GeneratedBatch`. ``H_tensor`` tem shape
@@ -413,10 +420,13 @@ class SyntheticDataGenerator:
         else:
             H_out = H6  # (n_models, nTR, nAng, n_pos, nf, 9)
 
-        # ── .dat 22-col — config de referência (TR₀, dip₀, freq₀) ────────────
-        H_ref = H6[:, 0, 0, :, 0, :]  # (n_models, n_pos, 9)
-        total_recs = n_models * n_positions
-        dat = np.zeros(total_recs, dtype=DTYPE_22COL)
+        # ── .dat 22-col — config de referência (TR₀, dip₀, freq₀), VETORIZADO ──
+        # Preenchimento COLUNA-A-COLUNA do array estruturado (substitui o laço
+        # Python O(N×L) — "inviável a 30k×600"). Ordem Fortran de registros m→p =
+        # reshape C-order de (n_models, n_positions): m externo, p interno → o
+        # `idx` antigo (idx = m*n_pos + p) bate exatamente com `reshape(-1)`.
+        # BIT-EXATO ao laço antigo (guard: test_vectorized_dat_22col_matches_python_loop).
+        # `build_dat_22col=False` pula tudo (caminho on-the-fly do surrogate).
         field_pairs = [
             ("Re_Hxx", "Im_Hxx"),
             ("Re_Hxy", "Im_Hxy"),
@@ -428,19 +438,31 @@ class SyntheticDataGenerator:
             ("Re_Hzy", "Im_Hzy"),
             ("Re_Hzz", "Im_Hzz"),
         ]
-        idx = 0
-        for m in range(n_models):
-            for p in range(n_positions):
-                dat[idx]["i"] = idx + 1
-                dat[idx]["z_obs"] = positions_z[p]
-                # Receptor = camada cujo topo é mais próximo de z_obs (simplificação).
-                layer_idx = _find_layer_for_z(positions_z[p], esp_all[m], n_layers)
-                dat[idx]["rho_h"] = rho_h_all[m, layer_idx]
-                dat[idx]["rho_v"] = rho_v_all[m, layer_idx]
-                for c, (re_n, im_n) in enumerate(field_pairs):
-                    dat[idx][re_n] = H_ref[m, p, c].real
-                    dat[idx][im_n] = H_ref[m, p, c].imag
-                idx += 1
+        if build_dat_22col:
+            H_ref = H6[:, 0, 0, :, 0, :]  # (n_models, n_pos, 9)
+            total_recs = n_models * n_positions
+            dat = np.zeros(total_recs, dtype=DTYPE_22COL)
+
+            # Receptor = camada que contém z_obs — lookup VETORIZADO (== laço escalar).
+            layer = _layer_at_batch(positions_z, esp_all, n_layers)  # (n_models, n_pos)
+            rho_h_obs = np.take_along_axis(
+                rho_h_all, layer, axis=1
+            )  # (n_models, n_pos)
+            rho_v_obs = np.take_along_axis(rho_v_all, layer, axis=1)
+
+            dat["i"] = np.arange(
+                1, total_recs + 1, dtype=np.int32
+            )  # 1-based, ordem m→p
+            dat["z_obs"] = np.broadcast_to(
+                positions_z[None, :], (n_models, n_positions)
+            ).reshape(-1)
+            dat["rho_h"] = rho_h_obs.reshape(-1)
+            dat["rho_v"] = rho_v_obs.reshape(-1)
+            for c, (re_n, im_n) in enumerate(field_pairs):
+                dat[re_n] = H_ref[:, :, c].real.reshape(-1)
+                dat[im_n] = H_ref[:, :, c].imag.reshape(-1)
+        else:
+            dat = np.zeros(0, dtype=DTYPE_22COL)
 
         return GeneratedBatch(
             H_tensor=H_out,
@@ -618,6 +640,49 @@ class SyntheticDataGenerator:
         )
 
 
+def _layer_at_batch(
+    positions_z: np.ndarray, esp_all: np.ndarray, n_layers: int
+) -> np.ndarray:
+    """Índice de camada por (modelo, posição) — VETORIZADO.
+
+    Generalização vetorizada de :func:`_find_layer_for_z` para todo o batch.
+    É BIT-EXATA ao laço escalar (são índices inteiros — equivalência exata, não
+    aproximada): camada 0 = semi-espaço superior (z<0); senão ``1 + nº de
+    fronteiras cumsum(esp) <= z``, com clamp a ``[0, n_layers-1]``.
+
+    A contagem ``(acc <= z).sum()`` reproduz exatamente o critério de parada
+    estrito ``z < acc`` do laço escalar (a camada do receptor é a primeira cuja
+    fronteira inferior é estritamente maior que z). ``cumsum`` e o acúmulo
+    sequencial ``acc += thickness`` somam float64 esquerda→direita → mesma
+    fronteira; a comparação produz o MESMO inteiro.
+
+    Args:
+        positions_z: ``(n_pos,)`` float64 — profundidades de observação (m).
+        esp_all: ``(n_models, n_esp)`` float64 — espessuras internas por modelo.
+        n_layers: Número total de camadas (inclui 2 semi-espaços).
+
+    Returns:
+        ``(n_models, n_pos)`` int64 — índice 0-based da camada por
+        (modelo, posição). Camada 0 = semi-espaço superior; ``n_layers-1`` =
+        semi-espaço inferior.
+
+    Note:
+        Twin vetorizado de :func:`_find_layer_for_z`; equivalência garantida por
+        ``tests/test_surrogate_onthefly.py::test_layer_at_batch_matches_scalar``.
+    """
+    n_models = esp_all.shape[0]
+    n_pos = positions_z.shape[0]
+    if n_layers <= 1 or esp_all.shape[1] == 0:
+        return np.zeros((n_models, n_pos), dtype=np.int64)
+    acc = np.cumsum(esp_all, axis=1)  # (n_models, n_esp) — fronteiras por modelo
+    count = (acc[:, :, None] <= positions_z[None, None, :]).sum(
+        axis=1
+    )  # (n_models, n_pos)
+    layer = count + 1  # z>=0 → camada 1.. (semi-espaço superior = 0)
+    layer = np.where(positions_z[None, :] < 0.0, 0, layer)
+    return np.clip(layer, 0, n_layers - 1).astype(np.int64)
+
+
 def _find_layer_for_z(z: float, esp: np.ndarray, n_layers: int) -> int:
     """Determina a camada que contém uma profundidade z.
 
@@ -628,6 +693,9 @@ def _find_layer_for_z(z: float, esp: np.ndarray, n_layers: int) -> int:
 
     Returns:
         Índice 0-based da camada. Camada 0 é semi-espaço superior (z<0).
+
+    Note:
+        Twin vetorizado p/ todo o batch: :func:`_layer_at_batch`.
     """
     if n_layers <= 1 or esp.shape[0] == 0:
         return 0

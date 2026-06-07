@@ -7,6 +7,347 @@ o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.57] — 2026-06-06 — SM MVVM landed na main: fundação GUI + Fatias 0-5 (Strangler Fig)
+
+### Resumo
+
+Merge da pilha `feat/gui-*` à `main`: a fundação **`geosteering_ai/gui/`** (MVVM compartilhada com o futuro Studio) + o app **`apps/sim_manager/`** (SM MVVM) chegam à branch principal. Construído por Strangler Fig em paralelo ao monólito intocado (`simulation/tests/simulation_manager.py`).
+
+### Entregue (specs 0004-0012)
+
+- **0004-0007** — Fundação `gui/`: `qt_compat` (PyQt6 primário, PySide6 fallback), base MVVM (`VMSignal`/`BaseViewModel`/`Perspective`/`MainWindowBase`), backends de plotagem (matplotlib/PyQtGraph/Plotly), persistência `.session` atômica.
+- **0011 + 0011a-d** — SM MVVM Fatias 0-4: de-shim, walking skeleton, params multi-config (freqs/dips/TRs + geometria + `n_pos` Fortran), geração estocástica (7 geradores, batch ragged), galeria de resultados (componentes/plot-kinds/seletores/paginação/cache LRU).
+- **0012** — JAX-GPU no SM MVVM: simulação em **subprocesso `spawn` TLS-safe** (evita crash `_dl_allocate_tls_init`), seletor de backend numba/jax/auto. Paridade JAX-GPU vs Numba `max|Δ|=4.38e-14` (<1e-12).
+- **Fluxo Qt Designer** — `simulator.ui` editável + `qt_compat.load_ui`.
+
+### Notas
+
+- Física intocada (só `simulate_batch`; paridade Fortran <1e-12 preservada). Monólito 100% funcional.
+- Em andamento (v2.58+): shell Antigravity (0013), Fatia 6a execução (0014), Fatia 6b geologia (0015); paridade total = Fatias 6c-6i.
+
+---
+
+## [v2.56] — 2026-06-02 — geosteering-cli: wall-clock JAX < Numba + transparência de tempo
+
+### Resumo
+
+`benchmark E --n 1000 --backend jax --geometry templates --repeat 3` mostrava "tempo 2,14 s" mas
+`time real = 25,1 s`, e o **wall-clock total do JAX (25,1 s) superava o do Numba (19,5 s)** apesar de
+~2× o throughput hot. Causa-raiz (bissecção + verificação adversarial — **FALSIFICOU a hipótese de
+cache XLA**): (1) discrepância de observabilidade (a tabela só mostrava `median(hot)`, escondendo
+startup+warmup; `elapsed_s = last_elapsed` ≠ `throughput = median`); (2) o gargalo NÃO é compilação
+(cache XLA cheio: 284/284 hits, 2º run idêntico) e sim **tracing Python por-grupo** sobre os 31 grupos
+`K=n//32`, re-pago a cada processo. **Fix (validado A6000)**: poucos grupos grandes + skip warmup morto
++ transparência + auto-chunk. **Medido: JAX warm `real` 12,75 s < Numba 19,97 s; hot 1,84M mod/h
+(+13%, ±10k vs ±143k)**. Paridade Fortran 10/10 e throughput Numba preservados.
+
+### Corrigido
+
+- **Discrepância de tempo** (tabela 2,14 s vs `time real` 25,1 s): `t_warmup`/`t_total` instrumentados;
+  `elapsed_s = statistics.median(elapseds)` (coerente com `thr_median`); novas linhas "tempo de warmup"
+  e "tempo total (handler)" na tabela + `warmup_s`/`total_s` no JSON (`cli/{benchmark,simulate,_table}.py`).
+- **JAX wall-clock > Numba**: default `templates` de **poucos grupos grandes** —
+  `sample_geometry` `n_geo` de `max(1, n//32)` → **`max(1, min(n//256, 4))`** (n=1000: 31→3) corta o
+  re-tracing Python por-grupo + satura melhor a GPU (`cli/_exec.py`). Numba é indiferente (pool).
+- **Warmup morto no JAX**: skip `warmup_backend` no path jax (compilava shape errado `n_models=1`,
+  ~3 s sem benefício); o JIT-warmup do workload completo é o warmup efetivo (`cli/{benchmark,simulate}.py`).
+
+### Adicionado
+
+- **`--jax-chunk-size N`** + `resolve_jax_chunk_size(backend, n_configs, explicit=)`: auto-chunk de
+  modelos (64) só em high-config JAX (`nf·nTR·nAng ≥ 9` = G/H/F) — anti-OOM com poucos grupos grandes;
+  E/C/D → vmap cheio. `run_once` propaga `jax_chunk_size_models` → `simulate_batch` (`cli/_exec.py`,
+  `cli/_main.py`).
+- **`tests/test_cli_timing.py`** (+7): `resolve_jax_chunk_size`, rows de tempo, `_build_stats` timing.
+
+### Investigado (sem código novo)
+
+- **Persistência de warmup em disco** (pedido do usuário): já é máxima nos dois backends — Numba `.nbc`
+  (`NUMBA_CACHE_DIR`, v2.52; AOT `pycc` inviável em Numba ≥0.59) e JAX `jax_compilation_cache_dir`
+  (148 MB). **`jax.export` (AOT) MEDIDO inefetivo**: `deserialize+call` (0,093 s) ≈
+  `trace+compile(cache-hit)` (0,094 s). O lever efetivo é reduzir K (desloca o gargalo p/ codegen
+  cacheável). Ver [report v2.56](reports/v2.56_cli_jax_wallclock_warmup_2026-06-02.md).
+
+---
+
+## [v2.55] — 2026-06-02 — geosteering-cli: crash TLS do JAX + lentidão (cold-start)
+
+### Resumo
+
+`benchmark E --backend jax --geometry templates --warmup` CRASHAVA com
+`_dl_allocate_tls_init: Assertion 'listp != NULL' failed` e reportava JAX 5.5× mais lento. Bissecção:
+o crash é exaustão de **TLS estático IN-PROCESS** (CUDA init no PAI → depois o warmup `models[:1]`
+degenera p/ Numba → pool libgomp 64 threads estoura); a lentidão é **cold-start** (warmup compilava
+ZERO programas JAX). **Fix híbrido** — validado no A6000: zero crash + JAX warm **1.66M mod/h (~2×
+Numba 840k)**. Paridade Fortran 10/10 e throughput Numba preservados.
+
+### Corrigido
+
+- **Crash `_dl_allocate_tls_init`**: NOVO `cli/_exec.py::resolve_backend_preflight` + `_count_geometry_groups`
+  (NumPy puro, jax-free) — para `--backend jax` + geometria não-agrupável, roda Numba **SEM chamar
+  `jax.devices()`** (sem init CUDA → sem pressão de TLS → sem crash). Wired nos handlers simulate/benchmark.
+- **Warmup JAX ineficaz (cold-start)**: o warmup JIT do benchmark para `jax` roda o **workload COMPLETO**
+  (`models`, não `models[:1]`) → aquece o trace XLA vmap+scatter dos group-sizes reais → o timed-run roda
+  QUENTE. Também elimina o Numba-após-CUDA (gatilho do crash). Numba mantém `models[:1]` (barato).
+- **Mitigação universal de TLS**: `cli/_main.py` seta, via `setdefault` antes dos imports,
+  `NUMBA_NUM_THREADS=(cpu//2)`, `OMP_NUM_THREADS=1` e `OPENBLAS_NUM_THREADS=1` — defesa validada por bissecção.
+- **Log**: `simulation/config.py` auto-detect `logger.info → logger.debug` (silencia "auto-detect:
+  n_workers=16" no JAX; lógica 100% funcional).
+
+### Adicionado
+
+- Warn em `--backend jax --geometry per-model` (via pré-voo) + backend EFETIVO + `motivo` na tabela.
+- `tests/test_cli_jax_crash_guard.py` (9): `_count`≡`group_by_geometry`; pré-voo NÃO chama
+  `_jax_gpu_available` p/ o caminho Numba; env threads; log debug.
+
+### Preservado (sem regressão)
+
+- Paridade Fortran **10/10 (<1e-6)** — kernels intocados. Throughput Numba **E n=200 = 239.313 mod/h**
+  (≈ baseline). `--compare-backends` roda numba antes de jax (sem crash). CLI version `v2.54` → `v2.55`.
+
+---
+
+## [v2.54] — 2026-06-02 — geosteering-cli: correção da lentidão/trava do backend JAX
+
+### Resumo
+
+`benchmark --scenario E --n 500 --backend jax` travava: os modelos sintéticos tinham geometria
+(`esp`) **única por modelo** → 500 grupos → JAX-grouped degenerava em 500 chamadas de 1 modelo
+(zero batching) + sync por grupo; e `run_once` forçava `numba_fallback=False`, desligando a proteção
+do dispatcher. **Fix híbrido**: `--backend jax` não-agrupável cai p/ Numba (sem travar, backend
+efetivo honesto); novo `--geometry templates` cria compartilhamento de geometria → JAX satura a GPU.
+Paridade Fortran 10/10 e throughput Numba preservados; `--compare-backends` continua forçando JAX
+(paridade real medida = 3.86e-14).
+
+### Corrigido
+
+- **Trava do `--backend jax`**: `run_once` ganha `numba_fallback: bool = True` → geometria
+  não-agrupável (n_grupos > 0.5·n_models) cai p/ Numba via o gate do dispatcher (antes bypassado por
+  `numba_fallback=False` hardcoded). Validado GPU: E n=64 jax → fallback em 0.23s (sem trava).
+- **`--compare-backends` (FURO 1)**: `run_compare_backends` passa `numba_fallback=False` EXPLÍCITO a
+  `run_once` — senão o fix acima faria o compare medir Numba×Numba (paridade≈0, speedup≈1.0×).
+- **Log ruidoso**: `SimulationConfig(backend="jax")` em `dispatch.py` recebe `n_workers=1/
+  threads_per_worker=1` (inertes no JAX) → pula o auto-detect Numba "n_workers=16" inútil.
+
+### Adicionado
+
+- **`--geometry {per-model,templates,quantized}`** + `--n-geometries` + `--quantize-step` (simulate +
+  benchmark). NOVO `cli/_exec.py::sample_geometry` espelha o `geometry_mode` de produção
+  (`synthetic_generator`): `templates` (K geometrias replicadas → agrupável, JAX satura),
+  `quantized` (esp arredondado → parcial), `per-model` (DEFAULT, preserva o stream rng legado).
+- **Backend EFETIVO + `motivo (fallback)`** na tabela/JSON: `run_once` retorna o backend realmente
+  executado + reason; a tabela mostra `backend=numba` + o motivo quando o jax cai p/ numba.
+- **Guard warning-only** em `simulate_multi_jax_batched_grouped` (geometria degenerada → avisa, NUNCA
+  reroteia — roteamento é do dispatcher).
+- `tests/test_cli_geometry.py` (13) + extensões em `test_cli_backend_table.py` (fallback + compare
+  força jax + reason).
+
+### Preservado (sem regressão)
+
+- Paridade Fortran **10/10 (<1e-6)** — kernels intocados. Throughput Numba **E n=200 = 227.727 mod/h**
+  (≈ baseline 234.665). Paridade Numba×JAX medida na A6000 = **3.86e-14** (c128). CLI version
+  `v2.53` → `v2.54`.
+
+---
+
+## [v2.53] — 2026-06-02 — geosteering-cli: backend JAX + tabela ASCII + salvar .dat/.out
+
+### Resumo
+
+A CLI ganhou **escolha de backend** (`--backend numba` padrão / `jax` GPU), **tabela ASCII de
+resultados** (throughput, tempo, paralelismo, hardware, NaN/Inf) e **gravação `.dat`/`.out` 22-col**
+conforme `geosteering-physics.md` §4 (com `res_h`/`res_v` reais na camada de cada `z_obs`). Caminho
+Numba byte-a-byte o legado (zero regressão: E n=200 = 233.692 mod/h ≈ 234.665); JAX via dispatcher
+parity-tested `simulate_batch` (paridade `max|Δ| = 2,71e-14`). Paridade Fortran 10/10 preservada.
+
+### Adicionado
+
+- **`cli/_backend.py`** — `resolve_backend(requested) → (backend, device)` com fallback gracioso
+  jax→numba quando não há GPU JAX visível.
+- **`cli/_table.py`** — `render_kv_table` (box Unicode + fallback ASCII via `GEOSTEERING_ASCII_TABLE`)
+  + `build_result_rows`. 100% stdlib (sem `tabulate`/`rich`).
+- **`cli/_hwinfo.py`** — `collect_hardware_info(*, want_gpu)`: CPU/cores/RAM/threads + GPU/VRAM/JAX
+  devices; probes defensivos (`/proc`+`nvidia-smi`+`psutil`-opcional) que nunca levantam.
+- **`cli/_exec.py`** — núcleo DRY: `run_once` (numba pool / jax dispatcher), `warmup_backend`,
+  `finitude_stats`, `parity_max_abs_diff`, `models_to_batch`, `rho_at_obs_from_batch`,
+  `run_compare_backends`.
+- **`simulation/io/tensor_dat.py`** — `write_dat_from_tensor`/`write_out_file`/`compute_nmeds_per_angle`
+  (relocados de `tests/sm_io.py` para produção).
+- **Flags CLI** (simulate+benchmark): `--backend {numba,jax}` · `--dtype` · `--jax-strategy` ·
+  `--warmup` · `--json` · `--repeat N` · `--compare-backends`; simulate: `--format {npz,dat,none}`;
+  benchmark: `--list-scenarios` · `--quiet`.
+- `tests/test_cli_{backend_table,hwinfo,dat_save}.py` (28) + `test_cli_mvp.py` estendido (+3) —
+  inclui conformidade física §4 do `.dat` e guarda de não-regressão de roteamento Numba.
+
+### Corrigido
+
+- **Bug `--out`/`.npz`**: lia `getattr(result, "H", None)` (atributo real é `.H_stack` → sempre None →
+  salvava `repr(result)`). Agora grava o tensor H real; guarda `test_npz_save_uses_real_tensor`.
+
+### Mudado
+
+- `simulation/tests/sm_io.py` → shim re-export de `io/tensor_dat` (retrocompat 100%).
+- CLI version `v2.37` → `v2.53`.
+
+### Preservado (sem regressão)
+
+- Paridade Fortran **10/10 (<1e-6)** — kernels intocados. Throughput **E n=200 = 233.692 mod/h**
+  (≈ baseline 234.665). Caminho Numba = `simulate_multi(models=…)` legado (pool de workers).
+
+---
+
+## [v2.52] — 2026-06-01 — Redução do warmup do simulador Numba JIT CPU
+
+### Resumo
+
+Análogo ao v2.51, mas para o **Numba CPU** (caminho crítico de paridade Fortran `<1e-6`).
+Fecha o gap do warmup (que aquecia só hmd_tiv/vmd via callback JAX, nunca os kernels prange
+de produção, E requeria JAX) + cache `.nbc` persistente cross-reboot. Paridade Fortran
+preservada (10/10); zero regressão de throughput (E n=200 = 234.665 mod/h).
+
+### Adicionado
+
+- **`geosteering_ai/simulation/_numba/warmup.py`** — `warmup_numba_simulator(...)` +
+  `warmup_numba_simulator_from_config(cfg)`: roda o caminho REAL `simulate_multi(backend="numba")`
+  em 2 chamadas tiny (multi-combo + single-combo) → aquece os kernels `parallel=True`/prange
+  (`_simulate_combined_prange_flat`/`_simulate_positions_njit_cached`/`precompute_common_arrays_cache`)
+  + dipolos inlinados. **JAX-independente**. `from_config` honra os seletores de kernel via `base_cfg`.
+- **CLI `geosteering-warmup --numba` (default)** + `--no-numba`/`--numba-n-pos`/`--numba-n-layers`/
+  `--numba-threads`. Substitui o callback-JAX como warmup default (roda sem JAX).
+- `tests/test_simulation_numba_warmup.py` (7) + teste das flags `--numba` + `scripts/diagnose_numba_warmup.py`.
+
+### Mudado
+
+- **NUMBA_CACHE_DIR default ESTÁVEL** `~/.cache/geosteering/numba_cache` (sobrevive reboot;
+  fallback `$TMPDIR`; `0o700`) — cross-process **27.72s → 0.27s = 103×** (.nbc persiste).
+- Background-thread (`geosteering-cli`) aponta p/ o novo warmup Numba (n_pos=64).
+
+### Análise (documentado)
+
+- **AOT (`numba.pycc`) NÃO viável** — removido no Numba ≥0.59 (env 0.65.1) + incompatível com
+  `parallel=True`. O ~111s bitcode→nativo é o piso fundamental do `.nbc`; amortizado pelo cache.
+
+Ref: [docs/reports/v2.52_warmup_numba_cpu_2026-06-01.md](reports/v2.52_warmup_numba_cpu_2026-06-01.md)
+
+---
+
+## [v2.51] — 2026-06-01 — Redução do warmup do simulador JAX GPU
+
+### Resumo
+
+Fecha o gap do warmup (que aquecia só o path Numba, nunca o kernel JAX GPU de
+produção) + hardening do cache XLA persistente. Resolve o cold-start de
+compilação de inversão/inferência e dá **4.81× cross-process**. Escopo conservador:
+shape-bucketing (data-gen multi-geometria) fica DOCUMENTADO, sem tocar o kernel.
+Paridade Fortran `<1e-13 c128` preservada (4/4); throughput morno inalterado (DG 6/6).
+
+### Adicionado
+
+- **`geosteering_ai/simulation/_jax/warmup.py`** — `warmup_jax_simulator(...)` +
+  `warmup_jax_simulator_from_config(cfg)`: pré-compila o kernel bucketed de produção
+  (`use_native_dipoles=True`) via dispatch real → popula o cache JIT in-process + o
+  cache de disco persistente. Real-call seguinte = **0 recompiles**.
+- **CLI `geosteering-warmup --jax`/`--gpu`/`--auto`** + overrides (`--jax-n-pos/--jax-dtype/
+  --jax-n-layers/--jax-n-models`); lifta `JAX_PLATFORMS=cpu` p/ GPU (respeitando override do
+  usuário) via `_resolve_jax_warmup` (puro, testado por tabela-verdade).
+- `tests/test_simulation_jax_warmup.py` (6) + 8 testes CLI/lift em
+  `test_cli_warmup_entry_point.py` + `scripts/diagnose_jax_warmup.py`.
+
+### Mudado
+
+- **`_jax/__init__.py`**: `jax_persistent_cache_min_compile_time_secs=0.0` (todo compile
+  persiste; version-guarded) + dir default ESTÁVEL `~/.cache/geosteering/jax_compilation_cache`
+  (sobrevive reboot; fallback `$TMPDIR` gracioso). Cross-process **4.81×** (10.04s→2.09s).
+- `.github/workflows/ci.yml`: `geosteering-warmup --verbose --auto`.
+
+### Análise (documentado, NÃO implementado)
+
+- **Shape-explosion**: o kernel bucketed recompila por shape de `z_bucket` → data-gen
+  multi-geometria aleatória não é cache-cobrível cross-run. Mitigação **shape-bucketing**
+  (flag futura `jax_pad_buckets_to`, default None=bit-idêntico) documentada com análise de
+  risco — toca o kernel quente → exigiria gate `<1e-13` + DG antes de qualquer default-flip.
+
+Ref: [docs/reports/v2.51_warmup_jax_gpu_2026-06-01.md](reports/v2.51_warmup_jax_gpu_2026-06-01.md)
+
+---
+
+## [v2.50] — 2026-06-01 — API on-the-fly de dados do Surrogate (dívida Sprint C)
+
+### Resumo
+
+Produtiza a geração on-the-fly de pares (ρ→H) do SurrogateNet em
+`data/surrogate_data.py` — substitui o benchmark hard-rolled + round-trip `.npz`
+offline por uma **API de dados reusável e testada**, matando o laço Python O(N×L).
+Escopo: API de dados + iterador (sem integração de treino TF). Paridade Fortran
+`<1e-13 c128` preservada (simulador intocado); **zero regressão de throughput**.
+
+### Adicionado
+
+- **`surrogate_pairs_from_batch(batch, config, *, apply_decoup=True)`** — ponte
+  `GeneratedBatch → SurrogateDataset` VETORIZADA (monta `(N,L,22)` do `H_tensor` +
+  delega à testada `extract_surrogate_pairs`). Paridade bit-exata vs caminho offline.
+- **`generate_surrogate_dataset(config, *, n_models, ...)`** — builder one-shot
+  on-the-fly (amostra + simula via dispatcher + extrai), `build_dat_22col=False`.
+- **`iter_surrogate_batches(config, *, batch_size, n_batches=None, seed=0, ...)`** —
+  stream de modelos FRESCOS por batch (`seed+i`) p/ treino on-the-fly (refresh/época);
+  validação eager; documenta contenção JAX/TF (gerar entre épocas, `backend='auto'`).
+- **`_layer_at_batch`** em `synthetic_generator.py` — lookup de camada VETORIZADO
+  (bit-exato a `_find_layer_for_z`).
+- `tests/test_surrogate_onthefly.py` — **14 testes** (bit-exato + paridade + freshness
+  + determinismo + edge + reroute).
+
+### Mudado
+
+- **`generate_batch` — `dat_22col` VETORIZADO**: laço Python O(N×L) → preenchimento
+  coluna-a-coluna (`reshape` C-order = ordem Fortran m→p). **Bit-exato** (guard test).
+  Novo param `build_dat_22col: bool = True` (pula a montagem no caminho on-the-fly).
+- `benchmarks/_sprintc_phase_a_gen.py` — produtizado: usa `generate_surrogate_dataset`
+  (remove `_layer_at` local + montagem 22-col manual).
+
+### Throughput / Paridade
+
+- **DG perf gate 6/6 PASS** (autoritativo): 0 regressão de pacote.
+- **A/B grouped vs blocks @128/grupo**: NEW 155.6s vs OLD 186.8s → **0.83×** (API mais rápida).
+- Fortran parity 4/4 + regressão (surrogate 5 + batched 17) = **48/48 PASS**.
+
+Ref: [docs/reports/v2.50_surrogate_onthefly_data_api_2026-06-01.md](reports/v2.50_surrogate_onthefly_data_api_2026-06-01.md)
+
+---
+
+## [v2.49] — 2026-05-31 — Reassembly vetorizado (dívida Sprint C) + pesquisa O6+ levers #3/#4/#5
+
+### Resumo
+
+Resolve o achado crítico do Sprint C (reassembly do grouped) e fecha a pesquisa O6+
+dos 3 levers de kernel restantes com **dados empíricos no A6000**. Paridade Fortran
+`<1e-13 c128` preservada (47/47); zero regressão.
+
+### Mudado
+
+- **`simulate_multi_jax_batched_grouped` — reassembly VETORIZADA**: substitui o padrão
+  `[None]*n_models` + atribuição modelo-a-modelo + `np.stack` por pré-alocação única +
+  scatter por grupo (`H_tensor[sel] = np.asarray(res.H_tensor)`). **Bit-exato** (Δ=0.0)
+  e **pico de memória −49 %** (4995→2532 MB a 30k×600) — evita OOM em tensores multi-config.
+
+### Pesquisa (O6+ — nenhuma mudança de código; levers fechados)
+
+- **Lever #3** (fatorar `exp(-2uh)`): **REJECT** — jaxpr tem **52 exp, 0 duplicados** →
+  nada a fatorar (per-camada já é 1 op `(5,201)`; demais 50 têm argumentos distintos).
+- **Lever #4** (c64 seletivo): **DEFER** — `jnp.exp` c64 é **11× mais rápido isolado**, mas
+  **~0 no kernel** (bucketed = scan/latency-bound) e **paridade-fatal** (`max_rel 3.9e-4`).
+- **Lever #5** (TF32 tensor-core Hankel): **REJECT** — só **1.36×** + **37–78 % de erro** no
+  filtro Werthmuller-201 real (cancelamento κ 400–800); Amdahl teto 1.05×.
+
+### Correção (honestidade)
+
+- O relatório v2.48 atribuiu a morte do run de 30k ao `np.stack` O(n). **Refutado**:
+  `res.H_tensor` já é numpy → reassembly é memcpy-bound (~1 s). O ganho real é **memória**;
+  o gargalo de escala é o **nº de geometrias** (overhead de launch JAX por grupo).
+
+Ref: [docs/reports/v2.49_reassembly_vetorizado_e_pesquisa_levers_o6_2026-05-31.md](reports/v2.49_reassembly_vetorizado_e_pesquisa_levers_o6_2026-05-31.md)
+
+---
+
 ## [v2.48] — 2026-05-31 — Sprint B: A-jax-gpu-dispatcher (simulate_batch backend="auto")
 
 ### Resumo

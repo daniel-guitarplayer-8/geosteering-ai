@@ -5,23 +5,26 @@
 # ║  Geosteering AI v2.0 — Inversao 1D de Resistividade via Deep Learning     ║
 # ║  Autor: Daniel Leal                                                        ║
 # ║  Framework: TensorFlow 2.x / Keras (exclusivo — PyTorch PROIBIDO)         ║
-# ║  Ambiente: VSCode + Claude Code (dev) · GitHub CI · Colab Pro+ GPU (exec) ║
+# ║  Ambiente: VSCode + Claude Code (dev) · GitHub CI · GPU A6000 local (exec)║
 # ║  Pacote: geosteering_ai (pip installable)                                 ║
 # ║  Config: PipelineConfig dataclass (ponto unico de verdade)                ║
 # ║                                                                            ║
 # ║  Proposito:                                                                ║
 # ║    • Extrair pares (rho, H_EM) do .dat para treino do SurrogateNet       ║
+# ║    • Gerar pares ON-THE-FLY via simulador (dispatcher) — sem .dat/.npz    ║
 # ║    • Selecionar componentes EM configuraveis (Modo A/B/C)                 ║
 # ║    • Aplicar decoupling e normalizacao nos canais H                        ║
 # ║    • Computar pesos por componente para loss balanceada                    ║
 # ║                                                                            ║
 # ║  Dependencias: config.py (PipelineConfig),                                ║
-# ║                data/loading.py (EM_COMPONENTS, load_binary_dat)           ║
-# ║  Exports: ~4 funcoes/classes — ver __all__                                ║
+# ║                data/loading.py (EM_COMPONENTS, load_binary_dat),          ║
+# ║                data/synthetic_generator.py (SyntheticDataGenerator)        ║
+# ║  Exports: 7 funcoes/classes — ver __all__                                 ║
 # ║  Ref: docs/ARCHITECTURE_v2.md secao 18.4 (Surrogate Data)                ║
 # ║                                                                            ║
 # ║  Historico:                                                                ║
 # ║    v2.0.2 (2026-04) — Implementacao inicial (Passo 2, Modo B)            ║
+# ║    v2.50  (2026-06) — API on-the-fly (pairs_from_batch/generate/iter)    ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """Extracao de dados para treino do SurrogateNet — forward model neural.
 
@@ -50,12 +53,16 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Iterator, List, Literal, Optional, Sequence
 
 import numpy as np
 
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
+    from geosteering_ai.data.synthetic_generator import (
+        GeneratedBatch,
+        SyntheticDataGenerator,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +93,13 @@ _DIAGONAL_COMPONENTS = {"XX", "YY", "ZZ"}
 __all__ = [
     # ── Dataclass ─────────────────────────────────────────────────────────
     "SurrogateDataset",
-    # ── Extracao ──────────────────────────────────────────────────────────
+    # ── Extracao (offline) ────────────────────────────────────────────────
     "extract_surrogate_pairs",
     "get_component_column_indices",
+    # ── Geracao on-the-fly ────────────────────────────────────────────────
+    "surrogate_pairs_from_batch",
+    "generate_surrogate_dataset",
+    "iter_surrogate_batches",
     # ── Pesos ─────────────────────────────────────────────────────────────
     "compute_component_weights",
 ]
@@ -303,7 +314,9 @@ def extract_surrogate_pairs(
         Guard numerico: rho clamped a [0.01, 100000] Ohm.m antes de log10.
     """
     if data.ndim != 3:
-        raise ValueError(f"data deve ser 3D (N, seq_len, 22), recebido ndim={data.ndim}")
+        raise ValueError(
+            f"data deve ser 3D (N, seq_len, 22), recebido ndim={data.ndim}"
+        )
     if data.shape[2] < 22:
         raise ValueError(f"data deve ter >= 22 colunas, recebido {data.shape[2]}")
 
@@ -372,6 +385,313 @@ def extract_surrogate_pairs(
         channel_names=channel_names,
         decoupled=apply_decoup,
     )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECAO: GERACAO ON-THE-FLY DE PARES (rho → H) PARA TREINO DO SURROGATE
+# ════════════════════════════════════════════════════════════════════════════
+# Produtiza o caminho on-the-fly (dívida do Sprint C): gera pares (x_rho, y_em)
+# FRESCOS via o simulador batched (dispatcher Sprint B) — sem round-trip .npz e
+# sem o laço Python O(N×L) do .dat. Três níveis:
+#   • surrogate_pairs_from_batch — ponte GeneratedBatch → SurrogateDataset (vetorizada);
+#   • generate_surrogate_dataset  — builder one-shot (amostra + simula + extrai);
+#   • iter_surrogate_batches      — stream infinito de batches frescos (refresh por época).
+# Reusa a extração TESTADA `extract_surrogate_pairs` (decoupling + log10 + seleção).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def surrogate_pairs_from_batch(
+    batch: "GeneratedBatch",
+    config: "PipelineConfig",
+    *,
+    apply_decoup: bool = True,
+) -> SurrogateDataset:
+    """Converte um :class:`GeneratedBatch` em pares (rho, H_EM) p/ o surrogate.
+
+    Ponte VETORIZADA entre o gerador sintético e o treino do SurrogateNet: monta
+    o array ``(N, L, 22)`` direto do ``H_tensor`` + perfis de resistividade do
+    batch (sem o laço Python O(N×L) do ``.dat``) e delega à extração testada
+    :func:`extract_surrogate_pairs`.
+
+    Pipeline:
+      ┌──────────────────────────────────────────────────────────────────┐
+      │  GeneratedBatch → pares de treino do surrogate:                  │
+      │                                                                  │
+      │  1. Normaliza H p/ a config de referência (TR₀, dip₀, freq₀)    │
+      │     → (n_models, n_pos, 9) complex128                            │
+      │  2. ρ no receptor por (modelo, posição) — lookup VETORIZADO      │
+      │  3. Monta (N, L, 22) float64 (cols 1/2/3 + 9×[Re,Im])          │
+      │  4. extract_surrogate_pairs (decoupling + log10 + seleção)       │
+      └──────────────────────────────────────────────────────────────────┘
+
+    Args:
+        batch: :class:`~geosteering_ai.data.synthetic_generator.GeneratedBatch`
+            com ``H_tensor`` (4-D single-config ``(n_models, n_pos, nf, 9)`` ou
+            6-D multi-config ``(n_models, nTR, nAng, n_pos, nf, 9)``), ``rho_h``/
+            ``rho_v`` ``(n_models, n_layers)``, ``esp`` ``(n_models, n_layers-2)``
+            e ``positions_z`` ``(n_pos,)``.
+        config: :class:`PipelineConfig` com ``surrogate_output_components`` e
+            ``spacing_meters`` (constantes de decoupling).
+        apply_decoup: Se ``True`` (default), remove o campo primário Tx-Rx das
+            diagonais (XX, YY, ZZ). O gerador produz H **RAW** → aplicar 1× aqui.
+            Use ``False`` apenas se o batch já vier com decoupling.
+
+    Returns:
+        :class:`SurrogateDataset` com ``x_rho (N, L, 2)`` e ``y_em (N, L, 2*K)``.
+
+    Raises:
+        ValueError: Se ``batch.H_tensor`` tiver ``ndim`` ≠ 4 e ≠ 6.
+
+    Example:
+        >>> from geosteering_ai.config import PipelineConfig
+        >>> from geosteering_ai.data.synthetic_generator import SyntheticDataGenerator
+        >>> cfg = PipelineConfig(simulator_backend="numba")
+        >>> batch = SyntheticDataGenerator(cfg).generate_batch(
+        ...     n_models=8, n_positions=30, n_layers=5, build_dat_22col=False)
+        >>> ds = surrogate_pairs_from_batch(batch, cfg)
+        >>> assert ds.x_rho.shape == (8, 30, 2)
+
+    Note:
+        Produz saída BIT-EXATA ao caminho offline
+        (``extract_surrogate_pairs`` sobre o mesmo ``(N, L, 22)``). A escolha da
+        config de referência (TR₀/dip₀/freq₀) espelha
+        :meth:`SyntheticDataGenerator.to_feature_dataset` e o ``dat_22col``.
+        See Also: :func:`generate_surrogate_dataset` (amostra + simula + extrai).
+    """
+    from geosteering_ai.data.synthetic_generator import _layer_at_batch
+
+    # ── 1. Normaliza H p/ a config de referência (n_models, n_pos, 9) ────────
+    # Robustez de ndim (espelha to_feature_dataset): 4-D single-config usa freq0;
+    # 6-D multi-config usa (TR0, dip0, freq0) — a MESMA config do dat_22col.
+    H = np.asarray(batch.H_tensor)
+    if H.ndim == 4:  # (n_models, n_pos, nf, 9)
+        H_ref = H[:, :, 0, :]
+    elif H.ndim == 6:  # (n_models, nTR, nAng, n_pos, nf, 9)
+        H_ref = H[:, 0, 0, :, 0, :]
+    else:
+        raise ValueError(
+            f"batch.H_tensor com ndim inesperado: {H.ndim} (esperado 4 ou 6)."
+        )
+
+    n_models, n_pos, _ = H_ref.shape
+    positions_z = np.asarray(batch.positions_z, dtype=np.float64)
+    n_layers = batch.n_layers
+
+    # ── 2. ρ no receptor por (modelo, posição) — lookup VETORIZADO ───────────
+    layer = _layer_at_batch(positions_z, np.asarray(batch.esp), n_layers)
+    rho_h_obs = np.take_along_axis(np.asarray(batch.rho_h), layer, axis=1)
+    rho_v_obs = np.take_along_axis(np.asarray(batch.rho_v), layer, axis=1)
+
+    # ── 3. Monta (N, L, 22) float64 — colunas 1/2/3 + 9×(Re, Im) ─────────────
+    # Cast c128 explícito: preserva a paridade mesmo se o batch vier em complex64
+    # (o gerador retorna c128 por default; defensivo p/ batches externos).
+    data = np.zeros((n_models, n_pos, 22), dtype=np.float64)
+    data[:, :, 1] = positions_z[None, :]
+    data[:, :, 2] = rho_h_obs
+    data[:, :, 3] = rho_v_obs
+    h_c128 = H_ref.astype(np.complex128, copy=False)
+    for c in range(9):
+        data[:, :, 4 + 2 * c] = h_c128[:, :, c].real
+        data[:, :, 5 + 2 * c] = h_c128[:, :, c].imag
+
+    # ── 4. Delega à extração TESTADA (decoupling + log10 + seleção) ──────────
+    return extract_surrogate_pairs(data, config, apply_decoup=apply_decoup)
+
+
+def _resolve_generator(config: "PipelineConfig") -> "SyntheticDataGenerator":
+    """Cria um :class:`SyntheticDataGenerator` roteando o backend do ``config``.
+
+    ``simulator_backend='fortran_f2py'`` (default histórico do ``PipelineConfig``)
+    NÃO é suportado pelo gerador in-process (o legacy é
+    ``Fortran_Gerador/batch_runner.py``); nesse caso roteia p/ ``'auto'``
+    (dispatcher Sprint B: JAX GPU ⇄ Numba). Backends ``{numba, jax, auto}``
+    passam direto — mantém ``PipelineConfig`` como fonte única de roteamento.
+
+    Args:
+        config: :class:`PipelineConfig` com ``simulator_backend``.
+
+    Returns:
+        :class:`SyntheticDataGenerator` pronto p/ ``generate_batch``.
+
+    Note:
+        Referenciado em :func:`generate_surrogate_dataset` e
+        :func:`iter_surrogate_batches`.
+    """
+    import dataclasses
+
+    from geosteering_ai.data.synthetic_generator import SyntheticDataGenerator
+
+    if config.simulator_backend == "fortran_f2py":
+        logger.info(
+            "surrogate on-the-fly: simulator_backend='fortran_f2py' não suportado "
+            "in-process; roteando p/ 'auto' (dispatcher JAX/Numba)."
+        )
+        config = dataclasses.replace(config, simulator_backend="auto")
+    return SyntheticDataGenerator(config)
+
+
+def generate_surrogate_dataset(
+    config: "PipelineConfig",
+    *,
+    n_models: int,
+    n_positions: int = 600,
+    n_layers: int = 5,
+    rho_h_range: tuple[float, float] = (1.0, 1000.0),
+    rho_v_range: tuple[float, float] = (1.0, 1000.0),
+    thickness_range: tuple[float, float] = (1.0, 10.0),
+    strategy: Literal["uniform", "log_uniform"] = "log_uniform",
+    seed: int = 42,
+    frequencies_hz: Optional[Sequence[float]] = None,
+    geometry_mode: Literal["templates", "quantize", "per_model"] = "templates",
+    n_geometries: Optional[int] = None,
+    apply_decoup: bool = True,
+    generator: Optional["SyntheticDataGenerator"] = None,
+    **gen_kwargs,
+) -> SurrogateDataset:
+    """Gera ON-THE-FLY um :class:`SurrogateDataset` (amostra + simula + extrai).
+
+    Builder one-shot que produtiza o caminho de geração do surrogate (antes
+    hard-rolled no benchmark Fase A): amostra ``n_models`` perfis ρ/geometria,
+    roda o simulador batched (via dispatcher) e extrai os pares (x_rho, y_em) —
+    tudo VETORIZADO, sem o laço Python O(N×L) nem round-trip ``.npz``.
+
+    Args:
+        config: :class:`PipelineConfig` — ``simulator_backend`` roteia o backend
+            (``fortran_f2py`` → ``auto``); ``surrogate_output_components`` define K.
+        n_models: Número de modelos a gerar.
+        n_positions: Posições de medição por modelo. Default 600 (escala produção).
+        n_layers: Camadas por modelo (inclui 2 semi-espaços). Default 5.
+        rho_h_range: ``(min, max)`` de ρₕ (Ω·m). Default ``(1, 1000)``.
+        rho_v_range: ``(min, max)`` de ρᵥ (Ω·m). Default ``(1, 1000)``.
+        thickness_range: ``(min, max)`` de espessuras internas (m). Default ``(1, 10)``.
+        strategy: ``"log_uniform"`` (default) ou ``"uniform"``.
+        seed: Semente p/ reprodutibilidade.
+        frequencies_hz: Frequências (Hz). Default ``[config.frequency_hz]``.
+        geometry_mode: ``"templates"`` (default) | ``"quantize"`` | ``"per_model"``.
+        n_geometries: K geometrias distintas (replicadas) — ativa o caminho
+            bucketed rápido no JAX. ``None`` = ``max(1, n_models//32)``.
+        apply_decoup: Decoupling nas diagonais (default ``True``; H gerado é RAW).
+        generator: :class:`SyntheticDataGenerator` reusável (evita re-warmup JIT).
+            ``None`` cria um via :func:`_resolve_generator`.
+        **gen_kwargs: Repassados a ``generate_batch`` (ex.: ``jax_chunk_size_models``,
+            ``numba_fallback``, ``quantize_step``, ``dip_degs``, ``tr_spacings_m``).
+
+    Returns:
+        :class:`SurrogateDataset` com ``x_rho (N, L, 2)`` e ``y_em (N, L, 2*K)``.
+
+    Raises:
+        ValueError: Se ``n_models <= 0``.
+
+    Example:
+        >>> from geosteering_ai.config import PipelineConfig
+        >>> cfg = PipelineConfig(simulator_backend="auto",
+        ...                      surrogate_output_components=["XX", "ZZ"])
+        >>> ds = generate_surrogate_dataset(cfg, n_models=64, n_positions=600)
+        >>> assert ds.x_rho.shape == (64, 600, 2)
+
+    Note:
+        Pula a construção do ``.dat`` (``build_dat_22col=False``) — o surrogate
+        consome ``H_tensor`` direto. See Also: :func:`iter_surrogate_batches`
+        (stream p/ treino on-the-fly por época).
+    """
+    if n_models <= 0:
+        raise ValueError(f"n_models deve ser > 0 (recebido {n_models}).")
+
+    gen = generator if generator is not None else _resolve_generator(config)
+    batch = gen.generate_batch(
+        n_models=n_models,
+        n_positions=n_positions,
+        n_layers=n_layers,
+        rho_h_range=rho_h_range,
+        rho_v_range=rho_v_range,
+        thickness_range=thickness_range,
+        strategy=strategy,
+        seed=seed,
+        frequencies_hz=frequencies_hz,
+        geometry_mode=geometry_mode,
+        n_geometries=n_geometries,
+        build_dat_22col=False,  # on-the-fly: consome H_tensor direto, pula o .dat
+        **gen_kwargs,
+    )
+    return surrogate_pairs_from_batch(batch, config, apply_decoup=apply_decoup)
+
+
+def iter_surrogate_batches(
+    config: "PipelineConfig",
+    *,
+    batch_size: int,
+    n_batches: Optional[int] = None,
+    seed: int = 0,
+    apply_decoup: bool = True,
+    generator: Optional["SyntheticDataGenerator"] = None,
+    **gen_kwargs,
+) -> "Iterator[SurrogateDataset]":
+    """Stream ON-THE-FLY de :class:`SurrogateDataset` com modelos FRESCOS por batch.
+
+    Primitivo de streaming p/ treino on-the-fly: a cada batch reamostra modelos
+    (``batch_seed = seed + i``) → cada ``SurrogateDataset`` cobre ρ/geometria
+    diferentes (dados efetivamente infinitos, sem overfit a um conjunto fixo).
+    Reusa um único gerador (1 warmup JIT amortizado).
+
+    Args:
+        config: :class:`PipelineConfig` (roteia backend; define K do surrogate).
+        batch_size: Modelos por batch (> 0).
+        n_batches: Número de batches a produzir. ``None`` (default) = INFINITO —
+            o caller DEVE limitar (``itertools.islice`` ou ``for _ in range(E)``).
+        seed: Semente base; o batch ``i`` usa ``seed + i`` (determinístico).
+        apply_decoup: Decoupling nas diagonais (default ``True``).
+        generator: :class:`SyntheticDataGenerator` reusável; ``None`` cria um.
+        **gen_kwargs: Repassados a :func:`generate_surrogate_dataset` (ex.:
+            ``n_positions``, ``n_layers``, ``n_geometries``, ``frequencies_hz``,
+            ``jax_chunk_size_models``).
+
+    Yields:
+        :class:`SurrogateDataset` ``(batch_size, L, 2)`` / ``(batch_size, L, 2*K)``.
+
+    Raises:
+        ValueError: Se ``batch_size <= 0`` ou ``n_batches < 0``.
+
+    Example:
+        >>> import itertools
+        >>> from geosteering_ai.config import PipelineConfig
+        >>> cfg = PipelineConfig(simulator_backend="auto")
+        >>> it = iter_surrogate_batches(cfg, batch_size=128, n_positions=600)
+        >>> for epoch in range(3):           # refresh por época
+        ...     ds = next(it)                # batch fresco
+
+    Note:
+        **Contenção JAX/TF (GPU)**: gere os batches ENTRE épocas (NÃO dentro do
+        ``tf.data.map``) — JAX (geração) e TF (treino) competem por VRAM na mesma
+        GPU. Prefira ``simulator_backend='auto'`` (o dispatcher cai p/ Numba/CPU
+        quando a GPU está ocupada). Espelha a separação de processos do benchmark
+        (Fase A JAX × Fase B TF). See Also: :func:`generate_surrogate_dataset`.
+
+        Validação dos argumentos é EAGER (na chamada, não no 1º ``next()``) — esta
+        é uma função normal que valida e retorna o gerador interno ``_iter``.
+    """
+    # ── Validação eager (esta função NÃO é geradora → falha na chamada) ───────
+    if batch_size <= 0:
+        raise ValueError(f"batch_size deve ser > 0 (recebido {batch_size}).")
+    if n_batches is not None and n_batches < 0:
+        raise ValueError(f"n_batches deve ser >= 0 ou None (recebido {n_batches}).")
+
+    gen = generator if generator is not None else _resolve_generator(config)
+
+    def _iter() -> "Iterator[SurrogateDataset]":
+        i = 0
+        while n_batches is None or i < n_batches:
+            # Avança a seed por batch → cada batch amostra modelos FRESCOS.
+            yield generate_surrogate_dataset(
+                config,
+                n_models=batch_size,
+                seed=seed + i,
+                apply_decoup=apply_decoup,
+                generator=gen,  # reusa o gerador (1 warmup JIT)
+                **gen_kwargs,
+            )
+            i += 1
+
+    return _iter()
 
 
 # ════════════════════════════════════════════════════════════════════════════

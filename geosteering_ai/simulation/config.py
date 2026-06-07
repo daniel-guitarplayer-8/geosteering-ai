@@ -759,9 +759,9 @@ class SimulationConfig:
             f"mas reduz precisão — uso em produção apenas."
         )
 
-        assert (
-            self.device in _VALID_DEVICES
-        ), f"device={self.device!r} inválido. Opções: {sorted(_VALID_DEVICES)}."
+        assert self.device in _VALID_DEVICES, (
+            f"device={self.device!r} inválido. Opções: {sorted(_VALID_DEVICES)}."
+        )
 
         assert self.hankel_filter in _VALID_HANKEL_FILTERS, (
             f"hankel_filter={self.hankel_filter!r} inválido. Opções: "
@@ -800,22 +800,22 @@ class SimulationConfig:
         # Se definidas, devem conter ≥ 1 elemento no range físico. Uma
         # lista vazia (len=0) é sempre erro de configuração.
         if self.frequencies_hz is not None:
-            assert (
-                len(self.frequencies_hz) >= 1
-            ), "frequencies_hz=[] inválido: se definido, deve conter ≥ 1 frequência."
+            assert len(self.frequencies_hz) >= 1, (
+                "frequencies_hz=[] inválido: se definido, deve conter ≥ 1 frequência."
+            )
             for i, f in enumerate(self.frequencies_hz):
-                assert (
-                    fmin <= f <= fmax
-                ), f"frequencies_hz[{i}]={f} Hz fora do range [{fmin}, {fmax}]."
+                assert fmin <= f <= fmax, (
+                    f"frequencies_hz[{i}]={f} Hz fora do range [{fmin}, {fmax}]."
+                )
 
         if self.tr_spacings_m is not None:
-            assert (
-                len(self.tr_spacings_m) >= 1
-            ), "tr_spacings_m=[] inválido: se definido, deve conter ≥ 1 espaçamento."
+            assert len(self.tr_spacings_m) >= 1, (
+                "tr_spacings_m=[] inválido: se definido, deve conter ≥ 1 espaçamento."
+            )
             for i, s in enumerate(self.tr_spacings_m):
-                assert (
-                    smin <= s <= smax
-                ), f"tr_spacings_m[{i}]={s} m fora do range [{smin}, {smax}]."
+                assert smin <= s <= smax, (
+                    f"tr_spacings_m[{i}]={s} m fora do range [{smin}, {smax}]."
+                )
 
         # ── Performance tuning ───────────────────────────────────────
         assert self.num_threads == -1 or self.num_threads >= 1, (
@@ -840,7 +840,13 @@ class SimulationConfig:
                 rec_workers, rec_threads = recommend_default_parallelism()
                 object.__setattr__(self, "n_workers", rec_workers)
                 object.__setattr__(self, "threads_per_worker", rec_threads)
-                logger.info(
+                # Sprint v2.55: DEBUG (era INFO). O auto-detect dispara para TODA
+                # SimulationConfig sem workers — inclusive no caminho JAX (onde os
+                # campos são inertes: vmap/XLA não consomem n_workers). Em INFO o
+                # log poluía runs `--backend jax` ("auto-detect: n_workers=16"). A
+                # lógica continua 100% funcional (campos setados acima); só o nível
+                # cai. Quem diagnostica paralelismo usa `-v`/DEBUG.
+                logger.debug(
                     "Sprint v2.23 A.2 — auto-detect: n_workers=%d, threads_per_worker=%d",
                     rec_workers,
                     rec_threads,
@@ -1029,9 +1035,9 @@ class SimulationConfig:
                 "tilted a 45° azimute 0."
             )
             for i, cfg in enumerate(self.tilted_configs):
-                assert (
-                    len(cfg) == 2
-                ), f"tilted_configs[{i}]={cfg!r} deve ser (beta_graus, phi_graus)."
+                assert len(cfg) == 2, (
+                    f"tilted_configs[{i}]={cfg!r} deve ser (beta_graus, phi_graus)."
+                )
                 beta, phi = cfg
                 assert 0.0 <= float(beta) <= 90.0, (
                     f"tilted_configs[{i}].beta={beta}° fora do range "

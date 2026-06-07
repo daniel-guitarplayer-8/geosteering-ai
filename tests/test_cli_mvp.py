@@ -62,11 +62,11 @@ def _run_cli(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def test_cli_version_subcommand():
-    """I2.6 — `version` retorna versão atual (v2.37)."""
+    """I2.6 — `version` retorna versão atual (v2.56)."""
     proc = _run_cli(["version"])
     assert proc.returncode == 0
     assert "Geosteering AI" in proc.stdout
-    assert "v2.37" in proc.stdout
+    assert "v2.56" in proc.stdout
 
 
 def test_cli_help_does_not_error():
@@ -141,8 +141,8 @@ def test_cli_module_path_is_geosteering_ai_cli():
 
     assert hasattr(cli_mod, "main")
     assert hasattr(cli_main_mod, "build_parser")
-    assert hasattr(cli_main_mod, "SIMULATION_MANAGER_VERSION")
-    assert cli_main_mod.SIMULATION_MANAGER_VERSION == "v2.37"
+    assert hasattr(cli_main_mod, "GEOSTEERING_CLI_VERSION")
+    assert cli_main_mod.GEOSTEERING_CLI_VERSION == "v2.56"
 
 
 # ── Smoke test simulação real (lento) ────────────────────────────
@@ -196,6 +196,43 @@ def test_cli_simulate_help_shows_multidim_flags():
     assert "--tr-spacings" in proc.stdout
 
 
+def test_cli_simulate_help_shows_v253_flags():
+    """v2.53 — `simulate --help` exibe backend/dtype/format/json/repeat/compare."""
+    proc = _run_cli(["simulate", "--help"])
+    assert proc.returncode == 0
+    for flag in (
+        "--backend",
+        "--dtype",
+        "--jax-strategy",
+        "--warmup",
+        "--format",
+        "--json",
+        "--repeat",
+        "--compare-backends",
+        "--geometry",
+        "--n-geometries",
+        "--quantize-step",
+    ):
+        assert flag in proc.stdout, f"flag {flag} ausente no help de simulate"
+
+
+def test_cli_benchmark_help_shows_v253_flags():
+    """v2.53 — `benchmark --help` exibe backend + --list-scenarios + recursos."""
+    proc = _run_cli(["benchmark", "--help"])
+    assert proc.returncode == 0
+    for flag in ("--backend", "--list-scenarios", "--json", "--repeat", "--quiet"):
+        assert flag in proc.stdout, f"flag {flag} ausente no help de benchmark"
+
+
+def test_cli_benchmark_list_scenarios_runs():
+    """v2.53 — `benchmark --list-scenarios` lista A–H e sai 0 (sem simular)."""
+    proc = _run_cli(["benchmark", "--list-scenarios"])
+    assert proc.returncode == 0
+    for key in ("A:", "E:", "H:"):
+        assert key in proc.stdout
+    assert "combos/pos" in proc.stdout
+
+
 def test_cli_benchmark_help_shows_multidim_flags_and_scenario_g():
     """v2.30 — `benchmark --help` exibe override flags e cenário G."""
     proc = _run_cli(["benchmark", "--help"])
@@ -212,9 +249,7 @@ def test_cli_benchmark_help_includes_scenario_h():
     assert proc.returncode == 0
     assert "H" in proc.stdout
     # menção textual ao escopo do cenário H deve aparecer no help
-    assert (
-        "8" in proc.stdout
-    ), "Help text não menciona 8 (esperado em '8freq×8TR×8dips')"
+    assert "8" in proc.stdout, "Help text não menciona 8 (esperado em '8freq×8TR×8dips')"
 
 
 def test_cli_benchmark_scenario_h_exists():
