@@ -72,6 +72,11 @@ class SimulationService(BaseService):
         Args:
             request: a requisição (já validada pelo ViewModel).
         """
+        # Guard de reentrância NO SERVICE (defesa, além do guard do ViewModel):
+        # resetar os eventos com um worker ainda em voo seria uma corrida (o worker
+        # lê cancel/pause enquanto o run() os reseta). 1 simulação por vez.
+        if self.is_busy():
+            return
         # Reseta o controle cooperativo para esta run (limpa cancel; despausa).
         self._cancel_event.clear()
         self._pause_event.set()
@@ -102,3 +107,15 @@ class SimulationService(BaseService):
     def request_resume(self) -> None:
         """Retoma de uma pausa cooperativa."""
         self._pause_event.set()
+
+    def wait(self, timeout_ms: int = 30000) -> None:
+        """Teardown seguro: cancela + despausa ANTES de bloquear (evita deadlock).
+
+        Um worker PAUSADO fica num sleep-loop cooperativo (``_await_resume_or_cancel``)
+        até ``pause_event`` ser setado. Se ``wait()`` bloqueasse a main thread sem
+        antes despausar, o worker nunca sairia do loop → deadlock até o timeout. Aqui
+        setamos cancel (sai do loop) + resume (destrava) e então delegamos ao base.
+        """
+        self._cancel_event.set()
+        self._pause_event.set()
+        super().wait(timeout_ms)

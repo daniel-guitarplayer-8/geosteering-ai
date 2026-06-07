@@ -510,10 +510,13 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             return
         state = self._vm.status
         running = state == "running"
+        # Pause/cancel cooperativos só atuam no backend numba (in-thread); no
+        # jax/auto (subprocesso) seriam no-op (v1) → manter desabilitados (UX honesta).
+        supports_ctrl = running and self._vm.backend == "numba"
         # Botões por estado (1 simulação por vez; o guard real vive no VM).
         self._run_btn.setEnabled(not running)
-        self._pause_btn.setEnabled(running)
-        self._cancel_btn.setEnabled(running)
+        self._pause_btn.setEnabled(supports_ctrl)
+        self._cancel_btn.setEnabled(supports_ctrl)
         if not running and self._pause_btn.isChecked():
             self._pause_btn.setChecked(False)
             self._pause_btn.setText("⏸  Pausar")

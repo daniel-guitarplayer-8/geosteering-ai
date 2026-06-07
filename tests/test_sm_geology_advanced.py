@@ -147,6 +147,46 @@ def test_vm_session_roundtrip_hankel_and_manual():
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# Revisão adversarial — guards (Hankel inválido + coerção de sessão corrompida)
+# ════════════════════════════════════════════════════════════════════════════
+def test_hankel_filters_constant_matches_catalog():
+    """O _HANKEL_FILTERS do VM casa com o catálogo real (evita staleness)."""
+    from apps.sim_manager.perspectives.simulation.viewmodel import _HANKEL_FILTERS
+    from geosteering_ai.simulation.filters.loader import FilterLoader
+
+    assert set(_HANKEL_FILTERS) == set(FilterLoader().available())
+
+
+def test_vm_invalid_hankel_rejected_and_sanitized():
+    """Filtro inválido: validate() reprova; load de .session corrompido saneia."""
+    vm = _make_vm()
+    vm.hankel_filter = "bogus"
+    assert any("Hankel" in e for e in vm.validate())
+    vm2 = _make_vm()
+    vm2.load_session_dict({"hankel_filter": "bogus"})
+    assert vm2.hankel_filter == "werthmuller_201pt"  # saneado p/ default
+
+
+def test_vm_load_manual_layers_string_coerced():
+    """`.session` com strings nas camadas manuais é coerido p/ float (não corrompe)."""
+    vm = _make_vm()
+    vm.load_session_dict(
+        {
+            "geology_mode": "manual",
+            "manual_layers": {
+                "n_layers": 3,
+                "thicknesses": ["8.0"],
+                "rho_h": ["1.0", "10.0", "100.0"],
+                "rho_v": ["2.0", "20.0", "200.0"],
+            },
+        }
+    )
+    assert vm.manual_layers is not None
+    assert isinstance(vm.manual_layers.thicknesses[0], float)
+    assert vm.manual_layers.validate() == []  # floats coeridos → válido
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # Paridade <1e-12 — geologia manual numba vs jax (gated GPU)
 # ════════════════════════════════════════════════════════════════════════════
 @_needs_gpu

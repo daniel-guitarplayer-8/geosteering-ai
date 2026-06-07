@@ -58,6 +58,12 @@ _N_LAYERS_MIN_PHYS = 3  # inclui 2 semi-espaços
 # sem spawn; sem regressão). O usuário opta por jax/auto p/ GPU.
 _BACKENDS = ("numba", "jax", "auto")
 
+# Filtros de Hankel (Fatia 6b) — nomes canônicos do catálogo
+# (simulation/filters/loader.py::_FILTER_CATALOG). Validados no VM (fail-fast) e
+# saneados no load de .session. test_sm_geology_advanced guarda que casam com
+# FilterLoader().available() (evita staleness).
+_HANKEL_FILTERS = ("werthmuller_201pt", "kong_61pt", "anderson_801pt")
+
 # Errata física — validação fail-fast no VM. ESPELHA O SIMULADOR (não a errata
 # do pipeline DL): a rota deste app é simulate_batch, cujo gate efetivo é
 # ``_validate_multi_inputs`` + ``SimulationConfig`` — NÃO o ``PipelineConfig`` do
@@ -400,8 +406,9 @@ class SimulationViewModel(BaseViewModel):
 
     @manual_layers.setter
     def manual_layers(self, value: Optional[ManualLayersModel]) -> None:
-        self._manual_layers = value
-        self.changed.emit("_manual_layers", value)
+        # _set: dedup (ManualLayersModel é frozen dataclass com __eq__) + emite
+        # changed só se mudou — consistente com os demais setters do VM.
+        self._set("_manual_layers", value)
 
     def apply_canonical_profile(self, name: str, *, auto_geometry: bool = True) -> None:
         """Carrega um perfil canônico → geologia MANUAL (+ auto-geometria opcional).
@@ -418,11 +425,12 @@ class SimulationViewModel(BaseViewModel):
             get_canonical_model,
         )
 
-        model = get_canonical_model(name)
-        self.manual_layers = ManualLayersModel.from_canonical(model)
+        model = get_canonical_model(name)  # type: ignore[arg-type]  # str → Literal
+        layers = ManualLayersModel.from_canonical(model)
+        self.manual_layers = layers
         self.geology_mode = "manual"
         if auto_geometry:
-            sum_esp = float(sum(self._manual_layers.thicknesses))
+            sum_esp = float(sum(layers.thicknesses))
             if sum_esp > 0.0:
                 # h1 acima da 1ª interface; tj cobre a pilha + a margem de h1
                 # (z_obs = linspace(-h1, tj-h1) varre [-h1, sum_esp]).
@@ -499,6 +507,13 @@ class SimulationViewModel(BaseViewModel):
         if self._backend not in _BACKENDS:
             errors.append(
                 f"Backend {self._backend!r} inválido (use {list(_BACKENDS)})."
+            )
+        # Filtro de Hankel (Fatia 6b): fail-fast no VM (senão FilterLoader.load
+        # estoura KeyError lá no kernel, sem feedback claro na UI).
+        if self._hankel_filter not in _HANKEL_FILTERS:
+            errors.append(
+                f"Filtro de Hankel {self._hankel_filter!r} inválido "
+                f"(use {list(_HANKEL_FILTERS)})."
             )
         # ── Guardrail de recurso: n_pos derivado não pode explodir (OOM) ─────
         # self.n_pos já guarda dips-vazio/p_med≤0/tj≤0 (retorna 0) → só dispara
@@ -717,6 +732,8 @@ class SimulationViewModel(BaseViewModel):
         # Resultado de cancelamento (Fatia 6a): NÃO alimenta a galeria nem result_ready.
         if result.get("cancelled"):
             self._last_result = result
+            self._progress_done = 0  # reseta a barra (parcial descartado)
+            self.changed.emit("_progress", 0)
             self.log_entry.emit("⏹ Simulação cancelada (resultado parcial descartado).")
             self._set("_status", "cancelled")
             return
@@ -825,16 +842,24 @@ class SimulationViewModel(BaseViewModel):
             if key in data:
                 setattr(self, key, data[key])
         # ── Geologia manual (Fatia 6b) — reconstrói o ManualLayersModel ────────
+        # Coerção float/int defensiva: um .session corrompido/editado à mão pode
+        # trazer strings ("8.0") → sem coerção, validate()/np.array estouraria.
         ml = data.get("manual_layers")
         if isinstance(ml, dict):
-            self.manual_layers = ManualLayersModel(
-                n_layers=int(ml.get("n_layers", 0)),
-                thicknesses=tuple(ml.get("thicknesses", ())),
-                rho_h=tuple(ml.get("rho_h", ())),
-                rho_v=tuple(ml.get("rho_v", ())),
-            )
+            try:
+                self.manual_layers = ManualLayersModel(
+                    n_layers=int(ml.get("n_layers", 0)),
+                    thicknesses=tuple(float(x) for x in ml.get("thicknesses", ())),
+                    rho_h=tuple(float(x) for x in ml.get("rho_h", ())),
+                    rho_v=tuple(float(x) for x in ml.get("rho_v", ())),
+                )
+            except (TypeError, ValueError):
+                self.manual_layers = None  # dados inválidos → descarta (não corrompe)
         elif ml is None and "manual_layers" in data:
             self.manual_layers = None
+        # ── Saneia o filtro de Hankel (Fatia 6b) — fora do catálogo → default ──
+        if self._hankel_filter not in _HANKEL_FILTERS:
+            self.hankel_filter = "werthmuller_201pt"
         # ── Saneia o backend vindo do .session ────────────────────────────────
         # Um .session corrompido/editado à mão pode trazer um backend inválido
         # (ex.: "cuda"). O combo da View só tem {numba,jax,auto} → setCurrentText

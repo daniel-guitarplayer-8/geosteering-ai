@@ -217,6 +217,34 @@ def test_service_routes_numba_with_progress_and_events(qapp, monkeypatch):
 
 @pytest.mark.skipif(not QT_AVAILABLE, reason="requer binding Qt6")
 @pytest.mark.gui
+def test_service_reentrancy_guard(qapp, monkeypatch):
+    """Revisão #2/#4 — run() ignora 2ª chamada se já ocupado (não reseta eventos)."""
+    from geosteering_ai.gui.services.simulation_service import SimulationService
+
+    svc = SimulationService()
+    calls: list = []
+    monkeypatch.setattr(svc, "is_busy", lambda: True)  # simula worker em voo
+    monkeypatch.setattr(svc, "_run_async", lambda *a, **k: calls.append("async"))
+    monkeypatch.setattr(svc, "_run_in_subprocess", lambda *a, **k: calls.append("sub"))
+    svc.run(SimRequest(backend="numba"))
+    assert calls == []  # guard bloqueou (sem despacho, sem reset de eventos)
+
+
+@pytest.mark.skipif(not QT_AVAILABLE, reason="requer binding Qt6")
+@pytest.mark.gui
+def test_service_wait_unblocks_paused_worker(qapp):
+    """Revisão #1 — wait() seta cancel+resume ANTES de bloquear (evita deadlock)."""
+    from geosteering_ai.gui.services.simulation_service import SimulationService
+
+    svc = SimulationService()
+    svc.request_pause()  # _pause_event limpo (pausado)
+    svc.wait(timeout_ms=1)  # sem threads → retorna rápido; deve destravar/cancelar
+    assert svc._cancel_event.is_set()
+    assert svc._pause_event.is_set()
+
+
+@pytest.mark.skipif(not QT_AVAILABLE, reason="requer binding Qt6")
+@pytest.mark.gui
 def test_service_request_cancel_sets_event(qapp):
     """RF-3 — request_cancel seta o cancel_event (e despausa)."""
     from geosteering_ai.gui.services.simulation_service import SimulationService

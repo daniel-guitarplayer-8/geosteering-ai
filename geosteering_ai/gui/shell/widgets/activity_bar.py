@@ -93,4 +93,7 @@ class ActivityBar(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any (
 
     def _on_clicked(self, btn: Any) -> None:
         """Slot interno — emite ``selected`` com o índice atual do botão clicado."""
-        self.selected.emit(self._buttons.index(btn))
+        # Guard defensivo: se o botão não está mais na lista (limpeza futura/GC),
+        # ignora em vez de estourar ValueError num slot Qt (crasharia a UI).
+        if btn in self._buttons:
+            self.selected.emit(self._buttons.index(btn))

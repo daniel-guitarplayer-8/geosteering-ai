@@ -97,7 +97,10 @@ class LayersDialog(QtWidgets.QDialog):  # type: ignore[misc] # QtWidgets é Any
                 f"{defaults[2]:g}" if is_internal else "—"
             )
             if not is_internal:
-                esp_item.setFlags(Qt.ItemFlag.ItemIsEnabled)  # não-editável
+                # Não-editável MAS ainda selecionável/navegável (Tab/clique).
+                esp_item.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                )
                 esp_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._table.setItem(row, 2, esp_item)
             self._table.setVerticalHeaderItem(
