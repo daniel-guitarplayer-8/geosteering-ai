@@ -71,10 +71,12 @@ _BINDING_CONTRACT = (
     "geoSeedSpin",
     # design-alvo (fatias 6a-6h) — já no .ui p/ desenhar a tela completa
     "canonicalCombo",
+    "applyCanonicalButton",
     "autoGeoCheck",
     "genRandomRadio",
     "genManualRadio",
     "editLayersButton",
+    "hankelFilterCombo",
     "hankelAutoRadio",
     "hankelOrderSpin",
     "hankelPathEdit",
