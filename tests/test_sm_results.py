@@ -347,18 +347,18 @@ def test_simulator_view_embeds_gallery(qtbot):
 # Toggle matplotlib ↔ PyQtGraph (quick win — escolha de backend de plot)
 # ════════════════════════════════════════════════════════════════════════════
 def test_results_vm_plot_backend_default_and_setter():
-    """O ResultsViewModel default p/ MATPLOTLIB; o setter aceita enum E str."""
+    """O ResultsViewModel default p/ PYQTGRAPH (Fatia 6d); o setter aceita enum E str."""
     from geosteering_ai.gui.plot_backends.base import PlotBackend
 
     rvm = _make_results_vm()
-    assert rvm.plot_backend == PlotBackend.MATPLOTLIB
+    assert rvm.plot_backend == PlotBackend.PYQTGRAPH  # default 6d (interativo)
     rec: list = []
     rvm.changed.connect(lambda name, value: rec.append(name))
-    rvm.plot_backend = "pyqtgraph"  # str → enum
-    assert rvm.plot_backend == PlotBackend.PYQTGRAPH
-    assert "_plot_backend" in rec  # emitiu changed (a View re-renderiza)
-    rvm.plot_backend = PlotBackend.MATPLOTLIB  # enum
+    rvm.plot_backend = "matplotlib"  # str → enum
     assert rvm.plot_backend == PlotBackend.MATPLOTLIB
+    assert "_plot_backend" in rec  # emitiu changed (a View re-renderiza)
+    rvm.plot_backend = PlotBackend.PYQTGRAPH  # enum
+    assert rvm.plot_backend == PlotBackend.PYQTGRAPH
 
 
 def test_session_roundtrip_includes_plot_backend():
@@ -376,7 +376,8 @@ def test_session_roundtrip_includes_plot_backend():
 
 @pytest.mark.gui
 def test_results_view_backend_toggle_rebuilds_canvas(qtbot):
-    """Trocar o backend recria o canvas (matplotlib → pyqtgraph → matplotlib)."""
+    """Trocar o backend recria o canvas (pyqtgraph default → matplotlib → pyqtgraph)."""
+    pytest.importorskip("pyqtgraph")
     from apps.sim_manager.perspectives.simulation.results_view import ResultsView
     from geosteering_ai.gui.plot_backends.base import PlotBackend
 
@@ -384,18 +385,18 @@ def test_results_view_backend_toggle_rebuilds_canvas(qtbot):
     view = ResultsView(rvm)
     qtbot.addWidget(view)
     rvm.set_result(_result(n_models=3))
-    assert view._active_backend == PlotBackend.MATPLOTLIB
+    assert view._active_backend == PlotBackend.PYQTGRAPH  # default 6d
     first_widget = view._canvas.widget()
 
-    # via combo (caminho do usuário) → recria o canvas
-    view._on_backend_changed("pyqtgraph")
-    assert rvm.plot_backend == PlotBackend.PYQTGRAPH
-    assert view._active_backend == PlotBackend.PYQTGRAPH
+    # via combo (caminho do usuário) → recria o canvas p/ matplotlib
+    view._on_backend_changed("matplotlib")
+    assert rvm.plot_backend == PlotBackend.MATPLOTLIB
+    assert view._active_backend == PlotBackend.MATPLOTLIB
     assert view._canvas.widget() is not first_widget  # canvas recriado
 
-    # volta p/ matplotlib
-    view._on_backend_changed("matplotlib")
-    assert view._active_backend == PlotBackend.MATPLOTLIB
+    # volta p/ pyqtgraph
+    view._on_backend_changed("pyqtgraph")
+    assert view._active_backend == PlotBackend.PYQTGRAPH
 
 
 @pytest.mark.gui

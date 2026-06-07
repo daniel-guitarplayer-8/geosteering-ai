@@ -202,6 +202,50 @@ class PyQtGraphCanvas(PlotCanvas):
         )
         ax.addItem(line)
 
+    def plot_image(
+        self,
+        ax: SubplotHandle,
+        data: np.ndarray,
+        *,
+        extent=None,
+        cmap: str = "viridis",
+        vmin=None,
+        vmax=None,
+    ):
+        """Plota imagem 2-D via ``ImageItem`` (heatmap de ensemble — interativo).
+
+        ``axisOrder="row-major"`` faz ``data[row, col]`` casar com matplotlib
+        (linha→Y, coluna→X). Colormap mapeado do nome matplotlib; ``extent`` posiciona
+        a imagem em coordenadas de dados via ``setRect``. Retorna o ``ImageItem``.
+        """
+        arr = np.asarray(data, dtype=float)
+        img = self._pg.ImageItem()
+        img.setOpts(axisOrder="row-major")
+        img.setImage(arr)
+        ax.addItem(img)
+        if vmin is not None and vmax is not None:
+            img.setLevels((vmin, vmax))
+        try:
+            cm = self._pg.colormap.get(cmap, source="matplotlib")
+            if cm is not None:
+                img.setColorMap(cm)
+        except Exception:  # noqa: BLE001  # colormap ausente → cores default (não-fatal)
+            pass
+        if extent is not None:
+            left, right, bottom, top = (float(v) for v in extent)
+            img.setRect(QtCore.QRectF(left, top, right - left, bottom - top))
+        return img
+
+    def set_colorbar(self, ax: SubplotHandle, image, *, label: str = "") -> None:
+        """Adiciona um ``ColorBarItem`` ligado ao ``ImageItem`` (interativo)."""
+        try:
+            cm = self._pg.colormap.get("viridis", source="matplotlib")
+            bar = self._pg.ColorBarItem(colorMap=cm, label=label or None)
+            bar.setImageItem(image, insert_in=ax)
+        except Exception:  # noqa: BLE001  # ColorBarItem indisponível → sem barra (não-fatal)
+            pass
+        return None
+
     def set_axis_config(self, ax: SubplotHandle, cfg: AxisConfig) -> None:
         if cfg.title:
             ax.setTitle(cfg.title)

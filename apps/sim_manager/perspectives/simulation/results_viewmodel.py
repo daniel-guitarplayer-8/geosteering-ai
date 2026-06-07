@@ -106,7 +106,7 @@ class ResultsViewModel(BaseViewModel):
         self,
         page_size: int = _DEFAULT_PAGE_SIZE,
         cache: Optional[LRUPlotCache] = None,
-        plot_backend: PlotBackend = PlotBackend.MATPLOTLIB,
+        plot_backend: PlotBackend = PlotBackend.PYQTGRAPH,
     ) -> None:
         """Inicializa sem resultado (galeria vazia).
 
@@ -114,8 +114,9 @@ class ResultsViewModel(BaseViewModel):
             page_size: nº de modelos por página da galeria (default 12).
             cache: LRU de curvas (default ``LRUPlotCache(maxlen=256)``) — bounded
                 por contagem; injetável p/ teste.
-            plot_backend: backend de plot inicial (default ``MATPLOTLIB``); a View
-                recria o canvas ao trocar.
+            plot_backend: backend de plot inicial (default ``PYQTGRAPH`` — interativo/
+                dinâmico, Fatia 6d). A View recria o canvas ao trocar e cai p/
+                MATPLOTLIB (``_build_canvas``) se o PyQtGraph faltar no ambiente.
         """
         super().__init__()
         self._result: Optional[Dict[str, Any]] = None

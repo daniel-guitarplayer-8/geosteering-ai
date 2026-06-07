@@ -136,6 +136,124 @@ def test_pyqtgraph_canvas_smoke(offscreen_app):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# Spec 0017 (Fatia 6d) — plot_step / plot_image / set_colorbar
+# ════════════════════════════════════════════════════════════════════════════
+def test_build_step_polyline_post_and_pre():
+    """RF-3 (6d) — a polilinha em degraus mantém o valor por intervalo de profundidade."""
+    import numpy as np
+
+    from geosteering_ai.gui.plot_backends.base import _build_step_polyline
+
+    x = np.array([1.0, 10.0, 100.0])  # ρ por posição
+    y = np.array([0.0, 5.0, 12.0])  # profundidade (monotônica)
+    xs, ys = _build_step_polyline(x, y, where="post")
+    # 2n−1 pontos; valor x[i] mantido de y[i] até y[i+1] (degraus axis-aligned).
+    assert xs.shape == (5,) and ys.shape == (5,)
+    assert list(xs) == [1.0, 1.0, 10.0, 10.0, 100.0]
+    assert list(ys) == [0.0, 5.0, 5.0, 12.0, 12.0]
+    # "pre": salto ANTES do ponto (valor x[i] vale até y[i]).
+    xs_p, ys_p = _build_step_polyline(x, y, where="pre")
+    assert list(xs_p) == [1.0, 10.0, 10.0, 100.0, 100.0]
+    assert list(ys_p) == [0.0, 0.0, 5.0, 5.0, 12.0]
+    # n ≤ 1 → degenera sem erro.
+    xs0, ys0 = _build_step_polyline(np.array([7.0]), np.array([3.0]))
+    assert list(xs0) == [7.0] and list(ys0) == [3.0]
+
+
+def test_plotcanvas_default_image_and_step_and_colorbar():
+    """RF-3 (6d) — defaults da ABC: plot_image levanta, set_colorbar no-op, step→plot_line.
+
+    Usa uma subclasse mínima (sem Qt) que implementa só os abstratos e registra as
+    chamadas a ``plot_line`` — assim os defaults concretos da ABC são testáveis PUROS.
+    """
+    import numpy as np
+
+    from geosteering_ai.gui.plot_backends.base import AxisConfig, PlotCanvas
+
+    class _FakeCanvas(PlotCanvas):
+        def __init__(self):
+            self.lines = []
+
+        def widget(self):
+            return None
+
+        def clear(self):
+            pass
+
+        def draw(self):
+            pass
+
+        def save(self, path, dpi=150):
+            pass
+
+        def add_subplot_grid(self, rows, cols, sharey=True, **kw):
+            return [[object() for _ in range(cols)] for _ in range(rows)]
+
+        def plot_line(self, ax, x, y, **kw):
+            self.lines.append((np.asarray(x), np.asarray(y)))
+
+        def add_hline(self, ax, y, **kw):
+            pass
+
+        def set_axis_config(self, ax, cfg: AxisConfig):
+            pass
+
+        def set_dark_mode(self, dark):
+            pass
+
+    c = _FakeCanvas()
+    ax = object()
+    # plot_step (concreto na ABC) → delega a plot_line com a polilinha em degraus.
+    c.plot_step(ax, np.array([1.0, 2.0]), np.array([0.0, 4.0]))
+    assert len(c.lines) == 1
+    assert list(c.lines[0][0]) == [1.0, 1.0, 2.0]  # xs em degraus
+    # plot_image default → NotImplementedError (plotly/vispy herdam erro claro).
+    with pytest.raises(NotImplementedError):
+        c.plot_image(ax, np.zeros((2, 2)))
+    # set_colorbar default → no-op (retorna None, sem erro).
+    assert c.set_colorbar(ax, object(), label="x") is None
+
+
+@pytest.mark.gui
+def test_matplotlib_step_image_colorbar_smoke(offscreen_app):
+    """RF-3 (6d) — MatplotlibCanvas: plot_step + plot_image + set_colorbar sem erro."""
+    import numpy as np
+
+    from geosteering_ai.gui.plot_backends import PlotBackend, make_canvas
+
+    canvas = make_canvas(PlotBackend.MATPLOTLIB)
+    grid = canvas.add_subplot_grid(1, 1)
+    ax = grid[0][0]
+    canvas.plot_step(ax, np.array([1.0, 10.0, 100.0]), np.array([0.0, 5.0, 12.0]))
+    img = canvas.plot_image(
+        ax, np.arange(12.0).reshape(3, 4), extent=(0.0, 4.0, 12.0, 0.0)
+    )
+    canvas.set_colorbar(ax, img, label="|H| (A/m)")
+    canvas.draw()
+    canvas.clear()
+
+
+@pytest.mark.gui
+def test_pyqtgraph_step_image_colorbar_smoke(offscreen_app):
+    """RF-3 (6d) — PyQtGraphCanvas: plot_step + plot_image (ImageItem) + colorbar sem erro."""
+    pytest.importorskip("pyqtgraph")
+    import numpy as np
+
+    from geosteering_ai.gui.plot_backends import PlotBackend, make_canvas
+
+    canvas = make_canvas(PlotBackend.PYQTGRAPH)
+    grid = canvas.add_subplot_grid(1, 1)
+    ax = grid[0][0]
+    canvas.plot_step(ax, np.array([1.0, 10.0, 100.0]), np.array([0.0, 5.0, 12.0]))
+    img = canvas.plot_image(
+        ax, np.arange(12.0).reshape(3, 4), extent=(0.0, 4.0, 12.0, 0.0)
+    )
+    assert img is not None  # ImageItem retornado p/ colorbar
+    canvas.set_colorbar(ax, img, label="|H| (A/m)")
+    canvas.draw()
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # De-shim (spec 0011 Fase 0) — o shim de plot_backends foi REMOVIDO
 # ════════════════════════════════════════════════════════════════════════════
 def test_plot_backends_shim_removed():

@@ -206,6 +206,39 @@ class MatplotlibCanvas(PlotCanvas):
             y, color=color, linestyle=linestyle, alpha=alpha, linewidth=linewidth
         )
 
+    def plot_image(
+        self,
+        ax: SubplotHandle,
+        data: np.ndarray,
+        *,
+        extent=None,
+        cmap: str = "viridis",
+        vmin=None,
+        vmax=None,
+    ):
+        """Plota imagem 2-D via ``ax.imshow`` (heatmap de ensemble — Fatia 6d).
+
+        ``origin="upper"`` + ``aspect="auto"`` → linha 0 no topo, preenche o subplot.
+        Retorna o ``AxesImage`` (mappable) p/ :meth:`set_colorbar`.
+        """
+        return ax.imshow(
+            np.asarray(data),
+            extent=extent,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            aspect="auto",
+            origin="upper",
+            interpolation="nearest",
+        )
+
+    def set_colorbar(self, ax: SubplotHandle, image, *, label: str = "") -> None:
+        """Adiciona colorbar do ``image`` ao lado do subplot ``ax``."""
+        cbar = self._figure.colorbar(image, ax=ax)
+        if label:
+            cbar.set_label(label)
+        return None
+
     def set_axis_config(self, ax: SubplotHandle, cfg: AxisConfig) -> None:
         """Aplica AxisConfig (title, labels, invert_y, grid, log scales)."""
         if cfg.title:

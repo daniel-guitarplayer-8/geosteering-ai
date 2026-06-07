@@ -105,6 +105,46 @@ class SubplotHandle(Protocol):
     ...
 
 
+def _build_step_polyline(
+    x: np.ndarray, y: np.ndarray, where: str = "post"
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Constrói a polilinha em degraus de ``(x, y)`` (quantidade x vs profundidade y).
+
+    Os perfis ρ/λ (Fatia 6d) têm a QUANTIDADE no eixo X piecewise-constant ao longo
+    da PROFUNDIDADE no eixo Y (monotônica) — saltos nas interfaces de camada. Como Y
+    é a variável independente (não X), ``matplotlib.step``/``stepMode`` (que degrau-eiam
+    Y como função de X) têm orientação ERRADA aqui; por isso montamos a polilinha
+    explicitamente e a desenhamos como linha comum (backend-agnóstico).
+
+    Args:
+        x: valores da quantidade (n,) — ρ, λ, … (eixo horizontal).
+        y: profundidades (n,) monotônicas (eixo vertical).
+        where: ``"post"`` (default) mantém ``x[i]`` de ``y[i]`` até ``y[i+1]`` (salto
+            DEPOIS do ponto); ``"pre"`` mantém ``x[i]`` de ``y[i-1]`` até ``y[i]``.
+
+    Returns:
+        ``(xs, ys)`` — arrays ``(2n−1,)`` da polilinha em degraus (ou ``(≤1,)`` se ``n≤1``).
+    """
+    xv = np.asarray(x, dtype=float).ravel()
+    yv = np.asarray(y, dtype=float).ravel()
+    n = int(min(xv.size, yv.size))
+    if n <= 1:
+        return xv[:n], yv[:n]
+    xv, yv = xv[:n], yv[:n]
+    xs = np.empty(2 * n - 1, dtype=float)
+    ys = np.empty(2 * n - 1, dtype=float)
+    xs[0::2] = xv
+    ys[0::2] = yv
+    if where == "pre":
+        # Salto ANTES do ponto: já assume x[i+1] em y[i].
+        xs[1::2] = xv[1:]
+        ys[1::2] = yv[:-1]
+    else:  # "post": mantém o valor atual até a próxima profundidade.
+        xs[1::2] = xv[:-1]
+        ys[1::2] = yv[1:]
+    return xs, ys
+
+
 class PlotCanvas(ABC):
     """Interface comum aos 4 backends de plotagem.
 
@@ -198,6 +238,81 @@ class PlotCanvas(ABC):
         """
 
     # ── Métodos opcionais (default no-op) ─────────────────────────────────
+
+    def plot_step(
+        self,
+        ax: SubplotHandle,
+        x: np.ndarray,
+        y: np.ndarray,
+        *,
+        where: str = "post",
+        label: str = "",
+        color: Optional[str] = None,
+        linewidth: float = 1.5,
+        linestyle: str = "-",
+    ) -> None:
+        """Plota uma curva STEP (perfis ρ/λ) — quantidade x constante por camada.
+
+        Implementação BACKEND-AGNÓSTICA (concreta na ABC): monta a polilinha em
+        degraus via :func:`_build_step_polyline` e delega a :meth:`plot_line` — assim
+        os 4 backends ganham step correto sem código nativo (``ax.step``/``stepMode``
+        degrau-eiam Y(X), orientação errada quando Y=profundidade é independente).
+
+        Args:
+            ax: handle do subplot.
+            x: quantidade (ρ, λ, …) por posição (eixo horizontal).
+            y: profundidades monotônicas (eixo vertical).
+            where: ``"post"`` (default) | ``"pre"`` (ver :func:`_build_step_polyline`).
+            label/color/linewidth/linestyle: repassados a :meth:`plot_line`.
+        """
+        xs, ys = _build_step_polyline(x, y, where)
+        self.plot_line(
+            ax,
+            xs,
+            ys,
+            label=label,
+            color=color,
+            linewidth=linewidth,
+            linestyle=linestyle,
+        )
+
+    def plot_image(
+        self,
+        ax: SubplotHandle,
+        data: np.ndarray,
+        *,
+        extent: Optional[Tuple[float, float, float, float]] = None,
+        cmap: str = "viridis",
+        vmin: Optional[float] = None,
+        vmax: Optional[float] = None,
+    ) -> Any:
+        """Plota uma imagem 2-D (heatmap de ensemble — n_models × n_pos).
+
+        Default: ``NotImplementedError`` (plotly/vispy herdam erro claro). Backends
+        reais (matplotlib ``imshow`` / PyQtGraph ``ImageItem``) sobrescrevem. A
+        galeria captura o erro e cai para matplotlib (``_build_canvas``).
+
+        Args:
+            ax: handle do subplot.
+            data: matriz 2-D ``(rows, cols)`` (row-major; ex.: modelo × posição).
+            extent: ``(left, right, bottom, top)`` em coordenadas de dados (opcional).
+            cmap: nome do colormap (estilo matplotlib).
+            vmin/vmax: limites de cor (opcionais; auto se ``None``).
+
+        Returns:
+            Handle da imagem (mappable/ImageItem) para :meth:`set_colorbar`.
+
+        Raises:
+            NotImplementedError: no backend que não suporta imagens.
+        """
+        raise NotImplementedError(
+            f"plot_image não suportado no backend {type(self).__name__} "
+            "(use matplotlib ou pyqtgraph)."
+        )
+
+    def set_colorbar(self, ax: SubplotHandle, image: Any, *, label: str = "") -> None:
+        """Adiciona uma colorbar à imagem de :meth:`plot_image`. Default: no-op."""
+        return None
 
     def set_legend(self, ax: SubplotHandle, visible: bool = True) -> None:
         """Mostra/oculta legenda em um subplot. Default: no-op."""
