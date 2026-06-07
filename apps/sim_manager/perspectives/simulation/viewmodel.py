@@ -692,6 +692,11 @@ class SimulationViewModel(BaseViewModel):
         return self._progress_total
 
     @property
+    def elapsed_s(self) -> float:
+        """Tempo (s) da última simulação concluída/em voo (p/ snapshot — Fatia 6c)."""
+        return self._sim_elapsed_s
+
+    @property
     def status_display(self) -> Dict[str, str]:
         """Snapshot ATÔMICO p/ a status bar (estado/elapsed/throughput) — PURO.
 

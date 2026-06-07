@@ -35,11 +35,15 @@ if TYPE_CHECKING:  # pragma: no cover — só type-checking (via qt_compat, não
 __all__ = ["SimulationPerspective"]
 
 
-def _history_label(result: dict) -> str:
-    """Rótulo curto de um resultado p/ o Histórico da sidebar (Fatia 6a)."""
-    h6 = result.get("H6")
-    n = getattr(h6, "shape", (None,))[0] if h6 is not None else "?"
-    return f"sim · backend={result.get('backend', '?')} · {n} modelo(s)"
+def _snapshot_info(snap: object) -> str:
+    """Texto de info de um snapshot p/ o painel de histórico (Fatia 6c)."""
+    return (
+        f"{getattr(snap, 'label', '')}\n"
+        f"timestamp: {getattr(snap, 'timestamp', '—')}\n"
+        f"backend: {getattr(snap, 'backend', '—')}\n"
+        f"nº modelos: {getattr(snap, 'n_models', '—')}\n"
+        f"tempo: {getattr(snap, 'elapsed_s', 0.0):.1f} s"
+    )
 
 
 class SimulationPerspective(Perspective):
@@ -63,7 +67,7 @@ class SimulationPerspective(Perspective):
         return SimulationViewModel(service=SimulationService())
 
     def build_view(self, ctx: AppContext) -> "QtWidgets.QWidget":
-        """Cria a View Qt ligada a um ViewModel novo (via :meth:`build_viewmodel`).
+        """Cria a View Qt ligada a um ViewModel novo + experimentos/histórico (6c).
 
         Args:
             ctx: contexto da aplicação.
@@ -71,16 +75,145 @@ class SimulationPerspective(Perspective):
         Returns:
             A :class:`SimulatorView` (``QWidget``) raiz da perspectiva.
         """
-        # Import local (View importa Qt) — mantém este módulo leve até a UI subir.
+        # Imports locais (Views importam Qt) — mantém este módulo leve.
+        from apps.sim_manager.perspectives.simulation.experiments_service import (
+            ExperimentsService,
+        )
+        from apps.sim_manager.perspectives.simulation.experiments_view import (
+            ExperimentsPanel,
+        )
+        from apps.sim_manager.perspectives.simulation.experiments_viewmodel import (
+            ExperimentsViewModel,
+        )
         from apps.sim_manager.perspectives.simulation.view import SimulatorView
 
-        viewmodel = self.build_viewmodel(ctx)
-        # Liga o feedback (Fatia 6a) à secondary sidebar do shell (Histórico/Log),
-        # via ctx.extras — sem acoplar o ViewModel (puro) ao shell.
+        sim_vm = self.build_viewmodel(ctx)
+        view = SimulatorView(sim_vm)
+        self._sim_vm = sim_vm  # ref viva
+
         sidebar = ctx.extras.get("secondary_sidebar")
-        if sidebar is not None:
-            viewmodel.log_entry.connect(sidebar.append_log)
-            viewmodel.result_ready.connect(
-                lambda result: sidebar.add_history_item(_history_label(result))
+        if sidebar is None:
+            return view
+        sim_vm.log_entry.connect(sidebar.append_log)
+
+        # ── Fatia 6c — experimentos & histórico (na secondary sidebar) ────────
+        self._exp_service = ExperimentsService()
+        self._exp_vm = ExperimentsViewModel(self._exp_service)
+        self._exp_panel = ExperimentsPanel()
+        self._view = view
+        sidebar.set_history_panel(self._exp_panel)
+
+        # VM → painel
+        self._exp_vm.experiment_changed.connect(self._on_experiment_changed)
+        self._exp_vm.snapshot_added.connect(
+            lambda sid, lbl, ic: self._exp_panel.add_snapshot(sid, lbl, in_cache=ic)
+        )
+        self._exp_vm.cache_status_changed.connect(
+            lambda sid, ic: None if ic else self._exp_panel.mark_out_of_cache(sid)
+        )
+        self._exp_vm.recents_changed.connect(self._exp_panel.set_recents)
+        self._exp_vm.error.connect(sidebar.append_log)
+
+        # painel → ações
+        self._exp_panel.request_new.connect(self._on_new_experiment)
+        self._exp_panel.request_open.connect(self._on_open_experiment)
+        self._exp_panel.request_save.connect(self._on_save_experiment)
+        self._exp_panel.request_close.connect(self._exp_vm.close_experiment)
+        self._exp_panel.request_clear.connect(self._on_clear_history)
+        self._exp_panel.snapshot_selected.connect(self._on_snapshot_selected)
+        self._exp_panel.snapshot_activated.connect(self._on_snapshot_reload)
+        self._exp_panel.recent_activated.connect(self._exp_vm.open_experiment)
+
+        # resultado de simulação → snapshot + cache (reabrível por double-click)
+        sim_vm.result_ready.connect(self._on_sim_result)
+
+        self._exp_vm.new_experiment("Sessão", "", "sm_experiments")  # default em RAM
+        self._exp_vm.load_recents()
+        return view
+
+    # ── Handlers de experimentos & histórico (Fatia 6c) ─────────────────────
+    def _on_experiment_changed(self, exp: object) -> None:
+        name = getattr(exp, "name", None)
+        path = getattr(exp, "file_path", "") if exp else ""
+        self._exp_panel.set_experiment_label(name, path)
+        self._exp_panel.clear_history()
+        for snap in getattr(exp, "snapshots", []):
+            self._exp_panel.add_snapshot(
+                snap.snapshot_id,
+                snap.label,
+                in_cache=self._exp_vm.is_in_cache(snap.snapshot_id),
+                info=_snapshot_info(snap),
             )
-        return SimulatorView(viewmodel)
+
+    def _on_new_experiment(self) -> None:
+        from apps.sim_manager.perspectives.simulation.experiments_view import (
+            NewExperimentDialog,
+        )
+
+        dialog = NewExperimentDialog(parent=self._view)
+        if dialog.exec():
+            name, desc, out_dir = dialog.values()
+            self._exp_vm.new_experiment(name, desc, out_dir)
+
+    def _on_open_experiment(self) -> None:
+        from geosteering_ai.gui.qt_compat import QtWidgets
+
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self._view, "Abrir experimento", "", "Experimento (*.exp.json)"
+        )
+        if path:
+            self._exp_vm.open_experiment(path)
+
+    def _on_save_experiment(self) -> None:
+        self._exp_vm.save_experiment(params=self._sim_vm.to_session_dict())
+
+    def _on_clear_history(self) -> None:
+        from geosteering_ai.gui.qt_compat import QtWidgets
+
+        resp = QtWidgets.QMessageBox.question(
+            self._view,
+            "Limpar histórico",
+            "Apagar todos os snapshots desta sessão? Não pode ser desfeito.",
+        )
+        if resp == QtWidgets.QMessageBox.StandardButton.Yes:
+            self._exp_vm.clear_snapshots()
+            self._exp_service.cache_clear()
+            self._exp_panel.clear_history()
+
+    def _on_snapshot_selected(self, snap_id: str) -> None:
+        snap = self._exp_vm.select_snapshot(snap_id)
+        if snap is not None:
+            self._exp_panel.set_snapshot_info(_snapshot_info(snap))
+
+    def _on_snapshot_reload(self, snap_id: str) -> None:
+        bundle = self._exp_service.cache_get(snap_id)
+        if bundle is not None:
+            self._sim_vm.results.set_result(bundle)  # reabre na galeria
+        else:
+            msg = (
+                "tensor grande demais para o cache"
+                if self._exp_service.cache_was_too_big(snap_id)
+                else "fora do cache"
+            )
+            self._sim_vm.log_entry.emit(f"↺ Reload indisponível ({msg}) — re-execute.")
+
+    def _on_sim_result(self, result: dict) -> None:
+        h6 = result.get("H6")
+        n_models = int(result.get("n_models") or (h6.shape[0] if h6 is not None else 0))
+        count = len(self._exp_vm.snapshots) + 1
+        backend = str(result.get("backend", "?"))
+        elapsed = float(getattr(self._sim_vm, "elapsed_s", 0.0))
+        label = f"#{count} · {backend} · {n_models} mod · {elapsed:.1f}s"
+        snap = self._exp_service.make_snapshot(
+            label=label,
+            backend=backend,
+            n_models=n_models,
+            elapsed_s=elapsed,
+            params=self._sim_vm.to_session_dict(),
+        )
+        # cache ANTES de add (evicções marcam itens antigos; o novo item já entra
+        # com o estado de cache final). Bundle reabrível = o próprio result.
+        self._exp_service.cache_put(snap.snapshot_id, dict(result))
+        self._exp_vm.add_snapshot(
+            snap, in_cache=self._exp_service.cache_contains(snap.snapshot_id)
+        )

@@ -84,8 +84,19 @@ class SecondarySidebar(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
         self._log.clear()
 
     def add_history_item(self, text: str) -> None:
-        """Adiciona um item ao topo do Histórico de simulações."""
+        """Adiciona um item ao topo do Histórico de simulações (lista simples)."""
         self._history.insertItem(0, text)
+
+    def set_history_panel(self, widget: Any) -> None:
+        """Substitui a aba Histórico (lista simples) por um painel rico (Fatia 6c).
+
+        A perspectiva injeta um ``ExperimentsPanel`` (toolbar + busca + ●/○ +
+        recentes). Mantém a posição (índice 0) e o rótulo "Histórico".
+        """
+        self._tabs.removeTab(0)
+        self._tabs.insertTab(0, widget, "Histórico")
+        self._history = widget  # passa a apontar p/ o painel rico
+        self._tabs.setCurrentIndex(0)
 
     def focus_log(self) -> None:
         """Traz a aba de Log para frente (ex.: ao iniciar uma simulação)."""
