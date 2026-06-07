@@ -37,6 +37,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from apps.sim_manager.perspectives.simulation.results_viewmodel import ResultsViewModel
+from geosteering_ai.gui.services.manual_geology import ManualLayersModel
 from geosteering_ai.gui.services.sim_request import SimRequest, compute_n_pos
 from geosteering_ai.gui.services.stochastic_geology import GENERATORS_AVAILABLE
 from geosteering_ai.gui.viewmodels.base import BaseViewModel
@@ -168,6 +169,10 @@ class SimulationViewModel(BaseViewModel):
         # Backend de simulação (spec 0012). Default "numba" (in-thread, rápido, sem
         # spawn); "jax"/"auto" rodam em subprocesso (GPU, TLS-safe).
         self._backend: str = "numba"
+        # ── Fatia 6b — filtro de Hankel + geologia manual ───────────────────
+        self._hankel_filter: str = "werthmuller_201pt"
+        # Geologia manual (editor de camadas / perfil canônico). None ⇒ não-manual.
+        self._manual_layers: Optional[ManualLayersModel] = None
         self._status: str = "idle"
         self._last_result: Optional[Dict[str, Any]] = None
         self.result_ready: VMSignal = VMSignal()
@@ -378,6 +383,52 @@ class SimulationViewModel(BaseViewModel):
     def backend(self, value: str) -> None:
         self._set("_backend", str(value))
 
+    # ── Fatia 6b — filtro de Hankel + geologia manual / perfis canônicos ─────
+    @property
+    def hankel_filter(self) -> str:
+        """Filtro de Hankel (catálogo simulation/filters; default werthmuller_201pt)."""
+        return self._hankel_filter
+
+    @hankel_filter.setter
+    def hankel_filter(self, value: str) -> None:
+        self._set("_hankel_filter", str(value))
+
+    @property
+    def manual_layers(self) -> Optional[ManualLayersModel]:
+        """Geologia manual atual (``ManualLayersModel``) ou ``None``."""
+        return self._manual_layers
+
+    @manual_layers.setter
+    def manual_layers(self, value: Optional[ManualLayersModel]) -> None:
+        self._manual_layers = value
+        self.changed.emit("_manual_layers", value)
+
+    def apply_canonical_profile(self, name: str, *, auto_geometry: bool = True) -> None:
+        """Carrega um perfil canônico → geologia MANUAL (+ auto-geometria opcional).
+
+        Reusa o catálogo PURO ``simulation.validation.canonical_models`` (7 perfis).
+        Define ``geology_mode="manual"`` + ``manual_layers`` do perfil. Se
+        ``auto_geometry``, ajusta ``tj``/``h1`` p/ cobrir a pilha de camadas.
+
+        Args:
+            name: chave canônica (ex.: ``"oklahoma_3"`` — ver ``list_canonical_models``).
+            auto_geometry: se ``True``, deriva ``tj``/``h1`` da soma das espessuras.
+        """
+        from geosteering_ai.simulation.validation.canonical_models import (
+            get_canonical_model,
+        )
+
+        model = get_canonical_model(name)
+        self.manual_layers = ManualLayersModel.from_canonical(model)
+        self.geology_mode = "manual"
+        if auto_geometry:
+            sum_esp = float(sum(self._manual_layers.thicknesses))
+            if sum_esp > 0.0:
+                # h1 acima da 1ª interface; tj cobre a pilha + a margem de h1
+                # (z_obs = linspace(-h1, tj-h1) varre [-h1, sum_esp]).
+                self.h1 = max(1.0, 0.1 * sum_esp)
+                self.tj = sum_esp + self._h1
+
     @property
     def status(self) -> str:
         """Estado atual: idle | running | done | error (read-only)."""
@@ -458,9 +509,16 @@ class SimulationViewModel(BaseViewModel):
                 f"Geometria degenerada: n_pos derivado ({n_pos}) > {_N_POS_MAX} "
                 f"(dip≈90° e/ou p_med ínfimo vs tj). Reduza o dip ou aumente p_med."
             )
-        # ── Geologia estocástica (só quando o modo a usa) ────────────────────
+        # ── Geologia: estocástica OU manual (Fatia 6b) ───────────────────────
         if self._geology_mode == "stochastic":
             errors.extend(self._validate_geology())
+        elif self._geology_mode == "manual":
+            if self._manual_layers is None:
+                errors.append(
+                    "Modo manual sem camadas: edite as camadas ou aplique um perfil."
+                )
+            else:
+                errors.extend(self._manual_layers.validate())
         return errors
 
     def _validate_geology(self) -> List[str]:
@@ -559,6 +617,16 @@ class SimulationViewModel(BaseViewModel):
             min_thickness=self._min_thickness,
             generator=self._generator,
             rng_seed=self._rng_seed,
+            # ── Fatia 6b — filtro de Hankel + geologia manual ───────────────
+            hankel_filter=self._hankel_filter,
+            manual_n_layers=(
+                self._manual_layers.n_layers if self._manual_layers else 0
+            ),
+            manual_thicknesses=(
+                self._manual_layers.thicknesses if self._manual_layers else ()
+            ),
+            manual_rho_h=(self._manual_layers.rho_h if self._manual_layers else ()),
+            manual_rho_v=(self._manual_layers.rho_v if self._manual_layers else ()),
         )
         # Reseta o feedback de execução (Fatia 6a) ANTES de iniciar.
         self._progress_done = 0
@@ -702,6 +770,18 @@ class SimulationViewModel(BaseViewModel):
             "generator": self._generator,
             "rng_seed": self._rng_seed,
             "backend": self._backend,
+            # ── Fatia 6b — filtro de Hankel + geologia manual ───────────────
+            "hankel_filter": self._hankel_filter,
+            "manual_layers": (
+                {
+                    "n_layers": self._manual_layers.n_layers,
+                    "thicknesses": list(self._manual_layers.thicknesses),
+                    "rho_h": list(self._manual_layers.rho_h),
+                    "rho_v": list(self._manual_layers.rho_v),
+                }
+                if self._manual_layers is not None
+                else None
+            ),
             # Preferência da galeria (str do enum) — reproduzível.
             "plot_backend": self.results.plot_backend.value,
         }
@@ -740,9 +820,21 @@ class SimulationViewModel(BaseViewModel):
             "generator",
             "rng_seed",
             "backend",
+            "hankel_filter",
         ):
             if key in data:
                 setattr(self, key, data[key])
+        # ── Geologia manual (Fatia 6b) — reconstrói o ManualLayersModel ────────
+        ml = data.get("manual_layers")
+        if isinstance(ml, dict):
+            self.manual_layers = ManualLayersModel(
+                n_layers=int(ml.get("n_layers", 0)),
+                thicknesses=tuple(ml.get("thicknesses", ())),
+                rho_h=tuple(ml.get("rho_h", ())),
+                rho_v=tuple(ml.get("rho_v", ())),
+            )
+        elif ml is None and "manual_layers" in data:
+            self.manual_layers = None
         # ── Saneia o backend vindo do .session ────────────────────────────────
         # Um .session corrompido/editado à mão pode trazer um backend inválido
         # (ex.: "cuda"). O combo da View só tem {numba,jax,auto} → setCurrentText

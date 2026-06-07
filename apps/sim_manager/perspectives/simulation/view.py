@@ -223,6 +223,10 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         # Geologia: habilita os campos só no modo "stochastic" (UX reativa —
         # no modo "fixed" eles são ignorados, então ficam desabilitados/cinza).
         self._geo_mode.currentTextChanged.connect(self._on_geology_mode_changed)
+        # Fatia 6b — perfil canônico + editor manual de camadas.
+        self._apply_canonical_btn.clicked.connect(self._on_apply_canonical)
+        self._edit_layers_btn.clicked.connect(self._on_edit_layers)
+        self._refresh_manual_info()
         self._on_geology_mode_changed(self._geo_mode.currentText())
 
     # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -240,7 +244,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         """
         # combos
         self._geo_mode = QtWidgets.QComboBox()
-        self._geo_mode.addItems(["stochastic", "fixed"])
+        self._geo_mode.addItems(["stochastic", "fixed", "manual"])  # +manual (Fatia 6b)
         self._geo_mode.setCurrentText(vm.geology_mode)
         self._geo_generator = QtWidgets.QComboBox()
         self._geo_generator.addItems(list(GENERATORS_AVAILABLE))
@@ -307,9 +311,45 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._geo_seed.setRange(0, 2_147_483_647)
         self._geo_seed.setValue(vm.rng_seed if vm.rng_seed is not None else 42)
 
+        # ── Fatia 6b — filtro de Hankel + perfil canônico + editor manual ────
+        from geosteering_ai.simulation.filters.loader import FilterLoader
+        from geosteering_ai.simulation.validation.canonical_models import (
+            get_all_canonical_models,
+        )
+
+        self._hankel_combo = QtWidgets.QComboBox()
+        self._hankel_combo.addItems(list(FilterLoader().available()))
+        self._hankel_combo.setCurrentText(vm.hankel_filter)
+        self._hankel_combo.setToolTip(
+            "Filtro de Hankel (transformada quasi-estática). Paridade <1e-12 preservada."
+        )
+        self._canonical_combo = QtWidgets.QComboBox()
+        self._canonical_combo.addItem("—", userData=None)
+        for cm in get_all_canonical_models():
+            self._canonical_combo.addItem(cm.title, userData=cm.name)
+        self._apply_canonical_btn = QtWidgets.QPushButton("Aplicar perfil")
+        self._auto_geo_check = QtWidgets.QCheckBox("Auto-geometria (tj/h1)")
+        self._auto_geo_check.setChecked(True)
+        self._edit_layers_btn = QtWidgets.QPushButton("Editar camadas…")
+        self._edit_layers_btn.setToolTip(
+            "Editor manual de camadas (ρₕ/ρᵥ/espessura) → modo 'manual'."
+        )
+        self._manual_info = QtWidgets.QLabel("manual: —")
+        self._manual_info.setProperty("role", "hint")
+
         # layout em form
         gform = QtWidgets.QFormLayout()
         gform.addRow("Modo:", self._geo_mode)
+        gform.addRow("Filtro Hankel:", self._hankel_combo)
+        canon_row = QtWidgets.QHBoxLayout()
+        canon_row.addWidget(self._canonical_combo, stretch=1)
+        canon_row.addWidget(self._apply_canonical_btn)
+        gform.addRow("Perfil canônico:", canon_row)
+        gform.addRow("", self._auto_geo_check)
+        manual_row = QtWidgets.QHBoxLayout()
+        manual_row.addWidget(self._edit_layers_btn)
+        manual_row.addWidget(self._manual_info, stretch=1)
+        gform.addRow("Geologia manual:", manual_row)
         gform.addRow("Gerador:", self._geo_generator)
         gform.addRow("Distribuição ρₕ:", self._geo_distr)
         gform.addRow("ρₕ mín:", self._geo_rho_min)
@@ -350,6 +390,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.p_med = self._p_med.value()
         self._vm.n_models = self._n_models.value()
         self._vm.backend = self._sim_backend.currentText()
+        self._vm.hankel_filter = self._hankel_combo.currentText()  # Fatia 6b
         # ── Geologia estocástica (Fatia 3) ───────────────────────────────────
         self._vm.geology_mode = self._geo_mode.currentText()
         self._vm.generator = self._geo_generator.currentText()
@@ -389,8 +430,9 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._n_pos_label.setText(f"n_pos: {compute_n_pos(tj, p_med, dips[0])}")
 
     def _on_geology_mode_changed(self, text: str) -> None:
-        """Habilita os campos de geologia só no modo ``"stochastic"`` (UX reativa)."""
-        enabled = text == "stochastic"
+        """Habilita campos por modo: estocástico (samplers) × manual (editor)."""
+        stochastic = text == "stochastic"
+        manual = text == "manual"
         for w in (
             self._geo_generator,
             self._geo_distr,
@@ -407,7 +449,47 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             self._geo_seed_random,
             self._geo_seed,
         ):
-            w.setEnabled(enabled)
+            w.setEnabled(stochastic)
+        # Editor manual / perfil canônico só fazem sentido no modo "manual".
+        self._edit_layers_btn.setEnabled(manual)
+        self._apply_canonical_btn.setEnabled(manual)
+        self._canonical_combo.setEnabled(manual)
+        self._auto_geo_check.setEnabled(manual)
+
+    def _on_apply_canonical(self) -> None:
+        """Aplica o perfil canônico selecionado → geologia manual (+ auto-geometria)."""
+        name = self._canonical_combo.currentData()
+        if not name:
+            self._status.setText("selecione um perfil canônico")
+            return
+        self._vm.apply_canonical_profile(
+            str(name), auto_geometry=self._auto_geo_check.isChecked()
+        )
+        self._geo_mode.setCurrentText("manual")  # apply_canonical já setou no VM
+        self._sync_inputs_from_vm()  # reflete tj/h1 (auto-geo) + manual info
+
+    def _on_edit_layers(self) -> None:
+        """Abre o editor manual de camadas; ao aceitar, fixa a geologia manual no VM."""
+        from apps.sim_manager.perspectives.simulation.layers_dialog import LayersDialog
+
+        dialog = LayersDialog(initial=self._vm.manual_layers, parent=self)
+        if dialog.exec():
+            model = dialog.get_model()
+            errors = model.validate()
+            if errors:
+                self._status.setText(f"camadas inválidas: {errors[0]}")
+                return
+            self._vm.manual_layers = model
+            self._vm.geology_mode = "manual"
+            self._geo_mode.setCurrentText("manual")
+            self._refresh_manual_info()
+
+    def _refresh_manual_info(self) -> None:
+        """Atualiza o rótulo-resumo da geologia manual atual."""
+        ml = self._vm.manual_layers
+        self._manual_info.setText(
+            "manual: —" if ml is None else f"manual: {ml.n_layers} camadas"
+        )
 
     def _on_pause_clicked(self) -> None:
         """Toggle Pausar/Retomar (cooperativo; numba). Delega ao ViewModel."""
@@ -503,6 +585,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.p_med = self._p_med.value()
         self._vm.n_models = self._n_models.value()
         self._vm.backend = self._sim_backend.currentText()
+        self._vm.hankel_filter = self._hankel_combo.currentText()  # Fatia 6b
         self._vm.geology_mode = self._geo_mode.currentText()
         self._vm.generator = self._geo_generator.currentText()
         self._vm.rho_h_distribution = self._geo_distr.currentText()
@@ -531,6 +614,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._p_med.setValue(self._vm.p_med)
         self._n_models.setValue(self._vm.n_models)
         self._sim_backend.setCurrentText(self._vm.backend)
+        self._hankel_combo.setCurrentText(self._vm.hankel_filter)  # Fatia 6b
         self._geo_mode.setCurrentText(self._vm.geology_mode)
         self._geo_generator.setCurrentText(self._vm.generator)
         self._geo_distr.setCurrentText(self._vm.rho_h_distribution)

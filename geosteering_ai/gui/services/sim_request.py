@@ -153,6 +153,16 @@ class SimRequest:
     normal_mu_log: float = 2.0
     normal_sigma_log: float = 1.0
     rng_seed: Optional[int] = None
+    # ── Fatia 6b — filtro de Hankel + geologia manual ────────────────────────
+    # Filtro de Hankel (catálogo em simulation/filters/loader.py). simulate_batch
+    # já aceita o nome (paridade <1e-12 preservada — só troca os pesos do filtro).
+    hankel_filter: str = "werthmuller_201pt"
+    # Geologia MANUAL (geology_mode="manual"): N camadas arbitrárias (editor de
+    # camadas / perfil canônico). Tuplas (picklable/imutável); replicadas n_models×.
+    manual_n_layers: int = 0
+    manual_thicknesses: Tuple[float, ...] = ()
+    manual_rho_h: Tuple[float, ...] = ()
+    manual_rho_v: Tuple[float, ...] = ()
 
 
 # Modelo TIV de referência (3 camadas): ρₕ por camada + λ²=2 (anisotropia branda,
@@ -266,6 +276,29 @@ def _generate_stochastic_models(request: SimRequest) -> List[Dict[str, Any]]:
     return models
 
 
+def _manual_models(request: SimRequest) -> List[Dict[str, Any]]:
+    """Replica a geologia MANUAL (N camadas) ``n_models`` vezes (Fatia 6b).
+
+    O modo manual simula UM perfil (editor de camadas ou perfil canônico)
+    replicado em ``n_models`` cópias idênticas — paridade com o monólito
+    (``simulation_manager.py:~8281``, ``for _ in range(n_models)``). Como todos
+    têm o mesmo ``n_layers``, formam 1 grupo em :func:`_simulate_grouped`.
+
+    Args:
+        request: a requisição (campos ``manual_*`` + ``n_models``).
+
+    Returns:
+        Lista de ``n_models`` dicts ``{"n_layers", "rho_h", "rho_v", "thicknesses"}``.
+    """
+    model: Dict[str, Any] = {
+        "n_layers": int(request.manual_n_layers),
+        "rho_h": list(request.manual_rho_h),
+        "rho_v": list(request.manual_rho_v),
+        "thicknesses": list(request.manual_thicknesses),
+    }
+    return [dict(model) for _ in range(max(1, int(request.n_models)))]
+
+
 def _simulate_grouped(
     models: List[Dict[str, Any]],
     positions_z: np.ndarray,
@@ -337,6 +370,7 @@ def _simulate_grouped(
             tr_spacings_m=trs,
             dip_degs=dips,
             backend=request.backend,
+            hankel_filter=request.hankel_filter,
         )
         if h6_out is None:
             # 1º grupo define o shape downstream (nTR, nAng, n_pos, nf, 9).
@@ -389,10 +423,14 @@ def _run_simulation(
         (pools distintos), mas a arquitetura manda ``ProcessPoolExecutor`` para
         CPU-bound em produção (isola o pool Numba, melhor p/ multi-sim concorrente).
     """
-    if request.geology_mode == "stochastic":
-        # Geração estocástica (pode ser ragged) → agrupa por n_layers.
+    if request.geology_mode in ("stochastic", "manual"):
+        # Geração estocástica (ragged) OU geologia MANUAL N-camadas (replicada
+        # n_models×). Ambas reusam ``_simulate_grouped`` (agrupa por n_layers).
         positions_z = _compute_positions_z(request)
-        models = _generate_stochastic_models(request)
+        if request.geology_mode == "manual":
+            models = _manual_models(request)
+        else:
+            models = _generate_stochastic_models(request)
         h6, info = _simulate_grouped(
             models, positions_z, request, progress_callback, cancel_event, pause_event
         )
@@ -416,6 +454,7 @@ def _run_simulation(
             tr_spacings_m=list(request.tr_spacings_m),
             dip_degs=list(request.dip_degs),
             backend=request.backend,
+            hankel_filter=request.hankel_filter,
         )
         if progress_callback is not None:
             progress_callback(request.n_models, request.n_models)  # 100%
