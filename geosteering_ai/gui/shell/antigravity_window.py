@@ -85,6 +85,28 @@ class AntigravityMainWindow(MainWindowBase):  # type: ignore[misc] # QtWidgets �
         self.setCentralWidget(central)
 
         self._rail.selected.connect(self._on_rail_selected)
+        self._init_status_fields()
+
+    def _init_status_fields(self) -> None:
+        """Campos PERMANENTES da status bar (Cache · Plot · Binding) — espelha o monólito.
+
+        Ficam à direita (``addPermanentWidget``). ``Binding`` é sempre-ligado (do
+        ``qt_compat``); ``Cache``/``Plot`` são atualizados pela perspectiva ativa via
+        os setters expostos em ``ctx.extras["status_bar"]`` (sem acoplar o ViewModel).
+        """
+        from geosteering_ai.gui.qt_compat import QT_BINDING
+
+        bar = self.statusBar()
+        self._sb_cache = QtWidgets.QLabel("Cache: 0")
+        self._sb_plot = QtWidgets.QLabel("Plot: —")
+        self._sb_binding = QtWidgets.QLabel(f"Binding: {QT_BINDING or '—'}")
+        for widget in (self._sb_cache, self._sb_plot, self._sb_binding):
+            widget.setProperty("role", "hint")
+            bar.addPermanentWidget(widget)
+        self.ctx.extras["status_bar"] = {
+            "set_cache": lambda text: self._sb_cache.setText(f"Cache: {text}"),
+            "set_plot": lambda text: self._sb_plot.setText(f"Plot: {text}"),
+        }
 
     # ── Accessors do host (rail + stack) ───────────────────────────────────
     def _host_count(self) -> int:

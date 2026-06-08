@@ -127,9 +127,27 @@ class SimulationPerspective(Perspective):
         # resultado de simulação → snapshot + cache (reabrível por double-click)
         sim_vm.result_ready.connect(self._on_sim_result)
 
+        # ── Status bar (Lote 1) — Plot backend + Cache (se o shell os expõe) ──
+        status_bar = ctx.extras.get("status_bar")
+        if isinstance(status_bar, dict):
+            self._sb_set_plot = status_bar.get("set_plot")
+            self._sb_set_cache = status_bar.get("set_cache")
+            if self._sb_set_plot is not None:
+                self._sb_set_plot(sim_vm.results.plot_backend.value)
+                sim_vm.results.changed.connect(self._on_results_changed_status)
+            if self._sb_set_cache is not None:
+                self._exp_vm.cache_status_changed.connect(
+                    lambda *_: self._sb_set_cache(self._exp_vm.cache_count)
+                )
+
         self._exp_vm.new_experiment("Sessão", "", "sm_experiments")  # default em RAM
         self._exp_vm.load_recents()
         return view
+
+    def _on_results_changed_status(self, name: str, _value: object) -> None:
+        """Atualiza o campo Plot da status bar quando o backend de plot muda."""
+        if name == "_plot_backend" and getattr(self, "_sb_set_plot", None):
+            self._sb_set_plot(self._sim_vm.results.plot_backend.value)
 
     # ── Handlers de experimentos & histórico (Fatia 6c) ─────────────────────
     def _on_experiment_changed(self, exp: object) -> None:

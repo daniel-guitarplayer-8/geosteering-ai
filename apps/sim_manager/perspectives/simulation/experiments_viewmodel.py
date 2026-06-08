@@ -89,6 +89,11 @@ class ExperimentsViewModel(BaseViewModel):
         """``True`` se o bundle do snapshot está em cache (ícone ●)."""
         return snap_id in self._cache_keys
 
+    @property
+    def cache_count(self) -> int:
+        """Nº de bundles atualmente em cache (campo Cache da status bar)."""
+        return len(self._cache_keys)
+
     # ── Ações ──────────────────────────────────────────────────────────────
     def new_experiment(self, name: str, description: str, output_dir: str) -> bool:
         """Cria um experimento novo (vira o atual). ``False`` se nome vazio."""

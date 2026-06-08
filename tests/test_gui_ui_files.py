@@ -80,8 +80,16 @@ _BINDING_CONTRACT = (
     "hankelAutoRadio",
     "hankelOrderSpin",
     "hankelPathEdit",
+    # paralelismo + saída (Lote 1)
     "workersSpin",
     "threadsSpin",
+    "cpuInfoLabel",
+    "parallelWarnLabel",
+    "saveArtifactsCheck",
+    # contadores derivados (Lote 1)
+    "nfLabel",
+    "nthetaLabel",
+    "ntrPairsLabel",
     "runButton",
     "pauseButton",
     "resumeButton",
