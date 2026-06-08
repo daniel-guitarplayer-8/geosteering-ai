@@ -135,6 +135,30 @@ def test_run_simulation_artifacts_off_by_default(tmp_path):
     assert not (tmp_path / "sm_output.dat").exists()
 
 
+def test_vm_surfaces_artifacts_in_log():
+    """O VM EXIBE no log o sucesso/erro dos artefatos (achado da revisão: era silencioso)."""
+    vm = _make_sim_vm()
+    logs: list = []
+    vm.log_entry.connect(logs.append)
+    h6 = np.zeros((1, 1, 1, 4, 1, 9), dtype=np.complex128)
+    base = {
+        "H6": h6,
+        "positions_z": np.linspace(-1.0, 9.0, 4),
+        "info": {},
+        "geology": [],
+        "n_models": 1,
+    }
+    vm._on_sim_finished(
+        {**base, "artifacts_error": "permissão negada", "artifacts_path": None}
+    )
+    assert any("Falha ao salvar artefatos" in m for m in logs)
+    logs.clear()
+    vm._on_sim_finished(
+        {**base, "artifacts_error": None, "artifacts_path": "/tmp/x/sm_output.dat"}
+    )
+    assert any("Artefatos salvos" in m for m in logs)
+
+
 def test_run_simulation_artifacts_error_does_not_crash():
     """Diretório inválido → artifacts_error setado, mas o H6 É retornado (sim não falha)."""
     out = _run_simulation(

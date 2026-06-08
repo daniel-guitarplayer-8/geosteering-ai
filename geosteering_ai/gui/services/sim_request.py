@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from dataclasses import dataclass
@@ -37,6 +38,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 __all__ = ["SimRequest", "compute_n_pos"]
+
+logger = logging.getLogger(__name__)
 
 # Tipo do callback de progresso: ``progress_callback(done, total)`` (Fatia 6a). É
 # injetado pelo ``Worker`` (emite ``signals.progress`` → QueuedConnection → VM). No
@@ -564,6 +567,9 @@ def _run_simulation(
                 request.output_dir, h6, positions_z, geology, request
             )
         except Exception as exc:  # noqa: BLE001 — I/O best-effort; sim não falha
+            # Loga o traceback completo (debug) + propaga a msg via artifacts_error
+            # (a View a exibe no log — ver viewmodel._on_sim_finished).
+            logger.warning("Falha ao gravar artefatos Fortran: %s", exc, exc_info=True)
             artifacts_error = str(exc)
     return {
         "H6": h6,

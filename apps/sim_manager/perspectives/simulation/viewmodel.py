@@ -818,6 +818,14 @@ class SimulationViewModel(BaseViewModel):
             f"✓ Concluído: {n} modelo(s) em {self._sim_elapsed_s:.1f} s "
             f"({self._sim_throughput:.0f} mod/s)"
         )
+        # ── Artefatos Fortran-compat (Lote 1) — surface ao usuário no log ────
+        # (a escrita .dat/.out é best-effort no service; aqui a View vê o resultado).
+        artifacts_error = result.get("artifacts_error")
+        artifacts_path = result.get("artifacts_path")
+        if artifacts_error:
+            self.log_entry.emit(f"⚠ Falha ao salvar artefatos Fortran: {artifacts_error}")
+        elif artifacts_path:
+            self.log_entry.emit(f"💾 Artefatos salvos: {artifacts_path} (+ .out)")
         self._set("_status", "done")
         self.result_ready.emit(result)
 

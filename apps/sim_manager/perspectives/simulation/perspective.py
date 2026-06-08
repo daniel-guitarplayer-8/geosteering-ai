@@ -128,6 +128,10 @@ class SimulationPerspective(Perspective):
         sim_vm.result_ready.connect(self._on_sim_result)
 
         # ── Status bar (Lote 1) — Plot backend + Cache (se o shell os expõe) ──
+        # Setters sempre existem como atributos (None se o shell não os expõe) —
+        # contrato explícito; os handlers guardam contra teardown do widget Qt.
+        self._sb_set_plot = None
+        self._sb_set_cache = None
         status_bar = ctx.extras.get("status_bar")
         if isinstance(status_bar, dict):
             self._sb_set_plot = status_bar.get("set_plot")
@@ -136,9 +140,7 @@ class SimulationPerspective(Perspective):
                 self._sb_set_plot(sim_vm.results.plot_backend.value)
                 sim_vm.results.changed.connect(self._on_results_changed_status)
             if self._sb_set_cache is not None:
-                self._exp_vm.cache_status_changed.connect(
-                    lambda *_: self._sb_set_cache(self._exp_vm.cache_count)
-                )
+                self._exp_vm.cache_status_changed.connect(self._on_cache_status_changed)
 
         self._exp_vm.new_experiment("Sessão", "", "sm_experiments")  # default em RAM
         self._exp_vm.load_recents()
@@ -146,8 +148,20 @@ class SimulationPerspective(Perspective):
 
     def _on_results_changed_status(self, name: str, _value: object) -> None:
         """Atualiza o campo Plot da status bar quando o backend de plot muda."""
-        if name == "_plot_backend" and getattr(self, "_sb_set_plot", None):
-            self._sb_set_plot(self._sim_vm.results.plot_backend.value)
+        if name == "_plot_backend" and self._sb_set_plot is not None:
+            try:
+                self._sb_set_plot(self._sim_vm.results.plot_backend.value)
+            except RuntimeError:
+                pass  # widget Qt já destruído (ordem de teardown) — não-fatal
+
+    def _on_cache_status_changed(self, *_: object) -> None:
+        """Atualiza o campo Cache da status bar (guardado contra teardown do widget)."""
+        if self._sb_set_cache is None:
+            return
+        try:
+            self._sb_set_cache(self._exp_vm.cache_count)
+        except RuntimeError:
+            pass  # widget Qt já destruído (ordem de teardown) — não-fatal
 
     # ── Handlers de experimentos & histórico (Fatia 6c) ─────────────────────
     def _on_experiment_changed(self, exp: object) -> None:

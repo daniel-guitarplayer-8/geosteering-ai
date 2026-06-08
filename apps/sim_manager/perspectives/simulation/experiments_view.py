@@ -33,7 +33,7 @@ __all__ = ["ExperimentsPanel", "NewExperimentDialog"]
 _SNAP_ROLE = int(Qt.ItemDataRole.UserRole)
 
 
-def _no_hscroll(widget: Any, elide: Any) -> None:
+def _no_hscroll(widget: Any, elide: "Qt.TextElideMode") -> None:
     """Configura um ``QListWidget`` p/ NÃO vazar a coluna (elide + sem h-scroll).
 
     Elide é só de pintura — ``item.text()`` permanece íntegro (emits corretos).
