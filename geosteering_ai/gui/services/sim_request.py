@@ -163,6 +163,16 @@ class SimRequest:
     manual_thicknesses: Tuple[float, ...] = ()
     manual_rho_h: Tuple[float, ...] = ()
     manual_rho_v: Tuple[float, ...] = ()
+    # ── Lote 1 — paralelismo + saída Fortran-compat ──────────────────────────
+    # threads_per_worker tem EFEITO REAL: numba.set_num_threads(...) antes do
+    # simulate_batch (knob de threading → resultados bit-idênticos; clampado a
+    # NUMBA_NUM_THREADS). ``0`` = não toca o numba (default p/ chamadas diretas em
+    # teste — a View/VM sempre passa ≥1). n_workers é transportado (pool = Fatia 5).
+    n_workers: int = 1
+    threads_per_worker: int = 0
+    # Se save_fortran_artifacts e output_dir, grava .dat (22-col) + .out ASCII.
+    output_dir: str = ""
+    save_fortran_artifacts: bool = False
 
 
 # Modelo TIV de referência (3 camadas): ρₕ por camada + λ²=2 (anisotropia branda,
@@ -386,6 +396,75 @@ def _simulate_grouped(
     return h6_out, {"groups": info_by_group, "n_groups": len(groups)}
 
 
+def _apply_thread_count(threads_per_worker: int) -> None:
+    """Aplica ``numba.set_num_threads`` (knob de threading — resultados bit-idênticos).
+
+    Clampa a ``NUMBA_NUM_THREADS`` (``set_num_threads`` levanta se exceder). ``≤0`` =
+    não toca (default p/ chamadas diretas em teste). Best-effort: qualquer falha
+    (numba ausente, valor inválido) é silenciosa — NUNCA afeta a física nem derruba a
+    simulação.
+    """
+    try:
+        n = int(threads_per_worker)
+        if n < 1:
+            return
+        import numba  # lazy
+
+        cap = int(numba.config.NUMBA_NUM_THREADS)
+        numba.set_num_threads(min(n, cap))
+    except Exception:  # noqa: BLE001 — best-effort; threading não é física
+        pass
+
+
+def _write_fortran_artifacts(
+    out_dir: str,
+    h6: np.ndarray,
+    positions_z: np.ndarray,
+    geology: List[Dict[str, Any]],
+    request: SimRequest,
+) -> str:
+    """Grava ``.dat`` (22-col) + ``.out`` (ASCII) Fortran-compat; retorna o path do .dat.
+
+    ``col2/col3`` (ρₕ/ρᵥ no ponto de observação) vêm de :func:`derived.rho_profile`
+    (byte-fiel ao perfil — convenção do monólito). NÃO toca a física: só serializa o
+    H6 já computado.
+    """
+    import os
+
+    from geosteering_ai.gui.services.derived import rho_profile
+    from geosteering_ai.simulation.io.tensor_dat import (
+        write_dat_from_tensor,
+        write_out_file,
+    )
+
+    os.makedirs(out_dir, exist_ok=True)
+    n_models, _n_tr, n_ang, n_pos, n_f, _ = h6.shape
+    z = np.asarray(positions_z, dtype=np.float64).reshape(-1)
+    # ρ no ponto de observação (n_models, n_pos) → broadcast no eixo de ângulos.
+    rho_h_obs = np.stack(
+        [rho_profile(z, g["rho_h"], g["thicknesses"]) for g in geology]
+    )
+    rho_v_obs = np.stack(
+        [rho_profile(z, g["rho_v"], g["thicknesses"]) for g in geology]
+    )
+    rho_h_obs = np.broadcast_to(rho_h_obs[:, None, :], (n_models, n_ang, n_pos))
+    rho_v_obs = np.broadcast_to(rho_v_obs[:, None, :], (n_models, n_ang, n_pos))
+    dat_path = os.path.join(out_dir, "sm_output.dat")
+    write_dat_from_tensor(
+        dat_path, h6, z, rho_h_at_obs=rho_h_obs, rho_v_at_obs=rho_v_obs
+    )
+    write_out_file(
+        os.path.join(out_dir, "sm_output.out"),
+        n_dips=n_ang,
+        n_freqs=n_f,
+        nmaxmodel=n_models,
+        angles=list(request.dip_degs),
+        freqs_hz=list(request.frequencies_hz),
+        nmeds_per_angle=[n_pos] * n_ang,
+    )
+    return dat_path
+
+
 def _run_simulation(
     request: SimRequest,
     progress_callback: _ProgressCb = None,
@@ -423,6 +502,8 @@ def _run_simulation(
         (pools distintos), mas a arquitetura manda ``ProcessPoolExecutor`` para
         CPU-bound em produção (isola o pool Numba, melhor p/ multi-sim concorrente).
     """
+    # Threads do Numba (efeito REAL; resultados bit-idênticos) — antes do kernel.
+    _apply_thread_count(request.threads_per_worker)
     if request.geology_mode in ("stochastic", "manual"):
         # Geração estocástica (ragged) OU geologia MANUAL N-camadas (replicada
         # n_models×). Ambas reusam ``_simulate_grouped`` (agrupa por n_layers).
@@ -472,6 +553,18 @@ def _run_simulation(
             {"rho_h": rho_h[i], "rho_v": rho_v[i], "thicknesses": esp[i]}
             for i in range(rho_h.shape[0])
         ]
+    # ── Lote 1 — artefatos Fortran-compat (.dat/.out), best-effort ───────────
+    # Serialização do H6 JÁ computado (zero física). Falha (permissão/disco) NÃO
+    # derruba o resultado: registra ``artifacts_error`` p/ a View exibir.
+    artifacts_path: Optional[str] = None
+    artifacts_error: Optional[str] = None
+    if request.save_fortran_artifacts and request.output_dir and h6 is not None:
+        try:
+            artifacts_path = _write_fortran_artifacts(
+                request.output_dir, h6, positions_z, geology, request
+            )
+        except Exception as exc:  # noqa: BLE001 — I/O best-effort; sim não falha
+            artifacts_error = str(exc)
     return {
         "H6": h6,
         "positions_z": positions_z,
@@ -480,4 +573,7 @@ def _run_simulation(
         # ── Fatia 6d — geologia por modelo (perfis ρ/λ) + nº modelos ─────────
         "geology": geology,
         "n_models": len(geology),
+        # ── Lote 1 — artefatos Fortran-compat (path ou erro; None se desligado) ──
+        "artifacts_path": artifacts_path,
+        "artifacts_error": artifacts_error,
     }

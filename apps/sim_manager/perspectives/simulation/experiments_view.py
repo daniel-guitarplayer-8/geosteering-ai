@@ -33,6 +33,18 @@ __all__ = ["ExperimentsPanel", "NewExperimentDialog"]
 _SNAP_ROLE = int(Qt.ItemDataRole.UserRole)
 
 
+def _no_hscroll(widget: Any, elide: Any) -> None:
+    """Configura um ``QListWidget`` p/ NÃO vazar a coluna (elide + sem h-scroll).
+
+    Elide é só de pintura — ``item.text()`` permanece íntegro (emits corretos).
+    ``setUniformItemSizes`` acelera o layout de listas grandes.
+    """
+    widget.setWordWrap(False)
+    widget.setUniformItemSizes(True)
+    widget.setTextElideMode(elide)
+    widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+
 class NewExperimentDialog(QtWidgets.QDialog):  # type: ignore[misc] # QtWidgets é Any
     """Dialog de criação de experimento (nome + descrição + diretório de saída)."""
 
@@ -120,6 +132,10 @@ class ExperimentsPanel(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
         self._search.textChanged.connect(lambda _t: self._apply_filter())
 
         self._list = QtWidgets.QListWidget()
+        # Anti-overflow (sem vazar a coluna): elide o texto + NUNCA scrollbar
+        # horizontal. ``item.text()`` permanece o texto COMPLETO (elide é só
+        # pintura), então double-click/emit continuam corretos.
+        _no_hscroll(self._list, Qt.TextElideMode.ElideRight)
         self._list.itemDoubleClicked.connect(self._on_double_click)
         self._list.currentItemChanged.connect(self._on_current_changed)
 
@@ -135,6 +151,10 @@ class ExperimentsPanel(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
         # ── Recentes ──────────────────────────────────────────────────────
         self._recents = QtWidgets.QListWidget()
         self._recents.setMaximumHeight(90)
+        # Caminhos absolutos longos: elide no MEIO (preserva o basename) + sem
+        # scrollbar horizontal. ``item.text()`` segue completo → emit do caminho
+        # íntegro (não truncado). Tooltip por item mostra o caminho completo.
+        _no_hscroll(self._recents, Qt.TextElideMode.ElideMiddle)
         self._recents.itemDoubleClicked.connect(
             lambda it: self.recent_activated.emit(it.text())
         )
@@ -152,11 +172,18 @@ class ExperimentsPanel(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
 
     # ── API (chamada pela perspectiva) ─────────────────────────────────────
     def set_experiment_label(self, name: Optional[str], path: str = "") -> None:
-        """Atualiza o rótulo do experimento atual."""
+        """Atualiza o rótulo do experimento (nome no rótulo; caminho no tooltip).
+
+        Exibir o caminho absoluto INLINE vaza a coluna (um path sem espaços não
+        quebra com ``wordWrap``). Mostramos só o nome; o caminho completo fica no
+        tooltip + no campo Exp da status bar.
+        """
         if name:
-            self._exp_label.setText(f"{name}  ·  {path}" if path else name)
+            self._exp_label.setText(name)
+            self._exp_label.setToolTip(f"{name}  ·  {path}" if path else name)
         else:
             self._exp_label.setText("(sem experimento)")
+            self._exp_label.setToolTip("")
 
     def add_snapshot(
         self, snap_id: str, label: str, *, in_cache: bool, info: str = ""
@@ -182,9 +209,12 @@ class ExperimentsPanel(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
         self._info.setPlainText(text)
 
     def set_recents(self, paths: List[str]) -> None:
-        """Popula a lista de recentes."""
+        """Popula a lista de recentes (tooltip = caminho completo; texto elidido)."""
         self._recents.clear()
-        self._recents.addItems(list(paths))
+        for path in paths:
+            item = QtWidgets.QListWidgetItem(path)
+            item.setToolTip(path)  # caminho completo no hover (texto pintado elide)
+            self._recents.addItem(item)
 
     def clear_history(self) -> None:
         """Limpa a lista + info."""

@@ -133,6 +133,11 @@ class SimulationViewModel(BaseViewModel):
         "_generator",
         "_rng_seed",
         "_backend",
+        # ── Paralelismo (Lote 1) + Saída ──
+        "_n_workers",
+        "_threads_per_worker",
+        "_output_dir",
+        "_save_fortran_artifacts",
     )
 
     def __init__(self, service: Any) -> None:
@@ -175,6 +180,23 @@ class SimulationViewModel(BaseViewModel):
         # Backend de simulação (spec 0012). Default "numba" (in-thread, rápido, sem
         # spawn); "jax"/"auto" rodam em subprocesso (GPU, TLS-safe).
         self._backend: str = "numba"
+        # ── Paralelismo (Lote 1) — defaults da topologia da CPU ──────────────
+        # threads tem efeito REAL (numba.set_num_threads antes do simulate_batch);
+        # n_workers é estado/UI (ProcessPool real = Fatia 5). Import LAZY+guardado
+        # (mantém o VM leve; fallback (4,1) se a detecção falhar).
+        try:
+            from geosteering_ai.simulation._workers import (
+                recommend_default_parallelism,
+            )
+
+            _def_w, _def_t = recommend_default_parallelism()
+        except Exception:  # noqa: BLE001 — detecção best-effort; fallback seguro
+            _def_w, _def_t = 4, 1
+        self._n_workers: int = int(_def_w)
+        self._threads_per_worker: int = int(_def_t)
+        # ── Saída — diretório + artefatos Fortran-compat (.dat/.out) ─────────
+        self._output_dir: str = ""
+        self._save_fortran_artifacts: bool = False
         # ── Fatia 6b — filtro de Hankel + geologia manual ───────────────────
         self._hankel_filter: str = "werthmuller_201pt"
         # Geologia manual (editor de camadas / perfil canônico). None ⇒ não-manual.
@@ -261,6 +283,44 @@ class SimulationViewModel(BaseViewModel):
     @n_models.setter
     def n_models(self, value: int) -> None:
         self._set("_n_models", int(value))
+
+    # ── Paralelismo (Lote 1) — workers (estado) + threads (efeito real) ──────
+    @property
+    def n_workers(self) -> int:
+        """Nº de workers sandbox (1–256). Estado/UI; ProcessPool real = Fatia 5."""
+        return self._n_workers
+
+    @n_workers.setter
+    def n_workers(self, value: int) -> None:
+        self._set("_n_workers", int(min(max(int(value), 1), 256)))
+
+    @property
+    def threads_per_worker(self) -> int:
+        """Nº de threads por worker (1–256). EFEITO REAL via numba.set_num_threads."""
+        return self._threads_per_worker
+
+    @threads_per_worker.setter
+    def threads_per_worker(self, value: int) -> None:
+        self._set("_threads_per_worker", int(min(max(int(value), 1), 256)))
+
+    # ── Saída — diretório + artefatos Fortran-compat (.dat/.out) ─────────────
+    @property
+    def output_dir(self) -> str:
+        """Diretório de saída p/ os artefatos Fortran-compat (vazio = não grava)."""
+        return self._output_dir
+
+    @output_dir.setter
+    def output_dir(self, value: str) -> None:
+        self._set("_output_dir", str(value))
+
+    @property
+    def save_fortran_artifacts(self) -> bool:
+        """Se ``True``, grava ``.dat`` (22-col) + ``.out`` ASCII após a simulação."""
+        return self._save_fortran_artifacts
+
+    @save_fortran_artifacts.setter
+    def save_fortran_artifacts(self, value: bool) -> None:
+        self._set("_save_fortran_artifacts", bool(value))
 
     # ── Properties de geologia estocástica (Fatia 3) ─────────────────────────
     @property
@@ -642,6 +702,11 @@ class SimulationViewModel(BaseViewModel):
             ),
             manual_rho_h=(self._manual_layers.rho_h if self._manual_layers else ()),
             manual_rho_v=(self._manual_layers.rho_v if self._manual_layers else ()),
+            # ── Paralelismo (Lote 1) + Saída ────────────────────────────────
+            n_workers=self._n_workers,
+            threads_per_worker=self._threads_per_worker,
+            output_dir=self._output_dir,
+            save_fortran_artifacts=self._save_fortran_artifacts,
         )
         # Reseta o feedback de execução (Fatia 6a) ANTES de iniciar.
         self._progress_done = 0
@@ -792,6 +857,11 @@ class SimulationViewModel(BaseViewModel):
             "generator": self._generator,
             "rng_seed": self._rng_seed,
             "backend": self._backend,
+            # ── Paralelismo (Lote 1) + Saída ────────────────────────────────
+            "n_workers": self._n_workers,
+            "threads_per_worker": self._threads_per_worker,
+            "output_dir": self._output_dir,
+            "save_fortran_artifacts": self._save_fortran_artifacts,
             # ── Fatia 6b — filtro de Hankel + geologia manual ───────────────
             "hankel_filter": self._hankel_filter,
             "manual_layers": (
@@ -842,6 +912,10 @@ class SimulationViewModel(BaseViewModel):
             "generator",
             "rng_seed",
             "backend",
+            "n_workers",
+            "threads_per_worker",
+            "output_dir",
+            "save_fortran_artifacts",
             "hankel_filter",
         ):
             if key in data:

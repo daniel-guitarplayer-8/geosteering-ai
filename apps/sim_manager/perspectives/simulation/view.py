@@ -65,6 +65,34 @@ def _parse_csv_floats(text: str) -> Tuple[float, ...]:
     return tuple(out)
 
 
+def _heading_title(text: str) -> Any:
+    """``QLabel`` de título de seção (``role="heading"`` — estilizado pelo QSS)."""
+    lbl = QtWidgets.QLabel(text)
+    lbl.setProperty("role", "heading")
+    return lbl
+
+
+def _hint(text: str) -> Any:
+    """``QLabel`` de subtítulo descritivo (``role="hint"`` — estilizado pelo QSS)."""
+    lbl = QtWidgets.QLabel(text)
+    lbl.setProperty("role", "hint")
+    lbl.setWordWrap(True)
+    return lbl
+
+
+def _group(title: str, hint: str, inner: Any) -> Any:
+    """``QGroupBox`` (card) com subtítulo ``role="hint"`` + um layout/widget interno."""
+    box = QtWidgets.QGroupBox(title)
+    vbox = QtWidgets.QVBoxLayout(box)
+    if hint:
+        vbox.addWidget(_hint(hint))
+    if isinstance(inner, QtWidgets.QLayout):
+        vbox.addLayout(inner)
+    else:
+        vbox.addWidget(inner)
+    return box
+
+
 class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any → mypy
     """View da Simulação: inputs + Run + status + 1 plot, ligada a um ViewModel.
 
@@ -152,8 +180,17 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             "· auto (decide GPU/CPU por tamanho/geometria). jax/auto rodam em subprocesso."
         )
 
+        # ── Contadores derivados (nf/ntheta/nº pares T-R) ────────────────────
+        # Read-only: derivados dos CSV de freqs/dips/TRs (atualizados em textChanged).
+        self._nf_label = QtWidgets.QLabel("—")
+        self._ntheta_label = QtWidgets.QLabel("—")
+        self._ntr_label = QtWidgets.QLabel("—")
+
         # ── Geologia estocástica (Fatia 3) ───────────────────────────────────
         self._geology_box = self._build_geology_group(vm)
+        # ── Paralelismo (Lote 1) + Saída ─────────────────────────────────────
+        self._parallel_box = self._build_parallelism_group(vm)
+        self._output_box = self._build_output_group(vm)
 
         self._n_pos_label = QtWidgets.QLabel("n_pos: —")
         # ── Execução & feedback (Fatia 6a) ───────────────────────────────────
@@ -179,7 +216,13 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._results = ResultsView(vm.results, parent=self)
 
         # ── Layout ────────────────────────────────────────────────────────────
+        # Geometria + aquisição (com contadores derivados no topo, espelhando o
+        # monólito: "Nº de frequências (nf)", "Nº de ângulos (ntheta)", "Nº de
+        # pares T-R" como rótulos read-only acima dos CSV que os definem).
         form = QtWidgets.QFormLayout()
+        form.addRow("Nº de frequências (nf):", self._nf_label)
+        form.addRow("Nº de ângulos (ntheta):", self._ntheta_label)
+        form.addRow("Nº de pares T-R:", self._ntr_label)
         form.addRow("Frequências (Hz):", self._freqs)
         form.addRow("Dips (°):", self._dips)
         form.addRow("Espaçamentos TR (m):", self._trs)
@@ -189,6 +232,12 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         form.addRow("Nº modelos:", self._n_models)
         form.addRow("Backend:", self._sim_backend)
         form.addRow("Posições derivadas:", self._n_pos_label)
+        geometry_box = _group(
+            "Geometria da ferramenta e aquisição",
+            "Configure a geometria da ferramenta LWD e a aquisição. Passe o mouse "
+            "sobre cada campo para uma explicação detalhada.",
+            form,
+        )
         # Linha 1: execução (Iniciar/Pausar/Cancelar) + progresso.
         exec_row = QtWidgets.QHBoxLayout()
         exec_row.addWidget(self._run_btn)
@@ -202,8 +251,11 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         session_row.addWidget(self._status)
         session_row.addStretch(1)
         root = QtWidgets.QVBoxLayout(self)
-        root.addLayout(form)
+        root.addWidget(_heading_title("Parâmetros da simulação"))
+        root.addWidget(geometry_box)
         root.addWidget(self._geology_box)
+        root.addWidget(self._parallel_box)
+        root.addWidget(self._output_box)
         root.addLayout(exec_row)
         root.addLayout(session_row)
         root.addWidget(self._results, stretch=1)
@@ -220,6 +272,11 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._tj.valueChanged.connect(self._refresh_n_pos)
         self._p_med.valueChanged.connect(self._refresh_n_pos)
         self._refresh_n_pos()
+        # Contadores nf/ntheta/nTR derivados dos CSV (atualizam ao digitar).
+        self._freqs.textChanged.connect(self._refresh_counts)
+        self._dips.textChanged.connect(self._refresh_counts)
+        self._trs.textChanged.connect(self._refresh_counts)
+        self._refresh_counts()
         # Geologia: habilita os campos só no modo "stochastic" (UX reativa —
         # no modo "fixed" eles são ignorados, então ficam desabilitados/cinza).
         self._geo_mode.currentTextChanged.connect(self._on_geology_mode_changed)
@@ -368,6 +425,127 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         box.setLayout(gform)
         return box
 
+    # ── Paralelismo (Lote 1) — workers + threads + CPU + aviso ───────────────
+    def _build_parallelism_group(self, vm: SimulationViewModel) -> Any:
+        """Grupo "Paralelismo": workers + threads (efeito real) + info de CPU + aviso.
+
+        Defaults vêm do VM (``recommend_default_parallelism``); a linha de CPU usa
+        ``detect_cpu_topology`` (import LAZY+guardado, mantém a View leve). O aviso de
+        oversubscrição (``W×T ≤ cores físicos``) atualiza em ``valueChanged``.
+        """
+        self._n_workers = QtWidgets.QSpinBox()
+        self._n_workers.setRange(1, 256)
+        self._n_workers.setValue(vm.n_workers)
+        self._n_workers.setToolTip(
+            "Nº de workers sandbox (processos). ESTADO/UI — o ProcessPoolExecutor "
+            "real é a Fatia 5; hoje o numba roda in-process com N threads."
+        )
+        self._threads = QtWidgets.QSpinBox()
+        self._threads.setRange(1, 256)
+        self._threads.setValue(vm.threads_per_worker)
+        self._threads.setToolTip(
+            "Nº de threads por worker. EFEITO REAL: numba.set_num_threads(...) antes "
+            "do simulate_batch (resultados bit-idênticos; clampado a NUMBA_NUM_THREADS)."
+        )
+        # Topologia da CPU (best-effort) — espelha a linha do monólito.
+        try:
+            from geosteering_ai.simulation._workers import detect_cpu_topology
+
+            _logical, _physical, _ht = detect_cpu_topology()
+            self._physical_cores = int(_physical)
+            ht = " (HT/SMT ativo)" if _ht else ""
+            cpu_txt = (
+                f"CPU: {_physical} cores físicos · {_logical} threads lógicas{ht}"
+            )
+        except Exception:  # noqa: BLE001 — detecção best-effort
+            self._physical_cores = 0
+            cpu_txt = "CPU: topologia indisponível"
+        self._cpu_info = QtWidgets.QLabel(cpu_txt)
+        self._cpu_info.setProperty("role", "hint")
+        self._parallel_warn = QtWidgets.QLabel("")
+        self._parallel_warn.setWordWrap(True)
+        self._n_workers.valueChanged.connect(self._refresh_parallel_warn)
+        self._threads.valueChanged.connect(self._refresh_parallel_warn)
+
+        pform = QtWidgets.QFormLayout()
+        pform.addRow("Nº de workers sandbox:", self._n_workers)
+        pform.addRow("Nº de threads por worker:", self._threads)
+        pform.addRow(self._cpu_info)
+        pform.addRow(self._parallel_warn)
+        box = _group(
+            "Paralelismo",
+            "Defina o paralelismo por workers sandbox (threads têm efeito real no "
+            "numba; o pool de processos é a Fatia 5).",
+            pform,
+        )
+        self._refresh_parallel_warn()
+        return box
+
+    # ── Saída (Lote 1) — diretório + artefatos Fortran-compat ────────────────
+    def _build_output_group(self, vm: SimulationViewModel) -> Any:
+        """Grupo "Saída": diretório + "Procurar…" + checkbox de artefatos .dat/.out."""
+        self._output_dir = QtWidgets.QLineEdit(vm.output_dir)
+        self._output_dir.setPlaceholderText("Diretório de saída (vazio = não grava)…")
+        self._browse_out = QtWidgets.QPushButton("Procurar…")
+        self._browse_out.setProperty("role", "ghost")
+        self._browse_out.clicked.connect(self._on_browse_output)
+        self._save_artifacts = QtWidgets.QCheckBox(
+            "Salvar artefatos Fortran-compat (.dat binário 22-col + .out ASCII)"
+        )
+        self._save_artifacts.setChecked(vm.save_fortran_artifacts)
+        self._save_artifacts.setToolTip(
+            "Após a simulação, grava o tensor H em .dat (22-col) + metadados .out "
+            "(idênticos ao tatu.x). col2/col3 = ρₕ/ρᵥ no ponto de observação."
+        )
+        dir_row = QtWidgets.QHBoxLayout()
+        dir_row.addWidget(self._output_dir, stretch=1)
+        dir_row.addWidget(self._browse_out)
+        vbox = QtWidgets.QVBoxLayout()
+        vbox.addLayout(dir_row)
+        vbox.addWidget(self._save_artifacts)
+        return _group(
+            "Saída",
+            "Diretório e artefatos Fortran-compatíveis (.dat/.out) gravados ao fim "
+            "da simulação.",
+            vbox,
+        )
+
+    def _refresh_counts(self, *_: Any) -> None:
+        """Atualiza os contadores nf/ntheta/nº pares T-R (derivados dos CSV)."""
+        for widget, label in (
+            (self._freqs, self._nf_label),
+            (self._dips, self._ntheta_label),
+            (self._trs, self._ntr_label),
+        ):
+            try:
+                label.setText(str(len(_parse_csv_floats(widget.text()))))
+            except ValueError:
+                label.setText("—")
+
+    def _refresh_parallel_warn(self, *_: Any) -> None:
+        """Aviso de oversubscrição: ``W×T ≤ cores físicos`` (senão ⚠, igual ao monólito)."""
+        w = self._n_workers.value()
+        t = self._threads.value()
+        total = w * t
+        phys = self._physical_cores
+        if phys and total > phys:
+            self._parallel_warn.setText(
+                f"⚠ Oversubscrição: {w}×{t} = {total} threads em {phys} cores "
+                f"físicos. Ideal: workers × threads ≤ {phys}."
+            )
+            self._parallel_warn.setStyleSheet("color: #f59e0b;")  # âmbar
+        else:
+            self._parallel_warn.setText("")
+            self._parallel_warn.setStyleSheet("")
+
+    def _on_browse_output(self) -> None:
+        """Abre um seletor de diretório → preenche o campo de saída."""
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Diretório de saída", self._output_dir.text() or ""
+        )
+        if path:
+            self._output_dir.setText(path)
+
     # ── Slots ─────────────────────────────────────────────────────────────────
     def _on_run_clicked(self) -> None:
         """Parseia os inputs, copia para o VM e dispara a simulação.
@@ -410,6 +588,11 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.rng_seed = (
             None if self._geo_seed_random.isChecked() else self._geo_seed.value()
         )
+        # ── Paralelismo (Lote 1) + Saída ─────────────────────────────────────
+        self._vm.n_workers = self._n_workers.value()
+        self._vm.threads_per_worker = self._threads.value()
+        self._vm.output_dir = self._output_dir.text().strip()
+        self._vm.save_fortran_artifacts = self._save_artifacts.isChecked()
         self._vm.run()
 
     def _refresh_n_pos(self, *_: Any) -> None:
@@ -606,6 +789,11 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.rng_seed = (
             None if self._geo_seed_random.isChecked() else self._geo_seed.value()
         )
+        # ── Paralelismo (Lote 1) + Saída ─────────────────────────────────────
+        self._vm.n_workers = self._n_workers.value()
+        self._vm.threads_per_worker = self._threads.value()
+        self._vm.output_dir = self._output_dir.text().strip()
+        self._vm.save_fortran_artifacts = self._save_artifacts.isChecked()
 
     def _sync_inputs_from_vm(self) -> None:
         """Reflete o estado do VM nos widgets de input (após abrir uma sessão)."""
@@ -635,4 +823,10 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._geo_seed_random.setChecked(self._vm.rng_seed is None)
         if self._vm.rng_seed is not None:
             self._geo_seed.setValue(self._vm.rng_seed)
+        # ── Paralelismo (Lote 1) + Saída ─────────────────────────────────────
+        self._n_workers.setValue(self._vm.n_workers)
+        self._threads.setValue(self._vm.threads_per_worker)
+        self._output_dir.setText(self._vm.output_dir)
+        self._save_artifacts.setChecked(self._vm.save_fortran_artifacts)
         self._refresh_n_pos()
+        self._refresh_counts()
