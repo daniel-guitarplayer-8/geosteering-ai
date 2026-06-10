@@ -54,6 +54,16 @@ import time
 # do usuário via `export JAX_PLATFORMS=cuda` ou `JAX_PLATFORMS=metal`.
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+# Sprint v2.55 — guard TLS-safe: pinar threads de BLAS/OpenMP ANTES de qualquer
+# import de numba/jax. OMP/OPENBLAS=1 impede que o pool de threads da BLAS consuma
+# o surplus de TLS estático — o que faria o init do threading-layer (libgomp) do
+# Numba estourar com `_dl_allocate_tls_init` quando o CUDA do JAX já alocou seu TLS
+# (cenário do usuário: `JAX_PLATFORMS=cuda ... --backend jax`). NUMBA_NUM_THREADS é
+# pinado (≥1) p/ fixar o pool prange. `setdefault` preserva override manual.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMBA_NUM_THREADS", str(os.cpu_count() or 1))
+
 # NUMBA_CACHE_DIR em tmpfs: `cache=True` em @njit armazena LLVM bitcode (.nbc),
 # não código de máquina. Cada novo processo Python ainda recompila o bitcode →
 # assembly nativo no backend LLVM (~111 s para 16 .nbc no projeto). Apontar
@@ -285,6 +295,76 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="suprime saída informativa (mantém erros)",
     )
+    # ── Backend + geometria + timing (spec 0003 + v2.53-v2.56) ─────
+    p_sim.add_argument(
+        "--backend",
+        choices=["numba", "jax", "auto"],
+        default=None,
+        help=(
+            "motor de simulação: numba (CPU) | jax (GPU/CPU) | auto (decide "
+            "pela árvore do dispatcher). Default implícito: numba (com aviso "
+            "de deprecação — mudará p/ auto). Ver spec 0003."
+        ),
+    )
+    p_sim.add_argument(
+        "--geometry",
+        choices=["per-model", "templates", "quantized"],
+        default="per-model",
+        help=(
+            "amostragem da geometria (esp): per-model (default, único por modelo) "
+            "| templates (poucas geometrias distintas → agrupável p/ JAX) | "
+            "quantized (esp arredondada → agrupável parcial)"
+        ),
+    )
+    p_sim.add_argument(
+        "--warmup",
+        action="store_true",
+        help="aquece o backend (JIT/XLA) antes da medição (best-effort)",
+    )
+    p_sim.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="nº de rodadas cronometradas (reporta o melhor tempo). Default: 1",
+    )
+    p_sim.add_argument(
+        "--dtype",
+        choices=["complex64", "complex128"],
+        default="complex128",
+        help="dtype complexo do path JAX (default: complex128)",
+    )
+    p_sim.add_argument(
+        "--jax-strategy",
+        choices=["bucketed", "unified", "vmap_real"],
+        default="bucketed",
+        help="estratégia de paralelismo JAX (default: bucketed)",
+    )
+    p_sim.add_argument(
+        "--jax-chunk-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help="fragmenta o eixo de modelos do vmap JAX (anti-OOM). None = auto",
+    )
+    p_sim.add_argument(
+        "--format",
+        choices=["npz", "dat", "none"],
+        default="npz",
+        help=(
+            "formato de saída quando --out é dado: npz (tensor H) | dat (22-col "
+            "Fortran-compat + .out) | none (não grava). Default: npz"
+        ),
+    )
+    p_sim.add_argument(
+        "--json",
+        action="store_true",
+        help="emite o resultado (backend efetivo, timing) em JSON no stdout",
+    )
+    p_sim.add_argument(
+        "--compare-backends",
+        action="store_true",
+        help="roda numba E jax lado-a-lado: throughput, speedup e paridade max|Δ|",
+    )
 
     # ── benchmark ──────────────────────────────────────────────────
     p_bench = sub.add_parser(
@@ -348,6 +428,31 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="threads por worker (default: auto-detect)",
+    )
+    # ── Backend + saída (spec 0003 + v2.53) ────────────────────────
+    p_bench.add_argument(
+        "--backend",
+        choices=["numba", "jax", "auto"],
+        default=None,
+        help=(
+            "motor: numba (CPU) | jax (GPU/CPU) | auto (árvore do dispatcher). "
+            "Default implícito: numba (com aviso de deprecação). Ver spec 0003."
+        ),
+    )
+    p_bench.add_argument(
+        "--compare-backends",
+        action="store_true",
+        help="roda numba E jax lado-a-lado: throughput, speedup e paridade max|Δ|",
+    )
+    p_bench.add_argument(
+        "--json",
+        action="store_true",
+        help="emite o resultado (backend efetivo, throughput) em JSON no stdout",
+    )
+    p_bench.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suprime saída informativa (mantém erros e o JSON se --json)",
     )
 
     # ── version ────────────────────────────────────────────────────
