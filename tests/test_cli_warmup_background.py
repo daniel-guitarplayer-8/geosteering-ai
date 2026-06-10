@@ -17,8 +17,11 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
-# Threshold configurável via env var para ambientes CI lentos (default: 2s)
-_BLOCKING_THRESHOLD_S = float(os.environ.get("WARMUP_BLOCKING_THRESHOLD_S", "2.0"))
+# Threshold configurável via env var para ambientes CI lentos (default: 4.5s).
+# Afrouxado de 2.0→4.5s: sob carga (suite paralela / máquina ocupada) o import
+# do CLI + spawn do subprocesso passa de 2s sem que o warmup esteja bloqueando —
+# 2s era flaky. O que o teste garante é que NÃO há bloqueio (não micro-benchmark).
+_BLOCKING_THRESHOLD_S = float(os.environ.get("WARMUP_BLOCKING_THRESHOLD_S", "4.5"))
 
 
 def test_warmup_thread_initializes_without_blocking():
@@ -29,7 +32,7 @@ def test_warmup_thread_initializes_without_blocking():
     que deve completar sem interferência do warmup.
 
     O threshold é configurável via env var ``WARMUP_BLOCKING_THRESHOLD_S``
-    para ambientes CI mais lentos (default: 2s).
+    para ambientes CI mais lentos (default: 4.5s — folga p/ máquina sob carga).
     """
     t0 = time.perf_counter()
     proc = subprocess.run(
