@@ -32,7 +32,7 @@ from typing import Any, Tuple
 from apps.sim_manager.perspectives.simulation.results_view import ResultsView
 from apps.sim_manager.perspectives.simulation.viewmodel import SimulationViewModel
 from geosteering_ai.gui.persistence.session import SessionDocument
-from geosteering_ai.gui.qt_compat import QtWidgets
+from geosteering_ai.gui.qt_compat import Qt, QtWidgets
 from geosteering_ai.gui.services.sim_request import compute_n_pos
 from geosteering_ai.gui.services.stochastic_geology import GENERATORS_AVAILABLE
 
@@ -63,6 +63,34 @@ def _parse_csv_floats(text: str) -> Tuple[float, ...]:
         except ValueError:
             raise ValueError(f"valor não numérico: '{tok}'") from None
     return tuple(out)
+
+
+def _heading_title(text: str) -> Any:
+    """``QLabel`` de título de seção (``role="heading"`` — estilizado pelo QSS)."""
+    lbl = QtWidgets.QLabel(text)
+    lbl.setProperty("role", "heading")
+    return lbl
+
+
+def _hint(text: str) -> Any:
+    """``QLabel`` de subtítulo descritivo (``role="hint"`` — estilizado pelo QSS)."""
+    lbl = QtWidgets.QLabel(text)
+    lbl.setProperty("role", "hint")
+    lbl.setWordWrap(True)
+    return lbl
+
+
+def _group(title: str, hint: str, inner: Any) -> Any:
+    """``QGroupBox`` (card) com subtítulo ``role="hint"`` + um layout/widget interno."""
+    box = QtWidgets.QGroupBox(title)
+    vbox = QtWidgets.QVBoxLayout(box)
+    if hint:
+        vbox.addWidget(_hint(hint))
+    if isinstance(inner, QtWidgets.QLayout):
+        vbox.addLayout(inner)
+    else:
+        vbox.addWidget(inner)
+    return box
 
 
 class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any → mypy
@@ -123,6 +151,22 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             "estocástica (Σ espessuras = tj). n_pos = ceil(tj/(p_med·cos dip₀))."
         )
 
+        # ── Auto-geometria canônica (Lote 2) — h1/tj derivados do perfil ─────
+        # Dois checkboxes (espelham o monólito): ao aplicar um perfil canônico,
+        # derivam tj/h1 das funções canônicas (paridade). Ver _on_apply_canonical.
+        self._tj_auto = QtWidgets.QCheckBox("tj automático")
+        self._tj_auto.setChecked(vm.tj_auto)
+        self._tj_auto.setToolTip(
+            "Ao aplicar um perfil canônico, deriva tj da janela de referência "
+            "global: max(Σesp do batch, Σesp atual) + 20 m (paridade c/ o monólito)."
+        )
+        self._h1_auto = QtWidgets.QCheckBox("h1 automático")
+        self._h1_auto.setChecked(vm.h1_auto)
+        self._h1_auto.setToolTip(
+            "Ao aplicar um perfil canônico, deriva h1 da centralização simétrica "
+            "h1 = (tj − Σesp)/2 (margem simétrica do perfil — paridade c/ o monólito)."
+        )
+
         self._p_med = QtWidgets.QDoubleSpinBox()
         self._p_med.setRange(0.01, 10.0)
         self._p_med.setDecimals(3)
@@ -152,8 +196,20 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             "· auto (decide GPU/CPU por tamanho/geometria). jax/auto rodam em subprocesso."
         )
 
-        # ── Geologia estocástica (Fatia 3) ───────────────────────────────────
+        # ── Contadores derivados (nf/ntheta/nº pares T-R) ────────────────────
+        # Read-only: derivados dos CSV de freqs/dips/TRs (atualizados em textChanged).
+        self._nf_label = QtWidgets.QLabel("—")
+        self._ntheta_label = QtWidgets.QLabel("—")
+        self._ntr_label = QtWidgets.QLabel("—")
+
+        # ── Categoria 3: "Geração de Modelos" (+Hankel) — cria também os widgets
+        #    do perfil canônico, reaproveitados pela Categoria 1 logo abaixo.
         self._geology_box = self._build_geology_group(vm)
+        # ── Categoria 1: "Perfil Pré-configurado" (perfil canônico + Aplicar) ──
+        self._profile_box = self._build_profile_group()
+        # ── Paralelismo (Lote 1/2) + Saída ───────────────────────────────────
+        self._parallel_box = self._build_parallelism_group(vm)
+        self._output_box = self._build_output_group(vm)
 
         self._n_pos_label = QtWidgets.QLabel("n_pos: —")
         # ── Execução & feedback (Fatia 6a) ───────────────────────────────────
@@ -179,16 +235,32 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._results = ResultsView(vm.results, parent=self)
 
         # ── Layout ────────────────────────────────────────────────────────────
+        # Geometria + aquisição (com contadores derivados no topo, espelhando o
+        # monólito: "Nº de frequências (nf)", "Nº de ângulos (ntheta)", "Nº de
+        # pares T-R" como rótulos read-only acima dos CSV que os definem).
+        # Categoria 2 (Lote 2): "Configurações da Ferramenta" (renomeada de
+        # "Geometria da ferramenta") — geometria + aquisição + auto-geometria.
+        # n_models → "Geração de Modelos"; backend → "Paralelismo" (gate Numba/Fortran).
         form = QtWidgets.QFormLayout()
+        form.addRow("Nº de frequências (nf):", self._nf_label)
+        form.addRow("Nº de ângulos (ntheta):", self._ntheta_label)
+        form.addRow("Nº de pares T-R:", self._ntr_label)
         form.addRow("Frequências (Hz):", self._freqs)
-        form.addRow("Dips (°):", self._dips)
-        form.addRow("Espaçamentos TR (m):", self._trs)
-        form.addRow("h1:", self._h1)
-        form.addRow("tj:", self._tj)
-        form.addRow("p_med:", self._p_med)
-        form.addRow("Nº modelos:", self._n_models)
-        form.addRow("Backend:", self._sim_backend)
+        form.addRow("Ângulos de dip (graus):", self._dips)
+        form.addRow("Espaçamentos T-R (m):", self._trs)
+        form.addRow("Altura h1:", self._h1)
+        form.addRow("", self._h1_auto)
+        form.addRow("Janela de investigação tj:", self._tj)
+        form.addRow("", self._tj_auto)
+        form.addRow("Passo entre medidas p_med:", self._p_med)
         form.addRow("Posições derivadas:", self._n_pos_label)
+        geometry_box = _group(
+            "Configurações da Ferramenta",
+            "Geometria da ferramenta LWD e aquisição (frequências, dips, "
+            "espaçamentos T-R, janela de investigação). Passe o mouse sobre cada "
+            "campo para uma explicação detalhada.",
+            form,
+        )
         # Linha 1: execução (Iniciar/Pausar/Cancelar) + progresso.
         exec_row = QtWidgets.QHBoxLayout()
         exec_row.addWidget(self._run_btn)
@@ -201,12 +273,48 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         session_row.addWidget(self._open_btn)
         session_row.addWidget(self._status)
         session_row.addStretch(1)
+        # ── Conteúdo vertical (config + execução + galeria) ───────────────────
+        # Montado num widget interno e envolvido por uma QScrollArea VERTICAL: o
+        # conteúdo cresceu (3 categorias + paralelismo Numba/Fortran + saída +
+        # galeria) e ultrapassa a altura da janela — sem scroll, os widgets de
+        # baixo (Saída, Iniciar, galeria) ficavam INACESSÍVEIS. Fix do Lote 2.
+        content = QtWidgets.QWidget()
+        content_layout = QtWidgets.QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.addWidget(_heading_title("Parâmetros da simulação"))
+        content_layout.addWidget(
+            _hint(
+                "Configure a geometria da ferramenta LWD, o filtro de Hankel e os "
+                "parâmetros de geração estocástica de perfis TIV. Passe o mouse sobre "
+                "cada campo para uma explicação detalhada."
+            )
+        )
+        # ── 3 categorias (Lote 2): Perfil Pré-configurado · Configurações da
+        #    Ferramenta · Geração de Modelos (+Hankel) — espelham o monólito.
+        content_layout.addWidget(self._profile_box)
+        content_layout.addWidget(geometry_box)
+        content_layout.addWidget(self._geology_box)
+        content_layout.addWidget(self._parallel_box)
+        content_layout.addWidget(self._output_box)
+        content_layout.addLayout(exec_row)
+        content_layout.addLayout(session_row)
+        # Galeria com altura mínima usável mesmo ao rolar (senão encolheria ao
+        # sizeHint dentro da scroll area).
+        self._results.setMinimumHeight(340)
+        content_layout.addWidget(self._results, stretch=1)
+
+        # QScrollArea: h-scroll OFF (widgetResizable acompanha a largura do
+        # viewport — sem vazamento horizontal); v-scroll AS-NEEDED.
+        scroll = QtWidgets.QScrollArea()
+        scroll.setObjectName("SimulatorScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+
         root = QtWidgets.QVBoxLayout(self)
-        root.addLayout(form)
-        root.addWidget(self._geology_box)
-        root.addLayout(exec_row)
-        root.addLayout(session_row)
-        root.addWidget(self._results, stretch=1)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(scroll)
 
         # ── Binding ──────────────────────────────────────────────────────────
         self._run_btn.clicked.connect(self._on_run_clicked)
@@ -220,14 +328,20 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._tj.valueChanged.connect(self._refresh_n_pos)
         self._p_med.valueChanged.connect(self._refresh_n_pos)
         self._refresh_n_pos()
-        # Geologia: habilita os campos só no modo "stochastic" (UX reativa —
-        # no modo "fixed" eles são ignorados, então ficam desabilitados/cinza).
-        self._geo_mode.currentTextChanged.connect(self._on_geology_mode_changed)
+        # Contadores nf/ntheta/nTR derivados dos CSV (atualizam ao digitar).
+        self._freqs.textChanged.connect(self._refresh_counts)
+        self._dips.textChanged.connect(self._refresh_counts)
+        self._trs.textChanged.connect(self._refresh_counts)
+        self._refresh_counts()
+        # Geologia (Lote 2): 2 radios Aleatória/Manual habilitam os campos do modo
+        # ativo (samplers no modo Aleatória; editor de camadas no modo Manual).
+        self._radio_random.toggled.connect(self._on_geology_mode_changed)
+        self._radio_manual.toggled.connect(self._on_geology_mode_changed)
         # Fatia 6b — perfil canônico + editor manual de camadas.
         self._apply_canonical_btn.clicked.connect(self._on_apply_canonical)
         self._edit_layers_btn.clicked.connect(self._on_edit_layers)
         self._refresh_manual_info()
-        self._on_geology_mode_changed(self._geo_mode.currentText())
+        self._on_geology_mode_changed()
 
     # ── Helpers ─────────────────────────────────────────────────────────────────
     @staticmethod
@@ -242,10 +356,20 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         distribuição, n_layers fixo/range, espessura mínima, seed). A validação
         de ranges é do VM; aqui só coletamos os valores.
         """
-        # combos
-        self._geo_mode = QtWidgets.QComboBox()
-        self._geo_mode.addItems(["stochastic", "fixed", "manual"])  # +manual (Fatia 6b)
-        self._geo_mode.setCurrentText(vm.geology_mode)
+        # Modo de geração (Lote 2): 2 radios (Aleatória/Manual) — substitui o combo
+        # de 3 modos. O "fixed" legado deixa de ser exposto na UI (o VM ainda o
+        # aceita p/ retrocompat/testes); "n_layers fixo" cobre o caso fixo dentro
+        # do modo Aleatória. Resolve o bug "modo fixed travava tudo" (Task 3).
+        self._radio_random = QtWidgets.QRadioButton("Aleatória (QMC / PRNG)")
+        self._radio_manual = QtWidgets.QRadioButton("Manual (tabela de camadas)")
+        self._mode_group = QtWidgets.QButtonGroup(self)
+        self._mode_group.addButton(self._radio_random)
+        self._mode_group.addButton(self._radio_manual)
+        # Estado inicial do VM: manual ⟺ "manual"; senão Aleatória (inclui "fixed").
+        if vm.geology_mode == "manual":
+            self._radio_manual.setChecked(True)
+        else:
+            self._radio_random.setChecked(True)
         self._geo_generator = QtWidgets.QComboBox()
         self._geo_generator.addItems(list(GENERATORS_AVAILABLE))
         self._geo_generator.setCurrentText(vm.generator)
@@ -328,8 +452,6 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         for cm in get_all_canonical_models():
             self._canonical_combo.addItem(cm.title, userData=cm.name)
         self._apply_canonical_btn = QtWidgets.QPushButton("Aplicar perfil")
-        self._auto_geo_check = QtWidgets.QCheckBox("Auto-geometria (tj/h1)")
-        self._auto_geo_check.setChecked(True)
         self._edit_layers_btn = QtWidgets.QPushButton("Editar camadas…")
         self._edit_layers_btn.setToolTip(
             "Editor manual de camadas (ρₕ/ρᵥ/espessura) → modo 'manual'."
@@ -337,36 +459,207 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._manual_info = QtWidgets.QLabel("manual: —")
         self._manual_info.setProperty("role", "hint")
 
-        # layout em form
+        # ── Categoria 3 (Lote 2): "Geração de Modelos" (+Filtros de Hankel) ──
+        # Ordem espelha as imagens de referência: radios → editor manual →
+        # quantidade → gerador → anisotropia → ρₕ → distribuição → espessura →
+        # n_layers → semente → filtro de Hankel. O combo de perfil canônico NÃO
+        # entra aqui (vai p/ a Categoria 1 "Perfil Pré-configurado").
         gform = QtWidgets.QFormLayout()
-        gform.addRow("Modo:", self._geo_mode)
-        gform.addRow("Filtro Hankel:", self._hankel_combo)
-        canon_row = QtWidgets.QHBoxLayout()
-        canon_row.addWidget(self._canonical_combo, stretch=1)
-        canon_row.addWidget(self._apply_canonical_btn)
-        gform.addRow("Perfil canônico:", canon_row)
-        gform.addRow("", self._auto_geo_check)
+        gform.addRow(self._radio_random)
+        gform.addRow(self._radio_manual)
         manual_row = QtWidgets.QHBoxLayout()
         manual_row.addWidget(self._edit_layers_btn)
         manual_row.addWidget(self._manual_info, stretch=1)
-        gform.addRow("Geologia manual:", manual_row)
-        gform.addRow("Gerador:", self._geo_generator)
-        gform.addRow("Distribuição ρₕ:", self._geo_distr)
-        gform.addRow("ρₕ mín:", self._geo_rho_min)
-        gform.addRow("ρₕ máx:", self._geo_rho_max)
+        gform.addRow(manual_row)
+        gform.addRow("Quantidade de modelos:", self._n_models)
+        gform.addRow("Gerador aleatório:", self._geo_generator)
         gform.addRow("", self._geo_aniso)
-        gform.addRow("λ mín:", self._geo_lambda_min)
-        gform.addRow("λ máx:", self._geo_lambda_max)
+        gform.addRow("λ mínimo (TIV):", self._geo_lambda_min)
+        gform.addRow("λ máximo (TIV):", self._geo_lambda_max)
+        gform.addRow("ρₕ mínimo:", self._geo_rho_min)
+        gform.addRow("ρₕ máximo:", self._geo_rho_max)
+        gform.addRow("Distribuição de ρₕ:", self._geo_distr)
+        gform.addRow("Espessura mínima:", self._geo_min_thick)
+        gform.addRow("Nº camadas mínimo:", self._geo_nl_min)
+        gform.addRow("Nº camadas máximo:", self._geo_nl_max)
         gform.addRow("", self._geo_nlf_check)
-        gform.addRow("n_layers (fixo):", self._geo_nlf)
-        gform.addRow("n_layers mín:", self._geo_nl_min)
-        gform.addRow("n_layers máx:", self._geo_nl_max)
-        gform.addRow("Espessura mín:", self._geo_min_thick)
+        gform.addRow("Nº camadas fixo:", self._geo_nlf)
         gform.addRow("", self._geo_seed_random)
-        gform.addRow("Semente (fixa):", self._geo_seed)
-        box = QtWidgets.QGroupBox("Geologia estocástica")
-        box.setLayout(gform)
+        gform.addRow("Semente fixa:", self._geo_seed)
+        gform.addRow("Filtro Hankel:", self._hankel_combo)
+        return _group(
+            "Geração de Modelos",
+            "Defina como os perfis geológicos são gerados (Aleatória QMC/PRNG ou "
+            "Manual via tabela de camadas) e o filtro de Hankel da transformada.",
+            gform,
+        )
+
+    # ── Categoria 1 (Lote 2) — "Perfil Pré-configurado" ─────────────────────
+    def _build_profile_group(self) -> Any:
+        """Grupo top-level "Perfil Pré-configurado": perfil canônico + Aplicar.
+
+        Reaproveita ``_canonical_combo``/``_apply_canonical_btn`` (criados em
+        :meth:`_build_geology_group`) — aqui só os promove a uma seção própria
+        (espelha o monólito, onde o perfil canônico é a 1ª seção). Aplicar um
+        perfil comuta para o modo Manual e (com h1/tj automático) deriva a
+        geometria canônica (ver :meth:`_on_apply_canonical`).
+        """
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self._canonical_combo, stretch=1)
+        row.addWidget(self._apply_canonical_btn)
+        return _group(
+            "Perfil Pré-configurado",
+            "Selecione um perfil canônico da literatura (Oklahoma, Devine, …) e "
+            "clique em Aplicar perfil para preencher as camadas.",
+            row,
+        )
+
+    # ── Paralelismo (Lote 1/2) — backend + workers/threads Numba & Fortran ───
+    def _build_parallelism_group(self, vm: SimulationViewModel) -> Any:
+        """Grupo "Paralelismo": workers + threads (efeito real) + info de CPU + aviso.
+
+        Defaults vêm do VM (``recommend_default_parallelism``); a linha de CPU usa
+        ``detect_cpu_topology`` (import LAZY+guardado, mantém a View leve). O aviso de
+        oversubscrição (``W×T ≤ cores físicos``) atualiza em ``valueChanged``.
+        """
+        # ── Par Numba (funcional) — threads têm efeito real ──────────────────
+        self._n_workers = QtWidgets.QSpinBox()
+        self._n_workers.setRange(1, 256)
+        self._n_workers.setValue(vm.n_workers)
+        self._n_workers.setToolTip(
+            "Nº de workers Numba (processos sandbox). ESTADO/UI — o ProcessPoolExecutor "
+            "real é a Fatia 5; hoje o numba roda in-process com N threads."
+        )
+        self._threads = QtWidgets.QSpinBox()
+        self._threads.setRange(1, 256)
+        self._threads.setValue(vm.threads_per_worker)
+        self._threads.setToolTip(
+            "Nº de threads por worker Numba. EFEITO REAL: numba.set_num_threads(...) "
+            "antes do simulate_batch (bit-idêntico; clampado a NUMBA_NUM_THREADS)."
+        )
+        # ── Par Fortran (estado/UI — execução tatu.x = Fatia 6h) ─────────────
+        self._n_workers_fortran = QtWidgets.QSpinBox()
+        self._n_workers_fortran.setRange(1, 256)
+        self._n_workers_fortran.setValue(vm.n_workers_fortran)
+        self._n_workers_fortran.setToolTip(
+            "Nº de workers Fortran (instâncias tatu.x). ESTADO/UI — a execução Fortran "
+            "(subprocesso tatu.x) chega na Fatia 6h; o valor é persistido na sessão."
+        )
+        self._threads_fortran = QtWidgets.QSpinBox()
+        self._threads_fortran.setRange(1, 256)
+        self._threads_fortran.setValue(vm.threads_fortran)
+        self._threads_fortran.setToolTip(
+            "Nº de threads OpenMP por instância Fortran (OMP_NUM_THREADS). ESTADO/UI — "
+            "efeito real na Fatia 6h (subprocesso tatu.x)."
+        )
+        # Topologia da CPU (best-effort) — espelha a linha do monólito.
+        try:
+            from geosteering_ai.simulation._workers import detect_cpu_topology
+
+            _logical, _physical, _ht = detect_cpu_topology()
+            self._physical_cores = int(_physical)
+            ht = " (HT/SMT ativo)" if _ht else ""
+            cpu_txt = f"CPU: {_physical} cores físicos · {_logical} threads lógicas{ht}"
+        except Exception:  # noqa: BLE001 — detecção best-effort
+            self._physical_cores = 0
+            cpu_txt = "CPU: topologia indisponível"
+        self._cpu_info = QtWidgets.QLabel(cpu_txt)
+        self._cpu_info.setProperty("role", "hint")
+        self._parallel_warn = QtWidgets.QLabel("")
+        self._parallel_warn.setWordWrap(True)
+        # Aviso de oversubscrição usa o par do backend ATIVO (Numba).
+        self._n_workers.valueChanged.connect(self._refresh_parallel_warn)
+        self._threads.valueChanged.connect(self._refresh_parallel_warn)
+
+        def _sub(text: str) -> Any:
+            lbl = QtWidgets.QLabel(text)
+            lbl.setProperty("role", "section")
+            return lbl
+
+        pform = QtWidgets.QFormLayout()
+        pform.addRow("Backend:", self._sim_backend)
+        pform.addRow(_sub("Numba JIT"))
+        pform.addRow("Nº de workers (Numba):", self._n_workers)
+        pform.addRow("Nº de threads (Numba):", self._threads)
+        pform.addRow(_sub("Fortran (tatu.x · Fatia 6h)"))
+        pform.addRow("Nº de workers (Fortran):", self._n_workers_fortran)
+        pform.addRow("Nº de threads (Fortran):", self._threads_fortran)
+        pform.addRow(self._cpu_info)
+        pform.addRow(self._parallel_warn)
+        box = _group(
+            "Paralelismo",
+            "Workers/threads SEPARADOS por backend (paridade com o monólito). Numba: "
+            "threads têm efeito real; workers = Fatia 5. Fortran: estado/UI — execução "
+            "tatu.x = Fatia 6h.",
+            pform,
+        )
+        self._refresh_parallel_warn()
         return box
+
+    # ── Saída (Lote 1) — diretório + artefatos Fortran-compat ────────────────
+    def _build_output_group(self, vm: SimulationViewModel) -> Any:
+        """Grupo "Saída": diretório + "Procurar…" + checkbox de artefatos .dat/.out."""
+        self._output_dir = QtWidgets.QLineEdit(vm.output_dir)
+        self._output_dir.setPlaceholderText("Diretório de saída (vazio = não grava)…")
+        self._browse_out = QtWidgets.QPushButton("Procurar…")
+        self._browse_out.setProperty("role", "ghost")
+        self._browse_out.clicked.connect(self._on_browse_output)
+        self._save_artifacts = QtWidgets.QCheckBox(
+            "Salvar artefatos Fortran-compat (.dat binário 22-col + .out ASCII)"
+        )
+        self._save_artifacts.setChecked(vm.save_fortran_artifacts)
+        self._save_artifacts.setToolTip(
+            "Após a simulação, grava o tensor H em .dat (22-col) + metadados .out "
+            "(idênticos ao tatu.x). col2/col3 = ρₕ/ρᵥ no ponto de observação."
+        )
+        dir_row = QtWidgets.QHBoxLayout()
+        dir_row.addWidget(self._output_dir, stretch=1)
+        dir_row.addWidget(self._browse_out)
+        vbox = QtWidgets.QVBoxLayout()
+        vbox.addLayout(dir_row)
+        vbox.addWidget(self._save_artifacts)
+        return _group(
+            "Saída",
+            "Diretório e artefatos Fortran-compatíveis (.dat/.out) gravados ao fim "
+            "da simulação.",
+            vbox,
+        )
+
+    def _refresh_counts(self, *_: Any) -> None:
+        """Atualiza os contadores nf/ntheta/nº pares T-R (derivados dos CSV)."""
+        for widget, label in (
+            (self._freqs, self._nf_label),
+            (self._dips, self._ntheta_label),
+            (self._trs, self._ntr_label),
+        ):
+            try:
+                label.setText(str(len(_parse_csv_floats(widget.text()))))
+            except ValueError:
+                label.setText("—")
+
+    def _refresh_parallel_warn(self, *_: Any) -> None:
+        """Aviso de oversubscrição: ``W×T ≤ cores físicos`` (senão ⚠, igual ao monólito)."""
+        w = self._n_workers.value()
+        t = self._threads.value()
+        total = w * t
+        phys = self._physical_cores
+        if phys and total > phys:
+            self._parallel_warn.setText(
+                f"⚠ Oversubscrição: {w}×{t} = {total} threads em {phys} cores "
+                f"físicos. Ideal: workers × threads ≤ {phys}."
+            )
+            self._parallel_warn.setStyleSheet("color: #f59e0b;")  # âmbar
+        else:
+            self._parallel_warn.setText("")
+            self._parallel_warn.setStyleSheet("")
+
+    def _on_browse_output(self) -> None:
+        """Abre um seletor de diretório → preenche o campo de saída."""
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Diretório de saída", self._output_dir.text() or ""
+        )
+        if path:
+            self._output_dir.setText(path)
 
     # ── Slots ─────────────────────────────────────────────────────────────────
     def _on_run_clicked(self) -> None:
@@ -392,7 +685,9 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.backend = self._sim_backend.currentText()
         self._vm.hankel_filter = self._hankel_combo.currentText()  # Fatia 6b
         # ── Geologia estocástica (Fatia 3) ───────────────────────────────────
-        self._vm.geology_mode = self._geo_mode.currentText()
+        self._vm.geology_mode = (
+            "manual" if self._radio_manual.isChecked() else "stochastic"
+        )
         self._vm.generator = self._geo_generator.currentText()
         self._vm.rho_h_distribution = self._geo_distr.currentText()
         self._vm.rho_h_min = self._geo_rho_min.value()
@@ -410,6 +705,15 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.rng_seed = (
             None if self._geo_seed_random.isChecked() else self._geo_seed.value()
         )
+        # ── Paralelismo (Lote 1) + Saída ─────────────────────────────────────
+        self._vm.n_workers = self._n_workers.value()
+        self._vm.threads_per_worker = self._threads.value()
+        self._vm.n_workers_fortran = self._n_workers_fortran.value()
+        self._vm.threads_fortran = self._threads_fortran.value()
+        self._vm.output_dir = self._output_dir.text().strip()
+        self._vm.save_fortran_artifacts = self._save_artifacts.isChecked()
+        self._vm.h1_auto = self._h1_auto.isChecked()
+        self._vm.tj_auto = self._tj_auto.isChecked()
         self._vm.run()
 
     def _refresh_n_pos(self, *_: Any) -> None:
@@ -429,10 +733,15 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             return
         self._n_pos_label.setText(f"n_pos: {compute_n_pos(tj, p_med, dips[0])}")
 
-    def _on_geology_mode_changed(self, text: str) -> None:
-        """Habilita campos por modo: estocástico (samplers) × manual (editor)."""
-        stochastic = text == "stochastic"
-        manual = text == "manual"
+    def _on_geology_mode_changed(self, *_: Any) -> None:
+        """Habilita campos por modo (Lote 2): Aleatória (samplers) × Manual (editor).
+
+        Resolve o bug do modo "fixed" travado (Task 3): agora só há 2 estados
+        (Aleatória/Manual), ambos funcionais. O perfil canônico (Categoria 1
+        "Perfil Pré-configurado") fica SEMPRE acessível — aplicá-lo comuta para Manual.
+        """
+        manual = self._radio_manual.isChecked()
+        stochastic = not manual
         for w in (
             self._geo_generator,
             self._geo_distr,
@@ -450,11 +759,9 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             self._geo_seed,
         ):
             w.setEnabled(stochastic)
-        # Editor manual / perfil canônico só fazem sentido no modo "manual".
+        # Editor manual só faz sentido no modo Manual. O perfil canônico (combo +
+        # Aplicar) e os checkboxes h1/tj-auto ficam SEMPRE habilitados (seções próprias).
         self._edit_layers_btn.setEnabled(manual)
-        self._apply_canonical_btn.setEnabled(manual)
-        self._canonical_combo.setEnabled(manual)
-        self._auto_geo_check.setEnabled(manual)
 
     def _on_apply_canonical(self) -> None:
         """Aplica o perfil canônico selecionado → geologia manual (+ auto-geometria)."""
@@ -463,10 +770,13 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             self._status.setText("selecione um perfil canônico")
             return
         self._vm.apply_canonical_profile(
-            str(name), auto_geometry=self._auto_geo_check.isChecked()
+            str(name),
+            auto_tj=self._tj_auto.isChecked(),
+            auto_h1=self._h1_auto.isChecked(),
         )
-        self._geo_mode.setCurrentText("manual")  # apply_canonical já setou no VM
-        self._sync_inputs_from_vm()  # reflete tj/h1 (auto-geo) + manual info
+        self._radio_manual.setChecked(True)  # apply_canonical já setou no VM
+        self._sync_inputs_from_vm()  # reflete tj/h1 (auto-geo) + n_layers
+        self._refresh_manual_info()  # Task 4: rótulo "N camadas" do perfil aplicado
 
     def _on_edit_layers(self) -> None:
         """Abre o editor manual de camadas; ao aceitar, fixa a geologia manual no VM."""
@@ -481,7 +791,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
                 return
             self._vm.manual_layers = model
             self._vm.geology_mode = "manual"
-            self._geo_mode.setCurrentText("manual")
+            self._radio_manual.setChecked(True)
             self._refresh_manual_info()
 
     def _refresh_manual_info(self) -> None:
@@ -589,7 +899,9 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.n_models = self._n_models.value()
         self._vm.backend = self._sim_backend.currentText()
         self._vm.hankel_filter = self._hankel_combo.currentText()  # Fatia 6b
-        self._vm.geology_mode = self._geo_mode.currentText()
+        self._vm.geology_mode = (
+            "manual" if self._radio_manual.isChecked() else "stochastic"
+        )
         self._vm.generator = self._geo_generator.currentText()
         self._vm.rho_h_distribution = self._geo_distr.currentText()
         self._vm.rho_h_min = self._geo_rho_min.value()
@@ -606,6 +918,15 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.rng_seed = (
             None if self._geo_seed_random.isChecked() else self._geo_seed.value()
         )
+        # ── Paralelismo (Lote 1) + Saída ─────────────────────────────────────
+        self._vm.n_workers = self._n_workers.value()
+        self._vm.threads_per_worker = self._threads.value()
+        self._vm.n_workers_fortran = self._n_workers_fortran.value()
+        self._vm.threads_fortran = self._threads_fortran.value()
+        self._vm.output_dir = self._output_dir.text().strip()
+        self._vm.save_fortran_artifacts = self._save_artifacts.isChecked()
+        self._vm.h1_auto = self._h1_auto.isChecked()
+        self._vm.tj_auto = self._tj_auto.isChecked()
 
     def _sync_inputs_from_vm(self) -> None:
         """Reflete o estado do VM nos widgets de input (após abrir uma sessão)."""
@@ -618,7 +939,11 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._n_models.setValue(self._vm.n_models)
         self._sim_backend.setCurrentText(self._vm.backend)
         self._hankel_combo.setCurrentText(self._vm.hankel_filter)  # Fatia 6b
-        self._geo_mode.setCurrentText(self._vm.geology_mode)
+        # Radio (Lote 2): manual ⟺ "manual"; senão Aleatória (inclui "fixed" legado).
+        if self._vm.geology_mode == "manual":
+            self._radio_manual.setChecked(True)
+        else:
+            self._radio_random.setChecked(True)
         self._geo_generator.setCurrentText(self._vm.generator)
         self._geo_distr.setCurrentText(self._vm.rho_h_distribution)
         self._geo_rho_min.setValue(self._vm.rho_h_min)
@@ -635,4 +960,14 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._geo_seed_random.setChecked(self._vm.rng_seed is None)
         if self._vm.rng_seed is not None:
             self._geo_seed.setValue(self._vm.rng_seed)
+        # ── Paralelismo (Lote 1/2) + Saída ───────────────────────────────────
+        self._n_workers.setValue(self._vm.n_workers)
+        self._threads.setValue(self._vm.threads_per_worker)
+        self._n_workers_fortran.setValue(self._vm.n_workers_fortran)
+        self._threads_fortran.setValue(self._vm.threads_fortran)
+        self._output_dir.setText(self._vm.output_dir)
+        self._save_artifacts.setChecked(self._vm.save_fortran_artifacts)
+        self._h1_auto.setChecked(self._vm.h1_auto)
+        self._tj_auto.setChecked(self._vm.tj_auto)
         self._refresh_n_pos()
+        self._refresh_counts()

@@ -355,7 +355,9 @@ def test_view_n_layers_max_inclusive_conversion(qtbot):
     # init: spin inclusive = exclusive − 1
     assert view._geo_nl_max.value() == vm.n_layers_max - 1 == 10
     # run com spin inclusive = 11 + modo sampled → VM exclusive = 12
-    view._geo_mode.setCurrentText("stochastic")
+    view._radio_random.setChecked(
+        True
+    )  # Lote 2: radio Aleatória (era combo "stochastic")
     view._geo_nlf_check.setChecked(False)  # amostra [min, max)
     view._geo_nl_min.setValue(3)
     view._geo_nl_max.setValue(11)  # INCLUSIVE
@@ -367,17 +369,27 @@ def test_view_n_layers_max_inclusive_conversion(qtbot):
 
 
 @pytest.mark.gui
-def test_view_geology_disabled_in_fixed_mode(qtbot):
-    """BUG B4 — os campos de geologia ficam desabilitados no modo 'fixed' (UX reativa)."""
+def test_view_geology_enable_by_radio(qtbot):
+    """Lote 2 (Task 3) — 2 radios Aleatória/Manual; ambos funcionais (sem trava).
+
+    No modo Manual os samplers ficam desabilitados e o editor de camadas habilitado;
+    no modo Aleatória, o inverso. Substitui o antigo combo de 3 modos (cujo 'fixed'
+    travava TODOS os campos — o bug reportado). O perfil canônico fica SEMPRE acessível.
+    """
     from apps.sim_manager.perspectives.simulation.view import SimulatorView
 
     vm = _make_vm()
     view = SimulatorView(vm)
     qtbot.addWidget(view)
-    view._geo_mode.setCurrentText("fixed")
+    # Modo Manual: samplers OFF, editor + perfil canônico ON (nada trava).
+    view._radio_manual.setChecked(True)
     assert not view._geo_generator.isEnabled()
     assert not view._geo_rho_min.isEnabled()
     assert not view._geo_seed.isEnabled()
-    view._geo_mode.setCurrentText("stochastic")
+    assert view._edit_layers_btn.isEnabled()
+    assert view._apply_canonical_btn.isEnabled()  # perfil canônico SEMPRE acessível
+    # Modo Aleatória: samplers ON, editor OFF.
+    view._radio_random.setChecked(True)
     assert view._geo_generator.isEnabled()
     assert view._geo_rho_min.isEnabled()
+    assert not view._edit_layers_btn.isEnabled()

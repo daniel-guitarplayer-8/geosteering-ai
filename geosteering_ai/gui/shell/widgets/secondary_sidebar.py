@@ -91,11 +91,21 @@ class SecondarySidebar(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
         """Substitui a aba Histórico (lista simples) por um painel rico (Fatia 6c).
 
         A perspectiva injeta um ``ExperimentsPanel`` (toolbar + busca + ●/○ +
-        recentes). Mantém a posição (índice 0) e o rótulo "Histórico".
+        recentes). Mantém a posição (índice 0) e o rótulo "Histórico". O painel é
+        envolvido por uma ``QScrollArea`` VERTICAL: a coluna direita pode ultrapassar
+        a altura da sidebar (toolbar + busca + lista + info + recentes), deixando
+        recursos inacessíveis sem scroll (fix do Lote 2). ``self._history`` segue
+        apontando para o PAINEL (não a scroll area) — a API pública não muda.
         """
+        scroll = QtWidgets.QScrollArea()
+        scroll.setObjectName("HistoryScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(widget)
         self._tabs.removeTab(0)
-        self._tabs.insertTab(0, widget, "Histórico")
-        self._history = widget  # passa a apontar p/ o painel rico
+        self._tabs.insertTab(0, scroll, "Histórico")
+        self._history = widget  # aponta p/ o PAINEL rico (não a scroll area)
         self._tabs.setCurrentIndex(0)
 
     def focus_log(self) -> None:
