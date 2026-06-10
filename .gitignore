@@ -99,3 +99,9 @@ Relatorio_2025/
 Relatorio_2026/
 # Backups manuais de relatórios em docs/reports/
 docs/reports/BACKUP*.md
+
+# ── WIP/tooling artifacts (cleanup 2026-06-10) ──────────────────────────────
+.antigravitycli/
+.claude/scheduled_tasks.lock
+benchmarks/results/
+*.bak
