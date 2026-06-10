@@ -840,7 +840,7 @@ class SimulationConfig:
                 rec_workers, rec_threads = recommend_default_parallelism()
                 object.__setattr__(self, "n_workers", rec_workers)
                 object.__setattr__(self, "threads_per_worker", rec_threads)
-                logger.info(
+                logger.debug(
                     "Sprint v2.23 A.2 — auto-detect: n_workers=%d, threads_per_worker=%d",
                     rec_workers,
                     rec_threads,

@@ -641,4 +641,41 @@ def _find_layer_for_z(z: float, esp: np.ndarray, n_layers: int) -> int:
     return n_layers - 1
 
 
+def _layer_at_batch(
+    positions_z: np.ndarray, esp_batch: np.ndarray, n_layers: int
+) -> np.ndarray:
+    """Twin VETORIZADO de :func:`_find_layer_for_z` — mapeia z→camada p/ um BATCH.
+
+    Equivalência BIT-EXATA com o laço escalar (mesma convenção de fronteira
+    ``z < acc`` estrita): ``z < 0`` → camada 0 (semi-espaço superior); senão a
+    camada é ``(nº de fronteiras cumsum(esp) ≤ z) + 1``, clampada a ``n_layers-1``.
+    Usado pela CLI (``_exec.rho_at_obs_from_batch``) p/ preencher col2/col3 (res_h/
+    res_v) do ``.dat`` 22-col sem o laço Python por-modelo.
+
+    Args:
+        positions_z: ``(n_pos,)`` profundidades de observação (m).
+        esp_batch: ``(n_models, n_layers-2)`` espessuras internas por modelo (m).
+        n_layers: número total de camadas (inclui 2 semi-espaços).
+
+    Returns:
+        ``np.ndarray`` ``(n_models, n_pos)`` ``intp`` — índice 0-based da camada
+        de cada ``z`` por modelo (consumível por ``np.take_along_axis``).
+
+    Note:
+        ``n_layers ≤ 1`` ou ``n_esp == 0`` → tudo na camada 0 (igual ao escalar).
+        A fronteira em ``z`` exato vai para a camada SEGUINTE (``≤`` em searchsorted
+        espelha o ``<`` estrito do escalar).
+    """
+    z = np.asarray(positions_z, dtype=np.float64).reshape(-1)  # (n_pos,)
+    esp = np.atleast_2d(np.asarray(esp_batch, dtype=np.float64))  # (n_models, n_esp)
+    n_models, n_esp = esp.shape
+    if n_layers <= 1 or n_esp == 0:
+        return np.zeros((n_models, z.shape[0]), dtype=np.intp)
+    bnd = np.cumsum(esp, axis=1)  # (n_models, n_esp) — fronteiras acumuladas
+    # nº de fronteiras ≤ z → a 1ª fronteira > z está nesse índice; camada = +1.
+    counts = (bnd[:, :, None] <= z[None, None, :]).sum(axis=1)  # (n_models, n_pos)
+    layer = np.where(z[None, :] < 0.0, 0, counts + 1)
+    return layer.astype(np.intp)
+
+
 __all__ = ["GeneratedBatch", "SyntheticDataGenerator"]

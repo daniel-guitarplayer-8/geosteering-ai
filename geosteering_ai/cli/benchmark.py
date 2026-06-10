@@ -149,12 +149,21 @@ SCENARIOS = {
 }
 
 
-def _build_models(n_models: int, seed: int = 42) -> list[dict]:
+def _build_models(
+    n_models: int,
+    seed: int = 42,
+    geometry: str = "per-model",
+    n_geometries: int | None = None,
+) -> list[dict]:
     """Gera modelos 5-camada determinísticos para benchmark.
 
     Args:
         n_models: número de modelos a gerar (≥ 1).
         seed: semente do gerador (default 42, reprodutibilidade).
+        geometry: ``"per-model"`` (default, stream legado) | ``"templates"`` |
+            ``"quantized"`` — controla a batchabilidade da ``esp`` no JAX (espelha
+            :func:`geosteering_ai.cli._exec.sample_geometry`).
+        n_geometries: (só ``templates``) K geometrias distintas; None = auto.
 
     Returns:
         Lista de ``n_models`` dicts ``{rho_h, rho_v, esp}``, todos
@@ -166,10 +175,9 @@ def _build_models(n_models: int, seed: int = 42) -> list[dict]:
         retornando lista vazia.
 
     Note:
-        Idêntico ao gerador de ``simulate.py`` — mantido aqui por
-        independência de imports (CLI subcomandos não devem se cruzar
-        para preservar lazy import do `simulate.py` quando apenas
-        benchmark é invocado).
+        Idêntico ao gerador de ``simulate._build_random_models`` — mantido aqui
+        por independência de imports (subcomandos não devem se cruzar p/ preservar
+        o lazy import). ``per-model`` preserva o stream rng legado (bit-idêntico).
 
     Example:
         >>> models = _build_models(2)
@@ -177,12 +185,27 @@ def _build_models(n_models: int, seed: int = 42) -> list[dict]:
         2
     """
     rng = np.random.default_rng(seed)
+    if geometry == "per-model":
+        # Stream LEGADO (bit-idêntico): rho_h, rho_v=rho_h·ratio, esp — POR modelo.
+        models = []
+        for _ in range(n_models):
+            rho_h = rng.uniform(1.0, 100.0, size=5).astype(np.float64)
+            rho_v = rho_h * rng.uniform(1.0, 3.0, size=5).astype(np.float64)
+            esp = rng.uniform(2.0, 10.0, size=3).astype(np.float64)
+            models.append({"rho_h": rho_h, "rho_v": rho_v, "esp": esp})
+        return models
+
+    # templates/quantized — ``esp`` em bloco (compartilhada); ``rho`` por modelo.
+    from geosteering_ai.cli._exec import sample_geometry
+
+    esp_batch = sample_geometry(
+        rng, n_models, 3, mode=geometry, n_geometries=n_geometries
+    )
     models = []
-    for _ in range(n_models):
+    for i in range(n_models):
         rho_h = rng.uniform(1.0, 100.0, size=5).astype(np.float64)
         rho_v = rho_h * rng.uniform(1.0, 3.0, size=5).astype(np.float64)
-        esp = rng.uniform(2.0, 10.0, size=3).astype(np.float64)
-        models.append({"rho_h": rho_h, "rho_v": rho_v, "esp": esp})
+        models.append({"rho_h": rho_h, "rho_v": rho_v, "esp": esp_batch[i]})
     return models
 
 
@@ -238,10 +261,18 @@ def handle_benchmark(args: argparse.Namespace) -> int:
             $ geosteering-cli benchmark --scenario E --n 50 --dips 0,15,30
             Cenário E — 52,000 mod/h
     """
-    # Lazy imports — evita carregar numba em `--help`
-    from geosteering_ai.simulation import simulate_multi
-    from geosteering_ai.simulation.config import SimulationConfig
+    # ── Motor compartilhado (cli._exec) — wiring p/ AMBOS os backends ─────────
+    # Imports leves (numpy puro); a simulação pesada é lazy DENTRO de run_once.
+    from geosteering_ai.cli._exec import (
+        finitude_stats,
+        resolve_backend_preflight,
+        resolve_jax_chunk_size,
+        resolve_requested_backend,
+        run_compare_backends,
+        run_once,
+    )
 
+    t_handler = time.perf_counter()  # p/ tempo total (handler) na tabela ASCII
     sc = SCENARIOS[args.scenario]
 
     # Parâmetros base do cenário — overrideable via flags CLI (Sprint v2.30)
@@ -259,64 +290,146 @@ def handle_benchmark(args: argparse.Namespace) -> int:
 
     n_pos: int = sc["n_pos"]  # type: ignore
     positions_z = np.linspace(-5.0, 5.0, n_pos).astype(np.float64)
-    models = _build_models(args.n)
+    n_models = int(args.n)
+    quiet = bool(getattr(args, "quiet", False))
+    as_json = bool(getattr(args, "json", False))
+    workers = getattr(args, "workers", None)
+    threads = getattr(args, "threads", None)
+    models = _build_models(n_models)
 
-    cfg = SimulationConfig(
-        n_workers=args.workers,
-        threads_per_worker=args.threads,
-    )
-
-    logger.info(
-        "Cenário %s: n=%d modelos, n_pos=%d, %d freq, %d TR, %d dips — %dw × %dt",
-        args.scenario,
-        args.n,
-        sc["n_pos"],
-        len(frequencies_hz),
-        len(tr_spacings_m),
-        len(dip_degs),
-        cfg.n_workers or 1,
-        cfg.threads_per_worker or 1,
-    )
-
-    # Warmup com shape COMPLETO (W2 code-review): pré-aquece todas as
-    # especializações JIT do cenário incluindo multi-freq, multi-TR e multi-dip.
-    _ = simulate_multi(
-        positions_z=positions_z,
-        models=models[:1],
-        cfg=cfg,
-        frequencies_hz=frequencies_hz,
-        tr_spacings_m=tr_spacings_m,
-        dip_degs=dip_degs,
-    )
-
-    # Run cronometrado
-    t0 = time.perf_counter()
-    try:
-        _ = simulate_multi(
-            positions_z=positions_z,
+    # ── --compare-backends: numba × jax lado-a-lado (DRY com simulate) ────────
+    if bool(getattr(args, "compare_backends", False)):
+        return run_compare_backends(
             models=models,
-            cfg=cfg,
+            positions_z=positions_z,
             frequencies_hz=frequencies_hz,
-            tr_spacings_m=tr_spacings_m,
             dip_degs=dip_degs,
+            tr_spacings_m=tr_spacings_m,
+            n_pos=n_pos,
+            workers=workers,
+            threads=threads,
+            dtype="complex128",
+            jax_strategy="bucketed",
+            warmup=True,
+            as_json=as_json,
+            quiet=quiet,
+            title=f"benchmark --scenario {args.scenario}",
+        )
+
+    # ── Backend (pré-voo TLS-safe — spec 0003) ────────────────────────────────
+    requested = resolve_requested_backend(args)
+    backend, device, _reason = resolve_backend_preflight(requested, models, quiet=quiet)
+    n_configs = len(frequencies_hz) * len(tr_spacings_m) * len(dip_degs)
+    jax_chunk = resolve_jax_chunk_size(backend, n_configs)
+    if not quiet:
+        logger.info(
+            "Cenário %s: backend=%s (device=%s) n=%d, n_pos=%d, %d freq, %d TR, %d dips",
+            args.scenario,
+            backend,
+            device,
+            n_models,
+            n_pos,
+            len(frequencies_hz),
+            len(tr_spacings_m),
+            len(dip_degs),
+        )
+
+    # Warmup com shape COMPLETO (W2 code-review): run_once(models[:1]) — no NUMBA
+    # é byte-idêntico ao legado simulate_multi(models[:1]) (pré-aquece todas as
+    # especializações JIT do cenário); no JAX aquece o XLA. Resultado descartado.
+    t_warm = time.perf_counter()
+    try:
+        run_once(
+            backend,
+            models[:1],
+            positions_z,
+            frequencies_hz=frequencies_hz,
+            dip_degs=dip_degs,
+            tr_spacings_m=tr_spacings_m,
+            workers=workers,
+            threads=threads,
+            jax_chunk_size_models=jax_chunk,
+        )
+    except (ValueError, RuntimeError, OSError) as exc:
+        logger.error("Erro durante warmup do benchmark: %s", exc, exc_info=True)
+        return 1
+    warmup_s = time.perf_counter() - t_warm
+
+    # Run CRONOMETRADO (run_once mede internamente — caminho numba inalterado).
+    try:
+        h6, elapsed, n_groups, effective, _run_reason = run_once(
+            backend,
+            models,
+            positions_z,
+            frequencies_hz=frequencies_hz,
+            dip_degs=dip_degs,
+            tr_spacings_m=tr_spacings_m,
+            workers=workers,
+            threads=threads,
+            jax_chunk_size_models=jax_chunk,
         )
     except (ValueError, RuntimeError, OSError) as exc:
         logger.error("Erro durante benchmark: %s", exc, exc_info=True)
         return 1
-    dt = time.perf_counter() - t0
 
-    if dt <= 0:
+    if elapsed <= 0:
         logger.error("Benchmark concluído em tempo zero — algo falhou")
         return 1
 
-    rate = (args.n / dt) * 3600.0
-    logger.info(
-        "Cenário %s — %d modelos em %.2fs → %.0f mod/h",
-        args.scenario,
-        args.n,
-        dt,
-        rate,
-    )
-    # CLI: stdout limpo (D9 exception documentada — ver Note do docstring)
-    print(f"Cenário {args.scenario} — {rate:,.0f} mod/h")
+    rate = (n_models / elapsed) * 3600.0
+    total_s = time.perf_counter() - t_handler
+    fin = finitude_stats(h6) if h6 is not None else {}
+
+    if as_json:
+        import json
+
+        print(
+            json.dumps(
+                {
+                    "command": "benchmark",
+                    "scenario": args.scenario,
+                    "backend": effective,
+                    "device": device,
+                    "n_models": n_models,
+                    "n_pos": n_pos,
+                    "elapsed_s": elapsed,
+                    "warmup_s": warmup_s,
+                    "total_s": total_s,
+                    "throughput_mod_h": rate,
+                    "n_freq": len(frequencies_hz),
+                    "n_tr": len(tr_spacings_m),
+                    "n_dips": len(dip_degs),
+                    "finitude": fin or None,
+                }
+            )
+        )
+    elif not quiet:
+        # ── Tabela ASCII de resultados (devolve a apresentação do CLI rico) ───
+        from geosteering_ai.cli._hwinfo import collect_hardware_info
+        from geosteering_ai.cli._table import build_result_rows, render_kv_table
+
+        hw = collect_hardware_info(want_gpu=(effective == "jax"))
+        stats = {
+            "backend": effective,
+            "device": device,
+            "throughput_mod_h": rate,
+            "elapsed_s": elapsed,
+            "warmup_s": warmup_s if warmup_s > 0 else None,
+            "total_s": total_s,
+            "n_models": n_models,
+            "n_pos": n_pos,
+            "n_freqs": len(frequencies_hz),
+            "n_dips": len(dip_degs),
+            "n_trs": len(tr_spacings_m),
+            "dtype": "complex128",
+            "jax_strategy": "bucketed",
+            "n_geometry_groups": n_groups,
+            "workers": workers,
+            "threads": threads,
+            "nan_count": fin.get("nan_count"),
+            "inf_count": fin.get("inf_count"),
+            "all_finite": fin.get("all_finite"),
+        }
+        title = f"BENCHMARK {args.scenario} — RESULTADO"
+        print(render_kv_table(title, build_result_rows(stats, hw)))
     return 0
