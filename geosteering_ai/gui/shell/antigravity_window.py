@@ -88,22 +88,44 @@ class AntigravityMainWindow(MainWindowBase):  # type: ignore[misc] # QtWidgets �
         self._init_status_fields()
 
     def _init_status_fields(self) -> None:
-        """Campos PERMANENTES da status bar (Cache · Plot · Binding) — espelha o monólito.
+        """Campos PERMANENTES da BottomBar — paridade com o monólito (Lote 2).
 
-        Ficam à direita (``addPermanentWidget``). ``Binding`` é sempre-ligado (do
-        ``qt_compat``); ``Cache``/``Plot`` são atualizados pela perspectiva ativa via
-        os setters expostos em ``ctx.extras["status_bar"]`` (sem acoplar o ViewModel).
+        Espelha a status bar do SM monolítico: ``Exp`` · ``● Estado`` · ``Elapsed`` ·
+        ``Throughput`` · ``Cache`` · ``Plot`` · ``Binding``. Ficam à direita
+        (``addPermanentWidget``). ``Binding`` é sempre-ligado (do ``qt_compat``); os
+        demais são atualizados pela perspectiva ativa via os setters expostos em
+        ``ctx.extras["status_bar"]`` (sem acoplar o ViewModel ao shell).
         """
         from geosteering_ai.gui.qt_compat import QT_BINDING
 
         bar = self.statusBar()
+        self._sb_exp = QtWidgets.QLabel("Exp: —")
+        self._sb_state = QtWidgets.QLabel("● ocioso")
+        self._sb_elapsed = QtWidgets.QLabel("Elapsed: —")
+        self._sb_throughput = QtWidgets.QLabel("Throughput: —")
         self._sb_cache = QtWidgets.QLabel("Cache: 0")
         self._sb_plot = QtWidgets.QLabel("Plot: —")
         self._sb_binding = QtWidgets.QLabel(f"Binding: {QT_BINDING or '—'}")
-        for widget in (self._sb_cache, self._sb_plot, self._sb_binding):
+        for widget in (
+            self._sb_exp,
+            self._sb_state,
+            self._sb_elapsed,
+            self._sb_throughput,
+            self._sb_cache,
+            self._sb_plot,
+            self._sb_binding,
+        ):
             widget.setProperty("role", "hint")
             bar.addPermanentWidget(widget)
+        # Setters expostos à perspectiva (None-safe: a perspectiva guarda contra
+        # teardown do widget). ``set_state`` recebe a string já formatada (com ●).
         self.ctx.extras["status_bar"] = {
+            "set_exp": lambda text: self._sb_exp.setText(f"Exp: {text}"),
+            "set_state": lambda text: self._sb_state.setText(str(text)),
+            "set_elapsed": lambda text: self._sb_elapsed.setText(f"Elapsed: {text}"),
+            "set_throughput": (
+                lambda text: self._sb_throughput.setText(f"Throughput: {text}")
+            ),
             "set_cache": lambda text: self._sb_cache.setText(f"Cache: {text}"),
             "set_plot": lambda text: self._sb_plot.setText(f"Plot: {text}"),
         }

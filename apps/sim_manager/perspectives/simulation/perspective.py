@@ -132,15 +132,31 @@ class SimulationPerspective(Perspective):
         # contrato explícito; os handlers guardam contra teardown do widget Qt.
         self._sb_set_plot = None
         self._sb_set_cache = None
+        self._sb_set_state = None
+        self._sb_set_elapsed = None
+        self._sb_set_throughput = None
+        self._sb_set_exp = None
         status_bar = ctx.extras.get("status_bar")
         if isinstance(status_bar, dict):
             self._sb_set_plot = status_bar.get("set_plot")
             self._sb_set_cache = status_bar.get("set_cache")
+            self._sb_set_state = status_bar.get("set_state")
+            self._sb_set_elapsed = status_bar.get("set_elapsed")
+            self._sb_set_throughput = status_bar.get("set_throughput")
+            self._sb_set_exp = status_bar.get("set_exp")
             if self._sb_set_plot is not None:
                 self._sb_set_plot(sim_vm.results.plot_backend.value)
                 sim_vm.results.changed.connect(self._on_results_changed_status)
             if self._sb_set_cache is not None:
                 self._exp_vm.cache_status_changed.connect(self._on_cache_status_changed)
+            # Estado · Elapsed · Throughput (Lote 2) — da SimulationViewModel.
+            if (
+                self._sb_set_state is not None
+                or self._sb_set_elapsed is not None
+                or self._sb_set_throughput is not None
+            ):
+                sim_vm.changed.connect(self._on_sim_status_changed)
+                self._on_sim_status_changed("_status", None)  # estado inicial
 
         self._exp_vm.new_experiment("Sessão", "", "sm_experiments")  # default em RAM
         self._exp_vm.load_recents()
@@ -163,11 +179,38 @@ class SimulationPerspective(Perspective):
         except RuntimeError:
             pass  # widget Qt já destruído (ordem de teardown) — não-fatal
 
+    def _on_sim_status_changed(self, name: str, _value: object = None) -> None:
+        """Atualiza Estado · Elapsed · Throughput na BottomBar (Lote 2).
+
+        Reage a ``_status``/``_progress`` da SimulationViewModel, lendo o snapshot
+        ATÔMICO ``status_display`` (evita race entre properties). Cada setter é
+        guardado contra ``RuntimeError`` (teardown do widget Qt).
+        """
+        if name not in ("_status", "_progress"):
+            return
+        info = self._sim_vm.status_display
+        for setter, key in (
+            (self._sb_set_state, "state"),
+            (self._sb_set_elapsed, "elapsed"),
+            (self._sb_set_throughput, "throughput"),
+        ):
+            if setter is not None:
+                try:
+                    setter(info[key])
+                except (RuntimeError, KeyError):
+                    pass  # widget destruído OU status_display sem a chave — não-fatal
+
     # ── Handlers de experimentos & histórico (Fatia 6c) ─────────────────────
     def _on_experiment_changed(self, exp: object) -> None:
         name = getattr(exp, "name", None)
         path = getattr(exp, "file_path", "") if exp else ""
         self._exp_panel.set_experiment_label(name, path)
+        # BottomBar (Lote 2): nome do experimento ativo.
+        if self._sb_set_exp is not None:
+            try:
+                self._sb_set_exp(name or "—")
+            except RuntimeError:
+                pass  # widget Qt já destruído (ordem de teardown) — não-fatal
         self._exp_panel.clear_history()
         for snap in getattr(exp, "snapshots", []):
             self._exp_panel.add_snapshot(

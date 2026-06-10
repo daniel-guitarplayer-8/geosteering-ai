@@ -136,8 +136,17 @@ class SimulationViewModel(BaseViewModel):
         # ── Paralelismo (Lote 1) + Saída ──
         "_n_workers",
         "_threads_per_worker",
+        # ── Paralelismo Fortran (Lote 2 — estado/UI; execução tatu.x = Fatia 6h) ──
+        "_n_workers_fortran",
+        "_threads_fortran",
         "_output_dir",
         "_save_fortran_artifacts",
+        # ── Auto-geometria canônica (Lote 2) + Hankel (Fatia 6b) ──
+        # (a serialização real é via to/load_session_dict customizados; mantemos o
+        #  _STATE_FIELDS exaustivo p/ coerência arquitetural com BaseViewModel.)
+        "_h1_auto",
+        "_tj_auto",
+        "_hankel_filter",
     )
 
     def __init__(self, service: Any) -> None:
@@ -194,9 +203,20 @@ class SimulationViewModel(BaseViewModel):
             _def_w, _def_t = 4, 1
         self._n_workers: int = int(_def_w)
         self._threads_per_worker: int = int(_def_t)
+        # ── Paralelismo Fortran (Lote 2) — estado/UI; execução tatu.x = Fatia 6h ──
+        # Defaults espelham a BenchmarkPage do monólito: workers ≈ recomendado (Numba
+        # já é ≈ phys/2 via recommend_default_parallelism) + 2 threads OpenMP/instância
+        # (cada tatu.x tem overhead de processo). NÃO dividir de novo (era phys/4 — bug).
+        self._n_workers_fortran: int = max(1, self._n_workers)
+        self._threads_fortran: int = 2
         # ── Saída — diretório + artefatos Fortran-compat (.dat/.out) ─────────
         self._output_dir: str = ""
         self._save_fortran_artifacts: bool = False
+        # ── Auto-geometria canônica (Lote 2) — derivar tj/h1 ao aplicar perfil ──
+        # Preferência persistida (espelha os checkboxes h1/tj-auto da View). Default
+        # True (auto-geometria ligada, como o monólito).
+        self._h1_auto: bool = True
+        self._tj_auto: bool = True
         # ── Fatia 6b — filtro de Hankel + geologia manual ───────────────────
         self._hankel_filter: str = "werthmuller_201pt"
         # Geologia manual (editor de camadas / perfil canônico). None ⇒ não-manual.
@@ -303,6 +323,25 @@ class SimulationViewModel(BaseViewModel):
     def threads_per_worker(self, value: int) -> None:
         self._set("_threads_per_worker", int(min(max(int(value), 1), 256)))
 
+    # ── Paralelismo Fortran (Lote 2) — estado/UI; execução tatu.x = Fatia 6h ──
+    @property
+    def n_workers_fortran(self) -> int:
+        """Nº de workers Fortran (1–256). Estado/UI — execução tatu.x = Fatia 6h."""
+        return self._n_workers_fortran
+
+    @n_workers_fortran.setter
+    def n_workers_fortran(self, value: int) -> None:
+        self._set("_n_workers_fortran", int(min(max(int(value), 1), 256)))
+
+    @property
+    def threads_fortran(self) -> int:
+        """Nº de threads OpenMP por instância Fortran (1–256). Estado/UI — Fatia 6h."""
+        return self._threads_fortran
+
+    @threads_fortran.setter
+    def threads_fortran(self, value: int) -> None:
+        self._set("_threads_fortran", int(min(max(int(value), 1), 256)))
+
     # ── Saída — diretório + artefatos Fortran-compat (.dat/.out) ─────────────
     @property
     def output_dir(self) -> str:
@@ -322,10 +361,31 @@ class SimulationViewModel(BaseViewModel):
     def save_fortran_artifacts(self, value: bool) -> None:
         self._set("_save_fortran_artifacts", bool(value))
 
+    # ── Auto-geometria canônica (Lote 2) — preferência persistida ────────────
+    @property
+    def h1_auto(self) -> bool:
+        """Se ``True``, ``apply_canonical_profile`` deriva ``h1`` (centralização simétrica)."""
+        return self._h1_auto
+
+    @h1_auto.setter
+    def h1_auto(self, value: bool) -> None:
+        self._set("_h1_auto", bool(value))
+
+    @property
+    def tj_auto(self) -> bool:
+        """Se ``True``, ``apply_canonical_profile`` deriva ``tj`` (janela canônica global)."""
+        return self._tj_auto
+
+    @tj_auto.setter
+    def tj_auto(self, value: bool) -> None:
+        self._set("_tj_auto", bool(value))
+
     # ── Properties de geologia estocástica (Fatia 3) ─────────────────────────
     @property
     def geology_mode(self) -> str:
-        """``"fixed"`` (3-camadas determinístico) ou ``"stochastic"`` (N modelos TIV)."""
+        """Modo de geologia: ``"stochastic"`` (N modelos TIV), ``"manual"`` (camadas do
+        editor/perfil canônico) ou ``"fixed"`` (3-camadas determinístico, legado — não
+        mais exposto na UI a partir do Lote 2, mas aceito p/ retrocompat e testes)."""
         return self._geology_mode
 
     @geology_mode.setter
@@ -470,17 +530,37 @@ class SimulationViewModel(BaseViewModel):
         # changed só se mudou — consistente com os demais setters do VM.
         self._set("_manual_layers", value)
 
-    def apply_canonical_profile(self, name: str, *, auto_geometry: bool = True) -> None:
-        """Carrega um perfil canônico → geologia MANUAL (+ auto-geometria opcional).
+    def apply_canonical_profile(
+        self, name: str, *, auto_tj: bool = True, auto_h1: bool = True
+    ) -> None:
+        """Carrega um perfil canônico → geologia MANUAL (+ auto-geometria canônica).
 
-        Reusa o catálogo PURO ``simulation.validation.canonical_models`` (7 perfis).
-        Define ``geology_mode="manual"`` + ``manual_layers`` do perfil. Se
-        ``auto_geometry``, ajusta ``tj``/``h1`` p/ cobrir a pilha de camadas.
+        Reusa o catálogo PURO ``simulation.validation.canonical_models`` (7 perfis) +
+        as funções de geometria canônica do MONÓLITO (``sm_canonical_profiles``), de
+        modo que ``tj``/``h1`` fiquem **byte-idênticos** aos do SM monolítico (paridade
+        — Lote 2; antes o MVVM usava uma fórmula ad-hoc 0.1·Σesp/assimétrica):
+
+          tj_ref = max(Σesp dos modelos de referência, Σesp_atual) + 20 m  (janela GLOBAL)
+          h1     = (tj_ref − Σesp) / 2                                     (margem SIMÉTRICA)
+
+        Define também ``n_layers_fixed`` do perfil — corrige o bug em que o contador
+        de camadas ficava preso em 5 ao aplicar um perfil (Task 4 do Lote 2).
 
         Args:
             name: chave canônica (ex.: ``"oklahoma_3"`` — ver ``list_canonical_models``).
-            auto_geometry: se ``True``, deriva ``tj``/``h1`` da soma das espessuras.
+            auto_tj: se ``True``, deriva ``tj`` da janela de referência canônica (+20 m).
+            auto_h1: se ``True``, deriva ``h1`` da centralização simétrica ``(tj−Σesp)/2``
+                (usa o ``tj`` ATUAL — auto ou manual).
+
+        Note:
+            As fórmulas de geometria vivem em ``sm_canonical_profiles`` (FONTE ÚNICA,
+            reusada — NÃO reimplementada aqui), o que garante paridade estrutural com o
+            monólito. A física do kernel (``simulate_batch``) permanece intocada.
         """
+        from geosteering_ai.simulation.tests.sm_canonical_profiles import (
+            compute_canonical_h1,
+            compute_canonical_reference_tj,
+        )
         from geosteering_ai.simulation.validation.canonical_models import (
             get_canonical_model,
         )
@@ -489,13 +569,16 @@ class SimulationViewModel(BaseViewModel):
         layers = ManualLayersModel.from_canonical(model)
         self.manual_layers = layers
         self.geology_mode = "manual"
-        if auto_geometry:
-            sum_esp = float(sum(layers.thicknesses))
-            if sum_esp > 0.0:
-                # h1 acima da 1ª interface; tj cobre a pilha + a margem de h1
-                # (z_obs = linspace(-h1, tj-h1) varre [-h1, sum_esp]).
-                self.h1 = max(1.0, 0.1 * sum_esp)
-                self.tj = sum_esp + self._h1
+        # Task 4 (Lote 2): reflete o nº de camadas do perfil no estado — a View
+        # espelha em n_layers_fixed → o contador deixa de ficar preso em 5
+        # (paridade c/ o monólito: simulation_manager.py spin_nlayers_fixed=cm.n_layers).
+        self.n_layers_fixed = int(model.n_layers)
+        sum_esp = float(sum(layers.thicknesses))
+        if sum_esp > 0.0:
+            if auto_tj:
+                self.tj = compute_canonical_reference_tj(current_esp_sum=sum_esp)
+            if auto_h1:
+                self.h1 = compute_canonical_h1(self._tj, sum_esp)
 
     @property
     def status(self) -> str:
@@ -705,6 +788,9 @@ class SimulationViewModel(BaseViewModel):
             # ── Paralelismo (Lote 1) + Saída ────────────────────────────────
             n_workers=self._n_workers,
             threads_per_worker=self._threads_per_worker,
+            # ── Paralelismo Fortran (Lote 2 — transportado; tatu.x = Fatia 6h) ──
+            n_workers_fortran=self._n_workers_fortran,
+            threads_fortran=self._threads_fortran,
             output_dir=self._output_dir,
             save_fortran_artifacts=self._save_fortran_artifacts,
         )
@@ -823,7 +909,9 @@ class SimulationViewModel(BaseViewModel):
         artifacts_error = result.get("artifacts_error")
         artifacts_path = result.get("artifacts_path")
         if artifacts_error:
-            self.log_entry.emit(f"⚠ Falha ao salvar artefatos Fortran: {artifacts_error}")
+            self.log_entry.emit(
+                f"⚠ Falha ao salvar artefatos Fortran: {artifacts_error}"
+            )
         elif artifacts_path:
             self.log_entry.emit(f"💾 Artefatos salvos: {artifacts_path} (+ .out)")
         self._set("_status", "done")
@@ -868,8 +956,14 @@ class SimulationViewModel(BaseViewModel):
             # ── Paralelismo (Lote 1) + Saída ────────────────────────────────
             "n_workers": self._n_workers,
             "threads_per_worker": self._threads_per_worker,
+            # ── Paralelismo Fortran (Lote 2 — estado/UI; Fatia 6h) ──────────
+            "n_workers_fortran": self._n_workers_fortran,
+            "threads_fortran": self._threads_fortran,
             "output_dir": self._output_dir,
             "save_fortran_artifacts": self._save_fortran_artifacts,
+            # ── Auto-geometria canônica (Lote 2) — preferência persistida ───
+            "h1_auto": self._h1_auto,
+            "tj_auto": self._tj_auto,
             # ── Fatia 6b — filtro de Hankel + geologia manual ───────────────
             "hankel_filter": self._hankel_filter,
             "manual_layers": (
@@ -922,8 +1016,12 @@ class SimulationViewModel(BaseViewModel):
             "backend",
             "n_workers",
             "threads_per_worker",
+            "n_workers_fortran",
+            "threads_fortran",
             "output_dir",
             "save_fortran_artifacts",
+            "h1_auto",
+            "tj_auto",
             "hankel_filter",
         ):
             if key in data:

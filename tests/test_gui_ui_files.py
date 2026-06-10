@@ -72,7 +72,6 @@ _BINDING_CONTRACT = (
     # design-alvo (fatias 6a-6h) — já no .ui p/ desenhar a tela completa
     "canonicalCombo",
     "applyCanonicalButton",
-    "autoGeoCheck",
     "genRandomRadio",
     "genManualRadio",
     "editLayersButton",
@@ -80,9 +79,14 @@ _BINDING_CONTRACT = (
     "hankelAutoRadio",
     "hankelOrderSpin",
     "hankelPathEdit",
-    # paralelismo + saída (Lote 1)
+    # auto-geometria canônica (Lote 2) — h1/tj separados (substitui autoGeoCheck)
+    "h1AutoCheck",
+    "tjAutoCheck",
+    # paralelismo + saída (Lote 1) + Fortran (Lote 2 — estado/UI; Fatia 6h)
     "workersSpin",
     "threadsSpin",
+    "workersFortranSpin",
+    "threadsFortranSpin",
     "cpuInfoLabel",
     "parallelWarnLabel",
     "saveArtifactsCheck",

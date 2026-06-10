@@ -117,11 +117,33 @@ def _make_vm():
 
 
 def test_vm_apply_canonical_profile():
+    """Lote 2: aplica perfil canônico → manual + n_layers_fixed + tj/h1 CANÔNICOS.
+
+    A geometria (tj/h1) reusa as funções do monólito (``sm_canonical_profiles``) —
+    janela global +20 m simétrica — em vez da antiga fórmula ad-hoc 0.1·Σesp. Usa
+    oklahoma_28 (28 camadas) para provar a correção do contador (Task 4: deixava de
+    refletir o perfil e ficava preso em 5).
+    """
+    from geosteering_ai.simulation.tests.sm_canonical_profiles import (
+        compute_canonical_h1,
+        compute_canonical_reference_tj,
+    )
+    from geosteering_ai.simulation.validation.canonical_models import (
+        get_canonical_model,
+    )
+
     vm = _make_vm()
-    vm.apply_canonical_profile("oklahoma_5", auto_geometry=True)
+    vm.apply_canonical_profile("oklahoma_28")  # auto_tj/auto_h1 default True
+    cm = get_canonical_model("oklahoma_28")
+    sesp = float(sum(float(x) for x in cm.esp))
+    tj_ref = compute_canonical_reference_tj(current_esp_sum=sesp)
     assert vm.geology_mode == "manual"
-    assert vm.manual_layers is not None and vm.manual_layers.n_layers == 5
-    assert vm.tj > 0.0 and vm.h1 > 0.0  # auto-geometria aplicada
+    assert vm.manual_layers is not None and vm.manual_layers.n_layers == 28
+    assert vm.n_layers_fixed == 28  # Task 4: contador reflete o perfil (não trava em 5)
+    assert vm.tj == tj_ref  # paridade c/ o monólito (janela global +20 m)
+    assert vm.h1 == compute_canonical_h1(
+        tj_ref, sesp
+    )  # centralização simétrica (tj−Σesp)/2
     assert vm.validate() == []
 
 
@@ -137,7 +159,7 @@ def test_vm_session_roundtrip_hankel_and_manual():
 
     vm = _make_vm()
     vm.hankel_filter = "kong_61pt"
-    vm.apply_canonical_profile("oklahoma_3", auto_geometry=False)
+    vm.apply_canonical_profile("oklahoma_3", auto_tj=False, auto_h1=False)
     blob = json.dumps(vm.to_session_dict())
     vm2 = _make_vm()
     vm2.load_session_dict(json.loads(blob))

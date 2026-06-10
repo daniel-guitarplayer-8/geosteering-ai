@@ -228,9 +228,17 @@
          </widget>
         </item>
         <item row="2" column="1">
-         <widget class="QCheckBox" name="autoGeoCheck">
-          <property name="text"><string>Auto-geometria a partir do perfil</string></property>
+         <widget class="QCheckBox" name="tjAutoCheck">
+          <property name="text"><string>tj automático</string></property>
           <property name="checked"><bool>true</bool></property>
+          <property name="toolTip"><string>tj = max(Σesp do batch, Σesp atual) + 20 m (janela canônica global — paridade c/ o monólito).</string></property>
+         </widget>
+        </item>
+        <item row="3" column="1">
+         <widget class="QCheckBox" name="h1AutoCheck">
+          <property name="text"><string>h1 automático</string></property>
+          <property name="checked"><bool>true</bool></property>
+          <property name="toolTip"><string>h1 = (tj − Σesp)/2 (centralização simétrica do perfil — paridade c/ o monólito).</string></property>
          </widget>
         </item>
        </layout>
@@ -587,6 +595,32 @@
          <widget class="QLabel" name="parallelWarnLabel">
           <property name="wordWrap"><bool>true</bool></property>
           <property name="text"><string/></property>
+         </widget>
+        </item>
+        <item row="4" column="0">
+         <widget class="QLabel" name="workersFortranLabel">
+          <property name="text"><string>Nº de workers (Fortran):</string></property>
+         </widget>
+        </item>
+        <item row="4" column="1">
+         <widget class="QSpinBox" name="workersFortranSpin">
+          <property name="minimum"><number>1</number></property>
+          <property name="maximum"><number>256</number></property>
+          <property name="value"><number>8</number></property>
+          <property name="toolTip"><string>Workers Fortran (instâncias tatu.x) — estado/UI; execução = Fatia 6h.</string></property>
+         </widget>
+        </item>
+        <item row="5" column="0">
+         <widget class="QLabel" name="threadsFortranLabel">
+          <property name="text"><string>Nº de threads (Fortran):</string></property>
+         </widget>
+        </item>
+        <item row="5" column="1">
+         <widget class="QSpinBox" name="threadsFortranSpin">
+          <property name="minimum"><number>1</number></property>
+          <property name="maximum"><number>256</number></property>
+          <property name="value"><number>2</number></property>
+          <property name="toolTip"><string>Threads OpenMP por instância Fortran (OMP_NUM_THREADS) — estado/UI; Fatia 6h.</string></property>
          </widget>
         </item>
        </layout>
