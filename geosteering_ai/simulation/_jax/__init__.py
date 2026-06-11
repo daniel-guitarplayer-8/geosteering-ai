@@ -171,24 +171,48 @@ def _setup_xla_environment() -> None:
         "XLA_PYTHON_CLIENT_MEM_FRACTION", "0.85" if _is_a100_class else "0.75"
     )
 
-    # ── Compilation cache dir ─────────────────────────────────────────────
-    # Prioridade: 1) env var explícita; 2) $TMPDIR/jax_compilation_cache_geosteering;
-    # 3) /tmp/jax_compilation_cache_geosteering (fallback POSIX).
+    # ── Compilation cache dir (PERSISTENTE — sobrevive reboot) ────────────
+    # Recuperado do WIP v2.51 (warmup): default ESTÁVEL em ~/.cache (sobrevive
+    # reboot → cache-hits XLA cross-run REAIS), em vez de /tmp (efêmero). Prioridade:
+    #   1) override explícito JAX_COMPILATION_CACHE_DIR (respeitado sempre);
+    #   2) ~/.cache/geosteering/jax_compilation_cache (estável);
+    #   3) fallback $TMPDIR/jax_compilation_cache_geosteering (efêmero, mas
+    #      válido na sessão) se o home não for gravável (CI/containers).
     cache_dir = _os.environ.get("JAX_COMPILATION_CACHE_DIR")
-    if not cache_dir:
-        tmpdir = _os.environ.get("TMPDIR", "/tmp")
-        cache_dir = str(_Path(tmpdir) / "jax_compilation_cache_geosteering")
-        _os.environ["JAX_COMPILATION_CACHE_DIR"] = cache_dir
-
-    try:
-        _Path(cache_dir).mkdir(parents=True, exist_ok=True)
-        _logger.info("JAX compilation cache configurado: %s", cache_dir)
-    except OSError as exc:
-        _logger.warning(
-            "Falha ao criar JAX cache dir %s: %s — seguindo sem cache persistente",
-            cache_dir,
-            exc,
+    if cache_dir:
+        # Override do usuário: cria on-demand, gracioso.
+        try:
+            _Path(cache_dir).mkdir(parents=True, exist_ok=True)
+            _logger.info("JAX compilation cache (override): %s", cache_dir)
+        except OSError as exc:
+            _logger.warning(
+                "Falha ao criar JAX cache dir %s: %s — sem cache persistente",
+                cache_dir,
+                exc,
+            )
+    else:
+        _stable = _Path.home() / ".cache" / "geosteering" / "jax_compilation_cache"
+        _tmp = (
+            _Path(_os.environ.get("TMPDIR", "/tmp"))
+            / "jax_compilation_cache_geosteering"
         )
+        for _candidate in (_stable, _tmp):
+            try:
+                _candidate.mkdir(parents=True, exist_ok=True)
+                cache_dir = str(_candidate)
+                _os.environ["JAX_COMPILATION_CACHE_DIR"] = cache_dir
+                _logger.info("JAX compilation cache configurado: %s", cache_dir)
+                break
+            except OSError as exc:
+                _logger.warning(
+                    "JAX cache dir %s não-gravável (%s) — tentando fallback",
+                    _candidate,
+                    exc,
+                )
+        if not cache_dir:
+            _logger.warning(
+                "Nenhum JAX cache dir gravável — seguindo sem cache persistente"
+            )
 
 
 # Executa setup ANTES do primeiro ``import jax`` abaixo.
@@ -223,6 +247,20 @@ try:
                 getattr(jax, "__version__", "?"),
                 _exc,
             )
+
+    # Recuperado do WIP v2.51 (warmup) — persiste TODO compile (mesmo rápido) no
+    # cache de disco. Default do JAX é ~1.0s → compiles de bucket abaixo do limiar
+    # NÃO persistiam, anulando o cache cross-run. 0.0 = persiste tudo. Version-guarded
+    # (chave ausente em versões antigas → degrada gracioso, como o bloco acima).
+    try:
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
+        _logger.debug("jax_persistent_cache_min_compile_time_secs=0.0 aplicado")
+    except (AttributeError, KeyError, ValueError) as _exc:
+        _logger.warning(
+            "jax_persistent_cache_min_compile_time_secs não suportado (%s): %s",
+            getattr(jax, "__version__", "?"),
+            _exc,
+        )
 
     HAS_JAX: Final[bool] = True
 except ImportError:
