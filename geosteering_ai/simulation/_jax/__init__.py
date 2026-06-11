@@ -178,41 +178,41 @@ def _setup_xla_environment() -> None:
     #   2) ~/.cache/geosteering/jax_compilation_cache (estável);
     #   3) fallback $TMPDIR/jax_compilation_cache_geosteering (efêmero, mas
     #      válido na sessão) se o home não for gravável (CI/containers).
-    cache_dir = _os.environ.get("JAX_COMPILATION_CACHE_DIR")
-    if cache_dir:
-        # Override do usuário: cria on-demand, gracioso.
+    # Candidatos em ordem de prioridade. Override do usuário PRIMEIRO; se ele for
+    # inválido/não-gravável, ainda tentamos o estável e o tmp (cache best-effort)
+    # em vez de propagar um caminho ruim ao JAX (revisão adversarial — crítico).
+    _override = _os.environ.get("JAX_COMPILATION_CACHE_DIR")
+    _candidates = []
+    if _override:
+        _candidates.append(_Path(_override))
+    _candidates.append(
+        _Path.home() / ".cache" / "geosteering" / "jax_compilation_cache"
+    )
+    _candidates.append(
+        _Path(_os.environ.get("TMPDIR", "/tmp")) / "jax_compilation_cache_geosteering"
+    )
+
+    cache_dir = None
+    for _candidate in _candidates:
         try:
-            _Path(cache_dir).mkdir(parents=True, exist_ok=True)
-            _logger.info("JAX compilation cache (override): %s", cache_dir)
+            _candidate.mkdir(parents=True, exist_ok=True)
+            cache_dir = str(_candidate)
+            _os.environ["JAX_COMPILATION_CACHE_DIR"] = cache_dir
+            _logger.info("JAX compilation cache configurado: %s", cache_dir)
+            break
         except OSError as exc:
             _logger.warning(
-                "Falha ao criar JAX cache dir %s: %s — sem cache persistente",
-                cache_dir,
+                "JAX cache dir %s não-gravável (%s) — tentando próximo",
+                _candidate,
                 exc,
             )
-    else:
-        _stable = _Path.home() / ".cache" / "geosteering" / "jax_compilation_cache"
-        _tmp = (
-            _Path(_os.environ.get("TMPDIR", "/tmp"))
-            / "jax_compilation_cache_geosteering"
+    if not cache_dir:
+        # Nenhum candidato gravável → REMOVE a env var (pode estar com o override
+        # inválido) para que o bloco jax.config.update abaixo NÃO receba caminho ruim.
+        _os.environ.pop("JAX_COMPILATION_CACHE_DIR", None)
+        _logger.warning(
+            "Nenhum JAX cache dir gravável — seguindo sem cache persistente"
         )
-        for _candidate in (_stable, _tmp):
-            try:
-                _candidate.mkdir(parents=True, exist_ok=True)
-                cache_dir = str(_candidate)
-                _os.environ["JAX_COMPILATION_CACHE_DIR"] = cache_dir
-                _logger.info("JAX compilation cache configurado: %s", cache_dir)
-                break
-            except OSError as exc:
-                _logger.warning(
-                    "JAX cache dir %s não-gravável (%s) — tentando fallback",
-                    _candidate,
-                    exc,
-                )
-        if not cache_dir:
-            _logger.warning(
-                "Nenhum JAX cache dir gravável — seguindo sem cache persistente"
-            )
 
 
 # Executa setup ANTES do primeiro ``import jax`` abaixo.

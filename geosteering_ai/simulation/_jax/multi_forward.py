@@ -1406,6 +1406,16 @@ def simulate_multi_jax_batched_grouped(
             # Aloca (n_models, nTR, nAng, n_pos, nf, 9) a partir do shape do 1º grupo
             # (todos os grupos compartilham nTR/nAng/n_pos/nf/9 — só varia o eixo 0).
             H_tensor = np.empty((n_models, *Hg.shape[1:]), dtype=Hg.dtype)
+        elif Hg.dtype != H_tensor.dtype:
+            # Guard fail-fast (revisão adversarial): todos os grupos compartilham o
+            # mesmo `cfg` → mesmo dtype. Se um grupo divergir (bug de backend), o
+            # scatter `H_tensor[sel] = Hg` faria DOWNCAST silencioso (e.g. c128→c64),
+            # quebrando a paridade <1e-12. O `np.stack` antigo promovia p/ o dtype
+            # comum (seguro); aqui recusamos truncar — fail-fast preserva a fidelidade.
+            raise ValueError(
+                "simulate_multi_jax_batched_grouped: dtype inconsistente entre grupos "
+                f"({Hg.dtype} vs {H_tensor.dtype}) — abortando p/ não truncar (paridade)."
+            )
         H_tensor[sel] = Hg  # scatter vetorizado p/ a ordem original (O(grupo) memcpy)
 
     if H_tensor is None:  # defesa: índice vazio (n_models>=1 garante ao menos 1 grupo)
