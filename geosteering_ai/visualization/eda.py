@@ -118,6 +118,29 @@ _VALID_CORR_METHODS = {"pearson", "spearman"}
 _VALID_SENSITIVITY_METRICS = {"variance", "gradient"}
 
 
+def _boxplot_labels_kwarg(labels: List[str]) -> Dict[str, List[str]]:
+    """Compat matplotlib do ``boxplot``: ``labels`` → ``tick_labels`` (mpl 3.9+).
+
+    O parâmetro ``labels`` do ``Axes.boxplot`` foi renomeado para ``tick_labels``
+    no matplotlib 3.9 (e removido como kwarg). Como o projeto declara
+    ``matplotlib>=3.5`` (range que cobre AMBAS as APIs), este helper escolhe o
+    nome certo em runtime — evita ``TypeError`` em mpl≥3.9 sem quebrar mpl 3.5-3.8.
+
+    Args:
+        labels: rótulos do eixo categórico (1 por caixa).
+
+    Returns:
+        Dict de 1 chave (``tick_labels`` ou ``labels``) p/ expandir via ``**``.
+    """
+    import re
+
+    import matplotlib as _mpl
+
+    _m = re.match(r"(\d+)\.(\d+)", _mpl.__version__)
+    _ge_39 = bool(_m) and (int(_m.group(1)), int(_m.group(2))) >= (3, 9)
+    return {"tick_labels" if _ge_39 else "labels": labels}
+
+
 # ──────────────────────────────────────────────────────────────────────
 # D2: Funcoes auxiliares — preparacao de dados para EDA
 # ──────────────────────────────────────────────────────────────────────
@@ -308,7 +331,7 @@ def plot_eda_summary(
     box_data = [data_flat[:, i] for i in range(n_plot)]
     bp = ax_box.boxplot(
         box_data,
-        labels=feature_names[:n_plot],
+        **_boxplot_labels_kwarg(feature_names[:n_plot]),
         patch_artist=True,
         showfliers=True,
         flierprops={"markersize": 2, "alpha": 0.3},
@@ -1131,7 +1154,7 @@ def plot_train_val_test_comparison(
 
         bp = ax.boxplot(
             box_data,
-            labels=box_labels,
+            **_boxplot_labels_kwarg(box_labels),
             patch_artist=True,
             showfliers=True,
             flierprops={"markersize": 2, "alpha": 0.3},
