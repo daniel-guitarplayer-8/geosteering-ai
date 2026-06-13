@@ -1349,8 +1349,45 @@ def simulate_multi_jax_batched_grouped(
     # ── Particiona por geometria idêntica (helper puro, fora do trace) ───────
     index_groups = group_by_geometry(esp_np)
 
+    # ── Guard defensivo (SOMENTE warning) — geometria degenerada ─────────────
+    # Se quase todo modelo tem geometria própria (n_grupos ≈ n_models), o vmap
+    # por grupo tem comprimento ~1 → ZERO batching: cada grupo paga trace+launch+
+    # sync sem ganho de GPU (pior que Numba, ~n_models× o custo fixo). Avisa o
+    # chamador a usar geometria agrupável (templates/quantizada) ou backend numba.
+    # NUNCA reroteia aqui: o roteamento JAX⇄Numba é responsabilidade EXCLUSIVA do
+    # dispatcher (simulate_batch). Rerotear dentro desta função quebraria a
+    # paridade se ela fosse chamada diretamente (e.g. --compare-backends).
+    n_groups_total = len(index_groups)
+    if n_models >= 8 and n_groups_total >= 0.9 * n_models:
+        logger.warning(
+            "simulate_multi_jax_batched_grouped: geometria heterogênea "
+            "(%d grupos para %d modelos, ~1 modelo/grupo) → JAX-grouped SUBUTILIZADO "
+            "(vmap de comprimento ~1, sem batching). Para saturar a GPU, gere o batch "
+            "com geometria agrupável (esp compartilhado/quantizado); ou use o backend "
+            "Numba (o dispatcher 'auto'/numba_fallback=True faz isso automaticamente).",
+            n_groups_total,
+            n_models,
+        )
+
     # ── Roda cada grupo (esp homogêneo → bucketed rápido) ────────────────────
-    H_per_model: list = [None] * n_models
+    # Reassembly VETORIZADO (recuperado do WIP v2.49 — dívida do Sprint C): pré-aloca
+    # o tensor de saída UMA vez e espalha cada grupo por indexação avançada
+    # `H_tensor[sel] = Hg`. `sel` mapeia índice local→global, então o scatter
+    # reposiciona cada grupo na ORDEM ORIGINAL dos modelos. Substitui o padrão antigo
+    # (lista `[None]*n_models` + atribuição modelo-a-modelo + `np.stack`).
+    #
+    # GANHO REAL = PICO DE MEMÓRIA (~2× a 30k×600), não wall-time: medido isolado, a
+    # cópia em si é ~equivalente (memcpy-bound, ~1 s a 30k; `H_tensor` já é numpy). O
+    # padrão antigo retinha VIEWS de TODOS os K grupos vivos até o `np.stack` final →
+    # pico ≈ 2× a saída (4995 MB medido); o scatter copia e LIBERA cada grupo na
+    # iteração seguinte → pico ≈ 1× a saída (2532 MB medido, −49%). Isso evita o OOM
+    # que matava o run de 30k para tensores multi-config (nTR·nAng·nf > 1). O custo
+    # dominante de ESCALA continua sendo o nº de GRUPOS (overhead de launch JAX por
+    # grupo) — amostre poucas geometrias.
+    #
+    # Bit-exatidão: mesmos índices, mesmos valores, só muda o padrão de memória → a
+    # paridade <1e-12 do caminho agrupado é preservada por construção.
+    H_tensor: "np.ndarray | None" = None
     for sel in index_groups:
         res = simulate_multi_jax_batched(
             rho_h_np[sel],
@@ -1363,11 +1400,28 @@ def simulate_multi_jax_batched_grouped(
             cfg=cfg,
             hankel_filter=hankel_filter,
         )
-        # res.H_tensor: (len(sel), nTR, nAngles, n_pos, nf, 9) — espalha p/ ordem original.
-        for local_j, global_i in enumerate(sel):
-            H_per_model[int(global_i)] = res.H_tensor[local_j]
+        # res.H_tensor: (len(sel), nTR, nAngles, n_pos, nf, 9).
+        Hg = np.asarray(res.H_tensor)
+        if H_tensor is None:
+            # Aloca (n_models, nTR, nAng, n_pos, nf, 9) a partir do shape do 1º grupo
+            # (todos os grupos compartilham nTR/nAng/n_pos/nf/9 — só varia o eixo 0).
+            H_tensor = np.empty((n_models, *Hg.shape[1:]), dtype=Hg.dtype)
+        elif Hg.dtype != H_tensor.dtype:
+            # Guard fail-fast (revisão adversarial): todos os grupos compartilham o
+            # mesmo `cfg` → mesmo dtype. Se um grupo divergir (bug de backend), o
+            # scatter `H_tensor[sel] = Hg` faria DOWNCAST silencioso (e.g. c128→c64),
+            # quebrando a paridade <1e-12. O `np.stack` antigo promovia p/ o dtype
+            # comum (seguro); aqui recusamos truncar — fail-fast preserva a fidelidade.
+            raise ValueError(
+                "simulate_multi_jax_batched_grouped: dtype inconsistente entre grupos "
+                f"({Hg.dtype} vs {H_tensor.dtype}) — abortando p/ não truncar (paridade)."
+            )
+        H_tensor[sel] = Hg  # scatter vetorizado p/ a ordem original (O(grupo) memcpy)
 
-    H_tensor = np.stack(H_per_model, axis=0)
+    if H_tensor is None:  # defesa: índice vazio (n_models>=1 garante ao menos 1 grupo)
+        raise ValueError(
+            "simulate_multi_jax_batched_grouped: nenhum grupo de geometria gerado."
+        )
     info = {
         "n_groups": len(index_groups),
         "group_sizes": [int(g.shape[0]) for g in index_groups],

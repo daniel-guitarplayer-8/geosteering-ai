@@ -136,7 +136,7 @@ Status: `BACKLOG` (não-priorizado) | `CANDIDATE` (próximo na fila) | `IN_PROGR
 | `C-framework-agnostic` | C | Framework-Agnostic Core: BaseInversionModel + adapters TF/PyTorch/ONNX | 1 semana | P4 | BACKLOG | Pré-mortem §75 |
 | `C-keras-ops` | C | Backend-Agnostic Code Hygiene: auditoria `tf.*` → `keras.ops.*` | 3-4 dias | P4 | BACKLOG | — |
 | `E-github-gpu` | E | GitHub Actions GPU runner (Trilha E pesquisa) | 1 semana | P4 | BACKLOG | Orçamento dedicado |
-| `F-mvc-split` | F | MVC split físico do Simulation Manager (refator package) | 2-3 sprints | P4 | BACKLOG | Ver `docs/reports/mvc_simulation_manager_studio_analysis_*.md` |
+| `F-mvc-split` | F | MVC split físico do Simulation Manager (refator package) → **SM MVVM (Strangler Fig)** | 2-3 sprints | P1 | IN_PROGRESS (v2.57+) | Fundação `gui/` + `apps/sim_manager/` + specs 0004-0018 (Lote 1+2) na `main`; paridade restante = Fatias 6e-6i. Ver `docs/reports/mvc_simulation_manager_studio_analysis_*.md` |
 
 ### Sprint em Execução
 
