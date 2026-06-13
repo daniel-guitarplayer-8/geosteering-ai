@@ -81,8 +81,15 @@ def test_simulation_config_explicit_threads_preserved():
 
 
 def test_threads_adaptive_logged(caplog):
-    """Sprint v2.23 A.2 — auto-detect emite mensagem de log informativa."""
-    with caplog.at_level(logging.INFO, logger="geosteering_ai.simulation.config"):
+    """Sprint v2.23 A.2 — auto-detect emite mensagem de log de diagnóstico.
+
+    Nota (v2.55): o log do auto-detect foi rebaixado de ``INFO`` → ``DEBUG`` em
+    ``config.py`` (redução de ruído "n_workers=16" no caminho JAX). A mensagem
+    CONTINUA sendo emitida (diagnóstico preservado), só mudou de nível — por isso
+    o ``caplog`` captura em ``DEBUG``. Antes desta correção o teste capturava em
+    ``INFO`` e falhava (CI vermelho pré-existente em ``main``).
+    """
+    with caplog.at_level(logging.DEBUG, logger="geosteering_ai.simulation.config"):
         SimulationConfig(n_workers=None, threads_per_worker=None)
     msgs = [r.message for r in caplog.records]
     assert any(

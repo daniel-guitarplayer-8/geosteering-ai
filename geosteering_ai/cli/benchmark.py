@@ -209,6 +209,31 @@ def _build_models(
     return models
 
 
+def _list_scenarios() -> int:
+    """Lista os cenários canônicos (A..H) com suas dimensões em stdout.
+
+    Saída tabular (id · n_pos · nf · nTR · nAng · combos/pos), útil para
+    descobrir os cenários disponíveis sem abrir o código. Pura (sem imports
+    pesados) — retorna 0. ``print`` é a exceção documentada D9 (stdout limpo é
+    contrato da CLI bench).
+
+    Returns:
+        ``0`` (sempre — operação puramente informativa).
+    """
+    print("Cenários de benchmark canônicos:")
+    print(
+        f"  {'Id':<3} {'n_pos':>6} {'nf':>3} {'nTR':>4} {'nAng':>5} {'combos/pos':>11}"
+    )
+    print(f"  {'─' * 3} {'─' * 6} {'─' * 3} {'─' * 4} {'─' * 5} {'─' * 11}")
+    for sid, sc in SCENARIOS.items():
+        nf = len(sc["freqs"])  # type: ignore[arg-type]
+        ntr = len(sc["trs"])  # type: ignore[arg-type]
+        nang = len(sc["dips"])  # type: ignore[arg-type]
+        combos = nf * ntr * nang
+        print(f"  {sid:<3} {sc['n_pos']:>6} {nf:>3} {ntr:>4} {nang:>5} {combos:>11}")
+    return 0
+
+
 def handle_benchmark(args: argparse.Namespace) -> int:
     """Handler do subcomando ``benchmark``.
 
@@ -261,6 +286,10 @@ def handle_benchmark(args: argparse.Namespace) -> int:
             $ geosteering-cli benchmark --scenario E --n 50 --dips 0,15,30
             Cenário E — 52,000 mod/h
     """
+    # ── --list-scenarios: lista e sai (puro, antes de qualquer import pesado) ──
+    if bool(getattr(args, "list_scenarios", False)):
+        return _list_scenarios()
+
     # ── Motor compartilhado (cli._exec) — wiring p/ AMBOS os backends ─────────
     # Imports leves (numpy puro); a simulação pesada é lazy DENTRO de run_once.
     from geosteering_ai.cli._exec import (
@@ -295,7 +324,13 @@ def handle_benchmark(args: argparse.Namespace) -> int:
     as_json = bool(getattr(args, "json", False))
     workers = getattr(args, "workers", None)
     threads = getattr(args, "threads", None)
-    models = _build_models(n_models)
+    # ── Geometria + dtype + JAX (paridade c/ simulate — item 3 da triagem) ────
+    geometry = getattr(args, "geometry", "per-model")
+    n_geometries = getattr(args, "n_geometries", None)
+    dtype = getattr(args, "dtype", "complex128")
+    jax_strategy = getattr(args, "jax_strategy", "bucketed")
+    repeat = max(1, int(getattr(args, "repeat", 1) or 1))
+    models = _build_models(n_models, geometry=geometry, n_geometries=n_geometries)
 
     # ── --compare-backends: numba × jax lado-a-lado (DRY com simulate) ────────
     if bool(getattr(args, "compare_backends", False)):
@@ -308,8 +343,8 @@ def handle_benchmark(args: argparse.Namespace) -> int:
             n_pos=n_pos,
             workers=workers,
             threads=threads,
-            dtype="complex128",
-            jax_strategy="bucketed",
+            dtype=dtype,
+            jax_strategy=jax_strategy,
             warmup=True,
             as_json=as_json,
             quiet=quiet,
@@ -320,7 +355,9 @@ def handle_benchmark(args: argparse.Namespace) -> int:
     requested = resolve_requested_backend(args)
     backend, device, _reason = resolve_backend_preflight(requested, models, quiet=quiet)
     n_configs = len(frequencies_hz) * len(tr_spacings_m) * len(dip_degs)
-    jax_chunk = resolve_jax_chunk_size(backend, n_configs)
+    jax_chunk = resolve_jax_chunk_size(
+        backend, n_configs, explicit=getattr(args, "jax_chunk_size", None)
+    )
     if not quiet:
         logger.info(
             "Cenário %s: backend=%s (device=%s) n=%d, n_pos=%d, %d freq, %d TR, %d dips",
@@ -348,6 +385,8 @@ def handle_benchmark(args: argparse.Namespace) -> int:
             tr_spacings_m=tr_spacings_m,
             workers=workers,
             threads=threads,
+            dtype=dtype,
+            jax_strategy=jax_strategy,
             jax_chunk_size_models=jax_chunk,
         )
     except (ValueError, RuntimeError, OSError) as exc:
@@ -355,19 +394,35 @@ def handle_benchmark(args: argparse.Namespace) -> int:
         return 1
     warmup_s = time.perf_counter() - t_warm
 
-    # Run CRONOMETRADO (run_once mede internamente — caminho numba inalterado).
+    # Run CRONOMETRADO — ``--repeat`` rodadas, reporta a MELHOR (menor elapsed →
+    # maior throughput), espelhando o simulate. run_once mede internamente; o
+    # caminho numba (pool) permanece inalterado.
+    h6 = None
+    elapsed = float("inf")
+    n_groups: int | None = None
+    effective = backend
     try:
-        h6, elapsed, n_groups, effective, _run_reason = run_once(
-            backend,
-            models,
-            positions_z,
-            frequencies_hz=frequencies_hz,
-            dip_degs=dip_degs,
-            tr_spacings_m=tr_spacings_m,
-            workers=workers,
-            threads=threads,
-            jax_chunk_size_models=jax_chunk,
-        )
+        for _ in range(repeat):
+            h6_i, elapsed_i, n_groups_i, effective_i, _run_reason = run_once(
+                backend,
+                models,
+                positions_z,
+                frequencies_hz=frequencies_hz,
+                dip_degs=dip_degs,
+                tr_spacings_m=tr_spacings_m,
+                workers=workers,
+                threads=threads,
+                dtype=dtype,
+                jax_strategy=jax_strategy,
+                jax_chunk_size_models=jax_chunk,
+            )
+            if elapsed_i < elapsed:  # mantém a melhor rodada
+                h6, elapsed, n_groups, effective = (
+                    h6_i,
+                    elapsed_i,
+                    n_groups_i,
+                    effective_i,
+                )
     except (ValueError, RuntimeError, OSError) as exc:
         logger.error("Erro durante benchmark: %s", exc, exc_info=True)
         return 1
@@ -399,6 +454,11 @@ def handle_benchmark(args: argparse.Namespace) -> int:
                     "n_freq": len(frequencies_hz),
                     "n_tr": len(tr_spacings_m),
                     "n_dips": len(dip_degs),
+                    "geometry": geometry,
+                    "n_geometry_groups": n_groups,
+                    "dtype": dtype,
+                    "jax_strategy": jax_strategy,
+                    "repeat": repeat,
                     "finitude": fin or None,
                 }
             )
@@ -421,8 +481,8 @@ def handle_benchmark(args: argparse.Namespace) -> int:
             "n_freqs": len(frequencies_hz),
             "n_dips": len(dip_degs),
             "n_trs": len(tr_spacings_m),
-            "dtype": "complex128",
-            "jax_strategy": "bucketed",
+            "dtype": dtype,
+            "jax_strategy": jax_strategy,
             "n_geometry_groups": n_groups,
             "workers": workers,
             "threads": threads,

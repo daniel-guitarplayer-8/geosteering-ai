@@ -454,6 +454,56 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="suprime saída informativa (mantém erros e o JSON se --json)",
     )
+    # ── Geometria + dtype + JAX + repeat (paridade c/ simulate) ────
+    # Recuperado do archive WIP (item 3 da triagem): fecha o gap simulate↔benchmark.
+    # SEM o rename de versão (a constante SIMULATION_MANAGER_VERSION permanece v2.37).
+    p_bench.add_argument(
+        "--geometry",
+        choices=["per-model", "templates", "quantized"],
+        default="per-model",
+        help=(
+            "amostragem da geometria (esp): per-model (default, único por modelo "
+            "→ JAX degenera) | templates (poucas geometrias → agrupável, JAX satura) "
+            "| quantized (esp arredondada → agrupável parcial)"
+        ),
+    )
+    p_bench.add_argument(
+        "--n-geometries",
+        type=int,
+        default=None,
+        metavar="K",
+        help="(só --geometry templates) nº de geometrias distintas. None = auto",
+    )
+    p_bench.add_argument(
+        "--dtype",
+        choices=["complex64", "complex128"],
+        default="complex128",
+        help="dtype complexo do path JAX (default: complex128)",
+    )
+    p_bench.add_argument(
+        "--jax-strategy",
+        choices=["bucketed", "unified", "vmap_real"],
+        default="bucketed",
+        help="estratégia de paralelismo JAX (default: bucketed)",
+    )
+    p_bench.add_argument(
+        "--jax-chunk-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help="fragmenta o eixo de modelos do vmap JAX (anti-OOM). None = auto",
+    )
+    p_bench.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="nº de rodadas cronometradas (reporta a melhor). Default: 1",
+    )
+    p_bench.add_argument(
+        "--list-scenarios",
+        action="store_true",
+        help="lista os cenários canônicos (A..H) com suas dimensões e sai",
+    )
 
     # ── version ────────────────────────────────────────────────────
     sub.add_parser(
