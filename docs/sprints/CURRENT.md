@@ -3,70 +3,62 @@
 > Este arquivo contém o plano detalhado da sprint **em execução**.
 > Após o merge, deve ser renomeado para snapshot imutável (convenção:
 > `v2.X.md`) e este arquivo fica vazio.
+>
+> **Fonte canônica do backlog:** [docs/ROADMAP.md §0](../ROADMAP.md) (SSoT, ADR-0001).
 
 ---
 
-## Sprint O0 — Pre-Flight (Pre-requisito de toda a iniciativa de otimização JAX GPU)
+## Iniciativa ativa — `F-mvc-split` (SM MVVM, Strangler Fig)
 
 | Campo | Valor |
 |:------|:------|
-| **Code** | `O0-jax-gpu-preflight` |
-| **Trilha** | A (JAX GPU) |
-| **Iniciada** | 2026-05-24 |
-| **Duração estimada** | 2 dias |
-| **Branch** | `feat/sprint-o0-pre-flight-tests` |
-| **Plano detalhado** | [docs/reports/v2.43_jax_gpu_optimization_plan.md](../reports/v2.43_jax_gpu_optimization_plan.md) — Parte III |
-| **Backup pré-otimização** | `.backups/jax_simulator_pre_optimization_20260523_223707/` (30 arquivos) |
+| **Code** | `F-mvc-split` |
+| **Trilha** | F (MVC split do Simulation Manager) |
+| **Prioridade** | **P1** · Status **IN_PROGRESS** (v2.57+) |
+| **Branches recentes** | `feat/gui-0018` (mergeada via PR #47) · `feat/recover-archive-v258` (PR #48, infra) |
+| **Referência de estado** | [docs/reports/v2.58_estado_4_produtos_2026-06-10.md](../reports/v2.58_estado_4_produtos_2026-06-10.md) |
 
-### Contexto
+### Contexto (atualizado 2026-06-10)
 
-A baseline JAX GPU A100 está estabelecida (v2.43, 164/164 paridade Fortran
-`<1e-12`, gate aprovado A: 3.55× / B: 3.10× / E: 2.19× Numba T4 local). Mas
-investigação multi-agente revelou que a A100 opera a apenas **~7% do pico FP64
-teórico** e perde para o histórico i9 per-device em E (0.39×) e G (0.37×).
+A construção do **Simulation Manager MVVM** (`apps/sim_manager/` + `geosteering_ai/gui/`),
+por Strangler Fig em paralelo ao monólito intocado, é a frente P1 em execução. Já landaram na
+`main`: fundação `gui/` (specs 0004-0007), Fatias **6a-6d** (execução/cancel, geologia+Hankel,
+experimentos+histórico, galeria+geosinais), shell Antigravity, JAX-GPU em subprocesso TLS-safe,
+e o **Lote 1+2** (paralelismo Numba/Fortran, física canônica tj/h1, BottomBar, scroll).
 
-A roadmap de otimização foi aprovada (Sprints O0–O4, ~10× ganho cumulativo
-esperado). Sprint O0 é **BLOQUEANTE** — antes de qualquer modificação no código
-de produção, precisamos de testes anti-regressão fechando 3 lacunas críticas:
+**Recém-entregue (v2.58, em revisão no PR #48):** recuperação do `archive/wip-stash-gui0013`
+(reassembly vetorizado −49% pico de memória, flags ricas do `benchmark`, cache XLA estável +
+`sm_io` shim, CHANGELOG SSoT). Infra geral (lib/CLI/docs) — não-GUI.
 
-1. Sem teste DIRETO `simulate_multi_jax_batched` vs Numba (apenas transitivo)
-2. Combinação `unified + chunked + vmap_real` nunca testada juntas
-3. Sem gate automático de throughput
+> A antiga **Sprint O0 (JAX GPU pre-flight, 2026-05-24)** está **CONCLUÍDA/SUPERSEDED**: a trilha
+> A (JAX GPU) landou integralmente em v2.42-v2.48 (`A-jax-gpu-batched-api`, `A-jax-gpu-dispatcher`,
+> agrupamento por geometria) — todos `DONE` no ROADMAP §0. O conteúdo foi arquivado deste CURRENT.
 
-### Critérios de Aceitação
+### Paridade restante — Fatias 6e-6i
 
-- [ ] 6 testes Tier 1 criados em `tests/`:
-  - [ ] T1.1 `test_forward_pure_bucketed_fortran_parity_canonical` (NEW)
-  - [ ] T1.2 `test_batched_vs_numba_parity_direct` (extend batched_api)
-  - [ ] T1.3 `test_pmap_parity_vs_forward_pure` (extend performance)
-  - [ ] T1.4 `test_common_factors_tx_in_bottom_layer` (extend propagation)
-  - [ ] T1.5 `test_unified_triple_flag_combination` (extend sprint12)
-  - [ ] T1.6 `test_throughput_gpu_regression_gate` (NEW)
-- [ ] `pytest tests/ --collect-only` coleta 6 novos testes sem erro
-- [ ] Em ambiente sem CUDA (macOS dev), testes SKIPam gracedosamente
-- [ ] Célula de profiling `jax.profiler.trace` adicionada em `validate_jax_gpu_v240.ipynb`
-- [ ] Snapshot final em `docs/sprints/v2.44.md` após merge
+| Fatia | Conteúdo | Análogo no monólito |
+|:-----:|:---------|:--------------------|
+| **6e** | Preferências (tema, paths, backend de plot, limites de cache LRU) | `PreferencesPage` |
+| **6f** | Aba Benchmark (cenários A-H + tabela + CSV export) | `BenchmarkPage` |
+| **6g** | Plot composer (grid de subplots, export PNG/PDF/EPS, DPI) | `PlotComposerDialog` |
+| **6h** | DAT viewer (carregar `.dat/.out` sem re-simular) | `sm_dat_viewer.py` |
+| **6i** | Perspectiva Resultados dedicada | `ResultsPage` |
 
-### Estrutura de Execução (Multi-Agente)
+### Próximo candidato (recomendado)
 
-3 agentes paralelos, cada um cobrindo 2 testes:
+**Fatia 6e — Preferências.** Menor superfície, desbloqueia configuração persistente (tema,
+paths, backend de plot) reutilizada pelas demais fatias. Gate por-fatia: paridade de
+comportamento vs monólito + pytest-qt headless + `ruff/format/mypy` limpos +
+**paridade física `<1e-12` preservada** (a GUI só consome `simulate_batch`, nunca recalcula).
 
-| Agente | Testes | Arquivos |
-|:------:|:------:|:---------|
-| 1 | T1.1 + T1.6 | `test_simulation_jax_fortran_parity.py` (NEW) + `test_simulation_jax_perf_baseline.py` (NEW) |
-| 2 | T1.2 + T1.4 | extend `test_simulation_jax_batched_api.py` + extend `test_simulation_jax_propagation.py` |
-| 3 | T1.3 + T1.5 | extend `test_simulation_jax_performance.py` + extend `test_simulation_jax_sprint12.py` |
+### Invariantes inegociáveis (toda fatia)
 
-### Próximas Sprints (após O0)
-
-| Code | Trilha | Item | Status |
-|:--|:-:|:--|:-:|
-| `O1-jax-gpu-quick-wins` | A | 9 commits low-risk (rho_h_at_obs vetorizado, XLA cache persistente, donate_argnums, scan unroll, ...) | BACKLOG (dep: O0 ✓) |
-| `O2-jax-gpu-chunking-async` | A | `lax.map(batch_size=K)` + async dispatch prefetch | BACKLOG (dep: O1) |
-| `O3-jax-gpu-profile-driven` | A | Memory layout + eliminar overcompute switch (condicional ao profile) | BACKLOG (dep: O2) |
-| `O4-jax-gpu-complex64-opt-in` | A | ADR + dtype dual + flag opt-in `cfg.dtype = "complex64"` | BACKLOG (dep: O3) |
+1. **Física só via `dispatch.simulate_batch`** — a GUI nunca reimplementa cálculo EM.
+2. **ViewModel puro** (sem import de Qt) — testável headless.
+3. **Monólito intocado** — coexistência Strangler Fig; nenhuma regressão no SM de produção.
+4. **CLI/GUI não se misturam** — fixes de lib/CLI vão p/ `main` + merge nas feature branches.
 
 ---
 
-*Template alinhado com ADR-0001. Versão `v2.44` será atribuída no primeiro commit
-do Sprint O1 (Quick Wins). Sprint O0 é "pre-flight" — não consume versão.*
+*Alinhado com ADR-0001. As versões `vX.Y` são atribuídas no primeiro commit de cada fatia/sprint;
+o backlog priorizado vive em [docs/ROADMAP.md §0](../ROADMAP.md).*
