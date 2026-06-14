@@ -70,6 +70,12 @@ jobs:
           # _blocking) é timing-sensível; runners GitHub são mais lentos que o
           # dev local. 5s dá folga (default 2s calibrado p/ Mac M2/Threadripper).
           WARMUP_BLOCKING_THRESHOLD_S: "5.0"
+          # Reabilitação de CI (issue #44): sem isto o JAX tenta cuInit num runner
+          # CPU-only → CUDA error 303 → ImportError → HAS_JAX=False → TODOS os
+          # testes @jax_only SKIPam silenciosamente (a paridade JAX↔Numba <1e-12
+          # NÃO era validada na CI). Forçar a plataforma CPU faz o JAX importar e
+          # os ~50 testes de paridade JAX rodarem de fato (gate real da fidelidade).
+          JAX_PLATFORMS: cpu
 
       # Sprint v2.33 — testes GUI pytest-qt rodam isolados sob xvfb (headless)
       - name: Run GUI tests (pytest-qt + xvfb)

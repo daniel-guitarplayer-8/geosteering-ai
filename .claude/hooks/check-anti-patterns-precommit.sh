@@ -40,7 +40,11 @@ for FILE_PATH in "$@"; do
         # shellcheck disable=SC2053
         [[ "$FILE_PATH" == $path_glob ]] || continue
 
-        if grep -qE -- "$pattern" "$FILE_PATH"; then
+        # Ignora linhas de comentário (py/sh/yaml '#', Fortran '!') ANTES do match:
+        # evita falsos-positivos quando o padrão aparece num COMENTÁRIO (ex.: o
+        # header D1 "NUNCA globals().get()" disparava KB-GLB sem violação real).
+        # Código real (e comentários inline após código) permanecem e são detectados.
+        if grep -vE '^[[:space:]]*[#!]' "$FILE_PATH" | grep -qE -- "$pattern"; then
             case "$severity" in
                 BLOCK)
                     echo "[BLOCK] $kb_id em $FILE_PATH (pattern: $pattern)" >&2

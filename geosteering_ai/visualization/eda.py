@@ -137,7 +137,7 @@ def _boxplot_labels_kwarg(labels: List[str]) -> Dict[str, List[str]]:
     import matplotlib as _mpl
 
     _m = re.match(r"(\d+)\.(\d+)", _mpl.__version__)
-    _ge_39 = bool(_m) and (int(_m.group(1)), int(_m.group(2))) >= (3, 9)
+    _ge_39 = _m is not None and (int(_m.group(1)), int(_m.group(2))) >= (3, 9)
     return {"tick_labels" if _ge_39 else "labels": labels}
 
 
@@ -336,8 +336,8 @@ def plot_eda_summary(
         showfliers=True,
         flierprops={"markersize": 2, "alpha": 0.3},
     )
-    # Colorir boxes com paleta suave
-    colors = plt.cm.Set3(np.linspace(0, 1, n_plot))
+    # Colorir boxes com paleta suave (plt.get_cmap: API moderna + type-clean vs plt.cm.Set3)
+    colors = plt.get_cmap("Set3")(np.linspace(0, 1, n_plot))
     for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color)
     ax_box.set_xlabel("Feature")
