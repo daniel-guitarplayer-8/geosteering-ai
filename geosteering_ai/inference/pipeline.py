@@ -316,14 +316,19 @@ class InferencePipeline:
         if self.config.use_geosignal_features:
             from geosteering_ai.data.geosignals import compute_geosignals
 
-            expanded_features = self.scaler_params.get("expanded_features")
-            if expanded_features is not None:
-                # Extrair colunas expandidas para computacao de GS
-                x_expanded = raw_data[:, :, expanded_features].astype(np.float32)
-            else:
-                x_expanded = x
-
-            gs_channels = compute_geosignals(x_expanded, self.config)
+            # GS computados sobre o raw_data 22-col ORIGINAL (não FV-transformado),
+            # espelhando data/pipeline.py (caminho offline) → PARIDADE com os GS que
+            # o modelo viu no treino. compute_geosignals indexa cada componente EM por
+            # COLUNA ABSOLUTA (EM_COMPONENTS no layout 22-col) e exige o tensor 2D
+            # completo (n_rows, n_columns) — NÃO o subconjunto expandido/reindexado.
+            # Fix do bug: antes passava `self.config` (PipelineConfig) onde se espera
+            # `families: List[str]`, e `x_expanded` (3D reindexado) onde se espera 2D.
+            n_seq, seq_len, _ = raw_data.shape
+            raw_2d = raw_data.reshape(n_seq * seq_len, raw_data.shape[-1])
+            gs_2d = compute_geosignals(
+                raw_2d, self.config.resolve_families(), self.config.n_columns
+            )
+            gs_channels = gs_2d.reshape(n_seq, seq_len, -1).astype(np.float32)
             x = np.concatenate([x, gs_channels], axis=-1)
 
         # ── Passo 4: Scaling — normaliza features com scaler treinado ──
@@ -364,7 +369,9 @@ class InferencePipeline:
             # ── Passo 6: Inverse target scaling → Ohm.m ──
             from geosteering_ai.data.scaling import inverse_target_scaling
 
-            y_mean_ohm = inverse_target_scaling(y_mean, method=self.config.target_scaling)
+            y_mean_ohm = inverse_target_scaling(
+                y_mean, method=self.config.target_scaling
+            )
             # std em log10 decades — NAO aplicar inverse scaling
             # (10^std e fisicamente errado para desvio-padrao).
             # y_std ja esta em unidades interpretaveis: 0.1 = ~0.1 decada log10.
