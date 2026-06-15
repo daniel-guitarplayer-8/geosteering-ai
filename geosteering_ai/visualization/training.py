@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import numpy as np
 
@@ -77,17 +77,17 @@ logger = logging.getLogger(__name__)
 # D10: Constantes de visualizacao
 # ──────────────────────────────────────────────────────────────────────
 _DEFAULT_DPI = 300
-_FIGSIZE_HISTORY = (16, 10)   # largura x altura para 4 subplots (2x2)
-_FIGSIZE_LR = (10, 4)        # largura x altura para plot isolado de LR
-_EPS = 1e-12                  # eps para float32 (NUNCA 1e-30)
+_FIGSIZE_HISTORY = (16, 10)  # largura x altura para 4 subplots (2x2)
+_FIGSIZE_LR = (10, 4)  # largura x altura para plot isolado de LR
+_EPS = 1e-12  # eps para float32 (NUNCA 1e-30)
 
 # Cores para consistencia visual
-_COLOR_TRAIN_LOSS = "#1f77b4"    # azul — train loss
-_COLOR_VAL_LOSS = "#ff7f0e"      # laranja — val loss
-_COLOR_TRAIN_R2 = "#2ca02c"      # verde — train R²
-_COLOR_VAL_R2 = "#d62728"        # vermelho — val R²
-_COLOR_LR = "#9467bd"            # roxo — learning rate
-_COLOR_NOISE = "#e377c2"         # rosa — noise level
+_COLOR_TRAIN_LOSS = "#1f77b4"  # azul — train loss
+_COLOR_VAL_LOSS = "#ff7f0e"  # laranja — val loss
+_COLOR_TRAIN_R2 = "#2ca02c"  # verde — train R²
+_COLOR_VAL_R2 = "#d62728"  # vermelho — val R²
+_COLOR_LR = "#9467bd"  # roxo — learning rate
+_COLOR_NOISE = "#e377c2"  # rosa — noise level
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -129,18 +129,23 @@ def _plot_placeholder(ax: object, message: str) -> None:
     Note:
         Ref: visualization/eda.py para pattern similar de placeholder.
     """
-    ax.text(
-        0.5, 0.5, message,
-        transform=ax.transAxes,
-        ha="center", va="center",
-        fontsize=11, color="gray", style="italic",
+    ax.text(  # type: ignore[attr-defined]
+        0.5,
+        0.5,
+        message,
+        transform=ax.transAxes,  # type: ignore[attr-defined]
+        ha="center",
+        va="center",
+        fontsize=11,
+        color="gray",
+        style="italic",
     )
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["bottom"].set_visible(False)
-    ax.spines["left"].set_visible(False)
+    ax.set_xticks([])  # type: ignore[attr-defined]
+    ax.set_yticks([])  # type: ignore[attr-defined]
+    ax.spines["top"].set_visible(False)  # type: ignore[attr-defined]
+    ax.spines["right"].set_visible(False)  # type: ignore[attr-defined]
+    ax.spines["bottom"].set_visible(False)  # type: ignore[attr-defined]
+    ax.spines["left"].set_visible(False)  # type: ignore[attr-defined]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -203,9 +208,7 @@ def plot_training_history(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error(
-            "matplotlib nao instalado. Instale com: pip install matplotlib"
-        )
+        logger.error("matplotlib nao instalado. Instale com: pip install matplotlib")
         raise
 
     # --- Detectar chaves disponiveis ---
@@ -219,7 +222,8 @@ def plot_training_history(
     epochs = np.arange(1, len(history[loss_key]) + 1)
     logger.info(
         "plot_training_history: %d epocas, chaves=%s",
-        len(epochs), list(history.keys()),
+        len(epochs),
+        list(history.keys()),
     )
 
     # --- Titulo base ---
@@ -236,21 +240,30 @@ def plot_training_history(
     # └────────────────────────────────────────────────────────────────┘
     ax_loss = axes[0, 0]
     ax_loss.plot(
-        epochs, history[loss_key],
-        color=_COLOR_TRAIN_LOSS, linewidth=1.5, label="Train Loss",
+        epochs,
+        history[loss_key],
+        color=_COLOR_TRAIN_LOSS,
+        linewidth=1.5,
+        label="Train Loss",
     )
     if val_loss_key is not None:
         ax_loss.plot(
-            epochs, history[val_loss_key],
-            color=_COLOR_VAL_LOSS, linewidth=1.5, linestyle="--",
+            epochs,
+            history[val_loss_key],
+            color=_COLOR_VAL_LOSS,
+            linewidth=1.5,
+            linestyle="--",
             label="Val Loss",
         )
         # D7: Marcar melhor val_loss com estrela
         val_losses = np.array(history[val_loss_key])
         best_epoch = int(np.argmin(val_losses))
         ax_loss.plot(
-            epochs[best_epoch], val_losses[best_epoch],
-            marker="*", markersize=12, color=_COLOR_VAL_LOSS,
+            epochs[best_epoch],
+            val_losses[best_epoch],
+            marker="*",
+            markersize=12,
+            color=_COLOR_VAL_LOSS,
             label=f"Best Val (ep {best_epoch + 1})",
         )
     ax_loss.set_xlabel("Epoca")
@@ -267,13 +280,19 @@ def plot_training_history(
     ax_r2 = axes[0, 1]
     if r2_key is not None:
         ax_r2.plot(
-            epochs, history[r2_key],
-            color=_COLOR_TRAIN_R2, linewidth=1.5, label=f"Train {r2_key}",
+            epochs,
+            history[r2_key],
+            color=_COLOR_TRAIN_R2,
+            linewidth=1.5,
+            label=f"Train {r2_key}",
         )
         if val_r2_key is not None:
             ax_r2.plot(
-                epochs, history[val_r2_key],
-                color=_COLOR_VAL_R2, linewidth=1.5, linestyle="--",
+                epochs,
+                history[val_r2_key],
+                color=_COLOR_VAL_R2,
+                linewidth=1.5,
+                linestyle="--",
                 label=f"Val {val_r2_key}",
             )
         ax_r2.axhline(y=1.0, color="gray", linewidth=0.5, linestyle=":")
@@ -297,8 +316,11 @@ def plot_training_history(
     if lr_key is not None:
         lr_values = np.array(history[lr_key], dtype=np.float64)
         ax_lr.plot(
-            epochs, lr_values,
-            color=_COLOR_LR, linewidth=1.5, label="Learning Rate",
+            epochs,
+            lr_values,
+            color=_COLOR_LR,
+            linewidth=1.5,
+            label="Learning Rate",
         )
         ax_lr.set_xlabel("Epoca")
         ax_lr.set_ylabel("Learning Rate")
@@ -312,7 +334,9 @@ def plot_training_history(
             ax_lr.set_yscale("log")
     else:
         # D13: Branch — LR nao disponivel → placeholder
-        _plot_placeholder(ax_lr, "LR nao registrado no history\n(usar LearningRateScheduler callback)")
+        _plot_placeholder(
+            ax_lr, "LR nao registrado no history\n(usar LearningRateScheduler callback)"
+        )
         ax_lr.set_title("LR Schedule (N/A)")
         logger.info("LR nao encontrado no history — painel 3 como placeholder")
 
@@ -324,12 +348,18 @@ def plot_training_history(
     if noise_key is not None:
         noise_values = np.array(history[noise_key], dtype=np.float64)
         ax_noise.fill_between(
-            epochs, 0, noise_values,
-            color=_COLOR_NOISE, alpha=0.3,
+            epochs,
+            0,
+            noise_values,
+            color=_COLOR_NOISE,
+            alpha=0.3,
         )
         ax_noise.plot(
-            epochs, noise_values,
-            color=_COLOR_NOISE, linewidth=1.5, label="Noise Level",
+            epochs,
+            noise_values,
+            color=_COLOR_NOISE,
+            linewidth=1.5,
+            label="Noise Level",
         )
         ax_noise.set_xlabel("Epoca")
         ax_noise.set_ylabel("Noise Level (A/m)")
@@ -409,9 +439,7 @@ def plot_lr_schedule(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error(
-            "matplotlib nao instalado. Instale com: pip install matplotlib"
-        )
+        logger.error("matplotlib nao instalado. Instale com: pip install matplotlib")
         raise
 
     # --- Detectar chave de LR ---
@@ -426,26 +454,43 @@ def plot_lr_schedule(
 
     lr_values = np.array(history[lr_key], dtype=np.float64)
     epochs = np.arange(1, len(lr_values) + 1)
-    logger.info("plot_lr_schedule: %d epocas, LR range [%.2e, %.2e]",
-                len(epochs), lr_values.min(), lr_values.max())
+    logger.info(
+        "plot_lr_schedule: %d epocas, LR range [%.2e, %.2e]",
+        len(epochs),
+        lr_values.min(),
+        lr_values.max(),
+    )
 
     # --- Criar figura ---
     fig, ax = plt.subplots(1, 1, figsize=_FIGSIZE_LR)
 
     ax.plot(
-        epochs, lr_values,
-        color=_COLOR_LR, linewidth=1.8, label="Learning Rate",
+        epochs,
+        lr_values,
+        color=_COLOR_LR,
+        linewidth=1.8,
+        label="Learning Rate",
     )
 
     # D7: Marcar LR maximo e minimo
     idx_max = int(np.argmax(lr_values))
     idx_min = int(np.argmin(lr_values))
-    ax.plot(epochs[idx_max], lr_values[idx_max],
-            marker="^", markersize=10, color="green",
-            label=f"Max LR={lr_values[idx_max]:.2e} (ep {idx_max + 1})")
-    ax.plot(epochs[idx_min], lr_values[idx_min],
-            marker="v", markersize=10, color="red",
-            label=f"Min LR={lr_values[idx_min]:.2e} (ep {idx_min + 1})")
+    ax.plot(
+        epochs[idx_max],
+        lr_values[idx_max],
+        marker="^",
+        markersize=10,
+        color="green",
+        label=f"Max LR={lr_values[idx_max]:.2e} (ep {idx_max + 1})",
+    )
+    ax.plot(
+        epochs[idx_min],
+        lr_values[idx_min],
+        marker="v",
+        markersize=10,
+        color="red",
+        label=f"Min LR={lr_values[idx_min]:.2e} (ep {idx_min + 1})",
+    )
 
     ax.set_xlabel("Epoca", fontsize=11)
     ax.set_ylabel("Learning Rate", fontsize=11)

@@ -55,13 +55,13 @@ Note:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List
 
 from geosteering_ai.evaluation.metrics import MetricsReport
 
 if TYPE_CHECKING:
-    from geosteering_ai.config import PipelineConfig
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +90,17 @@ __all__ = [
 _HIGHER_IS_BETTER = {"r2", "r2_rh", "r2_rv"}
 
 # Metricas validas para ranking (todas as metricas do MetricsReport)
-_VALID_METRICS = {"r2", "r2_rh", "r2_rv", "rmse", "rmse_rh", "rmse_rv",
-                  "mae", "mbe", "mape"}
+_VALID_METRICS = {
+    "r2",
+    "r2_rh",
+    "r2_rv",
+    "rmse",
+    "rmse_rh",
+    "rmse_rv",
+    "mae",
+    "mbe",
+    "mape",
+}
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -102,6 +111,7 @@ _VALID_METRICS = {"r2", "r2_rh", "r2_rv", "rmse", "rmse_rh", "rmse_rv",
 #
 # Ref: docs/ARCHITECTURE_v2.md secao 8.2
 # ════════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class ComparisonResult:
@@ -144,6 +154,7 @@ class ComparisonResult:
             - tests/test_evaluation.py: testes de ranking
         Ref: docs/ARCHITECTURE_v2.md secao 8.2.
     """
+
     model_names: List[str]
     metrics: Dict[str, MetricsReport]
     best_model: str
@@ -206,6 +217,7 @@ class ComparisonResult:
 #
 # Ref: docs/ARCHITECTURE_v2.md secao 8.2
 # ════════════════════════════════════════════════════════════════════════
+
 
 def compare_models(
     results: Dict[str, MetricsReport],

@@ -25,7 +25,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Sequence, Tuple, Union
+from typing import Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -113,11 +113,13 @@ class ValidationTracker:
             self.failed += 1
             self._log.warning("[V%d] %s — FALHOU", idx, description)
 
-        self.checks.append({
-            "index": idx,
-            "description": description,
-            "passed": condition,
-        })
+        self.checks.append(
+            {
+                "index": idx,
+                "description": description,
+                "passed": condition,
+            }
+        )
 
         return condition
 
@@ -144,20 +146,22 @@ class ValidationTracker:
         if all_passed:
             self._log.info(
                 "[%s] Validacao concluida: %d/%d checks aprovados",
-                self.module_name, self.passed, total,
+                self.module_name,
+                self.passed,
+                total,
             )
         else:
-            failed_checks = [
-                c for c in self.checks if not c["passed"]
-            ]
+            failed_checks = [c for c in self.checks if not c["passed"]]
             failed_desc = "; ".join(
-                f"V{c['index']}: {c['description']}"
-                for c in failed_checks
+                f"V{c['index']}: {c['description']}" for c in failed_checks
             )
             self._log.error(
                 "[%s] Validacao FALHOU: %d/%d aprovados, %d falhas: %s",
-                self.module_name, self.passed, total,
-                self.failed, failed_desc,
+                self.module_name,
+                self.passed,
+                total,
+                self.failed,
+                failed_desc,
             )
 
             if raise_on_error:

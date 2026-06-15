@@ -96,7 +96,7 @@ def is_jupyter() -> bool:
         shell = get_ipython()
         if shell is None:
             return False
-        return shell.__class__.__name__ == "ZMQInteractiveShell"
+        return shell.__class__.__name__ == "ZMQInteractiveShell"  # type: ignore[no-any-return]
     except ImportError:
         return False
 

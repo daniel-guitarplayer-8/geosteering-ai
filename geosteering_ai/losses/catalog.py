@@ -45,11 +45,12 @@ Note:
     Losses geofisicas (#14–#17) e avancadas (#20–#26) sao factories
     que retornam closures — chamadas por LossFactory.get(config).
 """
+
 from __future__ import annotations
 
 import logging
 import math
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ def mse_loss(y_true, y_pred):
         Sub-loss em: sobolev (#23), cross_gradient (#24), spectral (#25).
     """
     import tensorflow as tf
+
     return tf.reduce_mean(tf.square(y_true - y_pred))
 
 
@@ -108,6 +110,7 @@ def rmse_loss(y_true, y_pred):
         Base da log_scale_aware (#14) e suas variantes.
     """
     import tensorflow as tf
+
     return tf.sqrt(tf.reduce_mean(tf.square(y_true - y_pred)) + EPS)
 
 
@@ -128,6 +131,7 @@ def mae_loss(y_true, y_pred):
         Referenciado em: losses/factory.py (registry #3).
     """
     import tensorflow as tf
+
     return tf.reduce_mean(tf.abs(y_true - y_pred))
 
 
@@ -148,6 +152,7 @@ def mbe_loss(y_true, y_pred):
         Referenciado em: losses/factory.py (registry #4).
     """
     import tensorflow as tf
+
     return tf.reduce_mean(y_pred - y_true)
 
 
@@ -168,6 +173,7 @@ def rse_loss(y_true, y_pred):
         Referenciado em: losses/factory.py (registry #5).
     """
     import tensorflow as tf
+
     ss_res = tf.reduce_sum(tf.square(y_true - y_pred))
     ss_tot = tf.reduce_sum(tf.square(y_true - tf.reduce_mean(y_true))) + EPS
     return ss_res / ss_tot
@@ -189,6 +195,7 @@ def rae_loss(y_true, y_pred):
         Referenciado em: losses/factory.py (registry #6).
     """
     import tensorflow as tf
+
     ae = tf.reduce_sum(tf.abs(y_true - y_pred))
     ae_mean = tf.reduce_sum(tf.abs(y_true - tf.reduce_mean(y_true))) + EPS
     return ae / ae_mean
@@ -211,9 +218,8 @@ def mape_loss(y_true, y_pred):
         Cuidado: instavel quando y_true ≈ 0.
     """
     import tensorflow as tf
-    return tf.reduce_mean(
-        tf.abs((y_true - y_pred) / (tf.abs(y_true) + EPS))
-    ) * 100.0
+
+    return tf.reduce_mean(tf.abs((y_true - y_pred) / (tf.abs(y_true) + EPS))) * 100.0
 
 
 def msle_loss(y_true, y_pred):
@@ -234,11 +240,10 @@ def msle_loss(y_true, y_pred):
         Requer y_true > 0 e y_pred > 0 (protegido por tf.maximum).
     """
     import tensorflow as tf
+
     y_true_s = tf.maximum(y_true, EPS)
     y_pred_s = tf.maximum(y_pred, EPS)
-    return tf.reduce_mean(
-        tf.square(tf.math.log(y_true_s) - tf.math.log(y_pred_s))
-    )
+    return tf.reduce_mean(tf.square(tf.math.log(y_true_s) - tf.math.log(y_pred_s)))
 
 
 def rmsle_loss(y_true, y_pred):
@@ -257,6 +262,7 @@ def rmsle_loss(y_true, y_pred):
         Referenciado em: losses/factory.py (registry #9).
     """
     import tensorflow as tf
+
     return tf.sqrt(msle_loss(y_true, y_pred) + EPS)
 
 
@@ -277,6 +283,7 @@ def nrmse_loss(y_true, y_pred):
         Referenciado em: losses/factory.py (registry #10).
     """
     import tensorflow as tf
+
     rmse = tf.sqrt(tf.reduce_mean(tf.square(y_true - y_pred)) + EPS)
     rng = tf.reduce_max(y_true) - tf.reduce_min(y_true) + EPS
     return rmse / rng
@@ -298,6 +305,7 @@ def rrmse_loss(y_true, y_pred):
         Referenciado em: losses/factory.py (registry #11).
     """
     import tensorflow as tf
+
     rmse = tf.sqrt(tf.reduce_mean(tf.square(y_true - y_pred)) + EPS)
     mean = tf.abs(tf.reduce_mean(y_true)) + EPS
     return rmse / mean
@@ -321,6 +329,7 @@ def huber_loss(y_true, y_pred):
         Base da robust_log_scale (#16) e adaptive_robust (#17).
     """
     import tensorflow as tf
+
     return tf.reduce_mean(tf.keras.losses.huber(y_true, y_pred, delta=1.0))
 
 
@@ -341,6 +350,7 @@ def log_cosh_loss(y_true, y_pred):
         Referenciado em: losses/factory.py (registry #13).
     """
     import tensorflow as tf
+
     diff = y_pred - y_true
     return tf.reduce_mean(
         diff + tf.nn.softplus(-2.0 * diff) - tf.cast(tf.math.log(2.0), diff.dtype)
@@ -390,6 +400,7 @@ def _get_warmup_factor(epoch_var, warmup_epochs: int = 10):
         tf.Tensor: Escalar float32 ∈ [0, 1].
     """
     import tensorflow as tf
+
     if epoch_var is None:
         return tf.constant(1.0)
     epoch_f = tf.cast(epoch_var, tf.float32)
@@ -431,16 +442,17 @@ def make_log_scale_aware(
         Referenciado em: losses/factory.py (registry #14).
         v5.0.15+: Opera no dominio do TARGET_SCALING (Opcao A).
     """
-    alpha = config.loss_alpha           # peso interface (default 0.2)
-    beta = config.loss_beta             # peso oscilacao (default 0.1)
-    gamma = config.loss_gamma           # peso subestimacao (default 0.05)
+    alpha = config.loss_alpha  # peso interface (default 0.2)
+    beta = config.loss_beta  # peso oscilacao (default 0.1)
+    gamma = config.loss_gamma  # peso subestimacao (default 0.05)
     warmup_epochs = config.penalty_warmup_epochs
     interface_thr = config.interface_threshold
-    high_rho_thr = math.log10(config.high_rho_threshold)   # log10(300)
-    low_rho_thr = math.log10(config.low_rho_threshold)     # log10(50)
+    high_rho_thr = math.log10(config.high_rho_threshold)  # log10(300)
+    low_rho_thr = math.log10(config.low_rho_threshold)  # log10(50)
 
     def log_scale_aware_loss(y_true, y_pred):
         import tensorflow as tf
+
         error = y_true - y_pred
         rmse_base = tf.sqrt(tf.reduce_mean(tf.square(error)) + EPS)
 
@@ -450,7 +462,9 @@ def make_log_scale_aware(
         dy = y_true[:, 1:, :] - y_true[:, :-1, :]
         iface_mask = tf.cast(tf.abs(dy) > interface_thr, tf.float32)
         iface_count = tf.reduce_sum(iface_mask) + EPS
-        interface_err = tf.reduce_sum(tf.abs(error[:, 1:, :]) * iface_mask) / iface_count
+        interface_err = (
+            tf.reduce_sum(tf.abs(error[:, 1:, :]) * iface_mask) / iface_count
+        )
 
         # 2. Oscilacao: curvatura em alta rho (dominio scaled)
         d2y_pred = y_pred[:, 2:, :] - 2.0 * y_pred[:, 1:-1, :] + y_pred[:, :-2, :]
@@ -470,10 +484,12 @@ def make_log_scale_aware(
 
         # Penalidades ja estao em unidades log10 (mesmo dominio que RMSE) —
         # sem multiplicacao por p_scale (evita scaling quadratico).
-        return (w_base * rmse_base
-                + a_eff * interface_err
-                + b_eff * osc_penalty
-                + g_eff * under_penalty)
+        return (
+            w_base * rmse_base
+            + a_eff * interface_err
+            + b_eff * osc_penalty
+            + g_eff * under_penalty
+        )
 
     return log_scale_aware_loss
 
@@ -520,6 +536,7 @@ def make_adaptive_log_scale(
 
     def adaptive_log_scale_loss(y_true, y_pred):
         import tensorflow as tf
+
         # Gangorra: β sobe com ruido
         if noise_level_var is not None:
             noise_level = noise_level_var.value()
@@ -536,28 +553,28 @@ def make_adaptive_log_scale(
         dy = y_true[:, 1:, :] - y_true[:, :-1, :]
         iface_mask = tf.cast(tf.abs(dy) > interface_thr, tf.float32)
         iface_err = tf.reduce_sum(tf.abs(error[:, 1:, :]) * iface_mask) / (
-            tf.reduce_sum(iface_mask) + EPS)
+            tf.reduce_sum(iface_mask) + EPS
+        )
 
         # Oscilacao
         d2y = y_pred[:, 2:, :] - 2.0 * y_pred[:, 1:-1, :] + y_pred[:, :-2, :]
         hi_mask = tf.cast(y_true[:, 1:-1, :] > high_rho_thr, tf.float32)
-        osc_pen = tf.reduce_sum(tf.abs(d2y) * hi_mask) / (
-            tf.reduce_sum(hi_mask) + EPS)
+        osc_pen = tf.reduce_sum(tf.abs(d2y) * hi_mask) / (tf.reduce_sum(hi_mask) + EPS)
 
         # Subestimacao
         lo_mask = tf.cast(y_true < low_rho_thr, tf.float32)
         under_pen = tf.reduce_sum(tf.nn.relu(y_true - y_pred) * lo_mask) / (
-            tf.reduce_sum(lo_mask) + EPS)
+            tf.reduce_sum(lo_mask) + EPS
+        )
 
         a_eff = w * alpha
         b_eff = w * beta_eff
         g_eff = w * gamma
         w_base = tf.maximum(1.0 - a_eff - b_eff - g_eff, 0.01)
 
-        return (w_base * rmse_base
-                + a_eff * iface_err
-                + b_eff * osc_pen
-                + g_eff * under_pen)
+        return (
+            w_base * rmse_base + a_eff * iface_err + b_eff * osc_pen + g_eff * under_pen
+        )
 
     return adaptive_log_scale_loss
 
@@ -597,6 +614,7 @@ def make_robust_log_scale(
 
     def robust_log_scale_loss(y_true, y_pred):
         import tensorflow as tf
+
         error = y_true - y_pred
         huber_base = tf.reduce_mean(tf.keras.losses.huber(y_true, y_pred, delta=1.0))
         w = _get_warmup_factor(epoch_var, warmup_epochs)
@@ -605,13 +623,13 @@ def make_robust_log_scale(
         dy = y_true[:, 1:, :] - y_true[:, :-1, :]
         iface_mask = tf.cast(tf.abs(dy) > interface_thr, tf.float32)
         iface_err = tf.reduce_sum(tf.abs(error[:, 1:, :]) * iface_mask) / (
-            tf.reduce_sum(iface_mask) + EPS)
+            tf.reduce_sum(iface_mask) + EPS
+        )
 
         # Oscilacao
         d2y = y_pred[:, 2:, :] - 2.0 * y_pred[:, 1:-1, :] + y_pred[:, :-2, :]
         hi_mask = tf.cast(y_true[:, 1:-1, :] > high_rho_thr, tf.float32)
-        osc_pen = tf.reduce_sum(tf.abs(d2y) * hi_mask) / (
-            tf.reduce_sum(hi_mask) + EPS)
+        osc_pen = tf.reduce_sum(tf.abs(d2y) * hi_mask) / (tf.reduce_sum(hi_mask) + EPS)
 
         # Suavidade global (regularizacao de TV 1a ordem)
         dy_pred = y_pred[:, 1:, :] - y_pred[:, :-1, :]
@@ -620,7 +638,8 @@ def make_robust_log_scale(
         # Subestimacao
         lo_mask = tf.cast(y_true < low_rho_thr, tf.float32)
         under_pen = tf.reduce_sum(tf.nn.relu(y_true - y_pred) * lo_mask) / (
-            tf.reduce_sum(lo_mask) + EPS)
+            tf.reduce_sum(lo_mask) + EPS
+        )
 
         a_eff = w * alpha
         b_eff = w * beta
@@ -628,11 +647,13 @@ def make_robust_log_scale(
         d_eff = w * delta_smooth
         w_base = tf.maximum(1.0 - a_eff - b_eff - g_eff - d_eff, 0.01)
 
-        return (w_base * huber_base
-                + a_eff * iface_err
-                + b_eff * osc_pen
-                + d_eff * smooth_pen
-                + g_eff * under_pen)
+        return (
+            w_base * huber_base
+            + a_eff * iface_err
+            + b_eff * osc_pen
+            + d_eff * smooth_pen
+            + g_eff * under_pen
+        )
 
     return robust_log_scale_loss
 
@@ -676,11 +697,14 @@ def make_adaptive_robust(
 
     def adaptive_robust_loss(y_true, y_pred):
         import tensorflow as tf
+
         if noise_level_var is not None:
             noise_level = noise_level_var.value()
         else:
             noise_level = tf.constant(0.0)
-        noise_factor = 1.0 - tf.clip_by_value(noise_level / max(max_noise, EPS), 0.0, 1.0)
+        noise_factor = 1.0 - tf.clip_by_value(
+            noise_level / max(max_noise, EPS), 0.0, 1.0
+        )
 
         error = y_true - y_pred
         huber_base = tf.reduce_mean(tf.keras.losses.huber(y_true, y_pred, delta=1.0))
@@ -697,13 +721,13 @@ def make_adaptive_robust(
         dy = y_true[:, 1:, :] - y_true[:, :-1, :]
         iface_mask = tf.cast(tf.abs(dy) > interface_thr, tf.float32)
         iface_err = tf.reduce_sum(tf.abs(error[:, 1:, :]) * iface_mask) / (
-            tf.reduce_sum(iface_mask) + EPS)
+            tf.reduce_sum(iface_mask) + EPS
+        )
 
         # Oscilacao
         d2y = y_pred[:, 2:, :] - 2.0 * y_pred[:, 1:-1, :] + y_pred[:, :-2, :]
         hi_mask = tf.cast(y_true[:, 1:-1, :] > high_rho_thr, tf.float32)
-        osc_pen = tf.reduce_sum(tf.abs(d2y) * hi_mask) / (
-            tf.reduce_sum(hi_mask) + EPS)
+        osc_pen = tf.reduce_sum(tf.abs(d2y) * hi_mask) / (tf.reduce_sum(hi_mask) + EPS)
 
         # Suavidade
         dy_pred = y_pred[:, 1:, :] - y_pred[:, :-1, :]
@@ -712,13 +736,16 @@ def make_adaptive_robust(
         # Subestimacao
         lo_mask = tf.cast(y_true < low_rho_thr, tf.float32)
         under_pen = tf.reduce_sum(tf.nn.relu(y_true - y_pred) * lo_mask) / (
-            tf.reduce_sum(lo_mask) + EPS)
+            tf.reduce_sum(lo_mask) + EPS
+        )
 
-        return (w_base * huber_base
-                + a_eff * iface_err
-                + b_eff * osc_pen
-                + d_eff * smooth_pen
-                + g_eff * under_pen)
+        return (
+            w_base * huber_base
+            + a_eff * iface_err
+            + b_eff * osc_pen
+            + d_eff * smooth_pen
+            + g_eff * under_pen
+        )
 
     return adaptive_robust_loss
 
@@ -765,6 +792,7 @@ def probabilistic_nll(y_true, y_pred):
         v5.0.7+.
     """
     import tensorflow as tf
+
     # Dividir predicoes em media e log-variancia
     C = tf.shape(y_true)[-1]
     mu = y_pred[..., :C]
@@ -803,6 +831,7 @@ def make_look_ahead_weighted(
 
     def look_ahead_loss(y_true, y_pred):
         import tensorflow as tf
+
         N = tf.cast(tf.shape(y_true)[1], tf.float32)
         i = tf.cast(tf.range(tf.shape(y_true)[1]), tf.float32)
         weights = tf.exp(-decay_rate * i / (N + EPS))  # (N,)
@@ -851,11 +880,12 @@ def make_dilate(config: "PipelineConfig") -> Callable:
         v5.0.15+.
     """
     alpha_d = config.dilate_alpha
-    gamma_d = config.dilate_gamma
+    _gamma_d = config.dilate_gamma
     downsample = config.dilate_downsample
 
     def dilate_loss(y_true, y_pred):
         import tensorflow as tf
+
         # Downsample para eficiencia
         y_t = y_true[:, ::downsample, :]
         y_p = y_pred[:, ::downsample, :]
@@ -863,8 +893,8 @@ def make_dilate(config: "PipelineConfig") -> Callable:
         # Matriz de custo (N_t x N_p)
         N = tf.shape(y_t)[1]
         # Expande dimensoes para diferenca par-a-par
-        yt_exp = tf.expand_dims(y_t, 2)   # (B, N, 1, C)
-        yp_exp = tf.expand_dims(y_p, 1)   # (B, 1, N, C)
+        yt_exp = tf.expand_dims(y_t, 2)  # (B, N, 1, C)
+        yp_exp = tf.expand_dims(y_p, 1)  # (B, 1, N, C)
         D = tf.reduce_mean(tf.square(yt_exp - yp_exp), axis=-1)  # (B, N, N)
 
         # Soft-DTW aproximado por media ponderada (simplificado)
@@ -878,9 +908,9 @@ def make_dilate(config: "PipelineConfig") -> Callable:
         i_idx = tf.cast(tf.range(N), tf.float32)
         j_idx = tf.cast(tf.range(N), tf.float32)
         # Pesos: max deslocamento da diagonal
-        diag_weight = tf.abs(
-            tf.expand_dims(i_idx, 1) - tf.expand_dims(j_idx, 0)
-        ) / (N_f + EPS)  # (N, N)
+        diag_weight = tf.abs(tf.expand_dims(i_idx, 1) - tf.expand_dims(j_idx, 0)) / (
+            N_f + EPS
+        )  # (N, N)
         tdi = tf.reduce_mean(D * tf.expand_dims(diag_weight, 0))
 
         return alpha_d * soft_dtw + (1.0 - alpha_d) * tdi
@@ -915,14 +945,13 @@ def make_enc_decoder(config: "PipelineConfig") -> Callable:
 
     def enc_decoder_loss(y_true, y_pred):
         import tensorflow as tf
+
         C = tf.shape(y_true)[-1]
         pred = y_pred[..., :C]
         recon = y_pred[..., C:]
         pred_loss = tf.reduce_mean(tf.square(y_true - pred))
         # Penalidade de suavidade como proxy de reconstrucao
-        recon_smooth = tf.reduce_mean(
-            tf.square(recon[:, 1:, :] - recon[:, :-1, :])
-        )
+        recon_smooth = tf.reduce_mean(tf.square(recon[:, 1:, :] - recon[:, :-1, :]))
         return (1.0 - w_recon) * pred_loss + w_recon * recon_smooth
 
     return enc_decoder_loss
@@ -955,7 +984,7 @@ def make_multitask(config: "PipelineConfig") -> Callable:
         to Weigh Losses" sera implementado em v2.1 com variaveis
         treinaveis log_sigma_i por tarefa.
     """
-    n_tasks = config.output_channels  # ex: 2 (rho_h, rho_v)
+    _n_tasks = config.output_channels  # ex: 2 (rho_h, rho_v)
     logger.warning(
         "make_multitask: placeholder — retorna MSE simples. "
         "Kendall et al. (2018) sera implementado em v2.1"
@@ -963,6 +992,7 @@ def make_multitask(config: "PipelineConfig") -> Callable:
 
     def multitask_loss(y_true, y_pred):
         import tensorflow as tf
+
         C = tf.shape(y_true)[-1]
         pred = y_pred[..., :C]
         total = tf.reduce_mean(tf.square(y_true - pred))
@@ -994,6 +1024,7 @@ def make_sobolev(config: "PipelineConfig") -> Callable:
 
     def sobolev_loss(y_true, y_pred):
         import tensorflow as tf
+
         mse = tf.reduce_mean(tf.square(y_true - y_pred))
         dy_true = y_true[:, 1:, :] - y_true[:, :-1, :]
         dy_pred = y_pred[:, 1:, :] - y_pred[:, :-1, :]
@@ -1027,6 +1058,7 @@ def make_cross_gradient(config: "PipelineConfig") -> Callable:
 
     def cross_gradient_loss(y_true, y_pred):
         import tensorflow as tf
+
         mse = tf.reduce_mean(tf.square(y_true - y_pred))
         # Gradientes de rho_h (canal 0) e rho_v (canal 1)
         g_h = y_pred[:, 1:, 0] - y_pred[:, :-1, 0]  # (B, N-1)
@@ -1061,6 +1093,7 @@ def make_spectral(config: "PipelineConfig") -> Callable:
 
     def spectral_loss(y_true, y_pred):
         import tensorflow as tf
+
         mse = tf.reduce_mean(tf.square(y_true - y_pred))
         # FFT ao longo da dimensao temporal
         fft_true = tf.signal.rfft(tf.transpose(y_true, [0, 2, 1]))  # (B, C, N//2+1)
@@ -1108,6 +1141,7 @@ def make_morales_hybrid(
 
     def morales_hybrid_loss(y_true, y_pred):
         import tensorflow as tf
+
         if use_adaptive and epoch_var is not None:
             ep = tf.cast(epoch_var, tf.float32)
             progress = tf.clip_by_value(ep / max(ramp_epochs, 1), 0.0, 1.0)

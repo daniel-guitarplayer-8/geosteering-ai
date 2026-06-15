@@ -72,12 +72,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from geosteering_ai.config import PipelineConfig
+    pass
 
 # ──────────────────────────────────────────────────────────────────────
 # D8: Exports publicos — agrupados semanticamente
@@ -466,7 +466,8 @@ class UncertaintyEstimator:
         ci_upper = mean + _Z_95 * std
 
         logger.info(
-            "Ensemble concluido — %d modelos, mean_std=%.6f, " "mean_range=[%.4f, %.4f]",
+            "Ensemble concluido — %d modelos, mean_std=%.6f, "
+            "mean_range=[%.4f, %.4f]",
             n_models,
             float(np.mean(std)),
             float(np.min(mean)),
@@ -573,7 +574,7 @@ class UncertaintyEstimator:
         for _ in range(n_samples):
             noise = tf.random.normal(tf.shape(x_tensor), stddev=sigma)
             x_perturbed = x_tensor + noise
-            pred = model(x_perturbed, training=False)
+            pred = model(x_perturbed, training=False)  # type: ignore[operator]
             predictions_list.append(pred.numpy())
 
         predictions_stack = np.stack(predictions_list, axis=0)
@@ -669,7 +670,7 @@ class UncertaintyEstimator:
                     "Ensemble espera uma lista de modelos, nao um unico modelo. "
                     "Use method='mc_dropout' para modelo unico."
                 )
-            return self.estimate_ensemble(model_or_models, x)
+            return self.estimate_ensemble(model_or_models, x)  # type: ignore[arg-type]
 
         if self.method == "inn":
             # INN espera um unico modelo INN
@@ -686,7 +687,8 @@ class UncertaintyEstimator:
 
         # Fallback — nao deveria chegar aqui se __init__ validou
         raise ValueError(
-            f"Metodo desconhecido: {self.method!r}. " f"Valores aceitos: {_VALID_METHODS}"
+            f"Metodo desconhecido: {self.method!r}. "
+            f"Valores aceitos: {_VALID_METHODS}"
         )
 
     # ────────────────────────────────────────────────────────────────

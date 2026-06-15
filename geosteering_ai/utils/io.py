@@ -196,7 +196,7 @@ def safe_json_load(
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
         _log.debug("JSON carregado: %s", filepath)
-        return data
+        return data  # type: ignore[no-any-return]
 
     except FileNotFoundError:
         _log.warning("Arquivo nao encontrado: %s", filepath)

@@ -59,7 +59,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
@@ -121,6 +121,7 @@ _EPS = 1e-12
 # │  Resultado: string Markdown + salvar opcional em arquivo           │
 # └──────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
+
 
 def generate_geosteering_report(
     config: PipelineConfig,
@@ -204,9 +205,7 @@ def generate_geosteering_report(
     sections.append(_build_section_figures(figure_paths))
 
     # Secao 6: Steering Recommendations
-    sections.append(
-        _build_section_recommendations(geo_metrics, mode_comparison)
-    )
+    sections.append(_build_section_recommendations(geo_metrics, mode_comparison))
 
     # ── Montar documento final ──
     report = "\n---\n\n".join(sections)
@@ -237,6 +236,7 @@ def generate_geosteering_report(
 #
 # Ref: docs/ARCHITECTURE_v2.md secao 8.9
 # ════════════════════════════════════════════════════════════════════════
+
 
 def _build_section_well_summary(
     config: PipelineConfig,
@@ -657,6 +657,7 @@ def _build_section_recommendations(
 # Verifica se um valor numerico e NaN de forma segura.
 # Necessario porque float("nan") != float("nan").
 # ════════════════════════════════════════════════════════════════════════
+
 
 def _is_nan(value: Any) -> bool:
     """Verifica se valor e NaN de forma segura.

@@ -129,7 +129,7 @@ import logging
 import math
 import os
 import time
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
@@ -304,7 +304,7 @@ class UpdateNoiseLevelCallback:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(
@@ -341,7 +341,6 @@ class UpdateNoiseLevelCallback:
             Sem base_epoch, initial_epoch>0 fazia o scheduler pular
             diretamente para Fase 3 (stable) em vez de Fase 1 (clean).
         """
-        import tensorflow as tf
 
         super().__init__()
         self.noise_level_var = noise_level_var
@@ -480,7 +479,7 @@ class WeightNormMonitor:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, model: Any) -> None:
@@ -496,7 +495,6 @@ class WeightNormMonitor:
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
             O modelo deve ter ao menos uma variavel treinavel.
         """
-        import tensorflow as tf
 
         super().__init__()
         self._model_ref = model
@@ -653,7 +651,7 @@ class GradientMonitor:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(
@@ -908,7 +906,7 @@ class BestEpochTracker:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, monitor: str = "val_loss", mode: str = "min") -> None:
@@ -931,7 +929,6 @@ class BestEpochTracker:
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
             _best_value inicializa como +inf (min) ou -inf (max).
         """
-        import tensorflow as tf
 
         super().__init__()
 
@@ -1090,7 +1087,7 @@ class DualValidationCallback:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(
@@ -1114,7 +1111,6 @@ class DualValidationCallback:
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
             Ambos datasets devem estar prontos (batched, prefetched).
         """
-        import tensorflow as tf
 
         super().__init__()
         self._val_clean_ds = val_clean_ds
@@ -1242,7 +1238,7 @@ class PINNSLambdaScheduleCallback:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, pinns_lambda_var: Any, config: PipelineConfig) -> None:
@@ -1263,7 +1259,6 @@ class PINNSLambdaScheduleCallback:
             O pinns_lambda_var DEVE ser criado externamente (tf.Variable).
             Valor inicial = 0.0 (rampa comeca em zero).
         """
-        import tensorflow as tf
 
         super().__init__()
         self._pinns_lambda_var = pinns_lambda_var
@@ -1377,7 +1372,7 @@ class CausalDegradationMonitor:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, model: Any, val_ds: Any, config: PipelineConfig) -> None:
@@ -1394,7 +1389,6 @@ class CausalDegradationMonitor:
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
             O modelo deve ser compilado antes de usar este callback.
         """
-        import tensorflow as tf
 
         super().__init__()
         self._model_ref = model
@@ -1501,7 +1495,7 @@ class SlidingWindowValidation:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, model: Any, val_data: Any, config: PipelineConfig) -> None:
@@ -1518,7 +1512,6 @@ class SlidingWindowValidation:
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
             val_data deve conter sequencias de tamanho >= sequence_length.
         """
-        import tensorflow as tf
 
         super().__init__()
         self._model_ref = model
@@ -1620,7 +1613,7 @@ class PeriodicCheckpoint:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, config: PipelineConfig, *, period: int = 10) -> None:
@@ -1637,7 +1630,6 @@ class PeriodicCheckpoint:
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
             Se experiment_dir nao definido, callback registra warning e nao salva.
         """
-        import tensorflow as tf
 
         super().__init__()
         self._config = config
@@ -1680,10 +1672,12 @@ class PeriodicCheckpoint:
                 f"epoch_{epoch + 1:04d}.keras",
             )
             try:
-                self.model.save(filepath)
+                self.model.save(filepath)  # type: ignore[attr-defined]
                 logger.info("Checkpoint salvo: %s", filepath)
             except Exception as exc:
-                logger.warning("Falha ao salvar checkpoint epoch %d: %s", epoch + 1, exc)
+                logger.warning(
+                    "Falha ao salvar checkpoint epoch %d: %s", epoch + 1, exc
+                )
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1755,7 +1749,7 @@ class MetricPlateauDetector:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(
@@ -1790,7 +1784,6 @@ class MetricPlateauDetector:
             mode="min": _best=inf, melhoria = best - current > threshold.
             mode="max": _best=-inf, melhoria = current - best > threshold.
         """
-        import tensorflow as tf
 
         super().__init__()
         self._monitor: str = monitor
@@ -1924,7 +1917,7 @@ class OneCycleLR:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(
@@ -1951,7 +1944,6 @@ class OneCycleLR:
             Ref: Smith 2018 (super-convergence).
             LR range: [max_lr/25, max_lr] na Phase 1, depois annealing.
         """
-        import tensorflow as tf
 
         super().__init__()
         self._max_lr: float = max_lr
@@ -1960,7 +1952,8 @@ class OneCycleLR:
         self._pct_start: float = pct_start
 
         logger.info(
-            "OneCycleLR inicializado: max_lr=%.6f, total=%d, " "div=%.1f, pct_start=%.2f",
+            "OneCycleLR inicializado: max_lr=%.6f, total=%d, "
+            "div=%.1f, pct_start=%.2f",
             max_lr,
             total_epochs,
             div_factor,
@@ -2006,7 +1999,7 @@ class OneCycleLR:
             )
 
         # Atualiza LR do otimizador via backend Keras
-        tf.keras.backend.set_value(self.model.optimizer.learning_rate, new_lr)
+        tf.keras.backend.set_value(self.model.optimizer.learning_rate, new_lr)  # type: ignore[attr-defined]
 
         logger.debug(
             "Epoch %d: OneCycleLR lr=%.8f (pct=%.3f)",
@@ -2080,7 +2073,7 @@ class CosineWarmRestarts:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(
@@ -2107,7 +2100,6 @@ class CosineWarmRestarts:
             Ref: Loshchilov & Hutter 2017 (SGDR, Eq. 2).
             LR = initial_lr * 0.5 * (1 + cos(pi * T_cur / T_i)).
         """
-        import tensorflow as tf
 
         super().__init__()
         self._initial_lr: float = initial_lr
@@ -2148,7 +2140,7 @@ class CosineWarmRestarts:
             * (1.0 + math.cos(math.pi * self._T_cur / max(self._T_i, 1)))
         )
 
-        tf.keras.backend.set_value(self.model.optimizer.learning_rate, new_lr)
+        tf.keras.backend.set_value(self.model.optimizer.learning_rate, new_lr)  # type: ignore[attr-defined]
 
         logger.debug(
             "Epoch %d: CosineWarmRestarts lr=%.8f (T_cur=%d, T_i=%d)",
@@ -2235,7 +2227,7 @@ class CyclicalLR:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(
@@ -2267,7 +2259,6 @@ class CyclicalLR:
             triangular: max_lr constante.
             triangular2: max_lr /= 2 a cada ciclo (convergencia mais estavel).
         """
-        import tensorflow as tf
 
         super().__init__()
 
@@ -2322,7 +2313,7 @@ class CyclicalLR:
             self._base_lr + (self._max_lr - self._base_lr) * max(0.0, 1.0 - x) * scale
         )
 
-        tf.keras.backend.set_value(self.model.optimizer.learning_rate, new_lr)
+        tf.keras.backend.set_value(self.model.optimizer.learning_rate, new_lr)  # type: ignore[attr-defined]
 
         logger.debug(
             "Epoch %d: CyclicalLR lr=%.8f (cycle=%d, mode='%s')",
@@ -2380,7 +2371,7 @@ class MemoryMonitor:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(self) -> None:
@@ -2392,7 +2383,6 @@ class MemoryMonitor:
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
             Stateless: nenhum estado interno alem do herdado.
         """
-        import tensorflow as tf
 
         super().__init__()
         logger.info("MemoryMonitor inicializado")
@@ -2499,7 +2489,7 @@ class LatencyBenchmark:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(self, model: Any, sample_input: Any) -> None:
@@ -2516,7 +2506,6 @@ class LatencyBenchmark:
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
             sample_input deve ter batch_size=1 para medir latencia unitaria.
         """
-        import tensorflow as tf
 
         super().__init__()
         self._model_ref = model
@@ -2611,7 +2600,7 @@ class EpochSummary:
             Ref: CLAUDE.md (lazy TF import pattern).
         """
         resolved_cls = _ensure_keras_callback_base(cls)
-        instance = super().__new__(resolved_cls)
+        instance: Any = super().__new__(resolved_cls)
         return instance
 
     def __init__(self) -> None:
@@ -2623,7 +2612,6 @@ class EpochSummary:
             Ref: docs/ARCHITECTURE_v2.md secao 6.2.
             Stateless: nenhum estado interno alem do herdado.
         """
-        import tensorflow as tf
 
         super().__init__()
         logger.info("EpochSummary inicializado")
@@ -2657,7 +2645,7 @@ class EpochSummary:
 
         # Learning rate atual (se disponivel via modelo)
         try:
-            lr = tf.keras.backend.get_value(self.model.optimizer.learning_rate)
+            lr = tf.keras.backend.get_value(self.model.optimizer.learning_rate)  # type: ignore[attr-defined]
             parts.append(f"lr={lr:.2e}")
         except Exception:
             pass
@@ -2771,7 +2759,8 @@ class RhoCurriculumCallback:
             # ── Fase 2 (Ramp): threshold cresce linearmente ───────────
             progress = (epoch - self._epochs_easy) / max(self._epochs_ramp, 1)
             threshold = (
-                self._rho_max_start + (self._rho_max_end - self._rho_max_start) * progress
+                self._rho_max_start
+                + (self._rho_max_end - self._rho_max_start) * progress
             )
         else:
             # ── Fase 3 (Full): todas as amostras incluidas ────────────
@@ -3070,7 +3059,8 @@ def add_gradient_monitor(
 
     if loss_fn is None:
         logger.warning(
-            "add_gradient_monitor: loss_fn=None. " "GradientMonitor NAO sera adicionado."
+            "add_gradient_monitor: loss_fn=None. "
+            "GradientMonitor NAO sera adicionado."
         )
         return callbacks
 

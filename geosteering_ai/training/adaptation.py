@@ -88,10 +88,9 @@ Note:
 from __future__ import annotations
 
 import logging
-import math
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List
 
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
@@ -368,7 +367,6 @@ class DomainAdapter:
             Todas as camadas sao descongeladas ao final, independente
             do resultado da adaptacao.
         """
-        import tensorflow as tf  # Lazy import — D7: evita import-time GPU alloc
 
         # ── Validacao de parametros ─────────────────────────────────
         if strategy not in _VALID_STRATEGIES:
@@ -383,13 +381,10 @@ class DomainAdapter:
             )
         if lr_factor < _MIN_LR_FACTOR:
             raise ValueError(
-                f"lr_factor deve ser >= {_MIN_LR_FACTOR}, "
-                f"recebido: {lr_factor}"
+                f"lr_factor deve ser >= {_MIN_LR_FACTOR}, " f"recebido: {lr_factor}"
             )
         if epochs < 1:
-            raise ValueError(
-                f"epochs deve ser >= 1, recebido: {epochs}"
-            )
+            raise ValueError(f"epochs deve ser >= 1, recebido: {epochs}")
 
         # ── LR efetivo para adaptacao ──────────────────────────────
         adaptation_lr = self.config.learning_rate * lr_factor
@@ -411,23 +406,25 @@ class DomainAdapter:
         initial_val_loss = float(
             pre_eval[0] if isinstance(pre_eval, (list, tuple)) else pre_eval
         )
-        self._logger.info(
-            "Val loss pre-adaptacao: %.6f", initial_val_loss
-        )
+        self._logger.info("Val loss pre-adaptacao: %.6f", initial_val_loss)
 
         # ── Despacho para estrategia ───────────────────────────────
         t0 = time.monotonic()
 
         if strategy == "fine_tune":
             history = self._fine_tune(
-                model, field_train_ds, field_val_ds,
+                model,
+                field_train_ds,
+                field_val_ds,
                 epochs=epochs,
                 lr=adaptation_lr,
                 freeze_ratio=freeze_ratio,
             )
         else:  # strategy == "progressive" (validado acima)
             history = self._progressive_unfreeze(
-                model, field_train_ds, field_val_ds,
+                model,
+                field_train_ds,
+                field_val_ds,
                 epochs=epochs,
                 lr=adaptation_lr,
                 freeze_ratio=freeze_ratio,
@@ -437,10 +434,7 @@ class DomainAdapter:
 
         # ── Computa metricas finais ────────────────────────────────
         val_loss_history = history.get("val_loss", [])
-        final_val_loss = (
-            min(val_loss_history) if val_loss_history
-            else initial_val_loss
-        )
+        final_val_loss = min(val_loss_history) if val_loss_history else initial_val_loss
         epochs_trained = len(history.get("loss", []))
 
         self._logger.info(
@@ -522,9 +516,7 @@ class DomainAdapter:
         import tensorflow as tf  # Lazy import — evita import-time GPU alloc
 
         # ── Salvar estado original de trainable ────────────────────
-        original_trainable = [
-            layer.trainable for layer in model.layers
-        ]
+        original_trainable = [layer.trainable for layer in model.layers]
 
         try:
             # ── Congelar camadas do backbone ───────────────────────
@@ -536,11 +528,14 @@ class DomainAdapter:
             for i, layer in enumerate(model.layers):
                 layer.trainable = i >= n_freeze  # True para head, False para backbone
 
-            n_trainable = sum(1 for l in model.layers if l.trainable)
+            n_trainable = sum(1 for layer in model.layers if layer.trainable)
             n_frozen = n_layers - n_trainable
             self._logger.info(
                 "Fine-tune: %d/%d camadas congeladas, %d treinaveis, LR=%.2e",
-                n_frozen, n_layers, n_trainable, lr,
+                n_frozen,
+                n_layers,
+                n_trainable,
+                lr,
             )
 
             # ── Recompilar com LR reduzido ─────────────────────────
@@ -551,9 +546,12 @@ class DomainAdapter:
                     clipnorm=1.0,  # D7: gradient clipping conservador
                 ),
                 loss=model.loss,
-                metrics=model.compiled_metrics._metrics if hasattr(
-                    model, "compiled_metrics"
-                ) and model.compiled_metrics is not None else None,
+                metrics=(
+                    model.compiled_metrics._metrics
+                    if hasattr(model, "compiled_metrics")
+                    and model.compiled_metrics is not None
+                    else None
+                ),
             )
 
             # ── EarlyStopping conservador ──────────────────────────
@@ -569,7 +567,8 @@ class DomainAdapter:
 
             self._logger.info(
                 "Fine-tune fit: epochs=%d, patience=%d",
-                epochs, patience,
+                epochs,
+                patience,
             )
 
             # ── Treinamento ────────────────────────────────────────
@@ -586,14 +585,10 @@ class DomainAdapter:
         finally:
             # ── Restaurar trainable para TODAS as camadas ──────────
             # D7: garante que modelo nao permanece parcialmente congelado
-            for layer, was_trainable in zip(
-                model.layers, original_trainable
-            ):
+            for layer, was_trainable in zip(model.layers, original_trainable):
                 layer.trainable = was_trainable
 
-            self._logger.info(
-                "Fine-tune: trainable restaurado para estado original"
-            )
+            self._logger.info("Fine-tune: trainable restaurado para estado original")
 
     # ──────────────────────────────────────────────────────────────────
     # SECAO: PROGRESSIVE UNFREEZE — Descongela camadas progressivamente
@@ -657,9 +652,7 @@ class DomainAdapter:
         import tensorflow as tf  # Lazy import — evita import-time GPU alloc
 
         # ── Salvar estado original de trainable ────────────────────
-        original_trainable = [
-            layer.trainable for layer in model.layers
-        ]
+        original_trainable = [layer.trainable for layer in model.layers]
 
         try:
             n_layers = len(model.layers)
@@ -674,16 +667,21 @@ class DomainAdapter:
             # D7: cada bloco descongela 1 camada, do head para o backbone
             # Limita n_unfreeze_steps para nao exceder camadas congeladas
             # e para garantir pelo menos 2 epocas por bloco
-            n_unfreeze_steps = max(1, min(
-                n_freeze,
-                epochs // 2,  # Pelo menos 2 epocas por bloco
-            ))
+            n_unfreeze_steps = max(
+                1,
+                min(
+                    n_freeze,
+                    epochs // 2,  # Pelo menos 2 epocas por bloco
+                ),
+            )
             epochs_per_block = max(2, epochs // n_unfreeze_steps)
 
             self._logger.info(
                 "Progressive unfreeze: %d camadas congeladas, "
                 "%d blocos de %d epocas, LR_decay_per_block=%.2f",
-                n_freeze, n_unfreeze_steps, epochs_per_block,
+                n_freeze,
+                n_unfreeze_steps,
+                epochs_per_block,
                 _PROGRESSIVE_LR_DECAY_PER_BLOCK,
             )
 
@@ -727,9 +725,12 @@ class DomainAdapter:
                         clipnorm=1.0,
                     ),
                     loss=model.loss,
-                    metrics=model.compiled_metrics._metrics if hasattr(
-                        model, "compiled_metrics"
-                    ) and model.compiled_metrics is not None else None,
+                    metrics=(
+                        model.compiled_metrics._metrics
+                        if hasattr(model, "compiled_metrics")
+                        and model.compiled_metrics is not None
+                        else None
+                    ),
                 )
 
                 # ── Callbacks por bloco ────────────────────────────
@@ -744,14 +745,13 @@ class DomainAdapter:
                 ]
 
                 self._logger.info(
-                    "Bloco %d/%d: epochs=%d, LR=%.2e, patience=%d, "
-                    "trainable=%d/%d",
+                    "Bloco %d/%d: epochs=%d, LR=%.2e, patience=%d, " "trainable=%d/%d",
                     block_idx + 1,
                     n_unfreeze_steps,
                     block_epochs,
                     current_lr,
                     patience,
-                    sum(1 for l in model.layers if l.trainable),
+                    sum(1 for layer in model.layers if layer.trainable),
                     n_layers,
                 )
 
@@ -780,16 +780,15 @@ class DomainAdapter:
 
             self._logger.info(
                 "Progressive unfreeze concluido: %d epocas em %d blocos",
-                total_epochs_used, n_unfreeze_steps,
+                total_epochs_used,
+                n_unfreeze_steps,
             )
 
             return merged_history
 
         finally:
             # ── Restaurar trainable para TODAS as camadas ──────────
-            for layer, was_trainable in zip(
-                model.layers, original_trainable
-            ):
+            for layer, was_trainable in zip(model.layers, original_trainable):
                 layer.trainable = was_trainable
 
             self._logger.info(

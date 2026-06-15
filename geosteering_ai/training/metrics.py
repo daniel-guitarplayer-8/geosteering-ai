@@ -63,7 +63,7 @@ Note:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
@@ -74,11 +74,11 @@ if TYPE_CHECKING:
 # backward compatibility com consumidores de training.metrics.
 # ────────────────────────────────────────────────────────────────────────
 from geosteering_ai.evaluation.metrics import (  # noqa: E402
+    compute_mae,
+    compute_mape,
+    compute_mbe,
     compute_r2,
     compute_rmse,
-    compute_mae,
-    compute_mbe,
-    compute_mape,
 )
 
 logger = logging.getLogger(__name__)
@@ -195,12 +195,10 @@ class R2Score:
             tf.keras.metrics.Metric.__init__(self, name=name, **kwargs)
 
         # Acumuladores para SSE e SST
-        self.sum_sq_error = self.add_weight(
+        self.sum_sq_error = self.add_weight(  # type: ignore[attr-defined]
             name="sum_sq_error", initializer="zeros"
         )
-        self.sum_sq_total = self.add_weight(
-            name="sum_sq_total", initializer="zeros"
-        )
+        self.sum_sq_total = self.add_weight(name="sum_sq_total", initializer="zeros")  # type: ignore[attr-defined]
 
         logger.debug("R2Score metric inicializada (name=%s)", name)
 
@@ -286,7 +284,7 @@ class PerComponentMetric:
         Ref: docs/ARCHITECTURE_v2.md secao 7.2.
     """
 
-    def __init__(self, component_idx: int, name: str = None, **kwargs):
+    def __init__(self, component_idx: int, name: Optional[str] = None, **kwargs):
         """Inicializa PerComponentMetric para um canal especifico.
 
         Args:
@@ -305,9 +303,7 @@ class PerComponentMetric:
         import tensorflow as tf  # Lazy import — CPU-only safe
 
         if component_idx < 0:
-            raise ValueError(
-                f"component_idx deve ser >= 0, recebido: {component_idx}"
-            )
+            raise ValueError(f"component_idx deve ser >= 0, recebido: {component_idx}")
 
         self.component_idx = component_idx
 
@@ -329,16 +325,13 @@ class PerComponentMetric:
             tf.keras.metrics.Metric.__init__(self, name=name, **kwargs)
 
         # Acumuladores para MSE por componente
-        self.sum_sq = self.add_weight(
-            name="sum_sq", initializer="zeros"
-        )
-        self.count = self.add_weight(
-            name="count", initializer="zeros"
-        )
+        self.sum_sq = self.add_weight(name="sum_sq", initializer="zeros")  # type: ignore[attr-defined]
+        self.count = self.add_weight(name="count", initializer="zeros")  # type: ignore[attr-defined]
 
         logger.debug(
             "PerComponentMetric inicializada (idx=%d, name=%s)",
-            component_idx, name,
+            component_idx,
+            name,
         )
 
     def update_state(self, y_true, y_pred, sample_weight=None):
@@ -461,12 +454,8 @@ class AnisotropyRatioError:
             tf.keras.metrics.Metric.__init__(self, name=name, **kwargs)
 
         # Acumuladores para erro na razao de anisotropia
-        self.sum_abs_error = self.add_weight(
-            name="sum_abs_error", initializer="zeros"
-        )
-        self.count = self.add_weight(
-            name="count", initializer="zeros"
-        )
+        self.sum_abs_error = self.add_weight(name="sum_abs_error", initializer="zeros")  # type: ignore[attr-defined]
+        self.count = self.add_weight(name="count", initializer="zeros")  # type: ignore[attr-defined]
 
         logger.debug("AnisotropyRatioError metric inicializada (name=%s)", name)
 
@@ -597,8 +586,8 @@ def build_metrics(config: PipelineConfig) -> List:
     if config.output_channels >= 2:
         metrics.append(AnisotropyRatioError(name="anisotropy_ratio_error"))
         logger.info(
-            "Metrica adicionada: AnisotropyRatioError "
-            "(output_channels=%d >= 2)", config.output_channels,
+            "Metrica adicionada: AnisotropyRatioError " "(output_channels=%d >= 2)",
+            config.output_channels,
         )
 
     # --- Condicional: MAE global (modo verbose) ---
@@ -610,9 +599,10 @@ def build_metrics(config: PipelineConfig) -> List:
         )
 
     logger.info(
-        "build_metrics: %d metricas construidas para output_channels=%d, "
-        "verbose=%s",
-        len(metrics), config.output_channels, config.verbose,
+        "build_metrics: %d metricas construidas para output_channels=%d, " "verbose=%s",
+        len(metrics),
+        config.output_channels,
+        config.verbose,
     )
 
     return metrics

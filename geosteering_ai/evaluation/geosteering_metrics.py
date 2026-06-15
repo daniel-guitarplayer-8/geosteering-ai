@@ -119,6 +119,7 @@ _DEFAULT_INTERFACE_THRESHOLD = 0.5
 # └──────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
 
+
 @dataclass(frozen=True)
 class GeoMetrics:
     """Metricas especificas para operacoes de geosteering.
@@ -198,6 +199,7 @@ class GeoMetrics:
 # └──────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
 
+
 def _detect_interfaces(
     y: np.ndarray,
     threshold: float,
@@ -230,7 +232,7 @@ def _detect_interfaces(
     # Indices onde gradiente > threshold
     interface_positions = np.where(max_grad > threshold)[0].tolist()
 
-    return interface_positions
+    return interface_positions  # type: ignore[no-any-return]
 
 
 def _compute_look_ahead(
@@ -270,7 +272,8 @@ def _compute_look_ahead(
     for i in range(n_samples):
         # Detectar interfaces verdadeiras na amostra i
         true_interfaces = _detect_interfaces(
-            y_true[i], interface_threshold,
+            y_true[i],
+            interface_threshold,
         )
         total_interfaces += len(true_interfaces)
 
@@ -278,9 +281,12 @@ def _compute_look_ahead(
             continue
 
         # Detectar interfaces preditas na amostra i
-        pred_interfaces = set(_detect_interfaces(
-            y_pred[i], interface_threshold,
-        ))
+        pred_interfaces = set(
+            _detect_interfaces(
+                y_pred[i],
+                interface_threshold,
+            )
+        )
 
         # Para cada interface verdadeira, verificar se o modelo
         # antecipou (prediz interface em [pos - window, pos])
@@ -289,8 +295,7 @@ def _compute_look_ahead(
             window_start = max(0, pos - look_ahead_window)
             # Verificar se alguma interface predita cai na janela
             anticipated = any(
-                p in pred_interfaces
-                for p in range(window_start, pos + 1)
+                p in pred_interfaces for p in range(window_start, pos + 1)
             )
             if anticipated:
                 detected_interfaces += 1
@@ -320,6 +325,7 @@ def _compute_look_ahead(
 # │  Todos ──→ GeoMetrics(...)                                          │
 # └──────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
+
 
 def compute_geosteering_metrics(
     y_true: np.ndarray,
@@ -410,19 +416,22 @@ def compute_geosteering_metrics(
     logger.info(
         "Computando metricas geosteering — modelo=%s, shape=%s, "
         "look_ahead=%d, threshold=%.3f",
-        model_label, y_true.shape, look_ahead_window, interface_threshold,
+        model_label,
+        y_true.shape,
+        look_ahead_window,
+        interface_threshold,
     )
 
     # ── DTB Error (se fornecido) ─────────────────────────────────────
     if dtb_true is not None and dtb_pred is not None:
-        dtb_error = np.abs(
-            dtb_true.astype(np.float64) - dtb_pred.astype(np.float64)
-        )
+        dtb_error = np.abs(dtb_true.astype(np.float64) - dtb_pred.astype(np.float64))
         dtb_mean = float(np.mean(dtb_error))
         dtb_std = float(np.std(dtb_error))
         logger.info(
             "DTB error — mean=%.6f, std=%.6f (N=%d pontos)",
-            dtb_mean, dtb_std, dtb_error.size,
+            dtb_mean,
+            dtb_std,
+            dtb_error.size,
         )
     else:
         # DTB nao fornecido — campos NaN
@@ -432,13 +441,18 @@ def compute_geosteering_metrics(
 
     # ── Look-ahead Accuracy ──────────────────────────────────────────
     n_detected, n_total, accuracy = _compute_look_ahead(
-        y_true, y_pred, look_ahead_window, interface_threshold,
+        y_true,
+        y_pred,
+        look_ahead_window,
+        interface_threshold,
     )
 
     logger.info(
-        "Look-ahead accuracy — detectadas=%d/%d, accuracy=%.4f, "
-        "window=%d pontos",
-        n_detected, n_total, accuracy, look_ahead_window,
+        "Look-ahead accuracy — detectadas=%d/%d, accuracy=%.4f, " "window=%d pontos",
+        n_detected,
+        n_total,
+        accuracy,
+        look_ahead_window,
     )
 
     # ── Construir resultado ──────────────────────────────────────────
@@ -454,9 +468,11 @@ def compute_geosteering_metrics(
         "Metricas geosteering concluidas — modelo=%s: "
         "DTB_mean=%.4f, DTB_std=%.4f, look_ahead=%.4f (%d/%d)",
         model_label,
-        result.dtb_error_mean, result.dtb_error_std,
+        result.dtb_error_mean,
+        result.dtb_error_std,
         result.look_ahead_accuracy,
-        result.n_interfaces_detected, result.n_interfaces_total,
+        result.n_interfaces_detected,
+        result.n_interfaces_total,
     )
 
     return result

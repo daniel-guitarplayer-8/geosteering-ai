@@ -690,7 +690,7 @@ def spatial_error_profile(
         float(np.max(rmse_per_z)),
         float(np.mean(rmse_per_z)),
     )
-    return rmse_per_z
+    return rmse_per_z  # type: ignore[no-any-return]
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -829,10 +829,11 @@ def stability_analysis(
     """
     # D7: lazy import de TensorFlow — nao requerido no nivel do modulo
     try:
-        import tensorflow as tf  # noqa: F811
+        import tensorflow as tf  # noqa: F401
     except ImportError as e:
         raise ImportError(
-            "stability_analysis requer TensorFlow. " "Instale com: pip install tensorflow"
+            "stability_analysis requer TensorFlow. "
+            "Instale com: pip install tensorflow"
         ) from e
 
     x_test = np.asarray(x_test, dtype=np.float32)
