@@ -36,11 +36,13 @@ Referencia: docs/ARCHITECTURE_v2.md secao 5.1, docs/reference/feature_views.md.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import tensorflow as tf
 
 import numpy as np
 
-from geosteering_ai.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -104,17 +106,17 @@ VALID_VIEWS = {
 
 def _magnitude(re: np.ndarray, im: np.ndarray) -> np.ndarray:
     """Magnitude complexa: sqrt(re^2 + im^2 + eps)."""
-    return np.sqrt(re**2 + im**2 + EPS)
+    return np.sqrt(re**2 + im**2 + EPS)  # type: ignore[no-any-return]
 
 
 def _phase(re: np.ndarray, im: np.ndarray) -> np.ndarray:
     """Fase complexa: arctan2(im, re) em radianos."""
-    return np.arctan2(im, re)
+    return np.arctan2(im, re)  # type: ignore[no-any-return]
 
 
 def _safe_log10(x: np.ndarray) -> np.ndarray:
     """Log10 seguro com floor em eps."""
-    return np.log10(np.maximum(np.abs(x), EPS))
+    return np.log10(np.maximum(np.abs(x), EPS))  # type: ignore[no-any-return]
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -423,13 +425,15 @@ def apply_feature_view_tf(
 
     # ── Validacao parcial h1/h2 ────────────────────────────────────
     if (h1_cols is None) != (h2_cols is None):
-        raise ValueError("h1_cols e h2_cols devem ser ambos None ou ambos especificados.")
+        raise ValueError(
+            "h1_cols e h2_cols devem ser ambos None ou ambos especificados."
+        )
 
     # ── Resolucao das posicoes H1/H2 ──────────────────────────────
     _use_explicit = h1_cols is not None and h2_cols is not None
     if _use_explicit:
-        re_h1_idx, im_h1_idx = h1_cols
-        re_h2_idx, im_h2_idx = h2_cols
+        re_h1_idx, im_h1_idx = h1_cols  # type: ignore[misc]
+        re_h2_idx, im_h2_idx = h2_cols  # type: ignore[misc]
     else:
         em_start = n_prefix + 1
         tf.debugging.assert_greater_equal(

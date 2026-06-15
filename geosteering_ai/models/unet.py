@@ -50,9 +50,11 @@ Note:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import tensorflow as tf
+
     from geosteering_ai.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -101,7 +103,6 @@ def _build_unet_base(
         mbconv_block,
         output_projection,
         residual_block_1d,
-        se_block,
     )
 
     ap = config.arch_params or {}
@@ -190,7 +191,9 @@ def _build_unet_base(
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name=name)

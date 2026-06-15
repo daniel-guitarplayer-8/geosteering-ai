@@ -85,7 +85,10 @@ Note:
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    import tensorflow as tf
 
 logger = logging.getLogger(__name__)
 
@@ -1100,7 +1103,7 @@ def autocorr_block(
 
     # ── Projecoes Q, K, V ─────────────────────────────────────────────
     q = tf.keras.layers.Dense(dim)(x)
-    k = tf.keras.layers.Dense(dim)(x)
+    _k = tf.keras.layers.Dense(dim)(x)
     v = tf.keras.layers.Dense(dim)(x)
 
     # ── AutoCorrelacao simplificada: correlacao via conv ──────────────
@@ -1336,7 +1339,7 @@ def ita_block(
     """
     import tensorflow as tf
 
-    dim = x.shape[-1]
+    _dim = x.shape[-1]
 
     # ── Transpose: (batch, seq, var) → (batch, var, seq) ─────────────
     y = tf.keras.layers.Lambda(lambda z: tf.transpose(z, perm=[0, 2, 1]))(x)

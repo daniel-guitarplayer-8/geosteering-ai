@@ -39,6 +39,8 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import tensorflow as tf
+
     from geosteering_ai.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -122,7 +124,9 @@ def build_nbeats(config: "PipelineConfig") -> "tf.keras.Model":
 
     logger.info(
         "build_nbeats: n_stacks=%d, n_blocks=%d, n_hidden=%d",
-        n_stacks, n_blocks, n_hidden,
+        n_stacks,
+        n_blocks,
+        n_hidden,
     )
 
     inp = tf.keras.Input(shape=(seq_len, n_feat))
@@ -189,7 +193,7 @@ def build_nhits(config: "PipelineConfig") -> "tf.keras.Model":
     pool_sizes = ap.get("pool_sizes", [1, 4, 8])
     n_hidden = ap.get("n_hidden", 256)
     n_layers = ap.get("n_layers", 2)
-    expansion_dim = ap.get("expansion_coef_dim", 32)
+    _expansion_dim = ap.get("expansion_coef_dim", 32)
 
     seq_len = config.sequence_length
     n_feat = config.n_features
@@ -203,7 +207,9 @@ def build_nhits(config: "PipelineConfig") -> "tf.keras.Model":
 
     logger.info(
         "build_nhits: n_stacks=%d, pool_sizes=%s, n_hidden=%d",
-        n_stacks, pool_sizes, n_hidden,
+        n_stacks,
+        pool_sizes,
+        n_hidden,
     )
 
     inp = tf.keras.Input(shape=(seq_len, n_feat))
@@ -223,7 +229,9 @@ def build_nhits(config: "PipelineConfig") -> "tf.keras.Model":
 
         # ── Pooling expressivo ────────────────────────────────────────
         if pool_size > 1:
-            x_pool = tf.keras.layers.AveragePooling1D(pool_size, padding="same")(x_input)
+            x_pool = tf.keras.layers.AveragePooling1D(pool_size, padding="same")(
+                x_input
+            )
         else:
             x_pool = x_input
 

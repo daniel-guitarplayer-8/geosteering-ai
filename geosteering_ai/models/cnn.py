@@ -47,6 +47,8 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import tensorflow as tf
+
     from geosteering_ai.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -206,14 +208,18 @@ def build_resnet18(config: "PipelineConfig") -> "tf.keras.Model":
             )
         if use_se:
             x = se_block(x, reduction=config.se_reduction)
-        logger.debug("ResNet18 Stage %d: filters=%d, se=%s", stage_i + 1, n_filt, use_se)
+        logger.debug(
+            "ResNet18 Stage %d: filters=%d, se=%s", stage_i + 1, n_filt, use_se
+        )
 
     # ── Output projection ─────────────────────────────────────────────
     out = output_projection(
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
 
@@ -266,7 +272,9 @@ def build_resnet34(config: "PipelineConfig") -> "tf.keras.Model":
     use_se = config.use_se_block
 
     logger.info(
-        "build_resnet34: n_feat=%d, out_ch=%d", config.n_features, config.output_channels
+        "build_resnet34: n_feat=%d, out_ch=%d",
+        config.n_features,
+        config.output_channels,
     )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
@@ -290,7 +298,9 @@ def build_resnet34(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="ResNet_34")
@@ -341,7 +351,9 @@ def build_resnet50(config: "PipelineConfig") -> "tf.keras.Model":
     use_se = config.use_se_block
 
     logger.info(
-        "build_resnet50: n_feat=%d, out_ch=%d", config.n_features, config.output_channels
+        "build_resnet50: n_feat=%d, out_ch=%d",
+        config.n_features,
+        config.output_channels,
     )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
@@ -365,7 +377,9 @@ def build_resnet50(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="ResNet_50")
@@ -416,7 +430,9 @@ def build_convnext(config: "PipelineConfig") -> "tf.keras.Model":
     dr = config.dropout_rate
 
     logger.info(
-        "build_convnext: n_feat=%d, out_ch=%d", config.n_features, config.output_channels
+        "build_convnext: n_feat=%d, out_ch=%d",
+        config.n_features,
+        config.output_channels,
     )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
@@ -424,7 +440,9 @@ def build_convnext(config: "PipelineConfig") -> "tf.keras.Model":
     # ── Patchify stem (ConvNeXt usa stride=4 no stem) ─────────────────
     # Para seq2seq, stride=1 para preservar comprimento temporal
     pad = "causal" if causal else "same"
-    x = tf.keras.layers.Conv1D(stage_filters[0], stem_k, padding=pad, use_bias=False)(inp)
+    x = tf.keras.layers.Conv1D(stage_filters[0], stem_k, padding=pad, use_bias=False)(
+        inp
+    )
     x = tf.keras.layers.LayerNormalization()(x)
 
     # ── 4 Stages ─────────────────────────────────────────────────────
@@ -451,7 +469,9 @@ def build_convnext(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="ConvNeXt")
@@ -521,7 +541,9 @@ def build_inceptionnet(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="InceptionNet")
@@ -591,7 +613,9 @@ def build_inceptiontime(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="InceptionTime")
@@ -672,7 +696,9 @@ def build_cnn1d(config: "PipelineConfig") -> "tf.keras.Model":
         1,
         padding="same",
         activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )(x)
 
@@ -886,7 +912,9 @@ def build_resnext(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="ResNeXt")

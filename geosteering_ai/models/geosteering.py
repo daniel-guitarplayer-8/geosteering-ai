@@ -42,6 +42,8 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import tensorflow as tf
+
     from geosteering_ai.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -139,7 +141,9 @@ def build_wavenet(config: "PipelineConfig") -> "tf.keras.Model":
         out,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="WaveNet")
@@ -174,7 +178,10 @@ def build_causal_transformer(config: "PipelineConfig") -> "tf.keras.Model":
     """
     import tensorflow as tf
 
-    from geosteering_ai.models.blocks import output_projection, transformer_encoder_block
+    from geosteering_ai.models.blocks import (
+        output_projection,
+        transformer_encoder_block,
+    )
 
     ap = config.arch_params or {}
     n_layers = ap.get("n_layers", 4)
@@ -210,7 +217,9 @@ def build_causal_transformer(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="Causal_Transformer")
@@ -248,7 +257,10 @@ def build_informer(config: "PipelineConfig") -> "tf.keras.Model":
     """
     import tensorflow as tf
 
-    from geosteering_ai.models.blocks import output_projection, transformer_encoder_block
+    from geosteering_ai.models.blocks import (
+        output_projection,
+        transformer_encoder_block,
+    )
 
     ap = config.arch_params or {}
     n_encoder = ap.get("n_encoder", 3)
@@ -293,7 +305,9 @@ def build_informer(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="Informer")
@@ -405,7 +419,9 @@ def build_mamba_s4(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="Mamba_S4")
@@ -488,7 +504,9 @@ def build_encoder_forecaster(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="Encoder_Forecaster")
