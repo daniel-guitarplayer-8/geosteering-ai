@@ -58,6 +58,8 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import tensorflow as tf
+
     from geosteering_ai.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -111,7 +113,6 @@ def _surrogate_tcn_block(x, filters, kernel_size, dilation_rate, dropout_rate):
         Ref: Bai et al. (2018) "An Empirical Evaluation of Generic
              Convolutional and Recurrent Networks for Sequence Modeling".
     """
-    import tensorflow as tf
     from tensorflow.keras import layers
 
     # ── Conv1D causal dilatada ────────────────────────────────────

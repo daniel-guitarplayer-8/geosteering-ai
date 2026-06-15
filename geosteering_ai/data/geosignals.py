@@ -35,11 +35,13 @@ Referencia: docs/reference/geosignals.md, docs/physics/perspectivas.md.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Tuple
+
+if TYPE_CHECKING:
+    import tensorflow as tf
 
 import numpy as np
 
-from geosteering_ai.config import PipelineConfig
 from geosteering_ai.data.loading import EM_COMPONENTS
 
 logger = logging.getLogger(__name__)
@@ -104,11 +106,11 @@ EPS = 1e-12
 #    Complementa USD para geometrias 3D complexas.
 
 FAMILY_DEPS: Dict[str, List[str]] = {
-    "USD":  ["ZZ", "XZ", "ZX"],   # Symmetrized Directional — fronteiras camada
-    "UAD":  ["ZZ", "XZ", "ZX"],   # Anti-sym Directional — direcao fronteira
-    "UHR":  ["ZZ", "XX", "YY"],   # Harmonic Resistivity — anisotropia Rv/Rh
-    "UHA":  ["XX", "YY"],         # Harmonic Anisotropy — anisotropia planar
-    "U3DF": ["ZZ", "YZ", "ZY"],   # 3D Formation — fronteiras plano YZ
+    "USD": ["ZZ", "XZ", "ZX"],  # Symmetrized Directional — fronteiras camada
+    "UAD": ["ZZ", "XZ", "ZX"],  # Anti-sym Directional — direcao fronteira
+    "UHR": ["ZZ", "XX", "YY"],  # Harmonic Resistivity — anisotropia Rv/Rh
+    "UHA": ["XX", "YY"],  # Harmonic Anisotropy — anisotropia planar
+    "U3DF": ["ZZ", "YZ", "ZY"],  # 3D Formation — fronteiras plano YZ
 }
 
 
@@ -131,7 +133,9 @@ def compute_expanded_features(
     needed = set(base_features)
     for fam in families:
         if fam not in FAMILY_DEPS:
-            raise ValueError(f"Familia '{fam}' desconhecida. Validas: {list(FAMILY_DEPS)}")
+            raise ValueError(
+                f"Familia '{fam}' desconhecida. Validas: {list(FAMILY_DEPS)}"
+            )
         for comp in FAMILY_DEPS[fam]:
             re_idx, im_idx = EM_COMPONENTS[comp]
             needed.add(re_idx)
@@ -148,6 +152,7 @@ def compute_expanded_features(
 #   2. Phase shift (graus): angle(ratio) em graus, clipped em [-180, +180]
 # Usada tanto pela versao numpy quanto como modelo para a versao TF.
 # ════════════════════════════════════════════════════════════════════════
+
 
 def _geosignal_from_ratio_np(
     ratio: np.ndarray,
@@ -177,10 +182,11 @@ def _geosignal_from_ratio_np(
 # colunas: [zobs, depth, rho1, rho2, Re/Im das 9 componentes EM].
 # ════════════════════════════════════════════════════════════════════════
 
+
 def _build_complex(data: np.ndarray, comp_name: str) -> np.ndarray:
     """Constroi array complexo a partir de Re/Im no data 2D (n_rows, 22)."""
     re_idx, im_idx = EM_COMPONENTS[comp_name]
-    return data[:, re_idx] + 1j * data[:, im_idx]
+    return data[:, re_idx] + 1j * data[:, im_idx]  # type: ignore[no-any-return]
 
 
 def compute_geosignals(
@@ -213,7 +219,9 @@ def compute_geosignals(
 
     for i, fam in enumerate(families):
         if fam not in FAMILY_DEPS:
-            raise ValueError(f"Familia '{fam}' desconhecida. Validas: {list(FAMILY_DEPS)}")
+            raise ValueError(
+                f"Familia '{fam}' desconhecida. Validas: {list(FAMILY_DEPS)}"
+            )
         # Verificar disponibilidade de colunas para a familia solicitada
         for comp in FAMILY_DEPS[fam]:
             re_idx, im_idx = EM_COMPONENTS[comp]
@@ -291,7 +299,8 @@ def compute_geosignals(
 
     logger.info(
         "Geosinais calculados: familias=%s, shape=%s",
-        families, result.shape,
+        families,
+        result.shape,
     )
     return result
 
@@ -306,6 +315,7 @@ def compute_geosignals(
 # O import de tensorflow e lazy (dentro da funcao) para evitar
 # carregar o TF no momento do import do modulo.
 # ════════════════════════════════════════════════════════════════════════
+
 
 def compute_geosignals_tf(
     x_expanded: "tf.Tensor",

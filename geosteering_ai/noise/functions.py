@@ -27,7 +27,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
+
+if TYPE_CHECKING:
+    import tensorflow as tf
 
 import numpy as np
 
@@ -699,12 +702,14 @@ def _add_anisotropy_misalignment_noise_tf(x, noise_level, n_protected=1):
     mixed = tf.cond(
         n_em >= 4,
         lambda: em_feats + noise_level * shift,
-        lambda: em_feats
-        + tf.random.normal(
-            shape=tf.shape(em_feats),
-            mean=0.0,
-            stddev=noise_level,
-            dtype=tf.float32,
+        lambda: (
+            em_feats
+            + tf.random.normal(
+                shape=tf.shape(em_feats),
+                mean=0.0,
+                stddev=noise_level,
+                dtype=tf.float32,
+            )
         ),
     )
     return tf.concat([protected, mixed], axis=-1)
@@ -1100,7 +1105,7 @@ def _add_cross_talk_noise_tf(x, noise_level, n_protected=1):
     # ── Cross-talk: colunas pares (Re) vazam para impares (Im) e vice-versa
     # epsilon = noise_level × 0.4 controla magnitude do acoplamento.
     epsilon = noise_level * 0.4
-    n_em = tf.shape(em_feats)[2]
+    _n_em = tf.shape(em_feats)[2]
     # Shift circular de 1 posicao: Re↔Im adjacentes
     shifted = tf.roll(em_feats, shift=1, axis=2)
     noisy_em = em_feats + epsilon * shifted
@@ -2014,7 +2019,9 @@ def apply_raw_em_noise(
             # ── Dropout: mascara aleatoria ────────────────────────────
             keep_prob = max(1.0 - noise_level, 1e-6)
             mask = (rng.uniform(size=em_feats.shape) < keep_prob).astype(em_feats.dtype)
-            em_feats[:] = (1.0 - w_norm) * em_feats + w_norm * em_feats * mask / keep_prob
+            em_feats[:] = (
+                1.0 - w_norm
+            ) * em_feats + w_norm * em_feats * mask / keep_prob
 
         # ── 5 CORE adicionais (Fase II) ─────────────────────────────
         elif nt == "drift":
@@ -2081,9 +2088,9 @@ def apply_raw_em_noise(
         elif nt == "mud_invasion":
             # ── R3: atenuacao multiplicativa uniforme ────────────────
             atten = 1.0 - noise_level * rng.uniform(0, 1, size=em_feats.shape)
-            em_feats[:] = ((1.0 - w_norm) * em_feats + w_norm * em_feats * atten).astype(
-                em_feats.dtype
-            )
+            em_feats[:] = (
+                (1.0 - w_norm) * em_feats + w_norm * em_feats * atten
+            ).astype(em_feats.dtype)
 
         elif nt == "anisotropy_misalignment":
             # ── R4: mistura cruzada entre colunas EM ─────────────────
@@ -2101,9 +2108,9 @@ def apply_raw_em_noise(
             std_s = np.maximum(std_s, 1e-12)
             smooth_norm = smooth / std_s * noise_level
             factor = 1.0 + smooth_norm
-            em_feats[:] = ((1.0 - w_norm) * em_feats + w_norm * em_feats * factor).astype(
-                em_feats.dtype
-            )
+            em_feats[:] = (
+                (1.0 - w_norm) * em_feats + w_norm * em_feats * factor
+            ).astype(em_feats.dtype)
 
         elif nt == "telemetry":
             # ── R6: dropout esparso + bit error gaussiano ────────────
@@ -2279,7 +2286,7 @@ def apply_raw_em_noise(
         # ── 2 Geosteering R7-R8 (Fase III) ────────────────────────
         elif nt == "bha_vibration":
             # ── R7: deslocamento lateral sinusoidal ─────────────────
-            shift = noise_level * 0.5
+            shift = noise_level * 0.5  # type: ignore[assignment]
             seq_len_local = em_feats.shape[1]
             t = np.arange(seq_len_local).reshape(1, -1, 1)
             phase = rng.uniform(0, 2 * np.pi, size=(1, 1, em_feats.shape[2]))

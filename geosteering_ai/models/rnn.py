@@ -39,6 +39,8 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import tensorflow as tf
+
     from geosteering_ai.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -91,7 +93,9 @@ def build_lstm(config: "PipelineConfig") -> "tf.keras.Model":
 
     logger.info(
         "build_lstm: n_feat=%d, units=%d, n_layers=%d",
-        config.n_features, units, n_layers,
+        config.n_features,
+        units,
+        n_layers,
     )
 
     inp = tf.keras.Input(shape=(config.sequence_length, config.n_features))
@@ -110,9 +114,12 @@ def build_lstm(config: "PipelineConfig") -> "tf.keras.Model":
         logger.debug("LSTM layer %d: units=%d", layer_i + 1, units)
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="LSTM")
@@ -164,7 +171,10 @@ def build_bilstm(config: "PipelineConfig") -> "tf.keras.Model":
 
     logger.info(
         "build_bilstm: n_feat=%d, units=%d, n_layers=%d, merge=%s",
-        config.n_features, units, n_layers, merge_mode,
+        config.n_features,
+        units,
+        n_layers,
+        merge_mode,
     )
 
     if config.use_causal_mode:
@@ -186,12 +196,17 @@ def build_bilstm(config: "PipelineConfig") -> "tf.keras.Model":
         x = tf.keras.layers.Bidirectional(lstm, merge_mode=merge_mode)(x)
         if dr > 0.0:
             x = tf.keras.layers.Dropout(dr)(x)
-        logger.debug("BiLSTM layer %d: units=%d (out=%d)", layer_i + 1, units, x.shape[-1])
+        logger.debug(
+            "BiLSTM layer %d: units=%d (out=%d)", layer_i + 1, units, x.shape[-1]
+        )
 
     out = output_projection(
-        x, config.output_channels,
+        x,
+        config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="BiLSTM")

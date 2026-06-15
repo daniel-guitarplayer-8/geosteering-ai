@@ -75,7 +75,10 @@ Referencia: Relatorio Estrategia C.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Tuple
+
+if TYPE_CHECKING:
+    import tensorflow as tf
 
 import numpy as np
 
@@ -210,7 +213,7 @@ def compute_second_order_features(
         h2_cols,
     )
 
-    return result
+    return result  # type: ignore[no-any-return]
 
 
 # ════════════════════════════════════════════════════════════════════════════

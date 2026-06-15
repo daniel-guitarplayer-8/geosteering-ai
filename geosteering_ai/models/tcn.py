@@ -43,6 +43,8 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import tensorflow as tf
+
     from geosteering_ai.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -133,7 +135,9 @@ def build_tcn(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="TCN")
@@ -224,7 +228,9 @@ def build_tcn_advanced(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="TCN_Advanced")
@@ -410,7 +416,9 @@ def build_modern_tcn(config: "PipelineConfig") -> "tf.keras.Model":
         x,
         config.output_channels,
         constraint_activation=(
-            config.constraint_activation if config.use_physical_constraint_layer else None
+            config.constraint_activation
+            if config.use_physical_constraint_layer
+            else None
         ),
     )
     return tf.keras.Model(inputs=inp, outputs=out, name="ModernTCN")
