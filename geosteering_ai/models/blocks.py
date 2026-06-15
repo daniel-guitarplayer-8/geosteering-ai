@@ -1070,7 +1070,8 @@ def autocorr_block(
     requer operacoes de roll e top-k no loop de treino.
 
     Esquema (simplificada):
-        x → Q,K,V projecoes → DepthwiseConv(Q) → Softmax(axis=tempo) → Multiply(V) → Dense → Residual+LN
+        x → Q,V projecoes → DepthwiseConv(Q) → Softmax(axis=tempo) → Multiply(V) → Dense → Residual+LN
+        (K omitido no proxy; reservado para a AutoCorrelacao FFT completa)
 
     Args:
         x: Tensor de entrada (batch, seq_len, dim).
@@ -1101,9 +1102,13 @@ def autocorr_block(
 
     dim = x.shape[-1]
 
-    # ── Projecoes Q, K, V ─────────────────────────────────────────────
+    # ── Projecoes Q, V ────────────────────────────────────────────────
+    # NOTA: o proxy simplificado (DepthwiseConv) NAO usa a projecao K — a
+    # AutoCorrelacao completa (correlacao Q-K via FFT, Wu et al. 2021) e que
+    # a usaria. K fica reservado para a implementacao futura, como num_heads/
+    # factor. (Antes existia `_k = Dense(dim)(x)` morto: criado e descartado,
+    # nunca conectado ao grafo do modelo — dead code removido.)
     q = tf.keras.layers.Dense(dim)(x)
-    _k = tf.keras.layers.Dense(dim)(x)
     v = tf.keras.layers.Dense(dim)(x)
 
     # ── AutoCorrelacao simplificada: correlacao via conv ──────────────
