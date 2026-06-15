@@ -65,7 +65,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, cast
 
 import numpy as np
 
@@ -239,7 +239,9 @@ class RealtimeInference:
         window_array = np.stack(list(self.buffer), axis=0)
         raw_data = window_array[np.newaxis, :, :]  # (1, window_size, 22)
 
-        prediction = self.pipeline.predict(raw_data)
+        # predict() sem return_uncertainty=True sempre retorna np.ndarray;
+        # mypy nao consegue estreitar o tipo union a partir do default bool.
+        prediction = cast(np.ndarray, self.pipeline.predict(raw_data))
 
         logger.debug(
             "Inferencia realtime — update #%d, shape=%s",

@@ -97,7 +97,7 @@ Note:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List
 
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
@@ -160,6 +160,7 @@ _LOSS_CHOICES: List[str] = [
 # criar uma variante do PipelineConfig com os HPs sugeridos.
 # ════════════════════════════════════════════════════════════════════════
 
+
 def create_search_space(trial: Any, config: PipelineConfig) -> Dict[str, Any]:
     """Define espaco de busca Optuna com base no config.
 
@@ -208,9 +209,7 @@ def create_search_space(trial: Any, config: PipelineConfig) -> Dict[str, Any]:
     # ── Batch size (categorico: potencias de 2) ──────────────────────
     # D7: Batch size impacta estabilidade dos gradientes e uso de GPU.
     # Potencias de 2 sao otimas para alinhamento de memoria GPU.
-    params["batch_size"] = trial.suggest_categorical(
-        "batch_size", _BATCH_CHOICES
-    )
+    params["batch_size"] = trial.suggest_categorical("batch_size", _BATCH_CHOICES)
 
     # ── Dropout rate (uniforme: 0.0 a 0.5) ───────────────────────────
     # D7: Dropout complementa weight_decay (regularizacao por ativacao).
@@ -222,16 +221,12 @@ def create_search_space(trial: Any, config: PipelineConfig) -> Dict[str, Any]:
     # ── Loss type (categorico: 5 opcoes estaveis) ────────────────────
     # D7: Apenas losses robustas e bem validadas no pipeline.
     # Losses exoticas (physics-informed, geosteering) nao sao tunaveis.
-    params["loss_type"] = trial.suggest_categorical(
-        "loss_type", _LOSS_CHOICES
-    )
+    params["loss_type"] = trial.suggest_categorical("loss_type", _LOSS_CHOICES)
 
     # ── Optimizer (categorico: 4 opcoes) ──────────────────────────────
     # D7: AdamW e o default (weight_decay nativo). Adam, Nadam e RMSprop
     # sao alternativas bem estabelecidas para series temporais.
-    params["optimizer"] = trial.suggest_categorical(
-        "optimizer", _OPTIMIZER_CHOICES
-    )
+    params["optimizer"] = trial.suggest_categorical("optimizer", _OPTIMIZER_CHOICES)
 
     logger.info(
         "Trial %d: LR=%.2e, batch=%d, dropout=%.3f, loss=%s, opt=%s",
@@ -265,6 +260,7 @@ def create_search_space(trial: Any, config: PipelineConfig) -> Dict[str, Any]:
 #   │  "hyperband" → HyperbandPruner(min_resource=3, max=epochs)  │
 #   └────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
+
 
 def create_study(config: PipelineConfig) -> Any:
     """Cria Optuna study com sampler e pruner configurados.
@@ -351,6 +347,7 @@ def create_study(config: PipelineConfig) -> Any:
 # Timeout: study.optimize() para apos optuna_timeout segundos
 # OU optuna_n_trials trials (o que ocorrer primeiro).
 # ════════════════════════════════════════════════════════════════════════
+
 
 def run_hpo(
     config: PipelineConfig,
@@ -458,14 +455,10 @@ def run_hpo(
         try:
             val_loss = build_and_train_fn(trial_config)
         except Exception as exc:
-            logger.warning(
-                "Trial %d falhou: %s. Retornando inf.", trial.number, exc
-            )
+            logger.warning("Trial %d falhou: %s. Retornando inf.", trial.number, exc)
             return float("inf")
 
-        logger.info(
-            "Trial %d: val_loss = %.6f", trial.number, val_loss
-        )
+        logger.info("Trial %d: val_loss = %.6f", trial.number, val_loss)
 
         return val_loss
 
@@ -492,9 +485,7 @@ def run_hpo(
     n_pruned = len(
         [t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]
     )
-    n_failed = len(
-        [t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]
-    )
+    n_failed = len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])
 
     logger.info(
         "HPO concluido: %d trials (%d completos, %d podados, %d falhos). "

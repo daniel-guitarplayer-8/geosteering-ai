@@ -55,12 +55,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, Optional
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from geosteering_ai.config import PipelineConfig
+    pass
 
 # ──────────────────────────────────────────────────────────────────────
 # D8: Exports publicos — agrupados semanticamente
@@ -81,10 +81,10 @@ logger = logging.getLogger(__name__)
 # D10: Constantes de visualizacao
 # ──────────────────────────────────────────────────────────────────────
 _DEFAULT_DPI = 300
-_FIGSIZE_HEATMAP = (14, 6)     # largura x altura para heatmap
-_FIGSIZE_BAR = (10, 5)         # largura x altura para barras por banda
-_FIGSIZE_SPATIAL = (10, 5)     # largura x altura para perfil espacial
-_EPS = 1e-12                   # eps para float32 (NUNCA 1e-30)
+_FIGSIZE_HEATMAP = (14, 6)  # largura x altura para heatmap
+_FIGSIZE_BAR = (10, 5)  # largura x altura para barras por banda
+_FIGSIZE_SPATIAL = (10, 5)  # largura x altura para perfil espacial
+_EPS = 1e-12  # eps para float32 (NUNCA 1e-30)
 
 # Nomes das componentes de resistividade (indice 0 e 1)
 _COMPONENT_NAMES = {
@@ -96,9 +96,9 @@ _COMPONENT_NAMES = {
 _CMAP_ERROR = "hot_r"
 
 # Cores para graficos de barras
-_COLOR_BAR = "#3498db"          # azul para barras de RMSE
-_COLOR_SPATIAL = "#e74c3c"      # vermelho para perfil espacial
-_COLOR_SPATIAL_FILL = "#e74c3c" # vermelho com transparencia para fill
+_COLOR_BAR = "#3498db"  # azul para barras de RMSE
+_COLOR_SPATIAL = "#e74c3c"  # vermelho para perfil espacial
+_COLOR_SPATIAL_FILL = "#e74c3c"  # vermelho com transparencia para fill
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -179,20 +179,21 @@ def plot_error_heatmap(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error(
-            "matplotlib nao instalado. Instale com: pip install matplotlib"
-        )
+        logger.error("matplotlib nao instalado. Instale com: pip install matplotlib")
         raise
 
     # --- Computar erro absoluto ---
     # D7: Erro no dominio log10 (dominio do treinamento)
     abs_error = np.abs(y_true[:, :, component] - y_pred[:, :, component])
-    rmse_total = float(np.sqrt(np.mean(abs_error ** 2) + _EPS))
+    rmse_total = float(np.sqrt(np.mean(abs_error**2) + _EPS))
 
     n_samples, seq_len = abs_error.shape
     logger.info(
         "plot_error_heatmap: component=%d, shape=(%d, %d), RMSE=%.6f",
-        component, n_samples, seq_len, rmse_total,
+        component,
+        n_samples,
+        seq_len,
+        rmse_total,
     )
 
     # --- Nome da componente ---
@@ -236,8 +237,9 @@ def plot_error_heatmap(
     else:
         plt.close(fig)
 
-    logger.info("plot_error_heatmap concluido: component=%d, RMSE=%.6f",
-                component, rmse_total)
+    logger.info(
+        "plot_error_heatmap concluido: component=%d, RMSE=%.6f", component, rmse_total
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -290,9 +292,7 @@ def plot_error_by_band(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error(
-            "matplotlib nao instalado. Instale com: pip install matplotlib"
-        )
+        logger.error("matplotlib nao instalado. Instale com: pip install matplotlib")
         raise
 
     band_names = list(band_results.keys())
@@ -300,7 +300,9 @@ def plot_error_by_band(
 
     logger.info(
         "plot_error_by_band: %d bandas, RMSE range [%.6f, %.6f]",
-        len(band_names), rmse_values.min(), rmse_values.max(),
+        len(band_names),
+        rmse_values.min(),
+        rmse_values.max(),
     )
 
     # --- Titulo ---
@@ -312,8 +314,11 @@ def plot_error_by_band(
 
     x_pos = np.arange(len(band_names))
     bars = ax.bar(
-        x_pos, rmse_values,
-        color=_COLOR_BAR, edgecolor="white", linewidth=0.8,
+        x_pos,
+        rmse_values,
+        color=_COLOR_BAR,
+        edgecolor="white",
+        linewidth=0.8,
         alpha=0.85,
     )
 
@@ -323,7 +328,10 @@ def plot_error_by_band(
             bar_obj.get_x() + bar_obj.get_width() / 2.0,
             bar_obj.get_height() + rmse_values.max() * 0.02,
             f"{val:.4f}",
-            ha="center", va="bottom", fontsize=8, fontweight="bold",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            fontweight="bold",
         )
 
     ax.set_xticks(x_pos)
@@ -406,9 +414,7 @@ def plot_spatial_error(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error(
-            "matplotlib nao instalado. Instale com: pip install matplotlib"
-        )
+        logger.error("matplotlib nao instalado. Instale com: pip install matplotlib")
         raise
 
     seq_len = error_profile.shape[0]
@@ -419,7 +425,10 @@ def plot_spatial_error(
 
     logger.info(
         "plot_spatial_error: seq_len=%d, RMSE medio=%.6f, max=%.6f (idx=%d)",
-        seq_len, rmse_mean, rmse_max, rmse_max_idx,
+        seq_len,
+        rmse_mean,
+        rmse_max,
+        rmse_max_idx,
     )
 
     # --- Titulo ---
@@ -431,24 +440,36 @@ def plot_spatial_error(
 
     # Area preenchida sob a curva para visualizacao do envelope de erro
     ax.fill_between(
-        depth_axis, 0, error_profile,
-        color=_COLOR_SPATIAL_FILL, alpha=0.2,
+        depth_axis,
+        0,
+        error_profile,
+        color=_COLOR_SPATIAL_FILL,
+        alpha=0.2,
     )
     ax.plot(
-        depth_axis, error_profile,
-        color=_COLOR_SPATIAL, linewidth=1.2, label="RMSE por Profundidade",
+        depth_axis,
+        error_profile,
+        color=_COLOR_SPATIAL,
+        linewidth=1.2,
+        label="RMSE por Profundidade",
     )
 
     # D7: Linha horizontal de RMSE medio
     ax.axhline(
-        y=rmse_mean, color="gray", linewidth=1.0, linestyle="--",
+        y=rmse_mean,
+        color="gray",
+        linewidth=1.0,
+        linestyle="--",
         label=f"RMSE medio={rmse_mean:.4f}",
     )
 
     # D7: Marcar ponto de erro maximo
     ax.plot(
-        rmse_max_idx, rmse_max,
-        marker="v", markersize=10, color="darkred",
+        rmse_max_idx,
+        rmse_max,
+        marker="v",
+        markersize=10,
+        color="darkred",
         label=f"Max RMSE={rmse_max:.4f} (idx={rmse_max_idx})",
     )
 

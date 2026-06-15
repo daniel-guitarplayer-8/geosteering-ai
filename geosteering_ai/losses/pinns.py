@@ -81,7 +81,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
@@ -755,7 +755,8 @@ def make_surrogate_physics_loss(
     )
 
     logger.info(
-        "Surrogate loss configurada: modo='%s' (%s), norma='%s', " "f=%.0f Hz, L=%.2f m",
+        "Surrogate loss configurada: modo='%s' (%s), norma='%s', "
+        "f=%.0f Hz, L=%.2f m",
         output_mode,
         "4 canais Re+Im" if _use_complex else "2 canais log10|H|",
         norm,

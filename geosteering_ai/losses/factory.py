@@ -42,16 +42,16 @@ Fluxo de decisao para build_combined:
     │      NAO → base simples (+ PINNs se ativas)                         │
     └──────────────────────────────────────────────────────────────────────┘
 """
+
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from geosteering_ai.config import PipelineConfig
 
 from geosteering_ai.losses.catalog import (  # A: genericas; B: geofisicas (factories); C: geosteering; D: avancadas (factories)
-    EPS,
     huber_loss,
     log_cosh_loss,
     mae_loss,
@@ -135,7 +135,7 @@ VALID_LOSS_TYPES: list[str] = [
 _DIRECT = "direct"
 _FACTORY = "factory"
 
-_LOSS_REGISTRY: dict[str, tuple[str, object]] = {
+_LOSS_REGISTRY: dict[str, tuple[str, Callable[..., Any]]] = {
     # ── A: Genericas — funcoes diretas ────────────────────────────────────
     "mse": (_DIRECT, mse_loss),
     "rmse": (_DIRECT, rmse_loss),
@@ -261,14 +261,18 @@ class LossFactory:
 
         # Losses de ruido precisam de noise_level_var
         if loss_type in ("adaptive_log_scale", "adaptive_robust"):
-            return fn(config, epoch_var=epoch_var, noise_level_var=noise_level_var)
+            return fn(config, epoch_var=epoch_var, noise_level_var=noise_level_var)  # type: ignore[no-any-return]
 
         # Losses de epoch precisam de epoch_var
-        if loss_type in ("log_scale_aware", "robust_log_scale", "morales_physics_hybrid"):
-            return fn(config, epoch_var=epoch_var)
+        if loss_type in (
+            "log_scale_aware",
+            "robust_log_scale",
+            "morales_physics_hybrid",
+        ):
+            return fn(config, epoch_var=epoch_var)  # type: ignore[no-any-return]
 
         # Factories simples (sem variaveis de runtime)
-        return fn(config)
+        return fn(config)  # type: ignore[no-any-return]
 
     @classmethod
     def build_combined(

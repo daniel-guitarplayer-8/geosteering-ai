@@ -82,7 +82,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Sequence, Union
+from typing import Dict, Sequence
 
 import numpy as np
 
@@ -342,7 +342,7 @@ def compute_dod_standard(
         float(np.min(dod)),
         float(np.max(dod)),
     )
-    return dod
+    return dod  # type: ignore[no-any-return]
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -514,14 +514,15 @@ def compute_dod_snr(
     dod = delta_mean * attenuation
 
     logger.debug(
-        "DOD SNR: freq=%.0f Hz, noise=%.4f, snr_thresh=%.1f, " "dod_range=[%.3f, %.3f] m",
+        "DOD SNR: freq=%.0f Hz, noise=%.4f, snr_thresh=%.1f, "
+        "dod_range=[%.3f, %.3f] m",
         frequency_hz,
         noise_level,
         snr_threshold,
         float(np.min(dod)),
         float(np.max(dod)),
     )
-    return dod
+    return dod  # type: ignore[no-any-return]
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -684,7 +685,7 @@ def compute_dod_anisotropy(
         float(np.min(dod)),
         float(np.max(dod)),
     )
-    return dod
+    return dod  # type: ignore[no-any-return]
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -767,7 +768,7 @@ def compute_dod_dip(
         float(np.min(dod)),
         float(np.max(dod)),
     )
-    return dod
+    return dod  # type: ignore[no-any-return]
 
 
 # ════════════════════════════════════════════════════════════════════════

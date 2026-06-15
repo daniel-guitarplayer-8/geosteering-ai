@@ -56,6 +56,9 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 
 if TYPE_CHECKING:
+    from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
+
     from geosteering_ai.config import PipelineConfig
 
 # ──────────────────────────────────────────────────────────────────────
@@ -76,13 +79,13 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────
 _DEFAULT_WINDOW_SIZE = 100
 _FIGSIZE = (14, 6)
-_UPDATE_INTERVAL_MS = 100   # intervalo de atualizacao em milissegundos
-_CONFIDENCE_ALPHA = 0.25    # transparencia do intervalo de confianca
+_UPDATE_INTERVAL_MS = 100  # intervalo de atualizacao em milissegundos
+_CONFIDENCE_ALPHA = 0.25  # transparencia do intervalo de confianca
 
 # Cores para consistencia visual com holdout.py
-_COLOR_RHO_H = "#1f77b4"   # azul matplotlib default
-_COLOR_RHO_V = "#d62728"   # vermelho matplotlib default
-_COLOR_CI = "#aec7e8"      # azul claro para intervalo de confianca
+_COLOR_RHO_H = "#1f77b4"  # azul matplotlib default
+_COLOR_RHO_V = "#d62728"  # vermelho matplotlib default
+_COLOR_CI = "#aec7e8"  # azul claro para intervalo de confianca
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -151,15 +154,13 @@ class RealtimeMonitor:
         self._timestamps: deque = deque(maxlen=window_size)
 
         # Estado matplotlib (lazy init)
-        self._fig = None
-        self._ax_h = None
-        self._ax_v = None
+        self._fig: Optional["Figure"] = None
+        self._ax_h: Optional["Axes"] = None
+        self._ax_v: Optional["Axes"] = None
         self._step: int = 0
         self._interactive: bool = False
 
-        logger.info(
-            "RealtimeMonitor inicializado: window_size=%d", window_size
-        )
+        logger.info("RealtimeMonitor inicializado: window_size=%d", window_size)
 
     def _init_figure(self) -> None:
         """Cria a figura matplotlib em modo interativo.
@@ -174,6 +175,7 @@ class RealtimeMonitor:
         """
         try:
             import matplotlib.pyplot as plt
+
             plt.ion()  # modo interativo
             self._interactive = True
         except ImportError:
@@ -183,14 +185,14 @@ class RealtimeMonitor:
             self._interactive = False
             return
         except Exception:
-            logger.warning(
-                "Backend matplotlib sem suporte a display. Modo log-only."
-            )
+            logger.warning("Backend matplotlib sem suporte a display. Modo log-only.")
             self._interactive = False
             return
 
         self._fig, (self._ax_h, self._ax_v) = plt.subplots(
-            1, 2, figsize=_FIGSIZE,
+            1,
+            2,
+            figsize=_FIGSIZE,
         )
 
         # Titulo da figura
@@ -278,7 +280,9 @@ class RealtimeMonitor:
             if self._step % 50 == 0:
                 logger.info(
                     "Step %d: rho_h=%.4f, rho_v=%.4f",
-                    self._step, prediction[0], prediction[1],
+                    self._step,
+                    prediction[0],
+                    prediction[1],
                 )
 
     def _redraw(self) -> None:
@@ -298,46 +302,54 @@ class RealtimeMonitor:
         rho_v = np.array(self._rho_v_buffer)
 
         # --- Subplot rho_h ---
-        self._ax_h.cla()
-        self._ax_h.plot(x, rho_h, color=_COLOR_RHO_H, linewidth=1.2, label=r"$\rho_h$")
+        self._ax_h.cla()  # type: ignore[union-attr]
+        self._ax_h.plot(x, rho_h, color=_COLOR_RHO_H, linewidth=1.2, label=r"$\rho_h$")  # type: ignore[union-attr]
 
         # Banda de confianca para rho_h
         unc_h_vals = list(self._unc_h_buffer)
         if any(v is not None for v in unc_h_vals):
             unc_h = np.array([v if v is not None else 0.0 for v in unc_h_vals])
-            self._ax_h.fill_between(
-                x, rho_h - unc_h, rho_h + unc_h,
-                color=_COLOR_CI, alpha=_CONFIDENCE_ALPHA, label="IC",
+            self._ax_h.fill_between(  # type: ignore[union-attr]
+                x,
+                rho_h - unc_h,
+                rho_h + unc_h,
+                color=_COLOR_CI,
+                alpha=_CONFIDENCE_ALPHA,
+                label="IC",
             )
 
-        self._ax_h.set_xlabel("Passo")
-        self._ax_h.set_ylabel(r"$\log_{10}(\rho_h)$ [$\Omega\cdot$m]")
-        self._ax_h.set_title(r"$\rho_h$ (horizontal)")
-        self._ax_h.legend(loc="upper left", fontsize=8)
-        self._ax_h.grid(True, alpha=0.3)
+        self._ax_h.set_xlabel("Passo")  # type: ignore[union-attr]
+        self._ax_h.set_ylabel(r"$\log_{10}(\rho_h)$ [$\Omega\cdot$m]")  # type: ignore[union-attr]
+        self._ax_h.set_title(r"$\rho_h$ (horizontal)")  # type: ignore[union-attr]
+        self._ax_h.legend(loc="upper left", fontsize=8)  # type: ignore[union-attr]
+        self._ax_h.grid(True, alpha=0.3)  # type: ignore[union-attr]
 
         # --- Subplot rho_v ---
-        self._ax_v.cla()
-        self._ax_v.plot(x, rho_v, color=_COLOR_RHO_V, linewidth=1.2, label=r"$\rho_v$")
+        self._ax_v.cla()  # type: ignore[union-attr]
+        self._ax_v.plot(x, rho_v, color=_COLOR_RHO_V, linewidth=1.2, label=r"$\rho_v$")  # type: ignore[union-attr]
 
         # Banda de confianca para rho_v
         unc_v_vals = list(self._unc_v_buffer)
         if any(v is not None for v in unc_v_vals):
             unc_v = np.array([v if v is not None else 0.0 for v in unc_v_vals])
-            self._ax_v.fill_between(
-                x, rho_v - unc_v, rho_v + unc_v,
-                color=_COLOR_CI, alpha=_CONFIDENCE_ALPHA, label="IC",
+            self._ax_v.fill_between(  # type: ignore[union-attr]
+                x,
+                rho_v - unc_v,
+                rho_v + unc_v,
+                color=_COLOR_CI,
+                alpha=_CONFIDENCE_ALPHA,
+                label="IC",
             )
 
-        self._ax_v.set_xlabel("Passo")
-        self._ax_v.set_ylabel(r"$\log_{10}(\rho_v)$ [$\Omega\cdot$m]")
-        self._ax_v.set_title(r"$\rho_v$ (vertical)")
-        self._ax_v.legend(loc="upper left", fontsize=8)
-        self._ax_v.grid(True, alpha=0.3)
+        self._ax_v.set_xlabel("Passo")  # type: ignore[union-attr]
+        self._ax_v.set_ylabel(r"$\log_{10}(\rho_v)$ [$\Omega\cdot$m]")  # type: ignore[union-attr]
+        self._ax_v.set_title(r"$\rho_v$ (vertical)")  # type: ignore[union-attr]
+        self._ax_v.legend(loc="upper left", fontsize=8)  # type: ignore[union-attr]
+        self._ax_v.grid(True, alpha=0.3)  # type: ignore[union-attr]
 
         # --- Flush display ---
-        self._fig.tight_layout()
-        self._fig.canvas.draw_idle()
+        self._fig.tight_layout()  # type: ignore[union-attr]
+        self._fig.canvas.draw_idle()  # type: ignore[union-attr]
         plt.pause(0.001)  # pequena pausa para backend processar eventos
 
     def close(self) -> None:
@@ -351,11 +363,10 @@ class RealtimeMonitor:
         """
         if self._interactive and self._fig is not None:
             import matplotlib.pyplot as plt
+
             plt.ioff()
             plt.close(self._fig)
-            logger.info(
-                "RealtimeMonitor fechado apos %d passos", self._step
-            )
+            logger.info("RealtimeMonitor fechado apos %d passos", self._step)
 
         self._fig = None
         self._ax_h = None

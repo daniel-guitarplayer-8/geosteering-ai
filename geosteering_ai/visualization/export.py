@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Dict, Sequence
 
 # ──────────────────────────────────────────────────────────────────────
 # D8: Exports publicos — agrupados semanticamente
@@ -120,9 +120,7 @@ def save_figure(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error(
-            "matplotlib nao instalado. Instale com: pip install matplotlib"
-        )
+        logger.error("matplotlib nao instalado. Instale com: pip install matplotlib")
         raise
 
     # --- Validar formato ---
@@ -139,7 +137,7 @@ def save_figure(
     path_obj.parent.mkdir(parents=True, exist_ok=True)
 
     # --- Salvar ---
-    fig.savefig(str(path_obj), dpi=dpi, bbox_inches="tight")
+    fig.savefig(str(path_obj), dpi=dpi, bbox_inches="tight")  # type: ignore[attr-defined]
     logger.info("Figura salva em: %s (dpi=%d)", path_obj, dpi)
 
     # --- Fechar se solicitado ---
@@ -224,9 +222,7 @@ def export_all_figures(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error(
-            "matplotlib nao instalado. Instale com: pip install matplotlib"
-        )
+        logger.error("matplotlib nao instalado. Instale com: pip install matplotlib")
         raise
 
     # --- Criar diretorio de saida ---
@@ -234,7 +230,9 @@ def export_all_figures(
     output_path.mkdir(parents=True, exist_ok=True)
     logger.info(
         "export_all_figures: %d figuras x %d formatos → %s",
-        len(figures), len(formats), output_path,
+        len(figures),
+        len(formats),
+        output_path,
     )
 
     # --- Exportar cada figura em cada formato ---
@@ -245,7 +243,7 @@ def export_all_figures(
             file_path = output_path / f"{name}.{fmt_lower}"
             try:
                 # Nao fechar ate todos os formatos dessa figura serem salvos
-                fig.savefig(str(file_path), dpi=dpi, bbox_inches="tight")
+                fig.savefig(str(file_path), dpi=dpi, bbox_inches="tight")  # type: ignore[attr-defined]
                 n_saved += 1
                 logger.info("Exportado: %s", file_path)
             except Exception:
@@ -256,7 +254,9 @@ def export_all_figures(
 
     logger.info(
         "export_all_figures concluido: %d/%d arquivos salvos em %s",
-        n_saved, len(figures) * len(formats), output_path,
+        n_saved,
+        len(figures) * len(formats),
+        output_path,
     )
 
     return n_saved

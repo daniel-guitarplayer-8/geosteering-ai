@@ -79,7 +79,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import numpy as np
 
 if TYPE_CHECKING:
-    from geosteering_ai.config import PipelineConfig
+    pass
 
 # ──────────────────────────────────────────────────────────────────────
 # D8: Exports publicos — agrupados semanticamente
@@ -107,10 +107,10 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DPI = 300
 
 # Tamanhos de figura por tipo de plot
-_FIGSIZE_HISTORY = (12, 5)       # largura x altura — optimization history
-_FIGSIZE_IMPORTANCES = (10, 6)   # largura x altura — param importances
-_FIGSIZE_CONTOUR = (10, 8)       # largura x altura — contour plot
-_FIGSIZE_PARALLEL = (14, 6)      # largura x altura — parallel coordinate
+_FIGSIZE_HISTORY = (12, 5)  # largura x altura — optimization history
+_FIGSIZE_IMPORTANCES = (10, 6)  # largura x altura — param importances
+_FIGSIZE_CONTOUR = (10, 8)  # largura x altura — contour plot
+_FIGSIZE_PARALLEL = (14, 6)  # largura x altura — parallel coordinate
 
 # Numero minimo de trials completos para computar importancias
 # fManova requer >= 2 trials para funcionar
@@ -121,10 +121,10 @@ _MIN_TRIALS_IMPORTANCES = 2
 _MIN_TRIALS_CONTOUR = 3
 
 # Cores para consistencia visual
-_COLOR_TRIAL = "#1f77b4"          # azul — valor objetivo por trial
-_COLOR_BEST = "#d62728"           # vermelho — melhor valor acumulado
-_COLOR_BAR = "#2ca02c"            # verde — barras de importancia
-_COLOR_PRUNED = "#cccccc"         # cinza claro — trials podados
+_COLOR_TRIAL = "#1f77b4"  # azul — valor objetivo por trial
+_COLOR_BEST = "#d62728"  # vermelho — melhor valor acumulado
+_COLOR_BAR = "#2ca02c"  # verde — barras de importancia
+_COLOR_PRUNED = "#cccccc"  # cinza claro — trials podados
 
 # Epsilon para estabilidade numerica (float32)
 _EPS = 1e-12
@@ -151,15 +151,14 @@ def _import_optuna() -> Any:
     """
     try:
         import optuna
+
         return optuna
     except ImportError:
         logger.error(
             "optuna nao instalado. Instale com: pip install optuna. "
             "Visualizacoes Optuna requerem optuna >= 3.0."
         )
-        raise ImportError(
-            "optuna nao instalado. Instale com: pip install optuna"
-        )
+        raise ImportError("optuna nao instalado. Instale com: pip install optuna")
 
 
 def _import_matplotlib() -> Any:
@@ -180,11 +179,10 @@ def _import_matplotlib() -> Any:
     """
     try:
         import matplotlib.pyplot as plt
+
         return plt
     except ImportError:
-        logger.error(
-            "matplotlib nao instalado. Instale com: pip install matplotlib"
-        )
+        logger.error("matplotlib nao instalado. Instale com: pip install matplotlib")
         raise ImportError(
             "matplotlib nao instalado. Instale com: pip install matplotlib"
         )
@@ -206,10 +204,7 @@ def _get_completed_trials(study: Any) -> List[Any]:
         Ref: optuna.trial.TrialState para estados possiveis.
     """
     optuna = _import_optuna()
-    return [
-        t for t in study.trials
-        if t.state == optuna.trial.TrialState.COMPLETE
-    ]
+    return [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
 
 
 def _get_top_params(
@@ -241,7 +236,8 @@ def _get_top_params(
         logger.warning(
             "Apenas %d trials completos (minimo %d para importancia). "
             "Usando parametros do melhor trial como fallback.",
-            len(completed), _MIN_TRIALS_IMPORTANCES,
+            len(completed),
+            _MIN_TRIALS_IMPORTANCES,
         )
         best_params = list(study.best_trial.params.keys())
         return best_params[:n_top]
@@ -279,6 +275,7 @@ def _get_top_params(
 # │                Trial Number                                        │
 # └─────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
+
 
 def plot_optimization_history(
     study: Any,
@@ -334,14 +331,12 @@ def plot_optimization_history(
             "Execute study.optimize() antes de visualizar."
         )
 
-    pruned = [
-        t for t in study.trials
-        if t.state == optuna.trial.TrialState.PRUNED
-    ]
+    pruned = [t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]
 
     logger.info(
         "plot_optimization_history: %d trials completos, %d podados",
-        len(completed), len(pruned),
+        len(completed),
+        len(pruned),
     )
 
     # --- Extrair dados ---
@@ -379,39 +374,53 @@ def plot_optimization_history(
 
         # Filtrar trials com valor disponivel
         valid_pruned = [
-            (n, v) for n, v in zip(pruned_numbers, pruned_values)
-            if v is not None
+            (n, v) for n, v in zip(pruned_numbers, pruned_values) if v is not None
         ]
         if valid_pruned:
             pn, pv = zip(*valid_pruned)
             ax.scatter(
-                pn, pv,
-                color=_COLOR_PRUNED, marker="x", s=40,
-                alpha=0.5, label="Pruned", zorder=1,
+                pn,
+                pv,
+                color=_COLOR_PRUNED,
+                marker="x",
+                s=40,
+                alpha=0.5,
+                label="Pruned",
+                zorder=1,
             )
 
     # Trials completos (scatter azul)
     ax.scatter(
-        trial_numbers, trial_values,
-        color=_COLOR_TRIAL, marker="o", s=30,
-        alpha=0.7, label="Objective Value", zorder=2,
+        trial_numbers,
+        trial_values,
+        color=_COLOR_TRIAL,
+        marker="o",
+        s=30,
+        alpha=0.7,
+        label="Objective Value",
+        zorder=2,
     )
 
     # Best-so-far (linha vermelha)
     ax.plot(
-        trial_numbers, best_so_far,
-        color=_COLOR_BEST, linewidth=2.0,
-        label="Best So Far", zorder=3,
+        trial_numbers,
+        best_so_far,
+        color=_COLOR_BEST,
+        linewidth=2.0,
+        label="Best So Far",
+        zorder=3,
     )
 
     # D7: Marcar melhor trial com estrela
-    best_idx = int(np.argmin(trial_values) if is_minimize
-                    else np.argmax(trial_values))
+    best_idx = int(np.argmin(trial_values) if is_minimize else np.argmax(trial_values))
     ax.plot(
-        trial_numbers[best_idx], trial_values[best_idx],
-        marker="*", markersize=15, color=_COLOR_BEST,
+        trial_numbers[best_idx],
+        trial_values[best_idx],
+        marker="*",
+        markersize=15,
+        color=_COLOR_BEST,
         label=f"Best (trial {trial_numbers[best_idx]}, "
-              f"val={trial_values[best_idx]:.6f})",
+        f"val={trial_values[best_idx]:.6f})",
         zorder=4,
     )
 
@@ -421,7 +430,8 @@ def plot_optimization_history(
     ax.set_title(
         f"Optimization History ({len(completed)} trials, "
         f"{'minimize' if is_minimize else 'maximize'})",
-        fontsize=13, fontweight="bold",
+        fontsize=13,
+        fontweight="bold",
     )
     ax.legend(loc="best", fontsize=9)
     ax.grid(True, alpha=0.3)
@@ -443,7 +453,8 @@ def plot_optimization_history(
 
     logger.info(
         "plot_optimization_history concluido: %d trials, best=%.6f",
-        len(completed), trial_values[best_idx],
+        len(completed),
+        trial_values[best_idx],
     )
 
 
@@ -461,6 +472,7 @@ def plot_optimization_history(
 # │  batch_size     ████████                 0.089                     │
 # └─────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
+
 
 def plot_param_importances(
     study: Any,
@@ -521,7 +533,8 @@ def plot_param_importances(
         importances = optuna.importance.get_param_importances(study)
     except Exception as exc:
         logger.error(
-            "Falha ao computar importancia de parametros: %s", exc,
+            "Falha ao computar importancia de parametros: %s",
+            exc,
         )
         raise
 
@@ -541,14 +554,19 @@ def plot_param_importances(
     n_params = len(param_names_sorted)
     fig_height = max(3, 0.5 * n_params + 2)  # D7: altura adaptativa
     fig, ax = plt.subplots(
-        1, 1, figsize=(_FIGSIZE_IMPORTANCES[0], fig_height),
+        1,
+        1,
+        figsize=(_FIGSIZE_IMPORTANCES[0], fig_height),
     )
 
     # Barra horizontal
     y_positions = np.arange(n_params)
     bars = ax.barh(
-        y_positions, param_values_sorted,
-        color=_COLOR_BAR, alpha=0.8, edgecolor="white",
+        y_positions,
+        param_values_sorted,
+        color=_COLOR_BAR,
+        alpha=0.8,
+        edgecolor="white",
         height=0.6,
     )
 
@@ -558,7 +576,8 @@ def plot_param_importances(
             bar.get_width() + 0.005,
             bar.get_y() + bar.get_height() / 2,
             f"{val:.3f}",
-            va="center", fontsize=9,
+            va="center",
+            fontsize=9,
         )
 
     # Labels e formatacao
@@ -567,7 +586,8 @@ def plot_param_importances(
     ax.set_xlabel("Relative Importance", fontsize=11)
     ax.set_title(
         f"Hyperparameter Importances ({len(completed)} trials)",
-        fontsize=13, fontweight="bold",
+        fontsize=13,
+        fontweight="bold",
     )
     ax.set_xlim(0, max(param_values_sorted) * 1.15)
     ax.grid(True, axis="x", alpha=0.3)
@@ -588,9 +608,10 @@ def plot_param_importances(
         plt.close(fig)
 
     logger.info(
-        "plot_param_importances concluido: %d parametros, "
-        "top=%s (%.3f)",
-        n_params, param_names[0], param_values[0],
+        "plot_param_importances concluido: %d parametros, " "top=%s (%.3f)",
+        n_params,
+        param_names[0],
+        param_values[0],
     )
 
 
@@ -613,6 +634,7 @@ def plot_param_importances(
 # │                    param_1                                         │
 # └─────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
+
 
 def plot_contour(
     study: Any,
@@ -697,7 +719,9 @@ def plot_contour(
 
     logger.info(
         "plot_contour: param_x='%s', param_y='%s', %d trials",
-        param_x, param_y, len(completed),
+        param_x,
+        param_y,
+        len(completed),
     )
 
     # --- Extrair dados ---
@@ -722,8 +746,7 @@ def plot_contour(
                     set(
                         tt.params[param_x]
                         for tt in completed
-                        if param_x in tt.params
-                        and isinstance(tt.params[param_x], str)
+                        if param_x in tt.params and isinstance(tt.params[param_x], str)
                     )
                 )
             x_vals.append(float(x_categories.index(x_raw)))
@@ -736,8 +759,7 @@ def plot_contour(
                     set(
                         tt.params[param_y]
                         for tt in completed
-                        if param_y in tt.params
-                        and isinstance(tt.params[param_y], str)
+                        if param_y in tt.params and isinstance(tt.params[param_y], str)
                     )
                 )
             y_vals.append(float(y_categories.index(y_raw)))
@@ -766,31 +788,40 @@ def plot_contour(
     except Exception as exc:
         # D13: Branch — tricontourf falha com pontos colineares
         logger.warning(
-            "tricontourf falhou (%s) — plotando apenas scatter.", exc,
+            "tricontourf falhou (%s) — plotando apenas scatter.",
+            exc,
         )
 
     # Scatter overlay dos trials
-    scatter = ax.scatter(
-        x_arr, y_arr,
-        c=z_arr, cmap="viridis", edgecolors="white",
-        linewidths=0.5, s=50, zorder=5,
+    _scatter = ax.scatter(
+        x_arr,
+        y_arr,
+        c=z_arr,
+        cmap="viridis",
+        edgecolors="white",
+        linewidths=0.5,
+        s=50,
+        zorder=5,
     )
 
     # D7: Marcar melhor trial
     is_minimize = True
     try:
         import optuna as _opt
-        is_minimize = (
-            study.direction == _opt.study.StudyDirection.MINIMIZE
-        )
+
+        is_minimize = study.direction == _opt.study.StudyDirection.MINIMIZE
     except Exception:
         pass
 
     best_idx = int(np.argmin(z_arr) if is_minimize else np.argmax(z_arr))
     ax.plot(
-        x_arr[best_idx], y_arr[best_idx],
-        marker="*", markersize=18, color=_COLOR_BEST,
-        markeredgecolor="white", markeredgewidth=1.0,
+        x_arr[best_idx],
+        y_arr[best_idx],
+        marker="*",
+        markersize=18,
+        color=_COLOR_BEST,
+        markeredgecolor="white",
+        markeredgewidth=1.0,
         label=f"Best (obj={z_arr[best_idx]:.6f})",
         zorder=6,
     )
@@ -811,7 +842,8 @@ def plot_contour(
     ax.set_ylabel(y_label, fontsize=11)
     ax.set_title(
         f"Contour — {param_x} vs {param_y} ({len(x_vals)} trials)",
-        fontsize=13, fontweight="bold",
+        fontsize=13,
+        fontweight="bold",
     )
     ax.legend(loc="best", fontsize=9)
     ax.grid(True, alpha=0.2)
@@ -833,7 +865,9 @@ def plot_contour(
 
     logger.info(
         "plot_contour concluido: %s vs %s, %d trials",
-        param_x, param_y, len(x_vals),
+        param_x,
+        param_y,
+        len(x_vals),
     )
 
 
@@ -854,6 +888,7 @@ def plot_contour(
 # │  ├─────────┼─────────┼─────────┤       │                          │
 # └─────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
+
 
 def plot_parallel_coordinate(
     study: Any,
@@ -903,7 +938,6 @@ def plot_parallel_coordinate(
     """
     optuna = _import_optuna()
     plt = _import_matplotlib()
-    from matplotlib.collections import LineCollection  # noqa: E402
 
     completed = _get_completed_trials(study)
     if not completed:
@@ -925,7 +959,8 @@ def plot_parallel_coordinate(
     n_params = len(params)
     logger.info(
         "plot_parallel_coordinate: %d parametros, %d trials",
-        n_params, len(completed),
+        n_params,
+        len(completed),
     )
 
     # --- Mapear categoricos e extrair valores ---
@@ -962,7 +997,8 @@ def plot_parallel_coordinate(
 
     if not data_rows:
         logger.warning(
-            "Nenhum trial com todos os parametros %s definidos.", params,
+            "Nenhum trial com todos os parametros %s definidos.",
+            params,
         )
         return
 
@@ -992,9 +1028,7 @@ def plot_parallel_coordinate(
     # D7: Inverter colormap se minimize (azul = bom = valor baixo)
     is_minimize = True
     try:
-        is_minimize = (
-            study.direction == optuna.study.StudyDirection.MINIMIZE
-        )
+        is_minimize = study.direction == optuna.study.StudyDirection.MINIMIZE
     except Exception:
         pass
 
@@ -1005,8 +1039,11 @@ def plot_parallel_coordinate(
     for i in range(len(data_norm)):
         color = cmap(obj_norm[i])
         ax.plot(
-            x_positions, data_norm[i],
-            color=color, alpha=0.4, linewidth=1.2,
+            x_positions,
+            data_norm[i],
+            color=color,
+            alpha=0.4,
+            linewidth=1.2,
         )
 
     # Eixos verticais
@@ -1019,16 +1056,18 @@ def plot_parallel_coordinate(
     for j, p in enumerate(params):
         if p in category_maps:
             cats = sorted(category_maps[p].keys())
-            x_labels.append(f"{p}\n({', '.join(cats[:3])}{'...' if len(cats) > 3 else ''})")
+            x_labels.append(
+                f"{p}\n({', '.join(cats[:3])}{'...' if len(cats) > 3 else ''})"
+            )
         else:
             x_labels.append(f"{p}\n[{mins[j]:.4g}, {maxs[j]:.4g}]")
     ax.set_xticklabels(x_labels, fontsize=8, ha="center")
 
     ax.set_ylabel("Normalized Value", fontsize=11)
     ax.set_title(
-        f"Parallel Coordinate ({len(data_rows)} trials, "
-        f"{n_params} params)",
-        fontsize=13, fontweight="bold",
+        f"Parallel Coordinate ({len(data_rows)} trials, " f"{n_params} params)",
+        fontsize=13,
+        fontweight="bold",
     )
     ax.set_ylim(-0.05, 1.05)
     ax.grid(True, alpha=0.2)
@@ -1059,7 +1098,8 @@ def plot_parallel_coordinate(
 
     logger.info(
         "plot_parallel_coordinate concluido: %d trials, %d params",
-        len(data_rows), n_params,
+        len(data_rows),
+        n_params,
     )
 
 
@@ -1077,6 +1117,7 @@ def plot_parallel_coordinate(
 # │  └── 4. optuna_parallel.png      (plot_parallel_coordinate)        │
 # └─────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
+
 
 def plot_optuna_results(
     study: Any,
@@ -1140,7 +1181,7 @@ def plot_optuna_results(
     )
 
     # --- Preparar caminhos ---
-    save_paths = {
+    save_paths: dict[str, Optional[str]] = {
         "history": None,
         "importances": None,
         "contour": None,
@@ -1150,9 +1191,7 @@ def plot_optuna_results(
         save_dir_path = Path(save_dir)
         save_dir_path.mkdir(parents=True, exist_ok=True)
         save_paths["history"] = str(save_dir_path / "optuna_history.png")
-        save_paths["importances"] = str(
-            save_dir_path / "optuna_importances.png"
-        )
+        save_paths["importances"] = str(save_dir_path / "optuna_importances.png")
         save_paths["contour"] = str(save_dir_path / "optuna_contour.png")
         save_paths["parallel"] = str(save_dir_path / "optuna_parallel.png")
 
@@ -1225,7 +1264,8 @@ def plot_optuna_results(
 
     logger.info(
         "plot_optuna_results concluido: %d/4 plots gerados, %d falhas",
-        n_success, n_failed,
+        n_success,
+        n_failed,
     )
     if save_dir is not None:
         logger.info("Figuras salvas em: %s", save_dir)

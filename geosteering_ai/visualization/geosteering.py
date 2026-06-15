@@ -67,12 +67,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from geosteering_ai.config import PipelineConfig
+    pass
 
 # ──────────────────────────────────────────────────────────────────────
 # D8: Exports publicos — agrupados semanticamente
@@ -103,12 +103,12 @@ _DEFAULT_CMAP = "viridis"
 
 # Cores para consistencia visual entre modulos
 _COLOR_TRUE = "black"
-_COLOR_PRED = "#1f77b4"       # azul matplotlib default
+_COLOR_PRED = "#1f77b4"  # azul matplotlib default
 _COLOR_UNCERTAINTY = "#aec7e8"  # azul claro para bandas de incerteza
 _COLOR_DTB_TRUE = "black"
-_COLOR_DTB_PRED = "#d62728"    # vermelho para DTB predito
-_COLOR_ERROR = "#ff7f0e"       # laranja para barras de erro
-_COLOR_LATENCY = "#2ca02c"     # verde para latencia
+_COLOR_DTB_PRED = "#d62728"  # vermelho para DTB predito
+_COLOR_ERROR = "#ff7f0e"  # laranja para barras de erro
+_COLOR_LATENCY = "#2ca02c"  # verde para latencia
 _COLOR_CONFIDENCE = "#9467bd"  # roxo para confianca
 
 # Nomes de componentes de resistividade
@@ -137,6 +137,7 @@ _EPS = 1e-12
 # │       Posicao lateral (pontos)                                     │
 # └─────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
+
 
 def plot_curtain(
     y_pred: np.ndarray,
@@ -210,17 +211,17 @@ def plot_curtain(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error(
-            "matplotlib nao instalado. Instale com: pip install matplotlib"
-        )
+        logger.error("matplotlib nao instalado. Instale com: pip install matplotlib")
         raise
 
     logger.info(
-        "Plotando curtain plot — component=%d (%s), "
-        "N=%d amostras, seq_len=%d",
+        "Plotando curtain plot — component=%d (%s), " "N=%d amostras, seq_len=%d",
         component,
-        _COMPONENT_NAMES[component] if component < len(_COMPONENT_NAMES) else f"canal_{component}",
-        n_samples, seq_len,
+        _COMPONENT_NAMES[component]
+        if component < len(_COMPONENT_NAMES)
+        else f"canal_{component}",
+        n_samples,
+        seq_len,
     )
 
     # --- Extrair dados do canal selecionado ---
@@ -244,7 +245,9 @@ def plot_curtain(
     # Curtain plot como pcolormesh
     # Transpor data para (seq_len, N) pois Y=profundidade, X=posicao
     im = ax.pcolormesh(
-        x_axis, depth_axis, data.T,
+        x_axis,
+        depth_axis,
+        data.T,
         cmap=_DEFAULT_CMAP,
         shading="auto",
     )
@@ -267,7 +270,9 @@ def plot_curtain(
             unc_data = uncertainty[:, :, component].T  # (seq_len, N)
             # Contornos de 1-sigma
             contour = ax.contour(
-                x_axis, depth_axis, unc_data,
+                x_axis,
+                depth_axis,
+                unc_data,
                 levels=5,
                 colors="white",
                 linewidths=0.8,
@@ -279,7 +284,8 @@ def plot_curtain(
             logger.warning(
                 "Shape de uncertainty (%s) incompativel com y_pred (%s). "
                 "Contornos de incerteza ignorados.",
-                uncertainty.shape, y_pred.shape,
+                uncertainty.shape,
+                y_pred.shape,
             )
 
     # --- Labels e formatacao ---
@@ -309,7 +315,8 @@ def plot_curtain(
 
     logger.info(
         "plot_curtain concluido — component=%d, %d amostras",
-        component, n_samples,
+        component,
+        n_samples,
     )
 
 
@@ -331,6 +338,7 @@ def plot_curtain(
 # │      └──────────────────────────→ Posicao lateral                  │
 # └─────────────────────────────────────────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
+
 
 def plot_dtb_profile(
     dtb_true: np.ndarray,
@@ -381,17 +389,14 @@ def plot_dtb_profile(
     # --- Validacao de entrada ---
     if dtb_true.shape != dtb_pred.shape:
         raise ValueError(
-            f"Shape mismatch: dtb_true={dtb_true.shape}, "
-            f"dtb_pred={dtb_pred.shape}"
+            f"Shape mismatch: dtb_true={dtb_true.shape}, " f"dtb_pred={dtb_pred.shape}"
         )
 
     # --- Lazy import matplotlib ---
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error(
-            "matplotlib nao instalado. Instale com: pip install matplotlib"
-        )
+        logger.error("matplotlib nao instalado. Instale com: pip install matplotlib")
         raise
 
     # --- Determinar se e amostra unica ou multiplas ---
@@ -414,7 +419,8 @@ def plot_dtb_profile(
 
     logger.info(
         "Plotando DTB profile — N=%d amostras, seq_len=%d",
-        n_samples, seq_len,
+        n_samples,
+        seq_len,
     )
 
     # --- Eixo de posicao ---
@@ -430,8 +436,10 @@ def plot_dtb_profile(
 
     # True DTB
     ax.plot(
-        x_axis, true_mean,
-        color=_COLOR_DTB_TRUE, linewidth=1.5,
+        x_axis,
+        true_mean,
+        color=_COLOR_DTB_TRUE,
+        linewidth=1.5,
         label="DTB True",
     )
 
@@ -447,8 +455,10 @@ def plot_dtb_profile(
 
     # Predicted DTB
     ax.plot(
-        x_axis, pred_mean,
-        color=_COLOR_DTB_PRED, linewidth=1.2,
+        x_axis,
+        pred_mean,
+        color=_COLOR_DTB_PRED,
+        linewidth=1.2,
         linestyle="--",
         label="DTB Predicted",
     )
@@ -491,7 +501,8 @@ def plot_dtb_profile(
 
     logger.info(
         "plot_dtb_profile concluido — %d amostras, seq_len=%d",
-        n_samples, seq_len,
+        n_samples,
+        seq_len,
     )
 
 
@@ -508,6 +519,7 @@ def plot_dtb_profile(
 # │  Latencia em ms                │  Bar: look-ahead accuracy       │
 # └─────────────────────────────────┴─────────────────────────────────┘
 # ════════════════════════════════════════════════════════════════════════
+
 
 def plot_geosteering_dashboard(
     metrics: Dict[str, Any],
@@ -564,9 +576,7 @@ def plot_geosteering_dashboard(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error(
-            "matplotlib nao instalado. Instale com: pip install matplotlib"
-        )
+        logger.error("matplotlib nao instalado. Instale com: pip install matplotlib")
         raise
 
     logger.info(
@@ -579,29 +589,47 @@ def plot_geosteering_dashboard(
     # ── Painel 1: DTB Error Distribution (top-left) ─────────────────
     ax1 = axes[0, 0]
     dtb_errors = metrics.get("dtb_errors")
-    if dtb_errors is not None and isinstance(dtb_errors, np.ndarray) and dtb_errors.size > 0:
+    if (
+        dtb_errors is not None
+        and isinstance(dtb_errors, np.ndarray)
+        and dtb_errors.size > 0
+    ):
         ax1.hist(
-            dtb_errors.flatten(), bins=40, density=True,
-            alpha=0.7, color=_COLOR_ERROR, edgecolor="white", linewidth=0.5,
+            dtb_errors.flatten(),
+            bins=40,
+            density=True,
+            alpha=0.7,
+            color=_COLOR_ERROR,
+            edgecolor="white",
+            linewidth=0.5,
         )
         mu_dtb = float(np.mean(dtb_errors))
         std_dtb = float(np.std(dtb_errors))
         ax1.axvline(
-            x=mu_dtb, color="red", linewidth=1.5, linestyle="--",
+            x=mu_dtb,
+            color="red",
+            linewidth=1.5,
+            linestyle="--",
             label=f"mean={mu_dtb:.4f}",
         )
         ax1.set_xlabel("DTB Error (absoluto)", fontsize=10)
         ax1.set_ylabel("Densidade", fontsize=10)
         ax1.set_title(
             f"DTB Error Distribution\n(mean={mu_dtb:.4f}, std={std_dtb:.4f})",
-            fontsize=11, fontweight="bold",
+            fontsize=11,
+            fontweight="bold",
         )
         ax1.legend(fontsize=8)
     else:
         ax1.text(
-            0.5, 0.5, "DTB Error\nnao disponivel",
-            ha="center", va="center", fontsize=12,
-            transform=ax1.transAxes, color="gray",
+            0.5,
+            0.5,
+            "DTB Error\nnao disponivel",
+            ha="center",
+            va="center",
+            fontsize=12,
+            transform=ax1.transAxes,
+            color="gray",
         )
         ax1.set_title("DTB Error Distribution", fontsize=11, fontweight="bold")
     ax1.grid(True, alpha=0.3)
@@ -618,9 +646,12 @@ def plot_geosteering_dashboard(
 
     if r2_values:
         bars = ax2.bar(
-            r2_labels, r2_values,
-            color=[_COLOR_PRED, _COLOR_DTB_PRED, _COLOR_LATENCY][:len(r2_values)],
-            alpha=0.8, edgecolor="white", linewidth=1.2,
+            r2_labels,
+            r2_values,
+            color=[_COLOR_PRED, _COLOR_DTB_PRED, _COLOR_LATENCY][: len(r2_values)],
+            alpha=0.8,
+            edgecolor="white",
+            linewidth=1.2,
         )
         # Anotacoes de valor em cada barra
         for bar_obj, val in zip(bars, r2_values):
@@ -628,15 +659,22 @@ def plot_geosteering_dashboard(
                 bar_obj.get_x() + bar_obj.get_width() / 2.0,
                 bar_obj.get_height() + 0.01,
                 f"{val:.4f}",
-                ha="center", va="bottom", fontsize=9,
+                ha="center",
+                va="bottom",
+                fontsize=9,
             )
         ax2.set_ylim(0.0, min(1.1, max(r2_values) + 0.15))
         ax2.set_ylabel("R2", fontsize=10)
     else:
         ax2.text(
-            0.5, 0.5, "R2 metricas\nnao disponiveis",
-            ha="center", va="center", fontsize=12,
-            transform=ax2.transAxes, color="gray",
+            0.5,
+            0.5,
+            "R2 metricas\nnao disponiveis",
+            ha="center",
+            va="center",
+            fontsize=12,
+            transform=ax2.transAxes,
+            color="gray",
         )
     ax2.set_title("R2 por Componente", fontsize=11, fontweight="bold")
     ax2.grid(True, alpha=0.3, axis="y")
@@ -648,23 +686,36 @@ def plot_geosteering_dashboard(
         lat_val = float(latency)
         # Gauge-style: barra horizontal unica
         ax3.barh(
-            ["Latencia"], [lat_val],
-            color=_COLOR_LATENCY, alpha=0.8,
-            edgecolor="white", linewidth=1.2,
+            ["Latencia"],
+            [lat_val],
+            color=_COLOR_LATENCY,
+            alpha=0.8,
+            edgecolor="white",
+            linewidth=1.2,
             height=0.5,
         )
         ax3.text(
-            lat_val + 0.5, 0, f"{lat_val:.1f} ms",
-            ha="left", va="center", fontsize=11, fontweight="bold",
+            lat_val + 0.5,
+            0,
+            f"{lat_val:.1f} ms",
+            ha="left",
+            va="center",
+            fontsize=11,
+            fontweight="bold",
         )
         ax3.set_xlabel("Latencia (ms)", fontsize=10)
         # Limites horizontais com margem
         ax3.set_xlim(0, max(lat_val * 1.5, 10.0))
     else:
         ax3.text(
-            0.5, 0.5, "Latencia\nnao disponivel",
-            ha="center", va="center", fontsize=12,
-            transform=ax3.transAxes, color="gray",
+            0.5,
+            0.5,
+            "Latencia\nnao disponivel",
+            ha="center",
+            va="center",
+            fontsize=12,
+            transform=ax3.transAxes,
+            color="gray",
         )
     ax3.set_title("Latencia de Inferencia", fontsize=11, fontweight="bold")
     ax3.grid(True, alpha=0.3, axis="x")
@@ -682,34 +733,49 @@ def plot_geosteering_dashboard(
         colors = [_COLOR_CONFIDENCE]
 
         bars4 = ax4.bar(
-            categories, values,
-            color=colors, alpha=0.8,
-            edgecolor="white", linewidth=1.2,
+            categories,
+            values,
+            color=colors,
+            alpha=0.8,
+            edgecolor="white",
+            linewidth=1.2,
         )
         for bar_obj, val in zip(bars4, values):
             ax4.text(
                 bar_obj.get_x() + bar_obj.get_width() / 2.0,
                 bar_obj.get_height() + 0.01,
                 f"{val:.2%}",
-                ha="center", va="bottom", fontsize=11, fontweight="bold",
+                ha="center",
+                va="bottom",
+                fontsize=11,
+                fontweight="bold",
             )
 
         # Informacao de interfaces detectadas
         if n_detected is not None and n_total is not None:
             ax4.text(
-                0.5, 0.15,
+                0.5,
+                0.15,
                 f"Interfaces: {n_detected}/{n_total}",
-                ha="center", va="center", fontsize=10,
-                transform=ax4.transAxes, color="gray",
+                ha="center",
+                va="center",
+                fontsize=10,
+                transform=ax4.transAxes,
+                color="gray",
             )
 
         ax4.set_ylim(0.0, 1.15)
         ax4.set_ylabel("Accuracy", fontsize=10)
     else:
         ax4.text(
-            0.5, 0.5, "Look-Ahead Accuracy\nnao disponivel",
-            ha="center", va="center", fontsize=12,
-            transform=ax4.transAxes, color="gray",
+            0.5,
+            0.5,
+            "Look-Ahead Accuracy\nnao disponivel",
+            ha="center",
+            va="center",
+            fontsize=12,
+            transform=ax4.transAxes,
+            color="gray",
         )
     ax4.set_title("Nivel de Confianca", fontsize=11, fontweight="bold")
     ax4.grid(True, alpha=0.3, axis="y")

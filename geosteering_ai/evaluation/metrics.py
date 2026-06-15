@@ -65,7 +65,7 @@ from typing import TYPE_CHECKING, Dict
 import numpy as np
 
 if TYPE_CHECKING:
-    from geosteering_ai.config import PipelineConfig
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,7 @@ EPS = 1e-12
 # Ref: docs/reference/metricas.md
 # ════════════════════════════════════════════════════════════════════════
 
+
 def compute_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """Coeficiente de determinacao R2 (global).
 
@@ -135,8 +136,7 @@ def compute_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
     if y_true.shape != y_pred.shape:
         raise ValueError(
-            f"Shapes incompativeis: y_true={y_true.shape}, "
-            f"y_pred={y_pred.shape}"
+            f"Shapes incompativeis: y_true={y_true.shape}, " f"y_pred={y_pred.shape}"
         )
 
     ss_res = np.sum((y_true - y_pred) ** 2)
@@ -175,8 +175,7 @@ def compute_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
     if y_true.shape != y_pred.shape:
         raise ValueError(
-            f"Shapes incompativeis: y_true={y_true.shape}, "
-            f"y_pred={y_pred.shape}"
+            f"Shapes incompativeis: y_true={y_true.shape}, " f"y_pred={y_pred.shape}"
         )
     return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
 
@@ -206,8 +205,7 @@ def compute_mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
     if y_true.shape != y_pred.shape:
         raise ValueError(
-            f"Shapes incompativeis: y_true={y_true.shape}, "
-            f"y_pred={y_pred.shape}"
+            f"Shapes incompativeis: y_true={y_true.shape}, " f"y_pred={y_pred.shape}"
         )
     return float(np.mean(np.abs(y_true - y_pred)))
 
@@ -239,8 +237,7 @@ def compute_mbe(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
     if y_true.shape != y_pred.shape:
         raise ValueError(
-            f"Shapes incompativeis: y_true={y_true.shape}, "
-            f"y_pred={y_pred.shape}"
+            f"Shapes incompativeis: y_true={y_true.shape}, " f"y_pred={y_pred.shape}"
         )
     return float(np.mean(y_pred - y_true))
 
@@ -277,8 +274,7 @@ def compute_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y_pred = np.asarray(y_pred, dtype=np.float64).ravel()
     if y_true.shape != y_pred.shape:
         raise ValueError(
-            f"Shapes incompativeis: y_true={y_true.shape}, "
-            f"y_pred={y_pred.shape}"
+            f"Shapes incompativeis: y_true={y_true.shape}, " f"y_pred={y_pred.shape}"
         )
     return float(np.mean(np.abs(y_true - y_pred) / (np.abs(y_true) + EPS)) * 100.0)
 
@@ -297,6 +293,7 @@ def compute_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 #
 # Ref: docs/reference/metricas.md
 # ════════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class MetricsReport:
@@ -335,6 +332,7 @@ class MetricsReport:
             - evaluation/__init__.py: re-export
         Ref: docs/ARCHITECTURE_v2.md secao 8.1.
     """
+
     r2: float
     r2_rh: float
     r2_rv: float
@@ -421,6 +419,7 @@ class MetricsReport:
 # Ref: docs/ARCHITECTURE_v2.md secao 8.1
 # ════════════════════════════════════════════════════════════════════════
 
+
 def compute_all_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -465,8 +464,7 @@ def compute_all_metrics(
 
     if y_true.shape != y_pred.shape:
         raise ValueError(
-            f"Shapes incompativeis: y_true={y_true.shape}, "
-            f"y_pred={y_pred.shape}"
+            f"Shapes incompativeis: y_true={y_true.shape}, " f"y_pred={y_pred.shape}"
         )
 
     if y_true.ndim != 3 or y_true.shape[-1] != 2:
@@ -524,6 +522,7 @@ def compute_all_metrics(
 #
 # Ref: docs/ARCHITECTURE_v2.md secao 8.1
 # ════════════════════════════════════════════════════════════════════════
+
 
 def evaluate_predictions(
     y_true: np.ndarray,

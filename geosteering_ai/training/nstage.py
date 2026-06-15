@@ -115,6 +115,7 @@ __all__ = [
 #   - best_val_loss: melhor val_loss global entre todos os stages
 # ════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class NStageResult:
     """Resultado unificado de treinamento multi-stage.
@@ -146,6 +147,7 @@ class NStageResult:
         Ref: docs/ARCHITECTURE_v2.md secao 6.2.
         merged_history e compativel com Keras history.history format.
     """
+
     merged_history: Dict[str, List[float]] = field(default_factory=dict)
     stage_histories: List[Dict[str, List[float]]] = field(default_factory=list)
     stage_params: List[Dict[str, Any]] = field(default_factory=list)
@@ -191,6 +193,7 @@ class NStageResult:
 #   epocas tem noise crescente de 0 ate noise_k. Isso suaviza a
 #   transicao entre stages (evita salto abrupto de noise).
 # ════════════════════════════════════════════════════════════════════════
+
 
 class NStageTrainer:
     """Treinador N-Stage: ruido progressivo entre estagios.
@@ -458,7 +461,6 @@ class NStageTrainer:
             noise_level_var.assign() atualiza noise para train_map_fn via
             tf.data.map closure (leitura em tempo de execucao do grafo).
         """
-        import tensorflow as tf  # D10: lazy import TF
 
         cfg = self.config
         result = NStageResult()
@@ -530,8 +532,7 @@ class NStageTrainer:
                 )
                 callbacks.append(mini_cb)
                 logger.info(
-                    "Stage %d: mini-curriculum ativo (rampa %d ep, "
-                    "0.0 → %.4f)",
+                    "Stage %d: mini-curriculum ativo (rampa %d ep, " "0.0 → %.4f)",
                     stage_idx,
                     params["ramp_epochs"],
                     stage_noise,
@@ -550,9 +551,7 @@ class NStageTrainer:
                     verbose=1 if cfg.verbose else 0,
                 )
             except Exception as exc:
-                logger.error(
-                    "Stage %d: model.fit() falhou: %s", stage_idx, exc
-                )
+                logger.error("Stage %d: model.fit() falhou: %s", stage_idx, exc)
                 raise RuntimeError(
                     f"N-Stage Training falhou no Stage {stage_idx}: {exc}"
                 ) from exc
@@ -645,15 +644,9 @@ def _build_optimizer(config: PipelineConfig, learning_rate: float) -> Any:
             weight_decay=config.weight_decay,
         ),
         "sgd": lambda: tf.keras.optimizers.SGD(learning_rate=learning_rate),
-        "rmsprop": lambda: tf.keras.optimizers.RMSprop(
-            learning_rate=learning_rate
-        ),
-        "nadam": lambda: tf.keras.optimizers.Nadam(
-            learning_rate=learning_rate
-        ),
-        "adagrad": lambda: tf.keras.optimizers.Adagrad(
-            learning_rate=learning_rate
-        ),
+        "rmsprop": lambda: tf.keras.optimizers.RMSprop(learning_rate=learning_rate),
+        "nadam": lambda: tf.keras.optimizers.Nadam(learning_rate=learning_rate),
+        "adagrad": lambda: tf.keras.optimizers.Adagrad(learning_rate=learning_rate),
     }
 
     opt_name = config.optimizer.lower()
@@ -762,7 +755,6 @@ class _MiniCurriculumCallback:
             Referenciado em:
                 - training/nstage.py: NStageTrainer.run() (instanciacao)
         """
-        import tensorflow as tf  # D10: lazy import TF
 
         # Herda de Callback para compatibilidade com Keras
         super().__init__()
@@ -853,9 +845,7 @@ def _register_callback_base() -> type:
             self.ramp_epochs = ramp_epochs
             self._stage_start_epoch: Optional[int] = None
 
-        def on_epoch_begin(
-            self, epoch: int, logs: Optional[Dict] = None
-        ) -> None:
+        def on_epoch_begin(self, epoch: int, logs: Optional[Dict] = None) -> None:
             if self._stage_start_epoch is None:
                 self._stage_start_epoch = epoch
 
@@ -874,7 +864,7 @@ def _register_callback_base() -> type:
 
 # Override: usa versao Keras quando TF esta disponivel
 try:
-    _MiniCurriculumCallback = _register_callback_base()  # type: ignore[misc]
+    _MiniCurriculumCallback = _register_callback_base()  # type: ignore[assignment, misc]
 except ImportError:
     # TF nao disponivel (testes unitarios sem TF) — usa versao sem heranca
     pass
