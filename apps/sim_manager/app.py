@@ -5,15 +5,24 @@
 # ║  Módulo      : app — entry-point do Simulation Manager MVVM               ║
 # ║  Projeto     : Geosteering AI v2.0                                        ║
 # ║  Subsistema  : SM app (MVVM) — bootstrap (spec 0011a)                     ║
-# ║  Versão      : v0.1                                                       ║
+# ║  Versão      : v0.2                                                       ║
 # ║  Autor       : Daniel Leal                                                ║
 # ║  Status      : Produção — walking skeleton                                ║
 # ║  Dependências: gui.qt_compat, gui.shell, .main_window, perspectives        ║
 # ║  ---------------------------------------------------------------------    ║
 # ║  FINALIDADE                                                               ║
-# ║    Sobe o ``QApplication``, cria a ``SM_MainWindow`` e registra a          ║
-# ║    perspectiva Simulação. Entry-point PARALELO ao monólito (não o          ║
-# ║    substitui) — prova a pilha MVVM end-to-end.                            ║
+# ║    Sobe o ``QApplication``, cria a ``SM_MainWindow`` e registra as          ║
+# ║    perspectivas. Entry-point PARALELO ao monólito (não o substitui).       ║
+# ║                                                                           ║
+# ║  ORDEM DE BOOT CRÍTICA (NÃO REORDENAR — causa segfault)                   ║
+# ║    O ``QApplication`` é criado ANTES de qualquer import de ``geosteering_ai``║
+# ║    porque o pacote (``geosteering_ai/__init__`` → noise → training →        ║
+# ║    nstage) carrega TensorFlow no import, e importar TF ANTES de instanciar  ║
+# ║    o QApplication faz o plugin ``xcb`` do Qt dar SEGFAULT (conflito de       ║
+# ║    bibliotecas C TF↔Qt). Por isso o binding Qt é importado DIRETO aqui      ║
+# ║    (PyQt6→PySide6) — sem passar por ``gui.qt_compat`` (que dispararia o      ║
+# ║    ``__init__`` → TF) — e os demais imports vivem DENTRO de ``main`` após o  ║
+# ║    app existir. Ver ``tests/test_sm_app_boot.py``.                          ║
 # ║                                                                           ║
 # ║  USO                                                                      ║
 # ║    python -m apps.sim_manager.app                                         ║
@@ -26,23 +35,7 @@
 from __future__ import annotations
 
 import sys
-from typing import List, Optional
-
-from apps.sim_manager.main_window import SM_MainWindow
-from apps.sim_manager.perspectives.datviewer.perspective import DatViewerPerspective
-from apps.sim_manager.perspectives.preferences.perspective import (
-    PreferencesPerspective,
-)
-from apps.sim_manager.perspectives.simulation.perspective import SimulationPerspective
-from geosteering_ai.gui.qt_compat import (
-    QT_AVAILABLE,
-    QT_IMPORT_ERROR,
-    QtWidgets,
-    enforce_c_locale,
-)
-from geosteering_ai.gui.shell.context import AppContext
-from geosteering_ai.gui.shell.placeholder import PlaceholderPerspective
-from geosteering_ai.gui.theme import apply_theme
+from typing import Any, List, Optional
 
 __all__ = ["main"]
 
@@ -58,6 +51,32 @@ _SCAFFOLD_PERSPECTIVES = (
 )
 
 
+def _create_qapp(argv: List[str]) -> Optional[Any]:
+    """Cria (ou recupera) o ``QApplication`` ANTES de qualquer import de TF.
+
+    Importa o binding Qt6 DIRETO (PyQt6 → PySide6), deliberadamente SEM passar por
+    ``geosteering_ai.gui.qt_compat`` — importar qualquer módulo de ``geosteering_ai``
+    dispara ``geosteering_ai/__init__`` que carrega TensorFlow, e TF importado ANTES
+    do ``QApplication`` faz o plugin ``xcb`` do Qt dar segfault. Criar o app primeiro
+    (com o binding cru) e só então importar o resto (já com TF seguro) elimina o crash.
+
+    Args:
+        argv: argumentos da aplicação (tipicamente ``sys.argv``).
+
+    Returns:
+        A instância de ``QApplication`` (nova ou já existente), ou ``None`` se nenhum
+        binding Qt6 estiver instalado.
+    """
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except ImportError:
+        try:
+            from PySide6.QtWidgets import QApplication
+        except ImportError:
+            return None
+    return QApplication.instance() or QApplication(argv)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Sobe o app MVVM do Simulation Manager.
 
@@ -68,12 +87,34 @@ def main(argv: Optional[List[str]] = None) -> int:
         Código de saída do ``QApplication.exec()`` (0 = ok), ou 1 se não há
         binding Qt6 instalado.
     """
-    if not QT_AVAILABLE:
+    args = argv if argv is not None else sys.argv
+
+    # ── 1) QApplication PRIMEIRO (antes de qualquer import que puxe TF) ───────
+    # Ver "ORDEM DE BOOT CRÍTICA" no cabeçalho: TF-antes-de-QApplication = segfault.
+    app = _create_qapp(args)
+    if app is None:
+        # Sem binding Qt6 — usa qt_compat só para a mensagem de erro coerente
+        # (aqui não há QApplication a proteger, então importar TF é inofensivo).
+        from geosteering_ai.gui.qt_compat import QT_IMPORT_ERROR
+
         sys.stderr.write((QT_IMPORT_ERROR or "Qt6 indisponível.") + "\n")
         return 1
 
-    args = argv if argv is not None else sys.argv
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(args)
+    # ── 2) Demais imports (puxam TF via geosteering_ai/__init__, mas o app já
+    #       existe → ordem TF-após-QApplication é segura) ──────────────────────
+    from apps.sim_manager.main_window import SM_MainWindow
+    from apps.sim_manager.perspectives.datviewer.perspective import DatViewerPerspective
+    from apps.sim_manager.perspectives.preferences.perspective import (
+        PreferencesPerspective,
+    )
+    from apps.sim_manager.perspectives.simulation.perspective import (
+        SimulationPerspective,
+    )
+    from geosteering_ai.gui.qt_compat import enforce_c_locale
+    from geosteering_ai.gui.shell.context import AppContext
+    from geosteering_ai.gui.shell.placeholder import PlaceholderPerspective
+    from geosteering_ai.gui.theme import apply_theme
+
     # Locale C: ponto decimal nos QDoubleSpinBox (paridade c/ o monólito; evita
     # que um locale pt-BR mostre/parseie "1,5" e divirja do CSV Python float()).
     enforce_c_locale(app)
