@@ -29,6 +29,9 @@ import sys
 from typing import List, Optional
 
 from apps.sim_manager.main_window import SM_MainWindow
+from apps.sim_manager.perspectives.preferences.perspective import (
+    PreferencesPerspective,
+)
 from apps.sim_manager.perspectives.simulation.perspective import SimulationPerspective
 from geosteering_ai.gui.qt_compat import (
     QT_AVAILABLE,
@@ -51,7 +54,6 @@ _SCAFFOLD_PERSPECTIVES = (
     ("results", "Resultados", "📊", 1, "Fatia 6d"),
     ("benchmark", "Benchmark", "⚡", 2, "Fatia 6g"),
     ("analysis", "Análise", "🔬", 3, "Fatia 6f"),
-    ("preferences", "Preferências", "⚙", 4, "Fatia 6h"),
 )
 
 
@@ -80,6 +82,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ctx = AppContext(app_name=_APP_NAME)
     window = SM_MainWindow(ctx)
     window.add_perspective(SimulationPerspective())
+    # Fatia 6e — Preferências (perspectiva real: tema, paths, backend, cache LRU).
+    window.add_perspective(PreferencesPerspective())
     # Scaffolds "em breve" na activity rail (organização visível de todos os recursos).
     for pid, title, glyph, order, roadmap in _SCAFFOLD_PERSPECTIVES:
         window.add_perspective(
