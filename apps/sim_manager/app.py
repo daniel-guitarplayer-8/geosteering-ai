@@ -29,6 +29,7 @@ import sys
 from typing import List, Optional
 
 from apps.sim_manager.main_window import SM_MainWindow
+from apps.sim_manager.perspectives.datviewer.perspective import DatViewerPerspective
 from apps.sim_manager.perspectives.preferences.perspective import (
     PreferencesPerspective,
 )
@@ -84,6 +85,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     window.add_perspective(SimulationPerspective())
     # Fatia 6e — Preferências (perspectiva real: tema, paths, backend, cache LRU).
     window.add_perspective(PreferencesPerspective())
+    # Fatia 6h — Visualizador .dat/.out (somente leitura: tabela 22-col + metadados).
+    window.add_perspective(DatViewerPerspective())
     # Scaffolds "em breve" na activity rail (organização visível de todos os recursos).
     for pid, title, glyph, order, roadmap in _SCAFFOLD_PERSPECTIVES:
         window.add_perspective(
