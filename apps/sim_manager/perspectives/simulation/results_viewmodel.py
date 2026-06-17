@@ -192,7 +192,9 @@ class ResultsViewModel(BaseViewModel):
         dims = self.dims
         if dims is not None:
             n_models, n_tr, n_ang, _n_pos, n_f = dims
-            self._channel_index = int(np.clip(self._channel_index, 0, len(CHANNELS) - 1))
+            self._channel_index = int(
+                np.clip(self._channel_index, 0, len(CHANNELS) - 1)
+            )
             self._tr_index = int(np.clip(self._tr_index, 0, n_tr - 1))
             self._dip_index = int(np.clip(self._dip_index, 0, n_ang - 1))
             self._freq_index = int(np.clip(self._freq_index, 0, n_f - 1))

@@ -76,11 +76,14 @@ def _create_qapp(argv: List[str]) -> Optional[Any]:
     return QApplication.instance() or QApplication(argv)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: Optional[List[str]] = None, *, show_startup: bool = False) -> int:
     """Sobe o app MVVM do Simulation Manager.
 
     Args:
         argv: argumentos (default ``sys.argv``).
+        show_startup: se ``True``, exibe o diálogo de projeto (abrir/criar) ANTES da
+            janela (PR-3 #7a). Default ``False`` — só o entry-point manual (``__main__``)
+            ativa; testes/headless NÃO bloqueiam num diálogo modal.
 
     Returns:
         Código de saída do ``QApplication.exec()`` (0 = ok), ou 1 se não há
@@ -107,9 +110,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         PreferencesPerspective,
     )
     from apps.sim_manager.perspectives.results.perspective import ResultsPerspective
+    from apps.sim_manager.perspectives.simulation.experiments_service import (
+        ExperimentsService,
+    )
     from apps.sim_manager.perspectives.simulation.perspective import (
         SimulationPerspective,
     )
+    from apps.sim_manager.startup_dialog import ProjectStartupDialog
     from geosteering_ai.gui.qt_compat import enforce_c_locale
     from geosteering_ai.gui.shell.context import AppContext
     from geosteering_ai.gui.shell.placeholder import PlaceholderPerspective
@@ -122,6 +129,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     apply_theme(app)
 
     ctx = AppContext(app_name=_APP_NAME)
+
+    # ── PR-3 (#7a) — diálogo de projeto no startup (abrir/criar) ─────────────
+    # Só no entry-point manual (show_startup=True); testes/headless não bloqueiam.
+    # Popula ctx.extras ANTES de registrar a Simulação (que adota o projeto).
+    if show_startup:
+        service = ExperimentsService()
+        dialog = ProjectStartupDialog(service)
+        if not dialog.exec():
+            return 0  # usuário cancelou/saiu — encerra limpo, sem janela
+        ctx.extras["experiments_service"] = service  # reusado pela Simulação
+        ctx.extras["project"] = dialog.result_state
+        if dialog.result_state is not None:
+            ctx.extras["project_dir"] = dialog.result_state.output_dir
+
     window = SM_MainWindow(ctx)
     # Simulação PRIMEIRO (order=0): builda no boot e publica ctx.extras["results_vm"]
     # ANTES de Resultados (order=1) ser ativada (1 VM, 2 Views — PR-2 #1).
@@ -145,4 +166,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover — entry-point manual
-    raise SystemExit(main())
+    raise SystemExit(main(show_startup=True))
