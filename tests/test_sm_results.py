@@ -322,18 +322,18 @@ def test_results_view_renders_gallery(qtbot):
 
 
 @pytest.mark.gui
-def test_simulator_view_embeds_gallery(qtbot):
-    """AC-5/AC-7 — a SimulatorView embute a galeria; feeding o results re-renderiza."""
+def test_simulator_view_has_no_embedded_gallery(qtbot):
+    """PR-2 (#1) — a galeria SAIU da aba Simulação (vive em Resultados); inputs intactos."""
     from apps.sim_manager.perspectives.simulation.view import SimulatorView
 
     vm = _make_sim_vm()
     view = SimulatorView(vm)
     qtbot.addWidget(view)
-    assert hasattr(view, "_results")  # galeria embutida
-    # alimenta a galeria diretamente (sem rodar Numba)
+    assert not hasattr(view, "_results")  # galeria NÃO está mais embutida
+    # o ResultsViewModel continua no SimulationViewModel (publicado em ctx.extras)
     vm.results.set_result(_result(n_models=3))
     assert vm.results.has_result
-    # sync de inputs após "carregar sessão"
+    # sync de inputs após "carregar sessão" segue funcionando
     vm.load_session_dict(
         {"frequencies": [12345.0], "n_models": 7, "generator": "halton"}
     )
@@ -341,6 +341,88 @@ def test_simulator_view_embeds_gallery(qtbot):
     assert "12345" in view._freqs.text()
     assert view._n_models.value() == 7
     assert view._geo_generator.currentText() == "halton"
+
+
+@pytest.mark.gui
+def test_results_perspective_reuses_simulation_vm(qtbot):
+    """PR-2 (#1) — a ResultsPerspective liga a galeria ao MESMO ResultsViewModel da Simulação."""
+    from apps.sim_manager.perspectives.results.perspective import ResultsPerspective
+    from apps.sim_manager.perspectives.simulation.perspective import (
+        SimulationPerspective,
+    )
+    from geosteering_ai.gui.shell.context import AppContext
+
+    ctx = AppContext(app_name="t")
+    # Simulação builda primeiro → publica ctx.extras["results_vm"].
+    sim_view = SimulationPerspective().build_view(ctx)
+    qtbot.addWidget(sim_view)
+    assert "results_vm" in ctx.extras
+    # Resultados reusa o MESMO VM (1 VM, 2 Views).
+    res_persp = ResultsPerspective()
+    assert res_persp.build_viewmodel(ctx) is ctx.extras["results_vm"]
+    res_view = res_persp.build_view(ctx)
+    qtbot.addWidget(res_view)
+    # um resultado simulado aparece na galeria de Resultados (VM compartilhado).
+    ctx.extras["results_vm"].set_result(_result(n_models=3))
+    assert res_persp._vm.has_result
+
+
+def test_results_perspective_fallback_without_extras():
+    """Sem ctx.extras['results_vm'] → cria um VM vazio (galeria 'sem resultado', sem crash)."""
+    from apps.sim_manager.perspectives.results.perspective import ResultsPerspective
+    from apps.sim_manager.perspectives.simulation.results_viewmodel import (
+        ResultsViewModel,
+    )
+    from geosteering_ai.gui.shell.context import AppContext
+
+    vm = ResultsPerspective().build_viewmodel(AppContext(app_name="t"))
+    assert isinstance(vm, ResultsViewModel) and not vm.has_result
+
+
+def test_results_perspective_fallback_with_wrong_type_extras():
+    """ctx.extras['results_vm'] de TIPO ERRADO → fallback p/ VM vazio (guard isinstance)."""
+    from apps.sim_manager.perspectives.results.perspective import ResultsPerspective
+    from apps.sim_manager.perspectives.simulation.results_viewmodel import (
+        ResultsViewModel,
+    )
+    from geosteering_ai.gui.shell.context import AppContext
+
+    ctx = AppContext(app_name="t")
+    ctx.extras["results_vm"] = "não é um ResultsViewModel"  # poluição
+    vm = ResultsPerspective().build_viewmodel(ctx)
+    assert isinstance(vm, ResultsViewModel) and not vm.has_result
+
+
+@pytest.mark.gui
+def test_results_binds_shared_vm_via_real_shell_boot(qtbot):
+    """Contrato de boot (#1): registrando AMBAS as perspectivas na SM_MainWindow na
+    ordem de produção, ativar SÓ a aba Resultados ainda liga a galeria ao MESMO VM da
+    Simulação (Simulação order=0 builda no boot e publica results_vm). Protege a fiação
+    contra reordenação acidental em app.py.
+    """
+    from apps.sim_manager.main_window import SM_MainWindow
+    from apps.sim_manager.perspectives.results.perspective import ResultsPerspective
+    from apps.sim_manager.perspectives.simulation.perspective import (
+        SimulationPerspective,
+    )
+    from geosteering_ai.gui.shell.context import AppContext
+
+    win = SM_MainWindow(AppContext(app_name="boot"))
+    qtbot.addWidget(win)
+    win.add_perspective(SimulationPerspective())  # order=0 → builda no boot
+    win.add_perspective(ResultsPerspective())  # order=1 → lazy
+    # ativa a aba Resultados pela rail (build lazy).
+    idx = next(
+        i
+        for i in range(win._host_count())
+        if win._by_container.get(id(win._host_widget(i))).id == "results"
+    )
+    win._on_rail_selected(idx)
+    shared = win.ctx.extras.get("results_vm")
+    assert shared is not None
+    # alimenta via o VM compartilhado → a galeria de Resultados reflete (mesmo objeto).
+    shared.set_result(_result(n_models=3))
+    assert shared.has_result
 
 
 # ════════════════════════════════════════════════════════════════════════════

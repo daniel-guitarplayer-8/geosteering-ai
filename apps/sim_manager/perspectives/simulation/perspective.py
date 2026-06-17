@@ -91,6 +91,11 @@ class SimulationPerspective(Perspective):
         view = SimulatorView(sim_vm)
         self._sim_vm = sim_vm  # ref viva
 
+        # PR-2 (#1): publica o ResultsViewModel p/ a perspectiva "Resultados" (1 VM,
+        # 2 Views). A Simulação tem order=0 → builda no boot, antes de Resultados ser
+        # ativada (order=1), então o extra existe quando a galeria é construída.
+        ctx.extras["results_vm"] = sim_vm.results
+
         sidebar = ctx.extras.get("secondary_sidebar")
         if sidebar is None:
             return view

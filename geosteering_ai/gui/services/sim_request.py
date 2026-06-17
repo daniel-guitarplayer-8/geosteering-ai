@@ -173,14 +173,10 @@ class SimRequest:
     # teste — a View/VM sempre passa ≥1). n_workers é transportado (pool = Fatia 5).
     n_workers: int = 1
     threads_per_worker: int = 0
-    # ── Lote 2 — paralelismo Fortran (TRANSPORTADO; execução tatu.x = Fatia 6h) ──
-    # Persistido na sessão e exibido na UI (paridade com a BenchmarkPage do
-    # monólito), mas SEM efeito na execução hoje — só numba/jax/auto rodam (não há
-    # backend Fortran no MVVM ainda). Mantê-los aqui evita quebrar a sessão quando
-    # a Fatia 6h ligar o tatu.x (OMP_NUM_THREADS por subprocesso).
-    n_workers_fortran: int = 1
-    threads_fortran: int = 0
-    # Se save_fortran_artifacts e output_dir, grava .dat (22-col) + .out ASCII.
+    # ── Saída — artefatos .dat/.out (22-col, formato do tatu.x; LIDOS pelo
+    #    Visualizador .dat da Fatia 6h). É um FORMATO de arquivo do simulador
+    #    Python, NÃO executa Fortran. Se save_fortran_artifacts e output_dir,
+    #    grava .dat (22-col binário) + .out ASCII via write_dat_from_tensor.
     output_dir: str = ""
     save_fortran_artifacts: bool = False
     # ── PR-1 — diversidade de geometria p/ batchabilidade no JAX GPU ──────────

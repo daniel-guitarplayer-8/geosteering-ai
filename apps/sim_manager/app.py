@@ -45,7 +45,6 @@ _APP_NAME = "Geosteering AI — Simulation Manager"
 # que tornam a organização de TODOS os recursos do SM monólito visível já agora.
 # Cada um será habilitado pela sua fatia (paridade total = Fatias 6c-6i).
 _SCAFFOLD_PERSPECTIVES = (
-    ("results", "Resultados", "📊", 1, "Fatia 6d"),
     ("benchmark", "Benchmark", "⚡", 2, "Fatia 6g"),
     ("analysis", "Análise", "🔬", 3, "Fatia 6f"),
 )
@@ -107,6 +106,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     from apps.sim_manager.perspectives.preferences.perspective import (
         PreferencesPerspective,
     )
+    from apps.sim_manager.perspectives.results.perspective import ResultsPerspective
     from apps.sim_manager.perspectives.simulation.perspective import (
         SimulationPerspective,
     )
@@ -123,7 +123,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     ctx = AppContext(app_name=_APP_NAME)
     window = SM_MainWindow(ctx)
+    # Simulação PRIMEIRO (order=0): builda no boot e publica ctx.extras["results_vm"]
+    # ANTES de Resultados (order=1) ser ativada (1 VM, 2 Views — PR-2 #1).
     window.add_perspective(SimulationPerspective())
+    # Fatia 6i / PR-2 — Resultados (galeria do ensemble; reusa o ResultsViewModel).
+    window.add_perspective(ResultsPerspective())
     # Fatia 6e — Preferências (perspectiva real: tema, paths, backend, cache LRU).
     window.add_perspective(PreferencesPerspective())
     # Fatia 6h — Visualizador .dat/.out (somente leitura: tabela 22-col + metadados).

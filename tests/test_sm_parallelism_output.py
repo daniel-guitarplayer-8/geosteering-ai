@@ -73,6 +73,29 @@ def test_vm_parallelism_clamp_and_session():
     vm2.load_session_dict(d)
     assert vm2.n_workers == 8 and vm2.threads_per_worker == 2
     assert vm2.output_dir == "/tmp/sm_out" and vm2.save_fortran_artifacts is True
+    # PR-2: campos Fortran NÃO são mais serializados (backend Fortran removido).
+    assert "n_workers_fortran" not in d and "threads_fortran" not in d
+
+
+def test_vm_load_session_ignores_removed_fortran_keys():
+    """Backward-compat (PR-2): um .session ANTIGO com chaves Fortran carrega SEM crash.
+
+    O loop de load só itera as chaves atuais (``if key in data``), então as chaves
+    removidas (n_workers_fortran/threads_fortran) são silenciosamente ignoradas.
+    """
+    vm = _make_sim_vm()
+    old_session = {
+        "n_workers": 4,
+        "threads_per_worker": 2,
+        "n_workers_fortran": 8,  # chave removida (sessão antiga)
+        "threads_fortran": 3,  # chave removida (sessão antiga)
+        "output_dir": "/tmp/x",
+        "save_fortran_artifacts": True,
+    }
+    vm.load_session_dict(old_session)  # não pode levantar
+    assert vm.n_workers == 4 and vm.threads_per_worker == 2
+    assert not hasattr(vm, "n_workers_fortran")  # campo não recriado
+    assert vm.output_dir == "/tmp/x" and vm.save_fortran_artifacts is True
 
 
 def test_vm_run_passes_parallelism_to_request():
