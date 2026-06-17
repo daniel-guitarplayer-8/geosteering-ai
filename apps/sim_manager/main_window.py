@@ -92,3 +92,22 @@ class SM_MainWindow(AntigravityMainWindow):
             fn = actions.get(key)
             if callable(fn):
                 fn()
+
+    # ── Teardown — libera o worker JAX persistente (não vaza processo GPU) ────
+    def closeEvent(self, event: Any) -> None:  # noqa: N802 — override do Qt
+        """Encerra o pool JAX persistente ao fechar a janela (evita órfão de VRAM).
+
+        O backend jax/auto roda num subprocesso PERSISTENTE (CUDA quente entre runs —
+        ver ``gui.services.base``). Sem liberá-lo no fechamento, o processo filho (com
+        contexto CUDA + VRAM) ficaria órfão. Import LOCAL: ``release_jax_pool`` só
+        manipula o handle do ``ProcessPoolExecutor`` — NÃO importa JAX na GUI (TLS-safe).
+        Best-effort (try/except) — uma falha de teardown nunca impede o fechamento.
+        Defense-in-depth: também fiado em ``app.aboutToQuit`` + ``atexit``.
+        """
+        try:
+            from geosteering_ai.gui.services.base import release_jax_pool
+
+            release_jax_pool()
+        except Exception:  # noqa: BLE001 — teardown best-effort; fechar nunca falha
+            pass
+        super().closeEvent(event)

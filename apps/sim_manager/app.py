@@ -102,6 +102,22 @@ def main(argv: Optional[List[str]] = None, *, show_startup: bool = False) -> int
         sys.stderr.write((QT_IMPORT_ERROR or "Qt6 indisponível.") + "\n")
         return 1
 
+    # ── Teardown defense-in-depth: libera o worker JAX persistente no quit ────
+    # O backend jax/auto roda num subprocesso PERSISTENTE (CUDA quente entre runs —
+    # gui.services.base). ``aboutToQuit`` é o sinal canônico de encerramento do Qt
+    # (dispara mesmo quando o fechamento não passa pelo closeEvent da janela). Import
+    # LOCAL: ``release_jax_pool`` só mexe no handle do ProcessPool — NÃO importa JAX na
+    # GUI (TLS-safe). Complementa o closeEvent da SM_MainWindow + o atexit de base.
+    def _release_jax_pool_safe() -> None:
+        try:
+            from geosteering_ai.gui.services.base import release_jax_pool
+
+            release_jax_pool()
+        except Exception:  # noqa: BLE001 — teardown best-effort; quit nunca falha
+            pass
+
+    app.aboutToQuit.connect(_release_jax_pool_safe)
+
     # ── 2) Demais imports (puxam TF via geosteering_ai/__init__, mas o app já
     #       existe → ordem TF-após-QApplication é segura) ──────────────────────
     from apps.sim_manager.main_window import SM_MainWindow

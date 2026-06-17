@@ -83,7 +83,10 @@ class SimulationService(BaseService):
         if request.backend in self._SUBPROCESS_BACKENDS:
             # jax/auto podem init CUDA → subprocesso isolado (a QThread crasharia).
             # Progresso/cancel intra-run NÃO cruzam o processo (v1) — só finished/error.
-            self._run_in_subprocess(_run_simulation, request)
+            # persistent=True: o subprocesso fica VIVO entre runs (CUDA/cache JIT quentes)
+            # → 2º+ run ~12 s vs ~29 s do efêmero (fecha a disparidade CLI×SM). Teardown
+            # via release_jax_pool (closeEvent + aboutToQuit + atexit).
+            self._run_in_subprocess(_run_simulation, request, persistent=True)
         else:
             # numba in-thread (rápido, sem spawn): progresso por-grupo + cancel/pause
             # cooperativos via os eventos (memória compartilhada com a QThread).

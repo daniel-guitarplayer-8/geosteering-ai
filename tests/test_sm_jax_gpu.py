@@ -130,14 +130,19 @@ def test_service_routes_backend(qtbot, monkeypatch):
 
     svc = SimulationService()
     calls: list = []
+    sub_kwargs: list = []
     monkeypatch.setattr(svc, "_run_async", lambda fn, *a, **k: calls.append("async"))
     monkeypatch.setattr(
-        svc, "_run_in_subprocess", lambda fn, *a, **k: calls.append("sub")
+        svc,
+        "_run_in_subprocess",
+        lambda fn, *a, **k: (calls.append("sub"), sub_kwargs.append(k)),
     )
     svc.run(SimRequest(backend="numba"))
     svc.run(SimRequest(backend="jax"))
     svc.run(SimRequest(backend="auto"))
     assert calls == ["async", "sub", "sub"]
+    # PR worker persistente: jax/auto rodam no subprocesso PERSISTENTE (persistent=True).
+    assert [k.get("persistent") for k in sub_kwargs] == [True, True]
 
 
 # ════════════════════════════════════════════════════════════════════════════
