@@ -183,6 +183,19 @@ class SimRequest:
     # Se save_fortran_artifacts e output_dir, grava .dat (22-col) + .out ASCII.
     output_dir: str = ""
     save_fortran_artifacts: bool = False
+    # ── PR-1 — diversidade de geometria p/ batchabilidade no JAX GPU ──────────
+    # No modo estocástico cada modelo tem espessuras ÚNICAS → o dispatcher vê
+    # n_grupos=n_models (agrupa por esp.tobytes() em _jax/multi_forward) e o
+    # JAX-grouped degenera em per-model → fallback p/ Numba (lento). "templates"
+    # colapsa as espessuras a K geometrias por n_layers (round-robin) → POUCOS
+    # grupos → o JAX batela na GPU. ρ_h/ρ_v/λ continuam por-modelo (diversidade
+    # petrofísica preservada). "auto" = templates p/ backend jax/auto; per_model
+    # p/ numba (que é INDIFERENTE à agrupabilidade — cada modelo é independente).
+    # NÃO toca a física: cada modelo é computado com seu próprio esp/ρ/λ.
+    geometry_diversity: str = "auto"  # "auto" | "templates" | "per_model"
+    n_geometries: Optional[int] = (
+        None  # K templates (só templates); None = auto (cap 4)
+    )
 
 
 # Modelo TIV de referência (3 camadas): ρₕ por camada + λ²=2 (anisotropia branda,
@@ -317,6 +330,82 @@ def _manual_models(request: SimRequest) -> List[Dict[str, Any]]:
         "thicknesses": list(request.manual_thicknesses),
     }
     return [dict(model) for _ in range(max(1, int(request.n_models)))]
+
+
+# Teto default de geometrias distintas POR grupo de n_layers no modo templates.
+# Inspirado no CLI (`_exec._TEMPLATE_GEOMETRIES_CAP=4`), mas ADAPTADO ao agrupamento
+# por-n_layers do SM: aqui o teto é por GRUPO (clampado a g//2 p/ garantir n_grupos ≤
+# 0.5·g), não pela divisão por-batch do CLI (n//256). Poucas geometrias por grupo
+# maximizam a ocupação da GPU/minimizam re-tracing, mantendo alguma diversidade (>1).
+#
+# NOTA DE OCUPAÇÃO (honestidade): o colapso resolve a AGRUPABILIDADE (esp.tobytes()),
+# mas NÃO a ocupação da GPU, que o dispatcher mede POR grupo de n_layers (≥32 modelos
+# = `_N_MODELS_GPU_THRESHOLD`). Com geologia RAGGED (n_layers variável) e N pequeno,
+# grupos com <32 modelos ainda caem p/ Numba. Para batelar TODO o ensemble na GPU:
+# N grande (cada grupo ≥32 — ex.: 1000 modelos / faixa 3-11 ⇒ ~125/grupo) OU n_layers
+# FIXO (1 grupo grande). Não há como elevar a ocupação sem mexer no n_layers (quebraria
+# ρ por-camada por-modelo) ou no dispatcher (física sagrada) — por isso é documentado.
+_TEMPLATE_GEOMETRIES_CAP: int = 4
+
+
+def _templates_active(request: SimRequest) -> bool:
+    """Decide se as espessuras devem ser colapsadas a templates (batchável no JAX).
+
+    ``"templates"`` sempre; ``"per_model"`` nunca; ``"auto"`` → só p/ backend
+    jax/auto (o Numba é INDIFERENTE à agrupabilidade — cada modelo é independente
+    no pool, então não há ganho em colapsar e preserva-se a diversidade total).
+
+    Args:
+        request: a requisição (campos ``geometry_diversity`` + ``backend``).
+
+    Returns:
+        bool: ``True`` se o colapso a templates deve ser aplicado.
+    """
+    mode = request.geometry_diversity
+    if mode == "templates":
+        return True
+    if mode == "per_model":
+        return False
+    return request.backend in ("jax", "jax_gpu", "auto")  # "auto"
+
+
+def _collapse_geometry_to_templates(
+    models: List[Dict[str, Any]], n_geometries: Optional[int]
+) -> List[Dict[str, Any]]:
+    """Colapsa as espessuras a K templates POR n_layers (round-robin) — batchável.
+
+    Mantém as espessuras REAIS geradas (um subconjunto vira template) — NÃO inventa
+    geometria uniforme, preservando a riqueza do gerador estocástico. Dentro de cada
+    grupo de ``n_layers`` (``g`` modelos), escolhe ``K = min(K_req, g//2)`` templates
+    (garante a agrupabilidade do dispatcher: ``n_grupos ≤ 0.5·g``, ``dispatch.py:127``)
+    e reatribui ``thicknesses`` round-robin. ``rho_h``/``rho_v``/``lambda`` ficam
+    INTOCADOS (diversidade petrofísica por-modelo). NÃO toca a física — só prepara o
+    batch para o JAX-grouped saturar a GPU (cada modelo é computado com seu esp/ρ/λ).
+
+    Args:
+        models: lista de dicts ``{"n_layers","rho_h","rho_v","thicknesses",...}``.
+        n_geometries: K templates por grupo (``None`` → :data:`_TEMPLATE_GEOMETRIES_CAP`).
+
+    Returns:
+        A MESMA lista (mutada in-place) com ``thicknesses`` colapsadas a ≤K por n_layers.
+    """
+    from collections import defaultdict
+
+    groups: Dict[int, List[int]] = defaultdict(list)
+    for i, m in enumerate(models):
+        groups[int(m["n_layers"])].append(i)
+    for _n_layers, idxs in groups.items():
+        g = len(idxs)
+        if g <= 1:
+            continue  # 1 modelo no grupo → nada a compartilhar
+        k_req = (
+            int(n_geometries) if n_geometries is not None else _TEMPLATE_GEOMETRIES_CAP
+        )
+        k = max(1, min(k_req, g // 2))  # garante K ≤ 0.5·g (agrupável)
+        templates = [list(models[idxs[j]]["thicknesses"]) for j in range(k)]
+        for local, original_idx in enumerate(idxs):
+            models[original_idx]["thicknesses"] = list(templates[local % k])
+    return models
 
 
 def _simulate_grouped(
@@ -522,6 +611,12 @@ def _run_simulation(
             models = _manual_models(request)
         else:
             models = _generate_stochastic_models(request)
+            # #4 — colapsa a geometria a K templates (batchável no JAX GPU) quando
+            # ativo (auto p/ jax/auto). Estocástico-único explodia n_grupos=N →
+            # fallback p/ Numba; com templates o JAX-grouped satura a GPU. ρ/λ
+            # ficam por-modelo; manual já é groupable (replicado), então não entra.
+            if _templates_active(request):
+                models = _collapse_geometry_to_templates(models, request.n_geometries)
         h6, info = _simulate_grouped(
             models, positions_z, request, progress_callback, cancel_event, pause_event
         )

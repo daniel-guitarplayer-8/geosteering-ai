@@ -58,6 +58,10 @@ _N_LAYERS_MIN_PHYS = 3  # inclui 2 semi-espaços
 # sem spawn; sem regressão). O usuário opta por jax/auto p/ GPU.
 _BACKENDS = ("numba", "jax", "auto")
 
+# Diversidade de geometria (PR-1 — batchabilidade JAX GPU). "auto": templates p/
+# jax/auto, per_model p/ numba. Whitelist p/ sanear o .session (espelha _BACKENDS).
+_GEOMETRY_DIVERSITY = ("auto", "templates", "per_model")
+
 # Filtros de Hankel (Fatia 6b) — nomes canônicos do catálogo
 # (simulation/filters/loader.py::_FILTER_CATALOG). Validados no VM (fail-fast) e
 # saneados no load de .session. test_sm_geology_advanced guarda que casam com
@@ -133,6 +137,9 @@ class SimulationViewModel(BaseViewModel):
         "_generator",
         "_rng_seed",
         "_backend",
+        # ── Diversidade de geometria (PR-1 — batchabilidade JAX GPU) ──
+        "_geometry_diversity",
+        "_n_geometries",
         # ── Paralelismo (Lote 1) + Saída ──
         "_n_workers",
         "_threads_per_worker",
@@ -189,6 +196,13 @@ class SimulationViewModel(BaseViewModel):
         # Backend de simulação (spec 0012). Default "numba" (in-thread, rápido, sem
         # spawn); "jax"/"auto" rodam em subprocesso (GPU, TLS-safe).
         self._backend: str = "numba"
+        # ── Diversidade de geometria (PR-1) — batchabilidade no JAX GPU ──────
+        # "auto" (default): templates p/ jax/auto (colapsa esp a K geometrias →
+        # JAX-grouped satura a GPU); per_model p/ numba. ρ/λ sempre por-modelo.
+        self._geometry_diversity: str = "auto"
+        self._n_geometries: Optional[int] = (
+            None  # K (só templates); None = auto (cap 4)
+        )
         # ── Paralelismo (Lote 1) — defaults da topologia da CPU ──────────────
         # threads tem efeito REAL (numba.set_num_threads antes do simulate_batch);
         # n_workers é estado/UI (ProcessPool real = Fatia 5). Import LAZY+guardado
@@ -509,6 +523,28 @@ class SimulationViewModel(BaseViewModel):
     def backend(self, value: str) -> None:
         self._set("_backend", str(value))
 
+    @property
+    def geometry_diversity(self) -> str:
+        """Diversidade de geometria p/ o JAX: ``auto`` | ``templates`` | ``per_model``.
+
+        ``auto`` colapsa esp a K templates p/ backend jax/auto (JAX GPU batela);
+        per_model p/ numba. ρ/ρᵥ/λ sempre por-modelo (diversidade petrofísica).
+        """
+        return self._geometry_diversity
+
+    @geometry_diversity.setter
+    def geometry_diversity(self, value: str) -> None:
+        self._set("_geometry_diversity", str(value))
+
+    @property
+    def n_geometries(self) -> Optional[int]:
+        """K templates de geometria (só modo templates); ``None`` = auto (cap 4)."""
+        return self._n_geometries
+
+    @n_geometries.setter
+    def n_geometries(self, value: Optional[int]) -> None:
+        self._set("_n_geometries", None if value is None else max(1, int(value)))
+
     # ── Fatia 6b — filtro de Hankel + geologia manual / perfis canônicos ─────
     @property
     def hankel_filter(self) -> str:
@@ -762,6 +798,8 @@ class SimulationViewModel(BaseViewModel):
             p_med=self._p_med,
             n_models=self._n_models,
             backend=self._backend,
+            geometry_diversity=self._geometry_diversity,
+            n_geometries=self._n_geometries,
             geology_mode=self._geology_mode,
             n_layers_min=self._n_layers_min,
             n_layers_max=self._n_layers_max,
@@ -953,6 +991,9 @@ class SimulationViewModel(BaseViewModel):
             "generator": self._generator,
             "rng_seed": self._rng_seed,
             "backend": self._backend,
+            # ── Diversidade de geometria (PR-1) ─────────────────────────────
+            "geometry_diversity": self._geometry_diversity,
+            "n_geometries": self._n_geometries,
             # ── Paralelismo (Lote 1) + Saída ────────────────────────────────
             "n_workers": self._n_workers,
             "threads_per_worker": self._threads_per_worker,
@@ -1014,6 +1055,8 @@ class SimulationViewModel(BaseViewModel):
             "generator",
             "rng_seed",
             "backend",
+            "geometry_diversity",
+            "n_geometries",
             "n_workers",
             "threads_per_worker",
             "n_workers_fortran",
@@ -1053,6 +1096,12 @@ class SimulationViewModel(BaseViewModel):
         # changed → o combo sincroniza), em vez de carregar um estado inválido.
         if self._backend not in _BACKENDS:
             self.backend = "numba"
+        # ── Saneia a diversidade de geometria (PR-1) — fora do conjunto → "auto" ─
+        # Espelha o guard de backend/hankel: um .session corrompido/de versão futura
+        # com geometry_diversity inválido (ex.: "garbage") cairia silenciosamente no
+        # ramo "auto" de _templates_active. Aqui normalizamos no load (combo sincroniza).
+        if self._geometry_diversity not in _GEOMETRY_DIVERSITY:
+            self.geometry_diversity = "auto"
         # Preferência da galeria (sub-VM results) — aceita str do enum.
         if "plot_backend" in data:
             self.results.plot_backend = data["plot_backend"]

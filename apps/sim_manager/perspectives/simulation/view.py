@@ -435,6 +435,50 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._geo_seed.setRange(0, 2_147_483_647)
         self._geo_seed.setValue(vm.rng_seed if vm.rng_seed is not None else 42)
 
+        # ── Tooltips físicos/geofísicos (#6 — fidelidade com o SM monólito) ──
+        # Contexto e faixas típicas dos parâmetros geológicos/petrofísicos.
+        self._geo_generator.setToolTip(
+            "Gerador quasi-aleatório (QMC). 'sobol' (default): sequência de baixa "
+            "discrepância — cobertura uniforme do espaço de parâmetros, ideal p/ ML. "
+            "'halton': QMC base-prima. Demais: PRNG clássico."
+        )
+        self._geo_distr.setToolTip(
+            "Distribuição de amostragem de ρₕ. 'loguni' (default): log-uniforme — cobre "
+            "várias ordens de magnitude (≈0.3–5000 Ω·m). 'uniform': linear (concentra nos altos)."
+        )
+        self._geo_rho_min.setToolTip(
+            "Resistividade horizontal MÍNIMA (Ω·m). Típicos: ~0.3 (água salgada), ~1 "
+            "(água doce), 50–200 (folhelho), 1000+ (hidrocarboneto/carbonato resistivo)."
+        )
+        self._geo_rho_max.setToolTip(
+            "Resistividade horizontal MÁXIMA (Ω·m). Máximo usual ~5000 (tight gas / "
+            "carbonato muito resistivo)."
+        )
+        self._geo_aniso.setToolTip(
+            "Anisotropia TIV: ρᵥ = λ²·ρₕ (transversal isotrópico vertical, eixo vertical). "
+            "Desmarque p/ meio isotrópico (λ=1 ⇒ ρᵥ=ρₕ)."
+        )
+        self._geo_lambda_min.setToolTip(
+            "Coeficiente de anisotropia MÍNIMO (λ = √(ρᵥ/ρₕ) ≥ 1). Em meios laminados "
+            "ρᵥ ≥ ρₕ (λ ≥ 1)."
+        )
+        self._geo_lambda_max.setToolTip(
+            "Coeficiente de anisotropia MÁXIMO. Típicos: ~1.4 (fraca), ~1.7 (moderada), "
+            "~2.2 (forte)."
+        )
+        self._geo_min_thick.setToolTip(
+            "Espessura MÍNIMA por camada (m). Piso do stick-breaking — evita camadas "
+            "finas demais (≪ resolução do filtro de Hankel / comprimento de onda)."
+        )
+        self._geo_seed_random.setToolTip(
+            "Semente aleatória (recomendado): cada execução gera um ensemble diferente. "
+            "Desmarque p/ semente FIXA (reprodutibilidade bit-a-bit)."
+        )
+        self._geo_seed.setToolTip(
+            "Semente fixa do RNG. Mesma semente + mesmos parâmetros ⇒ ensemble idêntico. "
+            "Ativa apenas com 'Semente aleatória' desmarcada."
+        )
+
         # ── Fatia 6b — filtro de Hankel + perfil canônico + editor manual ────
         from geosteering_ai.simulation.filters.loader import FilterLoader
         from geosteering_ai.simulation.validation.canonical_models import (
@@ -522,6 +566,22 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         ``detect_cpu_topology`` (import LAZY+guardado, mantém a View leve). O aviso de
         oversubscrição (``W×T ≤ cores físicos``) atualiza em ``valueChanged``.
         """
+        # ── Diversidade de geometria (PR-1) — batchabilidade no JAX GPU ──────
+        self._geom_diversity = QtWidgets.QComboBox()
+        self._geom_diversity.addItems(["auto", "templates", "per_model"])
+        self._geom_diversity.setCurrentText(vm.geometry_diversity)
+        self._geom_diversity.setToolTip(
+            "Diversidade de geometria (espessuras) p/ o JAX GPU. No modo estocástico, "
+            "espessuras únicas por modelo impedem o batch na GPU (cada modelo vira 1 "
+            "grupo → cai p/ Numba). 'templates' colapsa a K≈4 geometrias por nº de "
+            "camadas (round-robin) → o JAX-grouped satura a GPU; ρₕ/ρᵥ/λ continuam "
+            "variando por modelo. 'auto' = templates p/ jax/auto, por-modelo p/ numba "
+            "(Numba é indiferente). 'per_model' preserva a diversidade total (JAX lento).\n\n"
+            "DICA de ocupação: a GPU bateleia por grupo de nº de camadas e exige ≥32 "
+            "modelos/grupo. Para batelar TODO o ensemble: use N grande (ex.: 1000 "
+            "modelos ⇒ ~125/grupo) OU marque 'n_layers fixo' (1 grupo único). Com poucos "
+            "modelos e faixa de camadas larga, grupos pequenos ainda rodam em Numba."
+        )
         # ── Par Numba (funcional) — threads têm efeito real ──────────────────
         self._n_workers = QtWidgets.QSpinBox()
         self._n_workers.setRange(1, 256)
@@ -578,6 +638,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
 
         pform = QtWidgets.QFormLayout()
         pform.addRow("Backend:", self._sim_backend)
+        pform.addRow("Diversidade de geometria (JAX):", self._geom_diversity)
         pform.addRow(_sub("Numba JIT"))
         pform.addRow("Nº de workers (Numba):", self._n_workers)
         pform.addRow("Nº de threads (Numba):", self._threads)
@@ -683,6 +744,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.p_med = self._p_med.value()
         self._vm.n_models = self._n_models.value()
         self._vm.backend = self._sim_backend.currentText()
+        self._vm.geometry_diversity = self._geom_diversity.currentText()  # PR-1 (#4)
         self._vm.hankel_filter = self._hankel_combo.currentText()  # Fatia 6b
         # ── Geologia estocástica (Fatia 3) ───────────────────────────────────
         self._vm.geology_mode = (
@@ -898,6 +960,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.p_med = self._p_med.value()
         self._vm.n_models = self._n_models.value()
         self._vm.backend = self._sim_backend.currentText()
+        self._vm.geometry_diversity = self._geom_diversity.currentText()  # PR-1 (#4)
         self._vm.hankel_filter = self._hankel_combo.currentText()  # Fatia 6b
         self._vm.geology_mode = (
             "manual" if self._radio_manual.isChecked() else "stochastic"
@@ -938,6 +1001,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._p_med.setValue(self._vm.p_med)
         self._n_models.setValue(self._vm.n_models)
         self._sim_backend.setCurrentText(self._vm.backend)
+        self._geom_diversity.setCurrentText(self._vm.geometry_diversity)  # PR-1 (#4)
         self._hankel_combo.setCurrentText(self._vm.hankel_filter)  # Fatia 6b
         # Radio (Lote 2): manual ⟺ "manual"; senão Aleatória (inclui "fixed" legado).
         if self._vm.geology_mode == "manual":
