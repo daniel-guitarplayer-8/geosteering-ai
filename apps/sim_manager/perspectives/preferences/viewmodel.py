@@ -53,6 +53,25 @@ def _safe_int(value: Any, fallback: int) -> int:
         return fallback
 
 
+def _safe_bool(value: Any, fallback: bool) -> bool:
+    """Converte ``value`` para ``bool`` com fallback (mesmo contrato de :func:`_safe_int`).
+
+    ``bool("false")`` seria ``True`` (string não-vazia!) — então NÃO usamos ``bool()``
+    cru. Aceita ``bool`` real; interpreta tokens textuais comuns ("true"/"1"/"on" →
+    True; "false"/"0"/"off"/"" → False); qualquer outro tipo (None, dict, …) cai para
+    ``fallback`` (degradação graciosa do load — nunca corrompe nem levanta).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in {"true", "1", "yes", "on"}:
+            return True
+        if s in {"false", "0", "no", "off", ""}:
+            return False
+    return fallback
+
+
 class PreferencesViewModel(BaseViewModel):
     """ViewModel PURO das preferências do SM (tema, paths, backend, cache LRU).
 
@@ -82,6 +101,7 @@ class PreferencesViewModel(BaseViewModel):
         "_cache_max_mb",
         "_cache_max_snapshots",
         "_paths",
+        "_jax_boot_warmup",
     )
 
     def __init__(self, service: Any) -> None:
@@ -100,6 +120,7 @@ class PreferencesViewModel(BaseViewModel):
         self._cache_max_mb: int = int(defaults["cache_max_mb"])
         self._cache_max_snapshots: int = int(defaults["cache_max_snapshots"])
         self._paths: Dict[str, str] = dict(defaults["paths"])
+        self._jax_boot_warmup: bool = bool(defaults["jax_boot_warmup"])
 
         self.theme_changed: VMSignal = VMSignal()
         self.plot_backend_changed: VMSignal = VMSignal()
@@ -147,6 +168,15 @@ class PreferencesViewModel(BaseViewModel):
         if self._set("_cache_max_snapshots", max(1, int(value))):
             self.cache_changed.emit(self._cache_max_mb, self._cache_max_snapshots)
 
+    @property
+    def jax_boot_warmup(self) -> bool:
+        """Se ``True``, o SM aquece o worker JAX GPU no boot (opt-in; default ``False``)."""
+        return self._jax_boot_warmup
+
+    @jax_boot_warmup.setter
+    def jax_boot_warmup(self, value: bool) -> None:
+        self._set("_jax_boot_warmup", bool(value))
+
     def get_path(self, key: str) -> str:
         """Retorna o path da chave (``""`` se ausente)."""
         return self._paths.get(key, "")
@@ -170,6 +200,7 @@ class PreferencesViewModel(BaseViewModel):
             "cache_max_mb": self._cache_max_mb,
             "cache_max_snapshots": self._cache_max_snapshots,
             "paths": dict(self._paths),
+            "jax_boot_warmup": self._jax_boot_warmup,
         }
 
     def load_session_dict(self, data: Dict[str, Any]) -> None:
@@ -195,6 +226,12 @@ class PreferencesViewModel(BaseViewModel):
             self._paths = {
                 k: str(stored_paths.get(k, self._paths.get(k, ""))) for k in _PATH_KEYS
             }
+        # _safe_bool (não bool() cru): bool("false") seria True — um .session com
+        # "jax_boot_warmup": "false" ligaria o warmup por engano. Cai p/ o default
+        # corrente em tipo inesperado (mesmo contrato de _safe_int nos campos de cache).
+        self._jax_boot_warmup = _safe_bool(
+            data.get("jax_boot_warmup"), self._jax_boot_warmup
+        )
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PreferencesViewModel":
@@ -246,5 +283,6 @@ class PreferencesViewModel(BaseViewModel):
         )
         if mb_changed or snaps_changed:
             self.cache_changed.emit(self._cache_max_mb, self._cache_max_snapshots)
+        self.jax_boot_warmup = bool(defaults["jax_boot_warmup"])
         for key in _PATH_KEYS:
             self.set_path(key, defaults["paths"].get(key, ""))

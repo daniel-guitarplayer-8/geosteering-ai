@@ -110,4 +110,14 @@ class SM_MainWindow(AntigravityMainWindow):
             release_jax_pool()
         except Exception:  # noqa: BLE001 — teardown best-effort; fechar nunca falha
             pass
+        # Junta a QThread do boot warmup, se em voo (release_jax_pool já cancelou o
+        # future pendente → o worker retorna rápido). Sem este wait, fechar durante o
+        # warmup poderia destruir a QThread ainda rodando ("QThread destroyed while
+        # running"). Best-effort + timeout curto (nunca trava o fechamento).
+        try:
+            svc = self.ctx.extras.get("jax_warmup_service")
+            if svc is not None and hasattr(svc, "wait"):
+                svc.wait(3000)
+        except Exception:  # noqa: BLE001 — teardown best-effort
+            pass
         super().closeEvent(event)

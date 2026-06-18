@@ -144,6 +144,19 @@ class PreferencesPanel(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
             "teto de MB. O que estourar primeiro (nº ou MB) rege o despejo."
         )
 
+        # ── Desempenho — boot warmup do JAX GPU (opt-in) ─────────────────────
+        self._jax_boot_warmup = QtWidgets.QCheckBox(
+            "Aquecer o worker JAX GPU no boot (tira o cold-start da 1ª simulação)"
+        )
+        self._jax_boot_warmup.setToolTip(
+            "OPT-IN (desligado por padrão). Ao abrir o SM, aquece em background o worker "
+            "JAX GPU persistente (init CUDA + compila a forma canônica), de modo que a 1ª "
+            "simulação jax/auto já reuse o worker quente (~12 s) em vez de pagar o "
+            "cold-start. Gasta GPU/VRAM no boot — deixe DESLIGADO se usa só o Numba. Sem "
+            "efeito se o JAX não estiver instalado. Ver docs/reference/"
+            "sm_jax_persistent_worker.md."
+        )
+
         # ── Paths (4 linhas: QLineEdit + "Procurar…") ────────────────────────
         self._path_edits: dict[str, Any] = {}
         paths_form = QtWidgets.QFormLayout()
@@ -215,6 +228,16 @@ class PreferencesPanel(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
                 cache_form,
             )
         )
+        perf_form = QtWidgets.QFormLayout()
+        perf_form.addRow(self._jax_boot_warmup)
+        content_layout.addWidget(
+            _group(
+                "Desempenho (JAX GPU)",
+                "Pré-aquecimento opcional do worker JAX GPU persistente no boot — tira o "
+                "cold-start XLA da 1ª simulação (opt-in; gasta GPU no arranque).",
+                perf_form,
+            )
+        )
         content_layout.addWidget(
             _group(
                 "Caminhos",
@@ -272,6 +295,7 @@ class PreferencesPanel(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
         self._set_combo(self._plot_backend, self._vm.plot_backend)
         self._cache_mb.setValue(int(self._vm.cache_max_mb))
         self._cache_snaps.setValue(int(self._vm.cache_max_snapshots))
+        self._jax_boot_warmup.setChecked(self._vm.jax_boot_warmup)
         for key, edit in self._path_edits.items():
             edit.setText(self._vm.get_path(key))
 
@@ -296,6 +320,7 @@ class PreferencesPanel(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
         self._vm.plot_backend = self._plot_backend.currentText()
         self._vm.cache_max_mb = self._cache_mb.value()
         self._vm.cache_max_snapshots = self._cache_snaps.value()
+        self._vm.jax_boot_warmup = self._jax_boot_warmup.isChecked()
         for key, edit in self._path_edits.items():
             self._vm.set_path(key, edit.text().strip())
 
