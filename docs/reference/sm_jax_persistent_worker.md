@@ -56,8 +56,11 @@ A partir da v2.58 o subprocesso JAX é **persistente**: um único filho `spawn` 
    - **Boot warmup**: ligue `jax_boot_warmup` em **Preferências** → ao abrir o SM, o worker
      é aquecido em background (status "Aquecendo JAX GPU…"). Opt-in (desligado por padrão
      p/ não gastar GPU de quem só usa Numba).
-   - **CLI**: `geosteering-warmup --jax` (use `export JAX_PLATFORMS=cuda` p/ aquecer a
-     A6000) popula o cache de disco 1× — compartilhado com o SM.
+   - **CLI**: `geosteering-warmup --jax` popula o cache de disco 1× — compartilhado com
+     o SM. Para aquecer a GPU use **`export JAX_PLATFORMS=cuda,cpu`** (cuda p/ o compute
+     **+ cpu** p/ o `jax.pure_callback` do kernel; só `cuda` QUEBRA o callback —
+     "failed to find a local CPU device"). O SM em si NÃO seta `JAX_PLATFORMS` (deixa o
+     JAX auto-detectar cuda+cpu), então o worker persistente já roda na GPU corretamente.
 
 > **Caveat de cobertura (honestidade):** o warmup usa **uma** geometria homogênea, então
 > pré-compila **1** das K geometrias-template. O ganho do init-CUDA do worker persistente
