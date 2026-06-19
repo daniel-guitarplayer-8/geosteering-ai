@@ -121,7 +121,12 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._dips = QtWidgets.QLineEdit(self._fmt_csv(vm.dips))
         self._dips.setPlaceholderText("ex.: 0, 30")
         self._dips.setToolTip(
-            "Ângulos de mergulho (°), separados por vírgula. Range [0, 90]."
+            "Ângulos de mergulho (°), separados por vírgula. Range [0, 90].\n\n"
+            "NOTA: o nº de pontos de medição (n_pos) e a grade TVD são derivados SÓ do "
+            "1º dip (n_pos=ceil(tj/(p_med·cos(dip0)))) e COMPARTILHADOS por todos os "
+            "ângulos (grade única; o dip muda a resposta EM, não a amostragem). Logo a "
+            "ORDEM importa: '0,15' usa a grade do 0° e '15,0' usa a do 15° — sem perda "
+            "de precisão (cada ponto é exato), só densidade de amostragem diferente."
         )
         self._trs = QtWidgets.QLineEdit(self._fmt_csv(vm.tr_spacings))
         self._trs.setPlaceholderText("ex.: 1.0, 2.0")
