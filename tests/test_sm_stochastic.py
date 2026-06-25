@@ -344,16 +344,18 @@ def test_parse_csv_accepts_comma_and_semicolon():
 def test_view_n_layers_max_inclusive_conversion(qtbot):
     """BUG B1 — a View trata n_layers_max INCLUSIVE (+1 p/ o exclusive do VM/monólito).
 
-    Init: VM exclusive=11 → spin mostra 10 (inclusive). Run: spin=11 (inclusive)
+    Init: VM exclusive=32 → spin mostra 31 (inclusive). Run: spin=11 (inclusive)
     → VM/SimRequest recebe 12 (exclusive), igual ao build_gen_config do monólito.
     """
     from apps.sim_manager.perspectives.simulation.view import SimulatorView
 
-    vm = _make_vm()  # _n_layers_max default = 11 (exclusive)
+    vm = (
+        _make_vm()
+    )  # _n_layers_max default = 32 (exclusive) — paridade monólito (item 3)
     view = SimulatorView(vm)
     qtbot.addWidget(view)
     # init: spin inclusive = exclusive − 1
-    assert view._geo_nl_max.value() == vm.n_layers_max - 1 == 10
+    assert view._geo_nl_max.value() == vm.n_layers_max - 1 == 31
     # run com spin inclusive = 11 + modo sampled → VM exclusive = 12
     view._radio_random.setChecked(
         True
