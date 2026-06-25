@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from apps.sim_manager.perspectives.simulation.viewmodel import SimulationViewModel
@@ -87,7 +88,12 @@ class SimulationPerspective(Perspective):
         )
         from apps.sim_manager.perspectives.simulation.view import SimulatorView
 
+        # PR-3 (#7a): adota o projeto do startup (pasta de saída default), se houver.
+        project = ctx.extras.get("project")
+        project_dir = ctx.extras.get("project_dir") or ""
         sim_vm = self.build_viewmodel(ctx)
+        if project_dir:
+            sim_vm.output_dir = project_dir  # pré-preenche o campo "Saída"
         view = SimulatorView(sim_vm)
         self._sim_vm = sim_vm  # ref viva
 
@@ -102,7 +108,11 @@ class SimulationPerspective(Perspective):
         sim_vm.log_entry.connect(sidebar.append_log)
 
         # ── Fatia 6c — experimentos & histórico (na secondary sidebar) ────────
-        self._exp_service = ExperimentsService()
+        # Reusa o ExperimentsService do startup (PR-3 #7a) se publicado — evita 2
+        # services (recentes/cache divergentes); senão cria um (boot sem diálogo).
+        self._exp_service = (
+            ctx.extras.get("experiments_service") or ExperimentsService()
+        )
         self._exp_vm = ExperimentsViewModel(self._exp_service)
         self._exp_panel = ExperimentsPanel()
         self._view = view
@@ -128,6 +138,20 @@ class SimulationPerspective(Perspective):
         self._exp_panel.snapshot_selected.connect(self._on_snapshot_selected)
         self._exp_panel.snapshot_activated.connect(self._on_snapshot_reload)
         self._exp_panel.recent_activated.connect(self._exp_vm.open_experiment)
+
+        # PR-3 (#7b): publica os comandos p/ a barra de menu (Arquivo/Sessão) — os
+        # MESMOS handlers do painel de experimentos e da View (sem duplicar lógica).
+        ctx.extras["file_actions"] = {
+            "new": self._on_new_experiment,
+            "open": self._on_open_experiment,
+            "save": self._on_save_experiment,
+            "save_as": self._on_save_as_experiment,
+            "close": self._exp_vm.close_experiment,
+        }
+        ctx.extras["session_actions"] = {
+            "save": view._on_save_session,
+            "open": view._on_open_session,
+        }
 
         # resultado de simulação → snapshot + cache (reabrível por double-click)
         sim_vm.result_ready.connect(self._on_sim_result)
@@ -163,7 +187,18 @@ class SimulationPerspective(Perspective):
                 sim_vm.changed.connect(self._on_sim_status_changed)
                 self._on_sim_status_changed("_status", None)  # estado inicial
 
-        self._exp_vm.new_experiment("Sessão", "", "sm_experiments")  # default em RAM
+        # PR-3 (#7a): adota o PROJETO do startup, se houver; senão default em RAM.
+        if project is not None and getattr(project, "name", ""):
+            if project.file_path and os.path.exists(project.file_path):
+                self._exp_vm.open_experiment(project.file_path)  # projeto existente
+            else:
+                self._exp_vm.new_experiment(
+                    project.name, project.description, project.output_dir
+                )
+        else:
+            self._exp_vm.new_experiment(
+                "Sessão", "", "sm_experiments"
+            )  # default em RAM
         self._exp_vm.load_recents()
         return view
 
@@ -245,6 +280,26 @@ class SimulationPerspective(Perspective):
             self._exp_vm.open_experiment(path)
 
     def _on_save_experiment(self) -> None:
+        self._exp_vm.save_experiment(params=self._sim_vm.to_session_dict())
+
+    def _on_save_as_experiment(self) -> None:
+        """Salvar Como… (PR-3 #7b) — escolhe novo .exp.json e reusa save_experiment."""
+        from geosteering_ai.gui.qt_compat import QtWidgets
+
+        exp = self._exp_vm.experiment
+        if exp is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self._view,
+            "Salvar experimento como",
+            exp.file_path or "",
+            "Experimento (*.exp.json)",
+        )
+        if not path:
+            return
+        if not path.endswith(".exp.json"):
+            path += ".exp.json"
+        exp.file_path = path  # redireciona o destino; save_experiment grava nele
         self._exp_vm.save_experiment(params=self._sim_vm.to_session_dict())
 
     def _on_clear_history(self) -> None:
