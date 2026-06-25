@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -108,6 +109,37 @@ def compute_n_pos(tj: float, p_med: float, dip0_deg: float) -> int:
     return max(1, int(math.ceil(tj / (p_med * cos_d))))
 
 
+def _jax_pool_initializer() -> None:
+    """``initializer`` do pool JAX PERSISTENTE — roda no INÍCIO do subprocesso filho
+    (ANTES de qualquer import pesado do filho). Definido AQUI (módulo Qt-FREE, já
+    importado pelo filho via :func:`_run_simulation`) e NÃO em ``gui/services/base.py``,
+    para que o ``spawn`` resolva esta referência sem importar ``base.py`` — que puxa Qt
+    (mantém o filho enxuto no cold-start; revisão adversarial Turn 7 op c).
+
+    Fixa a ORDEM do env de pré-alocação de VRAM ANTES de o XLA inicializar:
+    ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` (não agarra ~75% da VRAM de cara) via
+    ``os.environ.setdefault`` (respeita um override exportado pelo usuário). NUNCA
+    importa ``jax`` (TLS-safe — só mexe em ``os.environ``; mantenha-a NÃO-levantante).
+
+    Defense-in-depth: a ordem JÁ é correta hoje porque o filho carrega
+    ``simulation/_jax/__init__::_setup_xla_environment`` (mesmo ``setdefault``) ANTES do
+    ``import jax``. Este initializer garante a ordem mesmo se o grafo de imports do filho
+    mudar no futuro. O ``XLA_PYTHON_CLIENT_MEM_FRACTION`` por-tier de GPU continua SÓ em
+    ``_setup_xla_environment`` (fonte única do tuning por GPU) — NÃO o tocamos aqui.
+    """
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+
+# Chunk FIXO do eixo de modelos no path JAX do SM (Turn 7, op d). 64 casa o
+# ``_SM_CANON_N_MODELS`` do ``cli/warmup.py`` (dim líder do HLO vmapado) → a forma
+# de 64 do warmup bate a maioria das fatias do runtime (uma fatia-cauda < 64, ou um
+# n_models forçado ≠ 64, paga 1 compile XLA único e não-aquecido — só cold-start). Limita
+# a VRAM de pico fatiando ``n_models`` (ex.: 2000) e concatenando em CPU. Paridade vs
+# chunk=None: <1e-13 (bit-exato em GPU; ~1e-14 ULP em CPU por reordenação de reduções do
+# XLA conforme o tamanho do batch — fisicamente idêntico, MUITO abaixo do 1e-12 Fortran).
+_SM_JAX_CHUNK_SIZE_MODELS = 64
+
+
 @dataclass(frozen=True)
 class SimRequest:
     """Requisição de simulação (Fatia 2 params + Fatia 3 geologia estocástica).
@@ -140,6 +172,13 @@ class SimRequest:
         ``h1``/``tj``/``p_med`` (+ ``dip_degs[0]``) determinam ``positions_z`` pela
         convenção Fortran (ver :func:`_compute_positions_z`). Os campos de geologia só
         têm efeito quando ``geology_mode="stochastic"``.
+
+        Os defaults deste dataclass são LEVES (objeto-fio / teste: tj=10, p_med=1 ⇒
+        n_pos=10; n_models=2) e DIFEREM **de propósito** dos defaults de PRODUÇÃO do
+        ``SimulationViewModel`` (tj=120/p_med=0.2 ⇒ n_pos=600; n_models=2000 — paridade
+        c/ o monólito). A View/VM SEMPRE passa valores explícitos; estes defaults são só
+        o fallback do objeto-fio. NÃO construa ``SimRequest()`` esperando a forma de
+        produção.
     """
 
     frequencies_hz: Tuple[float, ...] = (20000.0,)
@@ -202,6 +241,12 @@ class SimRequest:
     n_geometries: Optional[int] = (
         None  # K templates (só templates); None = auto (cap 4)
     )
+    # ── Turn 7 (op d) — chunk FIXO do eixo de modelos no path JAX (VRAM) ──────
+    # Limita a VRAM de pico fatiando n_models em pedaços de K p/ o vmap do XLA
+    # (mesma compilação por fatia, concatena em CPU — multi_forward.py:1094-1139);
+    # paridade <1e-13 vs chunk=None (GPU bit-exato; CPU ~1e-14 ULP). Só afeta o backend
+    # JAX (numba ignora). None = vmap monolítico. Ver _SM_JAX_CHUNK_SIZE_MODELS.
+    jax_chunk_size_models: Optional[int] = _SM_JAX_CHUNK_SIZE_MODELS
 
 
 # Modelo TIV de referência (3 camadas): ρₕ por camada + λ²=2 (anisotropia branda,
@@ -486,6 +531,7 @@ def _simulate_grouped(
             dip_degs=dips,
             backend=request.backend,
             hankel_filter=request.hankel_filter,
+            jax_chunk_size_models=request.jax_chunk_size_models,  # VRAM (op d); no-op p/ numba
         )
         if h6_out is None:
             # 1º grupo define o shape downstream (nTR, nAng, n_pos, nf, 9).
@@ -669,6 +715,7 @@ def _run_simulation(
             dip_degs=list(request.dip_degs),
             backend=request.backend,
             hankel_filter=request.hankel_filter,
+            jax_chunk_size_models=request.jax_chunk_size_models,  # VRAM (op d); no-op p/ numba
         )
         if progress_callback is not None:
             progress_callback(request.n_models, request.n_models)  # 100%
