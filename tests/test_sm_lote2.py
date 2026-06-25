@@ -114,29 +114,9 @@ def test_auto_geometry_flags_persist_in_session():
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 2e — PARALELISMO FORTRAN (estado/UI; execução tatu.x = Fatia 6h)
+# (PR-2) Paralelismo Fortran REMOVIDO — o SM MVVM usa só Numba JIT + JAX GPU.
+# Os testes de n_workers_fortran/threads_fortran foram retirados junto com os campos.
 # ════════════════════════════════════════════════════════════════════════════
-def test_vm_fortran_parallelism_clamp_and_session():
-    vm = _make_sim_vm()
-    vm.n_workers_fortran = 999
-    vm.threads_fortran = 0
-    assert vm.n_workers_fortran == 256 and vm.threads_fortran == 1  # clamp [1, 256]
-    vm.n_workers_fortran = 4
-    vm.threads_fortran = 3
-    d = vm.to_session_dict()
-    assert d["n_workers_fortran"] == 4 and d["threads_fortran"] == 3
-    vm2 = _make_sim_vm()
-    vm2.load_session_dict(d)
-    assert vm2.n_workers_fortran == 4 and vm2.threads_fortran == 3
-
-
-def test_vm_run_passes_fortran_parallelism_to_request():
-    vm = _make_sim_vm()
-    vm.n_workers_fortran = 6
-    vm.threads_fortran = 5
-    vm.run()
-    req = vm._service.requests[-1]
-    assert req.n_workers_fortran == 6 and req.threads_fortran == 5
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -158,10 +138,11 @@ def test_simulator_view_three_categories(qtbot):
     assert view._radio_random.text().startswith("Aleatória")
     assert view._radio_manual.text().startswith("Manual")
     assert not hasattr(view, "_geo_mode")
-    # Par Fortran presente
-    assert view._n_workers_fortran.minimum() == 1
-    assert view._n_workers_fortran.maximum() == 256
-    assert view._threads_fortran.minimum() == 1
+    # PR-2: par ÚNICO workers/threads (Fortran removido — só Numba JIT + JAX GPU)
+    assert view._n_workers.minimum() == 1 and view._n_workers.maximum() == 256
+    assert view._threads.minimum() == 1
+    assert not hasattr(view, "_n_workers_fortran")
+    assert not hasattr(view, "_threads_fortran")
 
 
 @pytest.mark.gui
@@ -183,8 +164,10 @@ def test_simulator_view_has_vertical_scroll(qtbot):
     assert sa.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     # conteúdo bem mais alto que uma janela típica → scroll é necessário.
     assert sa.widget().sizeHint().height() > 800
-    # widgets seguem acessíveis por atributo (binding intacto).
-    assert view._profile_box is not None and view._results is not None
+    # widgets seguem acessíveis por atributo (binding intacto). PR-2 (#1): a galeria
+    # (_results) saiu desta aba p/ a perspectiva Resultados.
+    assert view._profile_box is not None and view._output_box is not None
+    assert not hasattr(view, "_results")
 
 
 @pytest.mark.gui

@@ -8,28 +8,27 @@
 # ║  Versão      : v0.3                                                       ║
 # ║  Autor       : Daniel Leal                                                ║
 # ║  Status      : Produção — geração estocástica (Fatia 3)                    ║
-# ║  Framework   : Qt6 via gui.qt_compat + gui.plot_backends                   ║
-# ║  Dependências: gui.qt_compat, gui.plot_backends, gui.services, .viewmodel   ║
+# ║  Framework   : Qt6 via gui.qt_compat                                       ║
+# ║  Dependências: gui.qt_compat, gui.services, .viewmodel                      ║
 # ║  Padrão      : View (MVVM) — sem lógica; faz binding aos VMSignals do VM   ║
 # ║  ---------------------------------------------------------------------    ║
 # ║  FINALIDADE                                                               ║
 # ║    Inputs multi-config (freqs/dips/TRs via CSV) + geometria (h1/tj/p_med/  ║
 # ║    nº modelos) + grupo de GEOLOGIA estocástica (gerador, ranges ρₕ/λ,       ║
 # ║    distribuição, n_layers, espessura, seed) + label de ``n_pos`` + Run +    ║
-# ║    status + PlotCanvas. Ao Run: copia os inputs para o ViewModel e chama    ║
-# ║    vm.run(). Liga-se a ``vm.changed`` (status/botão) e ``vm.result_ready``  ║
-# ║    (plota a resposta EM do modelo 0). Sem lógica de domínio.              ║
+# ║    status + sessão. Ao Run: copia os inputs para o ViewModel e chama        ║
+# ║    vm.run(). Liga-se a ``vm.changed`` (status/botão). A PLOTAGEM vive na     ║
+# ║    perspectiva Resultados (PR-2 #1) — esta aba NÃO tem galeria.            ║
 # ║                                                                           ║
 # ║  EXPORTS                                                                  ║
 # ║    SimulatorView                                                          ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-"""``SimulatorView`` — View Qt (inputs + geologia + Run + galeria + .session), VM (0011d)."""
+"""``SimulatorView`` — View Qt (inputs + geologia + Run + sessão; sem galeria), VM."""
 
 from __future__ import annotations
 
 from typing import Any, Tuple
 
-from apps.sim_manager.perspectives.simulation.results_view import ResultsView
 from apps.sim_manager.perspectives.simulation.viewmodel import SimulationViewModel
 from geosteering_ai.gui.persistence.session import SessionDocument
 from geosteering_ai.gui.qt_compat import Qt, QtWidgets
@@ -94,7 +93,7 @@ def _group(title: str, hint: str, inner: Any) -> Any:
 
 
 class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any → mypy
-    """View da Simulação: inputs + Run + status + 1 plot, ligada a um ViewModel.
+    """View da Simulação: inputs + Run + status (SEM galeria), ligada a um ViewModel.
 
     Args:
         vm: o :class:`SimulationViewModel` (a View se liga aos seus VMSignals).
@@ -102,7 +101,8 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
 
     Note:
         A View não valida nem simula — só coleta inputs, chama ``vm.run()`` e
-        renderiza o que o VM emite (``changed``/``result_ready``).
+        reflete o estado que o VM emite (``changed``). A plotagem do ensemble vive
+        na perspectiva Resultados (PR-2 #1), ligada ao mesmo ``vm.results``.
     """
 
     def __init__(self, vm: SimulationViewModel, parent: Any = None) -> None:
@@ -231,8 +231,10 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._open_btn = QtWidgets.QPushButton("Abrir sessão…")
         self._status = QtWidgets.QLabel("● ocioso")
 
-        # ── Galeria do ensemble (Fatia 4) — substitui o plot único ───────────
-        self._results = ResultsView(vm.results, parent=self)
+        # PR-2 (#1): a galeria de plot foi MOVIDA p/ a perspectiva "Resultados"
+        # (a aba Simulação não tem mais plotagem). O ResultsViewModel vive em
+        # ``vm.results`` e é publicado em ``ctx.extras["results_vm"]`` pela
+        # SimulationPerspective; a ResultsPerspective liga uma 2ª View ao MESMO VM.
 
         # ── Layout ────────────────────────────────────────────────────────────
         # Geometria + aquisição (com contadores derivados no topo, espelhando o
@@ -298,10 +300,9 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         content_layout.addWidget(self._output_box)
         content_layout.addLayout(exec_row)
         content_layout.addLayout(session_row)
-        # Galeria com altura mínima usável mesmo ao rolar (senão encolheria ao
-        # sizeHint dentro da scroll area).
-        self._results.setMinimumHeight(340)
-        content_layout.addWidget(self._results, stretch=1)
+        # PR-2 (#1): galeria removida desta aba (vive em "Resultados"). O stretch
+        # final empurra o conteúdo p/ o topo dentro da QScrollArea.
+        content_layout.addStretch(1)
 
         # QScrollArea: h-scroll OFF (widgetResizable acompanha a largura do
         # viewport — sem vazamento horizontal); v-scroll AS-NEEDED.
@@ -582,35 +583,22 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             "modelos ⇒ ~125/grupo) OU marque 'n_layers fixo' (1 grupo único). Com poucos "
             "modelos e faixa de camadas larga, grupos pequenos ainda rodam em Numba."
         )
-        # ── Par Numba (funcional) — threads têm efeito real ──────────────────
+        # ── Workers + threads (par ÚNICO) ────────────────────────────────────
+        # Os únicos simuladores do SM MVVM são Numba JIT e JAX GPU (sem Fortran).
         self._n_workers = QtWidgets.QSpinBox()
         self._n_workers.setRange(1, 256)
         self._n_workers.setValue(vm.n_workers)
         self._n_workers.setToolTip(
-            "Nº de workers Numba (processos sandbox). ESTADO/UI — o ProcessPoolExecutor "
-            "real é a Fatia 5; hoje o numba roda in-process com N threads."
+            "Nº de workers (processos sandbox). ESTADO/UI — o ProcessPoolExecutor real "
+            "é a Fatia 5; hoje o numba roda in-process com N threads."
         )
         self._threads = QtWidgets.QSpinBox()
         self._threads.setRange(1, 256)
         self._threads.setValue(vm.threads_per_worker)
         self._threads.setToolTip(
-            "Nº de threads por worker Numba. EFEITO REAL: numba.set_num_threads(...) "
-            "antes do simulate_batch (bit-idêntico; clampado a NUMBA_NUM_THREADS)."
-        )
-        # ── Par Fortran (estado/UI — execução tatu.x = Fatia 6h) ─────────────
-        self._n_workers_fortran = QtWidgets.QSpinBox()
-        self._n_workers_fortran.setRange(1, 256)
-        self._n_workers_fortran.setValue(vm.n_workers_fortran)
-        self._n_workers_fortran.setToolTip(
-            "Nº de workers Fortran (instâncias tatu.x). ESTADO/UI — a execução Fortran "
-            "(subprocesso tatu.x) chega na Fatia 6h; o valor é persistido na sessão."
-        )
-        self._threads_fortran = QtWidgets.QSpinBox()
-        self._threads_fortran.setRange(1, 256)
-        self._threads_fortran.setValue(vm.threads_fortran)
-        self._threads_fortran.setToolTip(
-            "Nº de threads OpenMP por instância Fortran (OMP_NUM_THREADS). ESTADO/UI — "
-            "efeito real na Fatia 6h (subprocesso tatu.x)."
+            "Nº de threads por worker. EFEITO REAL no Numba: numba.set_num_threads(...) "
+            "antes do simulate_batch (bit-idêntico; clampado a NUMBA_NUM_THREADS). No JAX "
+            "(subprocesso GPU) é no-op — a GPU paraleliza internamente."
         )
         # Topologia da CPU (best-effort) — espelha a linha do monólito.
         try:
@@ -631,27 +619,18 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._n_workers.valueChanged.connect(self._refresh_parallel_warn)
         self._threads.valueChanged.connect(self._refresh_parallel_warn)
 
-        def _sub(text: str) -> Any:
-            lbl = QtWidgets.QLabel(text)
-            lbl.setProperty("role", "section")
-            return lbl
-
         pform = QtWidgets.QFormLayout()
         pform.addRow("Backend:", self._sim_backend)
         pform.addRow("Diversidade de geometria (JAX):", self._geom_diversity)
-        pform.addRow(_sub("Numba JIT"))
-        pform.addRow("Nº de workers (Numba):", self._n_workers)
-        pform.addRow("Nº de threads (Numba):", self._threads)
-        pform.addRow(_sub("Fortran (tatu.x · Fatia 6h)"))
-        pform.addRow("Nº de workers (Fortran):", self._n_workers_fortran)
-        pform.addRow("Nº de threads (Fortran):", self._threads_fortran)
+        pform.addRow("Nº de workers:", self._n_workers)
+        pform.addRow("Nº de threads:", self._threads)
         pform.addRow(self._cpu_info)
         pform.addRow(self._parallel_warn)
         box = _group(
             "Paralelismo",
-            "Workers/threads SEPARADOS por backend (paridade com o monólito). Numba: "
-            "threads têm efeito real; workers = Fatia 5. Fortran: estado/UI — execução "
-            "tatu.x = Fatia 6h.",
+            "Simuladores: Numba JIT (CPU, in-thread) e JAX GPU (subprocesso). Threads "
+            "têm efeito real no Numba (numba.set_num_threads); workers (pool de "
+            "processos) = Fatia 5. Nenhuma execução Fortran no SM.",
             pform,
         )
         self._refresh_parallel_warn()
@@ -666,12 +645,13 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._browse_out.setProperty("role", "ghost")
         self._browse_out.clicked.connect(self._on_browse_output)
         self._save_artifacts = QtWidgets.QCheckBox(
-            "Salvar artefatos Fortran-compat (.dat binário 22-col + .out ASCII)"
+            "Salvar artefatos .dat/.out (22-col)"
         )
         self._save_artifacts.setChecked(vm.save_fortran_artifacts)
         self._save_artifacts.setToolTip(
-            "Após a simulação, grava o tensor H em .dat (22-col) + metadados .out "
-            "(idênticos ao tatu.x). col2/col3 = ρₕ/ρᵥ no ponto de observação."
+            "Após a simulação, grava o tensor H em .dat (22-col binário) + metadados "
+            ".out ASCII — formato do tatu.x, LIDO pelo Visualizador .dat. col2/col3 = "
+            "ρₕ/ρᵥ no ponto de observação. (Formato de arquivo; não executa Fortran.)"
         )
         dir_row = QtWidgets.QHBoxLayout()
         dir_row.addWidget(self._output_dir, stretch=1)
@@ -681,8 +661,8 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         vbox.addWidget(self._save_artifacts)
         return _group(
             "Saída",
-            "Diretório e artefatos Fortran-compatíveis (.dat/.out) gravados ao fim "
-            "da simulação.",
+            "Diretório e artefatos .dat/.out (22-col, formato tatu.x) gravados ao fim "
+            "da simulação — reabríveis no Visualizador .dat.",
             vbox,
         )
 
@@ -770,8 +750,6 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         # ── Paralelismo (Lote 1) + Saída ─────────────────────────────────────
         self._vm.n_workers = self._n_workers.value()
         self._vm.threads_per_worker = self._threads.value()
-        self._vm.n_workers_fortran = self._n_workers_fortran.value()
-        self._vm.threads_fortran = self._threads_fortran.value()
         self._vm.output_dir = self._output_dir.text().strip()
         self._vm.save_fortran_artifacts = self._save_artifacts.isChecked()
         self._vm.h1_auto = self._h1_auto.isChecked()
@@ -984,8 +962,6 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         # ── Paralelismo (Lote 1) + Saída ─────────────────────────────────────
         self._vm.n_workers = self._n_workers.value()
         self._vm.threads_per_worker = self._threads.value()
-        self._vm.n_workers_fortran = self._n_workers_fortran.value()
-        self._vm.threads_fortran = self._threads_fortran.value()
         self._vm.output_dir = self._output_dir.text().strip()
         self._vm.save_fortran_artifacts = self._save_artifacts.isChecked()
         self._vm.h1_auto = self._h1_auto.isChecked()
@@ -1024,11 +1000,9 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._geo_seed_random.setChecked(self._vm.rng_seed is None)
         if self._vm.rng_seed is not None:
             self._geo_seed.setValue(self._vm.rng_seed)
-        # ── Paralelismo (Lote 1/2) + Saída ───────────────────────────────────
+        # ── Paralelismo (Lote 1) + Saída ─────────────────────────────────────
         self._n_workers.setValue(self._vm.n_workers)
         self._threads.setValue(self._vm.threads_per_worker)
-        self._n_workers_fortran.setValue(self._vm.n_workers_fortran)
-        self._threads_fortran.setValue(self._vm.threads_fortran)
         self._output_dir.setText(self._vm.output_dir)
         self._save_artifacts.setChecked(self._vm.save_fortran_artifacts)
         self._h1_auto.setChecked(self._vm.h1_auto)

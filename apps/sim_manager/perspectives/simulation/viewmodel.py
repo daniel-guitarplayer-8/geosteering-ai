@@ -143,9 +143,6 @@ class SimulationViewModel(BaseViewModel):
         # ── Paralelismo (Lote 1) + Saída ──
         "_n_workers",
         "_threads_per_worker",
-        # ── Paralelismo Fortran (Lote 2 — estado/UI; execução tatu.x = Fatia 6h) ──
-        "_n_workers_fortran",
-        "_threads_fortran",
         "_output_dir",
         "_save_fortran_artifacts",
         # ── Auto-geometria canônica (Lote 2) + Hankel (Fatia 6b) ──
@@ -217,13 +214,7 @@ class SimulationViewModel(BaseViewModel):
             _def_w, _def_t = 4, 1
         self._n_workers: int = int(_def_w)
         self._threads_per_worker: int = int(_def_t)
-        # ── Paralelismo Fortran (Lote 2) — estado/UI; execução tatu.x = Fatia 6h ──
-        # Defaults espelham a BenchmarkPage do monólito: workers ≈ recomendado (Numba
-        # já é ≈ phys/2 via recommend_default_parallelism) + 2 threads OpenMP/instância
-        # (cada tatu.x tem overhead de processo). NÃO dividir de novo (era phys/4 — bug).
-        self._n_workers_fortran: int = max(1, self._n_workers)
-        self._threads_fortran: int = 2
-        # ── Saída — diretório + artefatos Fortran-compat (.dat/.out) ─────────
+        # ── Saída — diretório + artefatos .dat/.out 22-col (formato tatu.x) ──
         self._output_dir: str = ""
         self._save_fortran_artifacts: bool = False
         # ── Auto-geometria canônica (Lote 2) — derivar tj/h1 ao aplicar perfil ──
@@ -337,26 +328,7 @@ class SimulationViewModel(BaseViewModel):
     def threads_per_worker(self, value: int) -> None:
         self._set("_threads_per_worker", int(min(max(int(value), 1), 256)))
 
-    # ── Paralelismo Fortran (Lote 2) — estado/UI; execução tatu.x = Fatia 6h ──
-    @property
-    def n_workers_fortran(self) -> int:
-        """Nº de workers Fortran (1–256). Estado/UI — execução tatu.x = Fatia 6h."""
-        return self._n_workers_fortran
-
-    @n_workers_fortran.setter
-    def n_workers_fortran(self, value: int) -> None:
-        self._set("_n_workers_fortran", int(min(max(int(value), 1), 256)))
-
-    @property
-    def threads_fortran(self) -> int:
-        """Nº de threads OpenMP por instância Fortran (1–256). Estado/UI — Fatia 6h."""
-        return self._threads_fortran
-
-    @threads_fortran.setter
-    def threads_fortran(self, value: int) -> None:
-        self._set("_threads_fortran", int(min(max(int(value), 1), 256)))
-
-    # ── Saída — diretório + artefatos Fortran-compat (.dat/.out) ─────────────
+    # ── Saída — diretório + artefatos .dat/.out 22-col (formato tatu.x) ──────
     @property
     def output_dir(self) -> str:
         """Diretório de saída p/ os artefatos Fortran-compat (vazio = não grava)."""
@@ -826,9 +798,6 @@ class SimulationViewModel(BaseViewModel):
             # ── Paralelismo (Lote 1) + Saída ────────────────────────────────
             n_workers=self._n_workers,
             threads_per_worker=self._threads_per_worker,
-            # ── Paralelismo Fortran (Lote 2 — transportado; tatu.x = Fatia 6h) ──
-            n_workers_fortran=self._n_workers_fortran,
-            threads_fortran=self._threads_fortran,
             output_dir=self._output_dir,
             save_fortran_artifacts=self._save_fortran_artifacts,
         )
@@ -997,9 +966,6 @@ class SimulationViewModel(BaseViewModel):
             # ── Paralelismo (Lote 1) + Saída ────────────────────────────────
             "n_workers": self._n_workers,
             "threads_per_worker": self._threads_per_worker,
-            # ── Paralelismo Fortran (Lote 2 — estado/UI; Fatia 6h) ──────────
-            "n_workers_fortran": self._n_workers_fortran,
-            "threads_fortran": self._threads_fortran,
             "output_dir": self._output_dir,
             "save_fortran_artifacts": self._save_fortran_artifacts,
             # ── Auto-geometria canônica (Lote 2) — preferência persistida ───
@@ -1059,8 +1025,6 @@ class SimulationViewModel(BaseViewModel):
             "n_geometries",
             "n_workers",
             "threads_per_worker",
-            "n_workers_fortran",
-            "threads_fortran",
             "output_dir",
             "save_fortran_artifacts",
             "h1_auto",

@@ -82,11 +82,9 @@ _BINDING_CONTRACT = (
     # auto-geometria canônica (Lote 2) — h1/tj separados (substitui autoGeoCheck)
     "h1AutoCheck",
     "tjAutoCheck",
-    # paralelismo + saída (Lote 1) + Fortran (Lote 2 — estado/UI; Fatia 6h)
+    # paralelismo (Lote 1) — par ÚNICO workers/threads (PR-2: Fortran removido) + saída
     "workersSpin",
     "threadsSpin",
-    "workersFortranSpin",
-    "threadsFortranSpin",
     "cpuInfoLabel",
     "parallelWarnLabel",
     "saveArtifactsCheck",
@@ -113,14 +111,9 @@ _BINDING_CONTRACT = (
     "expClearButton",
     "historyList",
     "historySearchEdit",
-    # galeria de resultados (Fatia 6d)
-    "plotBackendCombo",
-    "plotModeCombo",
-    "channelCombo",
-    "plotKindCombo",
-    "animPlayButton",
-    "animSlider",
-    "animSpeedCombo",
+    # PR-2 (#1): a galeria de resultados (plotBackendCombo/plotModeCombo/channelCombo/
+    # plotKindCombo/animPlayButton/animSlider/animSpeedCombo) SAIU do simulador para a
+    # perspectiva Resultados (ResultsView), então não é mais contrato do simulator.ui.
 )
 
 pytestmark = pytest.mark.skipif(
