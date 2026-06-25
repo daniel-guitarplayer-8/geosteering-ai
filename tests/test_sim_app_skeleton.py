@@ -85,7 +85,11 @@ def test_vm_validate_run_and_result_with_stub():
     assert req.dip_degs == (0.0, 30.0)
     assert req.tr_spacings_m == (1.0,)
     assert req.n_models == 3
-    assert (req.h1, req.tj, req.p_med) == (1.0, 10.0, 1.0)
+    assert (req.h1, req.tj, req.p_med) == (
+        10.0,
+        120.0,
+        0.2,
+    )  # defaults == monólito (item 3)
     assert vm.status == "running"
 
     # o service "termina" → VM atualiza estado e re-emite
@@ -446,6 +450,12 @@ def test_end_to_end_real_simulation(qtbot):
     vm.result_ready.connect(rec.append)
     vm.frequencies = (20000.0,)
     vm.n_models = 2
+    # Params PEQUENOS explícitos (não depende dos defaults pesados de produção —
+    # item 3 mudou tj/p_med p/ 120/0.2 ⇒ n_pos=600, e n_layers até 31): tj=10/
+    # p_med=1 ⇒ n_pos=10; n_layers_fixed=3 ⇒ viável (3 cam.) e rápido.
+    vm.tj = 10.0
+    vm.p_med = 1.0
+    vm.n_layers_fixed = 3
     vm.run()
     # spin o event loop até concluir (marshaling worker→main via QueuedConnection).
     # 60s cobre o JIT warmup do Numba + simulate_batch no batch pequeno (skeleton).

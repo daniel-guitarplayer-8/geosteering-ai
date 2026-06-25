@@ -25,7 +25,9 @@
 
 from __future__ import annotations
 
+import logging
 import math
+import re
 from typing import Any
 
 from apps.sim_manager.perspectives.simulation.results_viewmodel import (
@@ -44,6 +46,8 @@ from geosteering_ai.gui.qt_compat import QtWidgets
 from geosteering_ai.gui.shell.widgets.animation_bar import AnimationBar
 
 __all__ = ["ResultsView"]
+
+_logger = logging.getLogger(__name__)
 
 # Rótulos amigáveis dos plot-kinds (mesma ordem de PLOT_KINDS).
 _KIND_LABELS = {"re": "Re", "im": "Im", "mag": "|H|", "phase": "Fase (°)"}
@@ -133,6 +137,22 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         bar.addWidget(self._prev)
         bar.addWidget(self._page_lbl)
         bar.addWidget(self._next)
+        # ── Export da figura (6g) — DPI + botão; replay off-screen p/ matplotlib ──
+        # Exporta a figura CORRENTE (PNG/PDF/SVG/EPS) via matplotlib, honrando o DPI
+        # INDEPENDENTE do backend on-screen (pyqtgraph ignora DPI; plotly precisa
+        # kaleido; vispy é raster). 100% apresentação — nenhuma re-simulação.
+        self._dpi = QtWidgets.QSpinBox()
+        self._dpi.setRange(50, 600)
+        self._dpi.setValue(150)
+        self._dpi.setPrefix("DPI ")
+        self._dpi.setToolTip("Resolução do arquivo exportado (PNG/PDF/SVG/EPS).")
+        self._export_btn = QtWidgets.QPushButton("Exportar figura…")
+        self._export_btn.setToolTip(
+            "Salva a figura CORRENTE da galeria (PNG/PDF/SVG/EPS) no DPI escolhido — "
+            "renderizada via matplotlib (publicação), independente do backend on-screen."
+        )
+        bar.addWidget(self._dpi)
+        bar.addWidget(self._export_btn)
         self._root = QtWidgets.QVBoxLayout(self)
         self._root.addLayout(bar)
         self._root.addWidget(self._canvas.widget(), stretch=1)
@@ -148,6 +168,7 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         self._freq.valueChanged.connect(self._on_freq_changed)
         self._prev.clicked.connect(self._on_prev)
         self._next.clicked.connect(self._on_next)
+        self._export_btn.clicked.connect(self._export_figure)
         self._vm.changed.connect(self._render)
         self._vm.results_changed.connect(self._render)
         self._render()
@@ -250,6 +271,10 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         self._anim.set_frame_count(self._vm.n_models)
         self._anim.set_frame(self._vm.focus_model)
         self._anim.setEnabled(self._vm.n_models > 1 and not is_heatmap)
+        # Export (6g): habilita SÓ quando o export realmente funciona — MESMA condição
+        # do guard de _export_figure e do _render (has_result E depth não-None). Evita
+        # botão aceso que vira no-op silencioso (ex.: H6 sem positions_z).
+        self._export_btn.setEnabled(self._vm.has_result and self._vm.depth is not None)
 
     def _build_canvas(self, backend: PlotBackend) -> tuple[Any, PlotBackend]:
         """Cria um canvas do ``backend``, com FALLBACK p/ matplotlib se faltar dep.
@@ -300,6 +325,15 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         if not self._vm.has_result or self._vm.depth is None:
             self._canvas.draw()  # galeria vazia (sem resultado)
             return
+        self._draw_current_mode()
+        self._canvas.draw()
+
+    def _draw_current_mode(self) -> None:
+        """Desenha o modo ATUAL (curva/perfil ρ-λ/heatmap) no ``self._canvas`` corrente.
+
+        Caminho ÚNICO reusado pelo render on-screen E pelo export off-screen (6g) — o
+        export troca ``self._canvas`` por um canvas matplotlib temporário e re-chama isto.
+        """
         mode = self._vm.plot_mode
         if mode == "heatmap":
             self._render_heatmap()
@@ -307,7 +341,6 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
             self._render_profiles(mode)
         else:
             self._render_curves()
-        self._canvas.draw()
 
     def _grid_for_page(self) -> tuple[list, list]:
         """Cria a grade rows×cols p/ os modelos da página atual; retorna (grid, models)."""
@@ -422,3 +455,62 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
     def _empty_subplot(self, ax: Any, title: str) -> None:
         """Configura um subplot vazio com um título (estado 'sem dados')."""
         self._canvas.set_axis_config(ax, AxisConfig(title=title, invert_y=False))
+
+    # ── Export (6g) — figura corrente → PNG/PDF/SVG/EPS no DPI escolhido ──────
+    def _export_figure(self) -> None:
+        """Abre o seletor de arquivo e exporta a figura CORRENTE no DPI do spinbox.
+
+        100% View (Qt): o ``QFileDialog`` e o salvamento vivem aqui (Princípio X — o
+        ViewModel é Qt-free). NÃO re-simula. Sem resultado, é no-op (o botão já fica
+        desabilitado em ``_sync_controls``).
+        """
+        if not self._vm.has_result or self._vm.depth is None:
+            return
+        path, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Exportar figura",
+            "geosteering_ensemble.png",
+            "PNG (*.png);;PDF (*.pdf);;SVG (*.svg);;EPS (*.eps)",
+        )
+        if not path:
+            return
+        # Normaliza a extensão pelo FILTRO escolhido (diálogos não-nativos/headless não
+        # a anexam) — senão matplotlib detecta o formato pela extensão e cairia em PNG
+        # mesmo com PDF/SVG/EPS selecionado. Mesma convenção de view.py (.session).
+        if not path.lower().endswith((".png", ".pdf", ".svg", ".eps")):
+            m = re.search(r"\*(\.[A-Za-z]+)", selected_filter or "")
+            path += m.group(1).lower() if m else ".png"
+        try:
+            self._save_current_figure(path, int(self._dpi.value()))
+        except Exception as exc:  # noqa: BLE001 — export robusto: erro claro, não derruba a galeria
+            _logger.warning("Falha ao exportar figura: %s", exc)
+            QtWidgets.QMessageBox.warning(
+                self, "Exportar figura", f"Falha ao exportar a figura:\n{exc}"
+            )
+
+    def _save_current_figure(self, path: str, dpi: int) -> None:
+        """Renderiza o estado ATUAL num ``MatplotlibCanvas`` OFF-SCREEN e salva (testável).
+
+        O backend matplotlib SEMPRE honra DPI/PDF/SVG/EPS (publicação), independente do
+        backend on-screen (pyqtgraph ignora DPI; plotly precisa kaleido; vispy é raster).
+        Troca ``self._canvas`` pelo canvas temporário, RE-USA ``_draw_current_mode`` (mesmo
+        caminho do render on-screen) e RESTAURA o canvas on-screen no ``finally`` — sem
+        re-simulação e sem mexer no canvas visível (snapshot do estado já desenhado).
+        """
+        export_canvas = make_canvas(PlotBackend.MATPLOTLIB)
+        export_canvas.set_dark_mode(True)  # WYSIWYG c/ a galeria (tema escuro)
+        on_screen = self._canvas
+        self._canvas = export_canvas
+        try:
+            export_canvas.clear()
+            self._draw_current_mode()
+            export_canvas.save(path, dpi=dpi)
+        finally:
+            self._canvas = on_screen  # restaura SEMPRE o canvas on-screen
+            # Teardown determinístico do canvas off-screen (idiom de _rebuild_canvas) —
+            # evita churn de QWidget/buffer Agg em exports repetidos. Best-effort.
+            try:
+                export_canvas.clear()
+                export_canvas.widget().deleteLater()
+            except Exception:  # noqa: BLE001 — limpeza best-effort; nunca mascara o save
+                pass

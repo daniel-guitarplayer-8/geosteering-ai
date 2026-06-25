@@ -129,7 +129,12 @@ def _acquire_jax_pool() -> Any:
     Singleton protegido por ``_JAX_POOL_LOCK``. Na 1ª criação registra
     ``atexit.register(release_jax_pool)`` (uma única vez) p/ não vazar o subprocesso
     GPU na saída do interpretador. NÃO importa ``jax`` — só faz ``spawn`` de um Python
-    limpo; o JAX é importado DENTRO do filho (via ``fn=_run_simulation``).
+    limpo; o JAX é importado DENTRO do filho (via ``fn=_run_simulation``). O ``spawn``
+    roda ``_jax_pool_initializer`` ANTES de qualquer trabalho (ordem do env de VRAM).
+
+    O initializer vive em ``sim_request`` (módulo Qt-FREE, JÁ importado pelo filho via
+    ``_run_simulation``) — NÃO aqui — para que o filho resolva a referência ``spawn``
+    sem importar este ``base.py``, que puxa Qt (mantém o filho enxuto/sem Qt no cold-start).
 
     Returns:
         O ``ProcessPoolExecutor`` persistente (1 worker, contexto ``spawn``).
@@ -138,10 +143,14 @@ def _acquire_jax_pool() -> Any:
     import multiprocessing
     from concurrent.futures import ProcessPoolExecutor
 
+    from geosteering_ai.gui.services.sim_request import _jax_pool_initializer
+
     with _JAX_POOL_LOCK:
         if _JAX_POOL is None:
             ctx = multiprocessing.get_context("spawn")
-            _JAX_POOL = ProcessPoolExecutor(max_workers=1, mp_context=ctx)
+            _JAX_POOL = ProcessPoolExecutor(
+                max_workers=1, mp_context=ctx, initializer=_jax_pool_initializer
+            )
             if not _JAX_POOL_ATEXIT_DONE:
                 atexit.register(release_jax_pool)
                 _JAX_POOL_ATEXIT_DONE = True

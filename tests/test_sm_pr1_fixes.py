@@ -247,9 +247,10 @@ def test_numba_auto_default_leaves_ensemble_uncollapsed():
 def test_font_sizes_bumped():
     from geosteering_ai.gui.theme.tokens import ANTIGRAVITY_DARK
 
-    assert ANTIGRAVITY_DARK.font_size_sm == 12
-    assert ANTIGRAVITY_DARK.font_size_base == 14
-    assert ANTIGRAVITY_DARK.font_size_lg == 18
+    # Turn 7: +1pt global (era 12/14/18 → 13/15/19).
+    assert ANTIGRAVITY_DARK.font_size_sm == 13
+    assert ANTIGRAVITY_DARK.font_size_base == 15
+    assert ANTIGRAVITY_DARK.font_size_lg == 19
 
 
 # ════════════════════════════════════════════════════════════════════════════
