@@ -45,6 +45,9 @@ DEFAULT_PREFERENCES: Dict[str, Any] = {
     "plot_backend": "matplotlib",  # default conservador (sempre disponível)
     "cache_max_mb": 256,  # limite de bytes do LRU de plots (MB)
     "cache_max_snapshots": 12,  # limite de entradas (maxlen) do LRU
+    # Aquecer o worker JAX GPU no boot (async): tira o cold-start XLA da 1ª sim. Opt-in
+    # (False) — não gasta GPU/VRAM no boot de quem só usa Numba (nem do CI/Studio).
+    "jax_boot_warmup": False,
     "paths": {  # paridade com load_paths()/save_paths() do monólito
         "output_dir": "",
         "tatu_binary": "",
