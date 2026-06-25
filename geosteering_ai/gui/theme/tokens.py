@@ -80,10 +80,11 @@ class ThemeTokens:
     # ── Tipografia ──────────────────────────────────────────────────────
     font_family: str = '"Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif'
     font_family_mono: str = '"JetBrains Mono", "Menlo", "Consolas", "Monaco", monospace'
-    # Fontes levemente maiores (PR-1 #7c — legibilidade; era 11/13/16).
-    font_size_sm: int = 12
-    font_size_base: int = 14
-    font_size_lg: int = 18
+    # Fontes levemente maiores (legibilidade). Histórico: 11/13/16 (PR-1 #7c) →
+    # 12/14/18 → 13/15/19 (Turn 7: +1pt global em todo o programa).
+    font_size_sm: int = 13
+    font_size_base: int = 15
+    font_size_lg: int = 19
     # ── Espaçamento (escala) ──────────────────────────────────────────────
     spacing_xs: int = 2
     spacing_sm: int = 4

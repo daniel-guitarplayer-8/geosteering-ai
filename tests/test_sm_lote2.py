@@ -98,12 +98,86 @@ def test_canonical_no_auto_keeps_geometry_but_sets_layers():
     assert vm.n_layers_fixed == 3  # Task 4: nº de camadas reflete o perfil
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# Turn 7 item 1 — aplicar perfil espelha os campos DERIVADOS do estocástico
+# (ρ/λ/min_thickness/anisotropia/n_models/range) — fecha "só Oklahoma 3 importa"
+# ════════════════════════════════════════════════════════════════════════════
+def test_canonical_profile_mirrors_stochastic_fields():
+    """Item 1: aplicar um perfil grava os mesmos campos derivados do monólito
+    (simulation_manager.py:1974-2057). Valida 3 perfis representativos."""
+    from geosteering_ai.simulation.validation.canonical_models import (
+        get_canonical_model,
+    )
+
+    for name in ("oklahoma_28", "oklahoma_15", "hou_7"):
+        vm = _make_sim_vm()
+        cm = get_canonical_model(name)
+        rho_h = [float(x) for x in cm.rho_h]
+        rho_v = [float(x) for x in cm.rho_v]
+        esp = [float(x) for x in cm.esp]
+        n = int(cm.n_layers)
+        lambdas = [
+            float(max(rv / rh, 1.0)) ** 0.5 for rh, rv in zip(rho_h, rho_v) if rh > 0.0
+        ]
+        aniso = any(abs(rv - rh) > 1e-9 * max(rh, 1.0) for rh, rv in zip(rho_h, rho_v))
+
+        vm.apply_canonical_profile(name)
+
+        assert vm.rho_h_min == min(rho_h), name
+        assert vm.rho_h_max == max(rho_h), name
+        assert vm.min_thickness == max(1e-3, min(esp)), name
+        assert vm.anisotropic is aniso, name
+        assert vm.lambda_min == max(1.0, min(lambdas)), name
+        assert vm.lambda_max == max(vm.lambda_min, max(lambdas)), name
+        assert vm.n_models == 1, name  # perfil determinístico (monólito spin_nmodels=1)
+        assert vm.n_layers_min == n, name
+        assert vm.n_layers_max == n + 1, name  # exclusivo → colapsa em {n}
+
+
+def test_canonical_isotropic_profile_disables_anisotropy():
+    """oklahoma_15/devine_8 são isotrópicos (ρᵥ==ρₕ) → anisotropic=False, λ=[1,1]."""
+    from geosteering_ai.simulation.validation.canonical_models import (
+        get_canonical_model,
+    )
+
+    for name in ("oklahoma_15", "devine_8"):
+        vm = _make_sim_vm()
+        cm = get_canonical_model(name)
+        assert all(rv == rh for rh, rv in zip(cm.rho_h, cm.rho_v)), f"{name} isotrópico"
+        vm.apply_canonical_profile(name)
+        assert vm.anisotropic is False, name
+        assert vm.lambda_min == 1.0 and vm.lambda_max == 1.0, name
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Turn 7 item 3 — defaults do VM == página de produção do SM monólito
+# ════════════════════════════════════════════════════════════════════════════
+def test_mvvm_defaults_match_monolith_production():
+    """Item 3: GATE de regressão dos defaults alinhados ao monólito. n_pos é
+    DERIVADO (600 = SEQUENCE_LENGTH da errata). Errata freq/TR/dip já coincidia."""
+    vm = _make_sim_vm()
+    assert vm.h1 == 10.0
+    assert vm.tj == 120.0
+    assert vm.p_med == 0.2
+    assert vm.n_pos == 600  # ceil(120/0.2), dip0=0 → SEQUENCE_LENGTH
+    assert vm.n_models == 2000
+    assert vm.min_thickness == 0.5
+    assert vm.rho_h_max == 1800.0
+    assert vm.n_layers_max == 32  # exclusivo (monólito spinbox 31 +1)
+    assert vm.n_layers_fixed is None  # "n camadas fixo" OFF
+    assert vm.save_fortran_artifacts is True
+    assert vm.h1_auto is False and vm.tj_auto is False
+    assert vm.validate() == []  # default permanece válido
+
+
 def test_auto_geometry_flags_persist_in_session():
     """Achado da revisão: h1_auto/tj_auto agora persistem na sessão (eram View-only)."""
     import json
 
     vm = _make_sim_vm()
-    assert vm.h1_auto is True and vm.tj_auto is True  # default
+    assert (
+        vm.h1_auto is False and vm.tj_auto is False
+    )  # default OFF (paridade produção, item 3)
     vm.h1_auto = False
     vm.tj_auto = False
     d = json.loads(json.dumps(vm.to_session_dict()))
