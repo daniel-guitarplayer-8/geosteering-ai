@@ -76,7 +76,7 @@ class ActivityBar(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any (
         btn.setEnabled(enabled)
         btn.setFixedSize(48, 44)
         font = btn.font()
-        font.setPointSize(15)
+        font.setPointSize(16)  # +1pt global (Turn 7); cabe na caixa fixa 48×44
         btn.setFont(font)
         btn.setCursor(QtGui.QCursor(Qt.CursorShape.PointingHandCursor))
         # ``clicked`` recomputa o índice ATUAL do botão (estável: sem remoção) →
