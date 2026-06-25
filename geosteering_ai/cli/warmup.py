@@ -44,23 +44,29 @@
 """Entry point standalone para warmup síncrono do cache JIT/LLVM (Sprint v2.32).
 
 Comando dedicado que aquece o cache de compilação Numba + LLVM Tier 2 e
-retorna ao shell. Existe um único subcomando (warmup padrão) com duas flags
-de modulação: ``--verbose`` (timing por fase) e ``--version`` (exibe versão).
+retorna ao shell. Flags: ``--verbose`` (timing por fase), ``--version`` (exibe
+versão) e o grupo JAX ``--jax``/``--jax-only``/``--jax-auto`` (op 4 — aquece a
+forma canônica do SM no cache XLA; default = só Numba). O banner reporta quais
+backends serão aquecidos (``numba=…, jax=…``).
 
 Exemplos de uso::
 
     $ geosteering-warmup
-    Warming up Geosteering AI v2.32...
+    Warming up Geosteering AI v2.XX (numba=True, jax=False)...
     OK (12.4s)
 
     $ geosteering-warmup --verbose
-    Warming up Geosteering AI v2.32...
+    Warming up Geosteering AI v2.XX (numba=True, jax=False)...
       [warmup] filter loaded (0.31s)
-      [warmup] JAX callback path warm (12.18s)
     OK (12.2s)
 
+    # GPU: cuda,cpu (cuda compute + cpu p/ o jax.pure_callback; só "cuda" quebra)
+    $ JAX_PLATFORMS=cuda,cpu geosteering-warmup --jax-auto
+    Warming up Geosteering AI v2.XX (numba=True, jax=True)...
+    OK (105.1s)
+
     $ geosteering-warmup --version
-    Geosteering AI Simulation Manager v2.32
+    Geosteering AI Simulation Manager v2.XX
 
     # Cenário CI: warmup isolado, depois benchmark com cache quente
     $ geosteering-warmup --verbose
@@ -115,6 +121,69 @@ if "NUMBA_CACHE_DIR" not in os.environ:
         pass
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Forma CANÔNICA do SM p/ o warmup JAX (NÃO é física — só governa shapes XLA)
+# ──────────────────────────────────────────────────────────────────────────────
+# Espelha a config do report do SM (20 kHz · dip 0° · TR 1 m · 600 posições · 20
+# camadas · werthmuller_201pt · complex128 · bucketed). n_models=64 casa o chunk
+# JAX-auto do `geosteering-cli` (dim líder do HLO vmapado) → o cache de disco aquecido
+# aqui é compartilhado com aquele caminho. NÃO cobre TODA forma do SM (geometrias
+# estocásticas/n_models distintos compilam na 1ª sim) — ver o caveat no --help e em
+# docs/reference/sm_jax_persistent_worker.md.
+_SM_CANON_N_POS: int = 600
+_SM_CANON_N_LAYERS: int = 20
+_SM_CANON_N_MODELS: int = 64
+_SM_CANON_DTYPE: str = "complex128"
+_SM_CANON_STRATEGY: str = "bucketed"
+_SM_CANON_FILTER: str = "werthmuller_201pt"
+_SM_CANON_DIPS: tuple[float, ...] = (0.0,)
+_SM_CANON_TRS: tuple[float, ...] = (1.0,)
+_SM_CANON_FREQS: tuple[float, ...] = (20000.0,)
+
+
+def _gpu_visible() -> bool:
+    """``True`` se o JAX enxerga uma GPU (gate do ``--jax-auto``).
+
+    Import LAZY de ``dispatch._jax_gpu_available`` — em ambiente sem o extra ``sim``
+    (jax ausente) o ``ImportError`` é tratado como "sem GPU" (no-op limpo no CI CPU).
+    """
+    try:
+        from geosteering_ai.simulation.dispatch import _jax_gpu_available
+
+        return bool(_jax_gpu_available())
+    except Exception:  # noqa: BLE001 — jax ausente / erro de init → trate como sem GPU
+        return False
+
+
+def _warmup_jax_canonical_sm(verbose: bool) -> dict:
+    """Aquece o caminho JAX bucketed na forma CANÔNICA do SM (popula o cache de disco).
+
+    Reusa :func:`geosteering_ai.simulation._jax.warmup.warmup_jax_simulator` (sem editar
+    o kernel). Aquece o que ``JAX_PLATFORMS`` resolver (``export JAX_PLATFORMS=cuda`` p/
+    a A6000; default ``cpu`` no CI/dev). Import LAZY (só após as env vars).
+
+    Args:
+        verbose: repassa o timing/diagnóstico do warmup.
+
+    Returns:
+        dict de diagnóstico de :func:`warmup_jax_simulator`.
+    """
+    from geosteering_ai.simulation._jax.warmup import warmup_jax_simulator
+
+    return warmup_jax_simulator(
+        n_layers=_SM_CANON_N_LAYERS,
+        n_positions=_SM_CANON_N_POS,
+        hankel_filter=_SM_CANON_FILTER,
+        complex_dtype=_SM_CANON_DTYPE,
+        dip_degs=_SM_CANON_DIPS,
+        tr_spacings_m=_SM_CANON_TRS,
+        freqs_hz=_SM_CANON_FREQS,
+        n_models=_SM_CANON_N_MODELS,
+        jax_strategy=_SM_CANON_STRATEGY,
+        verbose=verbose,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Constrói o parser argparse do entry point ``geosteering-warmup``.
 
@@ -160,6 +229,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--version",
         action="store_true",
         help="Exibe versão do Simulation Manager e sai",
+    )
+    # ── Warmup JAX (op 4) — aditivo; default = só Numba (comportamento legado) ──
+    # Mutuamente exclusivo. Aquece o que JAX_PLATFORMS resolver — para a GPU use
+    # `export JAX_PLATFORMS=cuda,cpu` (cuda p/ o compute + cpu p/ o jax.pure_callback
+    # do kernel; SÓ "cuda" QUEBRA o callback → "failed to find a local CPU device").
+    # Default cpu no CI/dev. O cache XLA aquecido é compartilhado com o SM (worker
+    # persistente) e o geosteering-cli. CAVEAT: warmup homogêneo prima 1 das K
+    # geometrias-template; geometrias estocásticas/n_models distintos do SM ainda
+    # compilam na 1ª sim.
+    jax_group = parser.add_mutually_exclusive_group()
+    jax_group.add_argument(
+        "--jax",
+        action="store_true",
+        help="Aquece TAMBÉM o JAX (forma canônica do SM), além do Numba.",
+    )
+    jax_group.add_argument(
+        "--jax-only",
+        action="store_true",
+        help="Aquece SÓ o JAX (pula o Numba).",
+    )
+    jax_group.add_argument(
+        "--jax-auto",
+        action="store_true",
+        help=(
+            "Aquece o JAX só se houver GPU JAX visível (no-op limpo no CI CPU). "
+            "Recomendado p/ CI. Para a GPU: export JAX_PLATFORMS=cuda,cpu (NÃO só 'cuda')."
+        ),
     )
     return parser
 
@@ -212,13 +308,36 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Geosteering AI Simulation Manager {SIMULATION_MANAGER_VERSION}")
         return 0
 
-    print(f"Warming up Geosteering AI {SIMULATION_MANAGER_VERSION}...")
+    # Seleção de backends a aquecer (op 4 — aditivo; default = só Numba, legado).
+    #   --jax-only  → só JAX (pula Numba)
+    #   --jax       → Numba + JAX
+    #   --jax-auto  → Numba + (JAX só se houver GPU JAX visível; no-op limpo no CI CPU)
+    do_numba = not args.jax_only
+    do_jax = args.jax or args.jax_only or (args.jax_auto and _gpu_visible())
+
+    print(
+        f"Warming up Geosteering AI {SIMULATION_MANAGER_VERSION} "
+        f"(numba={do_numba}, jax={do_jax})..."
+    )
     t0 = time.perf_counter()
 
     from geosteering_ai.cli._main import _warmup_numba_tier2_sync
 
     try:
-        _warmup_numba_tier2_sync(verbose=args.verbose)
+        if do_numba:
+            _warmup_numba_tier2_sync(verbose=args.verbose)
+        if do_jax:
+            info = _warmup_jax_canonical_sm(verbose=args.verbose)
+            if info.get("skipped"):
+                # JAX presente como flag mas ausente em runtime (HAS_JAX False) →
+                # observabilidade, não gating (mesmo contrato v2.44 do Numba).
+                logger.warning(
+                    "Warmup JAX pulado (%s) — instale jax e/ou use JAX_PLATFORMS=cuda.",
+                    info.get("reason"),
+                )
+        elif args.jax_auto:
+            # --jax-auto sem GPU visível: no-op explícito (recomendado p/ CI CPU).
+            print("JAX warmup pulado — sem GPU JAX visível (--jax-auto).")
     except (ModuleNotFoundError, ImportError) as e:
         # Sprint O4 (v2.44): backend ausente (jax/numba não instalados) NÃO é
         # falha de warmup — é ambiente sem os backends a aquecer. Warmup é
