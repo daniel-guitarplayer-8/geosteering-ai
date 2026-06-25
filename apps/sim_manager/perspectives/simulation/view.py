@@ -401,12 +401,12 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._geo_aniso.setChecked(vm.anisotropic)
         self._geo_lambda_min = QtWidgets.QDoubleSpinBox()
         self._geo_lambda_min.setRange(1.0, 5.0)
-        self._geo_lambda_min.setDecimals(3)
+        self._geo_lambda_min.setDecimals(4)  # 4 casas = paridade monólito (λ=√2→1.4142)
         self._geo_lambda_min.setSingleStep(0.05)  # passo do monólito
         self._geo_lambda_min.setValue(vm.lambda_min)
         self._geo_lambda_max = QtWidgets.QDoubleSpinBox()
         self._geo_lambda_max.setRange(1.0, 5.0)
-        self._geo_lambda_max.setDecimals(3)
+        self._geo_lambda_max.setDecimals(4)  # 4 casas = paridade monólito (λ=√2→1.4142)
         self._geo_lambda_max.setSingleStep(0.05)
         self._geo_lambda_max.setValue(vm.lambda_max)
         # n_layers (fixo OU range)
@@ -843,11 +843,13 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         if not name:
             self._status.setText("selecione um perfil canônico")
             return
-        self._vm.apply_canonical_profile(
-            str(name),
-            auto_tj=self._tj_auto.isChecked(),
-            auto_h1=self._h1_auto.isChecked(),
-        )
+        # Espelha o monólito (simulation_manager.py:2014-2015): aplicar um perfil
+        # FORÇA a auto-geometria ON (h1/tj derivados da Σesp), mesmo que os
+        # checkboxes estivessem desligados — que é o default de produção (item 3).
+        # _sync_inputs_from_vm (abaixo) re-marca os checkboxes a partir do VM.
+        self._vm.h1_auto = True
+        self._vm.tj_auto = True
+        self._vm.apply_canonical_profile(str(name), auto_tj=True, auto_h1=True)
         self._radio_manual.setChecked(True)  # apply_canonical já setou no VM
         self._sync_inputs_from_vm()  # reflete tj/h1 (auto-geo) + n_layers
         self._refresh_manual_info()  # Task 4: rótulo "N camadas" do perfil aplicado
