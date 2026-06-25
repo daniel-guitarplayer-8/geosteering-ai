@@ -226,8 +226,23 @@ class ResultsView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any �
         self._backend.setCurrentText(self._vm.plot_backend.value)
         self._backend.blockSignals(False)
         # paginação: por-modelo (curvas/perfis); o heatmap mostra TODOS de uma vez.
+        # Rótulo desambiguado (#5): mostra o INTERVALO de modelos + o TOTAL, não só o
+        # nº de páginas — "1/84" era lido como "84 modelos" (eram 84 PÁGINAS de 12).
         n_pages = self._vm.n_pages
-        self._page_lbl.setText(f"{self._vm.page + 1}/{n_pages}" if n_pages else "—")
+        total = self._vm.n_models
+        page_idxs = self._vm.page_models()
+        if not total:
+            self._page_lbl.setText("—")
+        elif is_heatmap:
+            # O heatmap mostra TODOS os modelos de uma vez (sem paginação).
+            self._page_lbl.setText(f"ensemble: {total} modelos")
+        elif n_pages and page_idxs:
+            self._page_lbl.setText(
+                f"pág {self._vm.page + 1}/{n_pages} · modelos "
+                f"{page_idxs[0] + 1}–{page_idxs[-1] + 1} de {total}"
+            )
+        else:
+            self._page_lbl.setText("—")
         self._prev.setEnabled(self._vm.page > 0 and not is_heatmap)
         self._next.setEnabled(self._vm.page < n_pages - 1 and not is_heatmap)
         # animation bar: varre os modelos (1 por frame); só faz sentido com ≥2 modelos
