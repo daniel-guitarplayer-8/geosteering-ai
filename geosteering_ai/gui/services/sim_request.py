@@ -591,11 +591,24 @@ def _run_simulation(
       └──────────────┴─────────────────────────────────────────────────────────┘
 
     Note:
-        A 1ª chamada dispara o JIT warmup do Numba (~1-30 s); as seguintes são
-        rápidas (cache ``.nbc``). DÍVIDA (Fatia 5): o Numba ``prange`` (parallel,
-        nogil) usa pool OMP próprio — rodar dentro de uma ``QThread`` funciona
-        (pools distintos), mas a arquitetura manda ``ProcessPoolExecutor`` para
-        CPU-bound em produção (isola o pool Numba, melhor p/ multi-sim concorrente).
+        Cold-start por backend (ambos pagam um custo de 1ª chamada, mas só o Numba
+        é pré-aquecido no SM/CI → o JAX "parece" mais lento na 1ª vez):
+          - **Numba**: a 1ª chamada dispara o JIT warmup (~1-30 s); as seguintes são
+            rápidas (cache ``.nbc``). O SM/CI pré-aquecem via ``geosteering-warmup``.
+          - **JAX GPU**: a 1ª execução de CADA geometria/tamanho COMPILA os kernels
+            XLA (dezenas de s por geometria distinta = por template K, cresce com o
+            tamanho do grupo; custo ÚNICO). As seguintes reusam o cache de disco
+            persistente (``~/.cache/geosteering/jax_compilation_cache``, ~30 s — mais
+            rápido que o Numba, p/ qualquer K). A chave do cache embute o batch-dim por
+            grupo, então mudar ``n_models``/``n_geometries`` (K) re-dispara 1 compilação.
+            Menos K ⇒ menos compilações ⇒ cold-start mais curto (medido no A6000, 1000
+            modelos/20 camadas/600 pos: K=1 ~108 s, K=4 ~173 s; warm ~29 s em ambos).
+            NÃO é regressão nem fallback p/ CPU — ver
+            ``docs/reports`` (investigação 2026-06-17).
+        DÍVIDA (Fatia 5): o Numba ``prange`` (parallel, nogil) usa pool OMP próprio —
+        rodar dentro de uma ``QThread`` funciona (pools distintos), mas a arquitetura
+        manda ``ProcessPoolExecutor`` para CPU-bound em produção (isola o pool Numba,
+        melhor p/ multi-sim concorrente).
     """
     # Threads do Numba (efeito REAL; resultados bit-idênticos) — antes do kernel.
     _apply_thread_count(request.threads_per_worker)

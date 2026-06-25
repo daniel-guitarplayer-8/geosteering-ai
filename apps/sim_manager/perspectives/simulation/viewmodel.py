@@ -62,6 +62,13 @@ _BACKENDS = ("numba", "jax", "auto")
 # jax/auto, per_model p/ numba. Whitelist p/ sanear o .session (espelha _BACKENDS).
 _GEOMETRY_DIVERSITY = ("auto", "templates", "per_model")
 
+# Teto de geometrias distintas (K) expostas na UI (spinbox 0..K_MAX; 0=auto). O
+# setter e o sanitizador de .session clampam a [1, _N_GEOMETRIES_MAX] p/ o VM NUNCA
+# divergir do spinbox (um .session de versão futura com K>teto exibiria o teto mas o
+# VM guardaria o original → desync). A View usa esta MESMA constante em setRange
+# (fonte única; não pode driftar). O dispatch ainda re-clampa a g//2 por grupo.
+_N_GEOMETRIES_MAX = 16
+
 # Filtros de Hankel (Fatia 6b) — nomes canônicos do catálogo
 # (simulation/filters/loader.py::_FILTER_CATALOG). Validados no VM (fail-fast) e
 # saneados no load de .session. test_sm_geology_advanced guarda que casam com
@@ -515,7 +522,12 @@ class SimulationViewModel(BaseViewModel):
 
     @n_geometries.setter
     def n_geometries(self, value: Optional[int]) -> None:
-        self._set("_n_geometries", None if value is None else max(1, int(value)))
+        # Clamp a [1, _N_GEOMETRIES_MAX]: o teto mantém o VM em sincronia com o spinbox
+        # (que satura no mesmo máximo); o piso 1 evita K=0 (0 vira None, não 0 modelos).
+        self._set(
+            "_n_geometries",
+            None if value is None else min(_N_GEOMETRIES_MAX, max(1, int(value))),
+        )
 
     # ── Fatia 6b — filtro de Hankel + geologia manual / perfis canônicos ─────
     @property
@@ -811,6 +823,21 @@ class SimulationViewModel(BaseViewModel):
             f"▶ Iniciando: {self._n_models} modelo(s) · backend={self._backend} · "
             f"geologia={self._geology_mode}"
         )
+        # Cold-start honesto (JAX GPU): a 1ª execução de cada geometria/tamanho COMPILA
+        # os kernels XLA (custo ÚNICO); as seguintes reusam o cache de disco e batem o
+        # Numba. Sem essa nota, o compile aparece como uma simulação "lenta"/regressão —
+        # ver memória jax-sm-cold-compile-not-regression. (Texto-only; zero física.)
+        # Só emite quando o JAX-grouped DE FATO roda (templates ativos): backend jax/auto
+        # E diversidade ≠ per_model. Com per_model+jax a geometria é não-agrupável → o
+        # dispatch cai p/ Numba (sem compile XLA) → a nota não se aplica (espelha
+        # _templates_active). "jax_gpu" não é ofertado pelo VM (_BACKENDS) → fora daqui.
+        if self._backend in ("jax", "auto") and self._geometry_diversity != "per_model":
+            self.log_entry.emit(
+                "ℹ JAX GPU: a 1ª execução de cada geometria/tamanho COMPILA os kernels "
+                "XLA (cold-start único, alguns min); execuções seguintes reusam o cache "
+                "de disco (~30 s, mais rápido que o Numba). Menos 'Geometrias (K)' ⇒ "
+                "menos compilações ⇒ cold-start mais curto."
+            )
         self._set("_status", "running")
         self._service.run(request)
 

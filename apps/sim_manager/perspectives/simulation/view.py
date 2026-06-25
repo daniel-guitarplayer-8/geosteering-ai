@@ -29,7 +29,10 @@ from __future__ import annotations
 
 from typing import Any, Tuple
 
-from apps.sim_manager.perspectives.simulation.viewmodel import SimulationViewModel
+from apps.sim_manager.perspectives.simulation.viewmodel import (
+    _N_GEOMETRIES_MAX,
+    SimulationViewModel,
+)
 from geosteering_ai.gui.persistence.session import SessionDocument
 from geosteering_ai.gui.qt_compat import Qt, QtWidgets
 from geosteering_ai.gui.services.sim_request import compute_n_pos
@@ -574,14 +577,38 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._geom_diversity.setToolTip(
             "Diversidade de geometria (espessuras) p/ o JAX GPU. No modo estocástico, "
             "espessuras únicas por modelo impedem o batch na GPU (cada modelo vira 1 "
-            "grupo → cai p/ Numba). 'templates' colapsa a K≈4 geometrias por nº de "
+            "grupo → cai p/ Numba). 'templates' colapsa a K geometrias por nº de "
             "camadas (round-robin) → o JAX-grouped satura a GPU; ρₕ/ρᵥ/λ continuam "
             "variando por modelo. 'auto' = templates p/ jax/auto, por-modelo p/ numba "
             "(Numba é indiferente). 'per_model' preserva a diversidade total (JAX lento).\n\n"
             "DICA de ocupação: a GPU bateleia por grupo de nº de camadas e exige ≥32 "
             "modelos/grupo. Para batelar TODO o ensemble: use N grande (ex.: 1000 "
             "modelos ⇒ ~125/grupo) OU marque 'n_layers fixo' (1 grupo único). Com poucos "
-            "modelos e faixa de camadas larga, grupos pequenos ainda rodam em Numba."
+            "modelos e faixa de camadas larga, grupos pequenos ainda rodam em Numba.\n\n"
+            "COLD-START (JAX GPU): a 1ª execução de cada geometria/tamanho COMPILA os "
+            "kernels XLA (dezenas de s por geometria distinta, custo ÚNICO); execuções "
+            "seguintes reusam o cache de disco (~30 s, mais rápido que o Numba). Use "
+            "'Geometrias (K)' p/ controlar o trade-off diversidade × cold-start."
+        )
+        # ── Geometrias distintas (K) — trade-off diversidade × cold-start XLA ─────
+        # Expõe SimRequest.n_geometries (já existia no VM, faltava na UI): cada K vira
+        # 1 programa XLA compilado na 1ª execução JAX. K=1 ⇒ 1 compilação ⇒ cold-start
+        # ≈ Numba (todas as geometrias iguais; ρₕ/ρᵥ/λ ainda variam por modelo). 0=auto
+        # (teto ≤4 por nº de camadas). Não afeta o Numba nem execuções já em cache.
+        self._geom_k = QtWidgets.QSpinBox()
+        self._geom_k.setRange(0, _N_GEOMETRIES_MAX)  # 0=auto; teto == clamp do VM
+        self._geom_k.setValue(vm.n_geometries or 0)
+        self._geom_k.setSpecialValueText("auto")  # 0 → "auto" (teto ≤4)
+        self._geom_k.setToolTip(
+            "Nº de geometrias distintas (K) nos modos 'templates'/'auto'. 'auto' (0) usa "
+            "o teto (≤4) por nº de camadas. K controla o trade-off DIVERSIDADE × "
+            "COLD-START do JAX GPU: cada K vira 1 programa XLA compilado na 1ª execução "
+            "(dezenas de s/compilação, cresce com o tamanho do grupo). K menor ⇒ menos "
+            "compilações ⇒ cold-start mais curto (medido: K=1 ~108 s vs K=4 ~173 s p/ "
+            "1000 modelos), mas todos os modelos compartilham a MESMA geometria (ρₕ/ρᵥ/λ "
+            "ainda variam). K maior ⇒ mais diversidade geológica, cold-start mais longo. "
+            "Sem efeito no Numba; execuções já em cache rodam ~30 s (batem o Numba) p/ "
+            "qualquer K."
         )
         # ── Workers + threads (par ÚNICO) ────────────────────────────────────
         # Os únicos simuladores do SM MVVM são Numba JIT e JAX GPU (sem Fortran).
@@ -622,6 +649,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         pform = QtWidgets.QFormLayout()
         pform.addRow("Backend:", self._sim_backend)
         pform.addRow("Diversidade de geometria (JAX):", self._geom_diversity)
+        pform.addRow("Geometrias (K):", self._geom_k)
         pform.addRow("Nº de workers:", self._n_workers)
         pform.addRow("Nº de threads:", self._threads)
         pform.addRow(self._cpu_info)
@@ -725,6 +753,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.n_models = self._n_models.value()
         self._vm.backend = self._sim_backend.currentText()
         self._vm.geometry_diversity = self._geom_diversity.currentText()  # PR-1 (#4)
+        self._vm.n_geometries = self._geom_k.value() or None  # 0 → auto (teto ≤4)
         self._vm.hankel_filter = self._hankel_combo.currentText()  # Fatia 6b
         # ── Geologia estocástica (Fatia 3) ───────────────────────────────────
         self._vm.geology_mode = (
@@ -939,6 +968,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.n_models = self._n_models.value()
         self._vm.backend = self._sim_backend.currentText()
         self._vm.geometry_diversity = self._geom_diversity.currentText()  # PR-1 (#4)
+        self._vm.n_geometries = self._geom_k.value() or None  # 0 → auto (teto ≤4)
         self._vm.hankel_filter = self._hankel_combo.currentText()  # Fatia 6b
         self._vm.geology_mode = (
             "manual" if self._radio_manual.isChecked() else "stochastic"
@@ -978,6 +1008,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._n_models.setValue(self._vm.n_models)
         self._sim_backend.setCurrentText(self._vm.backend)
         self._geom_diversity.setCurrentText(self._vm.geometry_diversity)  # PR-1 (#4)
+        self._geom_k.setValue(self._vm.n_geometries or 0)  # None → auto (0)
         self._hankel_combo.setCurrentText(self._vm.hankel_filter)  # Fatia 6b
         # Radio (Lote 2): manual ⟺ "manual"; senão Aleatória (inclui "fixed" legado).
         if self._vm.geology_mode == "manual":
