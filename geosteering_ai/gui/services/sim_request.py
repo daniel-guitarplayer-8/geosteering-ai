@@ -130,14 +130,39 @@ def _jax_pool_initializer() -> None:
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 
-# Chunk FIXO do eixo de modelos no path JAX do SM (Turn 7, op d). 64 casa o
-# ``_SM_CANON_N_MODELS`` do ``cli/warmup.py`` (dim líder do HLO vmapado) → a forma
-# de 64 do warmup bate a maioria das fatias do runtime (uma fatia-cauda < 64, ou um
-# n_models forçado ≠ 64, paga 1 compile XLA único e não-aquecido — só cold-start). Limita
-# a VRAM de pico fatiando ``n_models`` (ex.: 2000) e concatenando em CPU. Paridade vs
-# chunk=None: <1e-13 (bit-exato em GPU; ~1e-14 ULP em CPU por reordenação de reduções do
-# XLA conforme o tamanho do batch — fisicamente idêntico, MUITO abaixo do 1e-12 Fortran).
-_SM_JAX_CHUNK_SIZE_MODELS = 64
+# Cap VRAM do eixo de modelos no path JAX do SM (Turn 8 — fix da regressão JAX-lento).
+# É o MÁXIMO de modelos por dispatch, decidido POR GRUPO de n_layers via
+# :func:`_resolve_group_chunk`: grupos ≤ cap rodam INTEIROS (``chunk=None`` → 1 forma XLA
+# de dim-líder, SEM fatia-cauda); grupos > cap são fatiados a ``cap`` (limita a VRAM de pico).
+#
+# Por quê 256 (e não 64): no default ragged (2000 modelos / 29 valores de n_layers) cada
+# grupo tem ~53-85 modelos. Um chunk FIXO de 64 fatiava cada grupo em ``[64, resto]`` →
+# DUAS dims-líder de vmap = DUAS compilações XLA por bucket (~950 → ~1900 programas a frio).
+# Com cap=256, grupos ragged (≤256) rodam inteiros → 1 dim-líder por grupo → ~metade das
+# compilações. 256 × 600 pos × c128 ≈ 14 GB < 36 GB (MEM_FRACTION 0.75 da A6000) → sem OOM;
+# o grupo FIXO grande (ex.: n_layers fixo, 2000 modelos) ainda é fatiado a 256 (VRAM segura).
+# Paridade vs chunk=None: <1e-13 (GPU bit-exato; CPU ~1e-14 ULP) — test_o4_chunk_size_models_invariante.
+_SM_JAX_CHUNK_CAP = 256
+
+
+def _resolve_group_chunk(group_size: int, cap: Optional[int]) -> Optional[int]:
+    """Chunk efetivo p/ UM grupo (n_layers) no path JAX (VRAM × nº de compilações).
+
+    ``None`` se o grupo cabe (``group_size ≤ cap``) → roda inteiro (1 forma XLA, sem
+    fatia-cauda); senão ``cap`` → fatia p/ limitar a VRAM. ``cap=None`` ⇒ nunca fatia.
+    Evita o over-slicing de grupos ragged pequenos (a causa-raiz do JAX-lento). Só afeta
+    o backend JAX (numba ignora ``jax_chunk_size_models``).
+
+    Args:
+        group_size: nº de modelos no grupo (mesmo n_layers).
+        cap: teto de modelos por dispatch (``SimRequest.jax_chunk_size_models``).
+
+    Returns:
+        ``None`` (dispatch único) ou ``cap`` (fatiado).
+    """
+    if cap is None or group_size <= cap:
+        return None
+    return cap
 
 
 @dataclass(frozen=True)
@@ -241,12 +266,12 @@ class SimRequest:
     n_geometries: Optional[int] = (
         None  # K templates (só templates); None = auto (cap 4)
     )
-    # ── Turn 7 (op d) — chunk FIXO do eixo de modelos no path JAX (VRAM) ──────
-    # Limita a VRAM de pico fatiando n_models em pedaços de K p/ o vmap do XLA
-    # (mesma compilação por fatia, concatena em CPU — multi_forward.py:1094-1139);
-    # paridade <1e-13 vs chunk=None (GPU bit-exato; CPU ~1e-14 ULP). Só afeta o backend
-    # JAX (numba ignora). None = vmap monolítico. Ver _SM_JAX_CHUNK_SIZE_MODELS.
-    jax_chunk_size_models: Optional[int] = _SM_JAX_CHUNK_SIZE_MODELS
+    # ── Turn 8 — CAP VRAM do eixo de modelos no path JAX (era chunk fixo 64) ──
+    # MÁX. de modelos por dispatch, aplicado POR GRUPO de n_layers via
+    # _resolve_group_chunk: grupos ≤ cap rodam INTEIROS (1 forma XLA, sem fatia-cauda);
+    # > cap são fatiados (limita a VRAM). None = nunca fatia. Só afeta o backend JAX
+    # (numba ignora). Paridade <1e-13 vs chunk=None. Ver _SM_JAX_CHUNK_CAP.
+    jax_chunk_size_models: Optional[int] = _SM_JAX_CHUNK_CAP
 
 
 # Modelo TIV de referência (3 camadas): ρₕ por camada + λ²=2 (anisotropia branda,
@@ -531,7 +556,11 @@ def _simulate_grouped(
             dip_degs=dips,
             backend=request.backend,
             hankel_filter=request.hankel_filter,
-            jax_chunk_size_models=request.jax_chunk_size_models,  # VRAM (op d); no-op p/ numba
+            # Chunk POR GRUPO: grupo ragged pequeno (≤cap) roda inteiro (1 forma XLA);
+            # grupo grande é fatiado (VRAM). Corta o over-slicing — só JAX (numba ignora).
+            jax_chunk_size_models=_resolve_group_chunk(
+                len(idxs), request.jax_chunk_size_models
+            ),
         )
         if h6_out is None:
             # 1º grupo define o shape downstream (nTR, nAng, n_pos, nf, 9).
@@ -715,7 +744,10 @@ def _run_simulation(
             dip_degs=list(request.dip_degs),
             backend=request.backend,
             hankel_filter=request.hankel_filter,
-            jax_chunk_size_models=request.jax_chunk_size_models,  # VRAM (op d); no-op p/ numba
+            # 1 grupo (geologia fixa/manual): cap por nº de modelos do batch (VRAM).
+            jax_chunk_size_models=_resolve_group_chunk(
+                int(rho_h.shape[0]), request.jax_chunk_size_models
+            ),
         )
         if progress_callback is not None:
             progress_callback(request.n_models, request.n_models)  # 100%

@@ -136,21 +136,30 @@ def test_no_toplevel_jax_import_outside_jax_pkg():
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# (d) — jax_chunk_size_models FIXO no SimRequest + cabeado nos 2 call-sites
+# (d) — chunk ADAPTATIVO por grupo (Turn 8): cap VRAM; grupo pequeno → None (sem fatia)
 # ════════════════════════════════════════════════════════════════════════════
-def test_simrequest_jax_chunk_default_is_fixed_64():
-    """SimRequest carrega o chunk FIXO (64), alinhado ao _SM_CANON_N_MODELS do warmup."""
-    from geosteering_ai.gui.services.sim_request import (
-        _SM_JAX_CHUNK_SIZE_MODELS,
-        SimRequest,
-    )
+def test_simrequest_jax_chunk_cap_default_256():
+    """O cap default é 256 (VRAM-safe; acima do tamanho típico de grupo ragged)."""
+    from geosteering_ai.gui.services.sim_request import _SM_JAX_CHUNK_CAP, SimRequest
 
-    assert _SM_JAX_CHUNK_SIZE_MODELS == 64
-    assert SimRequest().jax_chunk_size_models == 64
+    assert _SM_JAX_CHUNK_CAP == 256
+    assert SimRequest().jax_chunk_size_models == 256
+
+
+def test_resolve_group_chunk_adaptive():
+    """grupo ≤ cap → None (roda inteiro, 1 forma XLA); > cap → cap; cap=None → None."""
+    from geosteering_ai.gui.services.sim_request import _resolve_group_chunk
+
+    assert _resolve_group_chunk(70, 256) is None  # ragged típico → sem fatia
+    assert _resolve_group_chunk(256, 256) is None  # fronteira == cap → inteiro
+    assert _resolve_group_chunk(2000, 256) == 256  # grupo fixo grande → fatiado
+    assert _resolve_group_chunk(2000, None) is None  # cap None → nunca fatia
+    assert _resolve_group_chunk(1, 256) is None
 
 
 def _fake_simulate_batch(captured: dict):
     def _fn(rho_h, rho_v, esp, positions_z, **kw):  # noqa: ANN001
+        captured.setdefault("chunks", []).append(kw.get("jax_chunk_size_models"))
         captured.update(kw)
         n_models = int(np.asarray(rho_h).shape[0])
         n_pos = int(np.asarray(positions_z).shape[0])
@@ -163,8 +172,8 @@ def _fake_simulate_batch(captured: dict):
     return _fn
 
 
-def test_sm_fixed_path_passes_jax_chunk(monkeypatch):
-    """Ramo geologia FIXA: _run_simulation passa jax_chunk_size_models=64 a simulate_batch."""
+def test_sm_small_group_passes_none(monkeypatch):
+    """Grupo pequeno (≤ cap): _run_simulation passa chunk=None (roda inteiro, sem fatia-cauda)."""
     import geosteering_ai.simulation as sim
     from geosteering_ai.gui.services.sim_request import SimRequest, _run_simulation
 
@@ -175,11 +184,29 @@ def test_sm_fixed_path_passes_jax_chunk(monkeypatch):
             geology_mode="fixed", n_models=2, backend="numba", frequencies_hz=(20000.0,)
         )
     )
-    assert captured.get("jax_chunk_size_models") == 64
+    assert captured.get("jax_chunk_size_models") is None  # 2 ≤ 256 → None
 
 
-def test_sm_grouped_path_passes_jax_chunk(monkeypatch):
-    """Ramo ESTOCÁSTICO (agrupado): cada simulate_batch por grupo recebe o chunk=64."""
+def test_sm_large_group_passes_cap(monkeypatch):
+    """Grupo grande (> cap): passa o cap (256) p/ limitar a VRAM."""
+    import geosteering_ai.simulation as sim
+    from geosteering_ai.gui.services.sim_request import SimRequest, _run_simulation
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(sim, "simulate_batch", _fake_simulate_batch(captured))
+    _run_simulation(
+        SimRequest(
+            geology_mode="fixed",
+            n_models=600,
+            backend="numba",
+            frequencies_hz=(20000.0,),
+        )
+    )
+    assert captured.get("jax_chunk_size_models") == 256  # 600 > 256 → cap
+
+
+def test_sm_grouped_path_chunk_per_group(monkeypatch):
+    """Ramo ESTOCÁSTICO: cada grupo (n_layers) recebe o chunk resolvido p/ o SEU tamanho."""
     import geosteering_ai.simulation as sim
     from geosteering_ai.gui.services.sim_request import SimRequest, _run_simulation
 
@@ -195,4 +222,5 @@ def test_sm_grouped_path_passes_jax_chunk(monkeypatch):
             frequencies_hz=(20000.0,),
         )
     )
-    assert captured.get("jax_chunk_size_models") == 64
+    # 1 grupo de 4 modelos ≤ 256 → None (sem fatia-cauda)
+    assert captured.get("chunks") == [None]
