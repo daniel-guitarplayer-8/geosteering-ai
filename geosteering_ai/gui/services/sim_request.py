@@ -79,6 +79,16 @@ def compute_n_pos(tj: float, p_med: float, dip0_deg: float) -> int:
     passo no eixo vertical (guard ``1e-6`` evita ÷0 em 90°). Usado por
     :func:`_compute_positions_z` e pela property ``n_pos`` do ViewModel.
 
+    Note:
+        ``n_pos`` deriva SÓ do ``dip0`` (1º ângulo). Num run multi-dip a grade TVD
+        (``positions_z``) é ÚNICA e COMPARTILHADA por todos os ângulos — o dip é
+        parâmetro da resposta EM, não da amostragem. Consequência: a ORDEM dos dips
+        muda ``n_pos`` (``[0,15]`` usa a grade do 0°; ``[15,0]`` a do 15°). NÃO há
+        perda de precisão (cada ponto é um forward solve exato) — só a densidade de
+        amostragem dos ângulos secundários difere da "nativa" deles (sub-cm,
+        inofensivo: a resposta difusiva está super-amostrada). Convenção Fortran
+        (espelha o monólito); o CLI passa ``n_pos`` direto.
+
     Args:
         tj: janela de investigação (m).
         p_med: passo entre medidas (m) — DEVE ser > 0 (é o denominador).

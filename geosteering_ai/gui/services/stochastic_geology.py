@@ -417,11 +417,48 @@ def _generate_one_model(
     }
 
 
+def _warn_if_geometrically_infeasible(cfg: GenConfig, choices: np.ndarray) -> None:
+    """Avisa (NÃO-levantante) se a janela não comporta as camadas no piso (Q3).
+
+    Se ``total_depth ≤ n_internas·min_thickness`` (pior caso = máx. de camadas
+    amostrável), :func:`_generate_thicknesses` degenera p/ a partição igual
+    (espessuras < ``min_thickness``, IDÊNTICAS entre modelos → diversidade geométrica
+    nula). Os modelos seguem FÍSICOS/válidos (positivos, soma = total_depth) — por isso
+    é só um warning (não levanta; NÃO muda nada gerado). Fica AQUI (não em
+    :func:`generate_models`) porque é o ponto comum a TODOS os caminhos de geração: o
+    app MVVM (``generate_models``) E o monólito (``ModelGenerationThread`` chama
+    ``_build_n_layer_choices`` + ``_generate_one_model`` direto). Uma vez por run.
+    """
+    max_ncam = int(choices.max()) if choices.size else 0
+    internal = max(0, max_ncam - 2)
+    if internal > 0 and cfg.total_depth <= internal * cfg.min_thickness:
+        logger.warning(
+            "Geração estocástica: total_depth=%.4g m insuficiente para %d camadas "
+            "internas com min_thickness=%.4g m (exige > %.4g m). As espessuras "
+            "degeneram p/ a partição igual (~%.4g m, abaixo do piso) e ficam IDÊNTICAS "
+            "entre modelos (diversidade geométrica nula). Aumente total_depth, reduza "
+            "min_thickness ou n_layers.",
+            cfg.total_depth,
+            internal,
+            cfg.min_thickness,
+            internal * cfg.min_thickness,
+            cfg.total_depth / internal,
+        )
+
+
 def _build_n_layer_choices(cfg: GenConfig) -> np.ndarray:
-    """Pré-computa o array de opções de ``n_layers`` (uniforme entre min e max)."""
+    """Pré-computa o array de opções de ``n_layers`` (uniforme entre min e max).
+
+    Chokepoint comum a TODOS os caminhos de geração (``generate_models`` do app MVVM e
+    ``ModelGenerationThread`` do monólito) → também emite o aviso de inviabilidade
+    geométrica (Q3) aqui, 1× por run.
+    """
     if cfg.n_layers_fixed is None:
-        return np.arange(cfg.n_layers_min, cfg.n_layers_max)
-    return np.array([cfg.n_layers_fixed], dtype=np.int64)
+        choices = np.arange(cfg.n_layers_min, cfg.n_layers_max)
+    else:
+        choices = np.array([cfg.n_layers_fixed], dtype=np.int64)
+    _warn_if_geometrically_infeasible(cfg, choices)
+    return choices
 
 
 def generate_models(
@@ -462,6 +499,8 @@ def generate_models(
     cfg.validate()
     actual_seed = _resolve_rng_seed(rng_seed)
     rng = np.random.default_rng(actual_seed)
+    # _build_n_layer_choices também emite o aviso de inviabilidade geométrica (Q3) —
+    # é o chokepoint comum a este caminho E ao monólito (ModelGenerationThread).
     n_layer_choices = _build_n_layer_choices(cfg)
     models = [
         _generate_one_model(cfg, rng, n_layer_choices, i, actual_seed)

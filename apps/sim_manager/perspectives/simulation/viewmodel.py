@@ -753,6 +753,29 @@ class SimulationViewModel(BaseViewModel):
                     f"n_layers máximo ({self._n_layers_max}) deve ser > mínimo "
                     f"({self._n_layers_min})."
                 )
+        # ── Viabilidade geométrica (Q3): a janela tj precisa COMPORTAR as camadas
+        #    internas no piso min_thickness. Se tj ≤ n_internas·min_thickness, o
+        #    gerador degenera p/ a partição igual (espessuras < min_thickness,
+        #    IDÊNTICAS entre modelos → diversidade geométrica nula) — fail-fast aqui
+        #    em vez de gerar um ensemble silenciosamente degenerado. Usa o PIOR caso
+        #    (mais camadas): fixo → n_fixed; variável → o máx. amostrável
+        #    (n_layers_max−1, pois max é EXCLUSIVO). Só roda com tj/min_thickness já
+        #    individualmente válidos (evita erro duplicado).
+        if self._tj > 0.0 and self._min_thickness > 0.0:
+            worst_ncam = (
+                self._n_layers_fixed
+                if self._n_layers_fixed is not None
+                else self._n_layers_max - 1
+            )
+            internal = worst_ncam - 2
+            if internal > 0 and self._tj <= internal * self._min_thickness:
+                errors.append(
+                    f"Janela tj ({self._tj:g} m) insuficiente para {worst_ncam} camadas "
+                    f"({internal} internas) com min_thickness ({self._min_thickness:g} m): "
+                    f"exige tj > {internal * self._min_thickness:g} m. Aumente tj, reduza "
+                    f"min_thickness ou n_layers (senão as espessuras degeneram, idênticas "
+                    f"entre modelos)."
+                )
         return errors
 
     def run(self) -> None:
