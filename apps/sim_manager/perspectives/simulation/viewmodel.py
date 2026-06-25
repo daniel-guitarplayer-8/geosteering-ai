@@ -174,24 +174,32 @@ class SimulationViewModel(BaseViewModel):
         self._dips: Tuple[float, ...] = (0.0,)
         self._tr_spacings: Tuple[float, ...] = (1.0,)
         # Geometria Fortran (positions_z = linspace(-h1, tj-h1, n_pos)).
-        self._h1: float = 1.0
-        self._tj: float = 10.0
-        self._p_med: float = 1.0
-        self._n_models: int = 2
+        # Defaults da PÁGINA DE PRODUÇÃO do SM monólito (paridade — Turn 7 item 3):
+        # h1=10, tj=120, p_med=0.2 ⇒ n_pos=600 (= SEQUENCE_LENGTH da errata);
+        # n_models=2000 (ensemble de produção) ⇒ a 1ª execução é PESADA por design
+        # (paridade c/ o monólito, que também roda 2000 por default e não confirma).
+        # O backend default "numba" roda IN-THREAD/serial; só com backend "jax" o eixo
+        # de modelos é chunkado (jax_chunk_size_models) p/ caber na VRAM da GPU.
+        self._h1: float = 10.0
+        self._tj: float = 120.0
+        self._p_med: float = 0.2
+        self._n_models: int = 2000
         # ── Fatia 3 — geologia estocástica (defaults p/ um ensemble TIV brando) ──
         # Default "stochastic": é o propósito do app (modelos diversos). O modo
         # "fixed" (geologia determinística da Fatia 2) fica disponível p/ smoke.
         self._geology_mode: str = "stochastic"
-        self._n_layers_fixed: Optional[int] = 5  # None ⇒ amostra [min, max)
+        # Paridade c/ a página de produção do monólito (item 3): "n camadas fixo"
+        # OFF (None ⇒ amostra ragged [min, max)); range [3, 32) (monólito: spin 31 +1).
+        self._n_layers_fixed: Optional[int] = None  # None ⇒ amostra [min, max)
         self._n_layers_min: int = 3
-        self._n_layers_max: int = 11
+        self._n_layers_max: int = 32  # EXCLUSIVO (monólito: spinbox 31 +1)
         self._rho_h_min: float = 1.0
-        self._rho_h_max: float = 1000.0
+        self._rho_h_max: float = 1800.0
         self._rho_h_distribution: str = "loguni"
         self._anisotropic: bool = True
         self._lambda_min: float = 1.0
         self._lambda_max: float = 2.0**0.5  # √2 — anisotropia TIV branda
-        self._min_thickness: float = 1.0
+        self._min_thickness: float = 0.5  # monólito spin_min_thick=0.5 (item 3)
         self._generator: str = "sobol"
         # ALEATÓRIO por default (None): paridade com o monólito (v2.19) e KB-018
         # — cada execução gera um ensemble TIV distinto. Reprodutibilidade é
@@ -223,12 +231,16 @@ class SimulationViewModel(BaseViewModel):
         self._threads_per_worker: int = int(_def_t)
         # ── Saída — diretório + artefatos .dat/.out 22-col (formato tatu.x) ──
         self._output_dir: str = ""
-        self._save_fortran_artifacts: bool = False
+        self._save_fortran_artifacts: bool = (
+            True  # monólito check_save_artifacts=True (item 3)
+        )
         # ── Auto-geometria canônica (Lote 2) — derivar tj/h1 ao aplicar perfil ──
         # Preferência persistida (espelha os checkboxes h1/tj-auto da View). Default
-        # True (auto-geometria ligada, como o monólito).
-        self._h1_auto: bool = True
-        self._tj_auto: bool = True
+        # False (paridade c/ a PÁGINA DE PRODUÇÃO do monólito: check_auto_h1/tj OFF,
+        # item 3). São FORÇADOS ON ao aplicar um perfil canônico (View._on_apply_canonical,
+        # espelhando simulation_manager.py:2014-2015) — só então tj/h1 são derivados.
+        self._h1_auto: bool = False
+        self._tj_auto: bool = False
         # ── Fatia 6b — filtro de Hankel + geologia manual ───────────────────
         self._hankel_filter: str = "werthmuller_201pt"
         # Geologia manual (editor de camadas / perfil canônico). None ⇒ não-manual.
@@ -599,6 +611,47 @@ class SimulationViewModel(BaseViewModel):
                 self.tj = compute_canonical_reference_tj(current_esp_sum=sum_esp)
             if auto_h1:
                 self.h1 = compute_canonical_h1(self._tj, sum_esp)
+
+        # ── Espelha os campos derivados do estocástico que o MONÓLITO grava ao
+        #    aplicar um perfil (simulation_manager.py:1974-2057) — fecha a lacuna
+        #    "só Oklahoma 3 importa as configurações" (Turn 7 item 1). ρₕ/λ/
+        #    min_thickness/anisotropia derivam da geologia do perfil; n_models=1
+        #    (perfil determinístico); o range estocástico de camadas colapsa em
+        #    torno de n_layers. NÃO importa freq/TR/dip (parâmetros de ferramenta —
+        #    preservados, idêntico ao monólito). A View re-sincroniza tudo em
+        #    _sync_inputs_from_vm. Física do kernel (simulate_batch) intocada.
+        rho_h = [float(x) for x in model.rho_h]
+        rho_v = [float(x) for x in model.rho_v]
+        esp = [float(x) for x in model.esp]
+        n = int(model.n_layers)
+
+        self.rho_h_min = min(rho_h) if rho_h else 1.0
+        self.rho_h_max = max(rho_h) if rho_h else 1000.0
+        # Menor espessura interna do perfil (evita zero/negativo) — espelha o monólito.
+        self.min_thickness = max(1e-3, min(esp)) if esp else 0.5
+
+        # Anisotropia: ativa se algum ρᵥ difere de ρₕ (tol 1e-9 em razão);
+        # λ = √(max(ρᵥ/ρₕ, 1)) por camada (clamp TIV ρᵥ≥ρₕ).
+        aniso_active = False
+        lambdas: List[float] = []
+        for rh, rv in zip(rho_h, rho_v):
+            if rh > 0.0:
+                lambdas.append(float(max(rv / rh, 1.0)) ** 0.5)
+                if abs(rv - rh) > 1e-9 * max(rh, 1.0):
+                    aniso_active = True
+        if lambdas:
+            self.lambda_min = max(1.0, min(lambdas))
+            self.lambda_max = max(self._lambda_min, max(lambdas))
+        else:
+            self.lambda_min, self.lambda_max = 1.0, 1.0
+        self.anisotropic = bool(aniso_active)
+
+        # Colapsa o range estocástico de camadas em torno do perfil (monólito:
+        # nlayers_min=n, nlayers_max=n). n_layers_max é EXCLUSIVO no VM → n+1.
+        self.n_layers_min = n
+        self.n_layers_max = n + 1
+        # Perfil determinístico ⇒ 1 modelo (monólito spin_nmodels=1).
+        self.n_models = 1
 
     @property
     def status(self) -> str:
