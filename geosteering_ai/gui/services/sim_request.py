@@ -445,22 +445,106 @@ def _templates_active(request: SimRequest) -> bool:
     return request.backend in ("jax", "jax_gpu", "auto")  # "auto"
 
 
+def _stable_geometry_seed(gen_cfg: Any) -> int:
+    """Semente ESTÁVEL-entre-processos derivada dos campos de geometria da config.
+
+    O cache XLA de disco só acerta entre runs se a GEOMETRIA (esp) for idêntica — e
+    esp só depende dos campos abaixo (``total_depth``/``min_thickness``/faixa de
+    ``n_layers``), NÃO de ρ/λ. Usa :func:`zlib.crc32` (determinístico entre processos)
+    e NUNCA :func:`hash` (salgado por ``PYTHONHASHSEED`` → mudaria a cada processo →
+    cache erraria). Configs distintas → sementes distintas; mesma config → mesma
+    semente → mesmos K templates → buckets idênticos → recompilação zero no 2º run.
+
+    Args:
+        gen_cfg: ``GenConfig`` (de :mod:`gui.services.stochastic_geology`).
+
+    Returns:
+        int: semente ≥ 0 estável para a config corrente.
+    """
+    import zlib
+
+    key = (
+        f"{float(gen_cfg.total_depth):.10g}|{float(gen_cfg.min_thickness):.10g}|"
+        f"{gen_cfg.n_layers_fixed}|{int(gen_cfg.n_layers_min)}|{int(gen_cfg.n_layers_max)}"
+    ).encode("utf-8")
+    return int(zlib.crc32(key))
+
+
+def _deterministic_templates(
+    gen_cfg: Any, n_layers: int, k: int, stable_seed: int
+) -> List[List[float]]:
+    """Gera ``k`` templates de espessura DETERMINÍSTICOS p/ um grupo de ``n_layers``.
+
+    Reusa :func:`stochastic_geology._generate_thicknesses` (mesma distribuição
+    stick-breaking do gerador) com porções amostradas de um RNG semeado por
+    ``(stable_seed, n_layers)`` — idênticas entre runs (cache XLA acerta), porém
+    estatisticamente equivalentes às da população (amostras VÁLIDAS, soma = total_depth,
+    piso ``min_thickness``). NÃO toca ρ/λ (continuam sorteados por-modelo). NÃO toca a
+    física — só fixa a SEQUÊNCIA de geometria que o colapso usa como template.
+
+    Args:
+        gen_cfg: ``GenConfig`` (campos ``total_depth``/``min_thickness``).
+        n_layers: nº de camadas do grupo (``ncamint = n_layers - 2`` espessuras).
+        k: nº de templates distintos a gerar (``≤ g//2``).
+        stable_seed: semente-base estável da config (:func:`_stable_geometry_seed`).
+
+    Returns:
+        Lista de ``k`` listas de ``ncamint`` floats (espessuras). Para ``n_layers ≤ 2``
+        (sem camadas internas) cada template é vazio — consistente com a população.
+    """
+    from geosteering_ai.gui.services.stochastic_geology import _generate_thicknesses
+
+    ncamint = int(n_layers) - 2  # camadas internas (finitas)
+    n_thick_dims = max(0, ncamint - 1)  # pontos de corte do stick-breaking
+    # Mistura n_layers na semente (mesma config, n_layers distintos → templates
+    # distintos). Máscara p/ 63 bits (default_rng aceita ≥ 0).
+    seed = (int(stable_seed) ^ (int(n_layers) * 0x9E3779B1)) & 0x7FFFFFFFFFFFFFFF
+    rng = np.random.default_rng(seed)
+    templates: List[List[float]] = []
+    for _ in range(int(k)):
+        portion = (
+            rng.random(n_thick_dims)
+            if n_thick_dims > 0
+            else np.empty(0, dtype=np.float64)
+        )
+        th = _generate_thicknesses(
+            ncamint, portion, gen_cfg.total_depth, gen_cfg.min_thickness
+        )
+        templates.append([float(v) for v in th])
+    return templates
+
+
 def _collapse_geometry_to_templates(
-    models: List[Dict[str, Any]], n_geometries: Optional[int]
+    models: List[Dict[str, Any]],
+    n_geometries: Optional[int],
+    *,
+    gen_cfg: Any = None,
+    stable_seed: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Colapsa as espessuras a K templates POR n_layers (round-robin) — batchável.
 
-    Mantém as espessuras REAIS geradas (um subconjunto vira template) — NÃO inventa
-    geometria uniforme, preservando a riqueza do gerador estocástico. Dentro de cada
-    grupo de ``n_layers`` (``g`` modelos), escolhe ``K = min(K_req, g//2)`` templates
-    (garante a agrupabilidade do dispatcher: ``n_grupos ≤ 0.5·g``, ``dispatch.py:127``)
-    e reatribui ``thicknesses`` round-robin. ``rho_h``/``rho_v``/``lambda`` ficam
-    INTOCADOS (diversidade petrofísica por-modelo). NÃO toca a física — só prepara o
-    batch para o JAX-grouped saturar a GPU (cada modelo é computado com seu esp/ρ/λ).
+    Dentro de cada grupo de ``n_layers`` (``g`` modelos), escolhe ``K = min(K_req,
+    g//2)`` templates (garante a agrupabilidade do dispatcher: ``n_grupos ≤ 0.5·g``,
+    ``dispatch.py:127``) e reatribui ``thicknesses`` round-robin.
+    ``rho_h``/``rho_v``/``lambda`` ficam INTOCADOS (diversidade petrofísica por-modelo).
+    NÃO toca a física — só prepara o batch para o JAX-grouped saturar a GPU (cada modelo
+    é computado com seu esp/ρ/λ).
+
+    Origem dos K templates:
+      ┌────────────────────────────────┬──────────────────────────────────────────┐
+      │ ``gen_cfg``+``stable_seed`` set │ DETERMINÍSTICO — esp idêntico entre runs   │
+      │  (caminho de produção JAX)      │ (:func:`_deterministic_templates`) → o     │
+      │                                 │ cache XLA de disco ACERTA no 2º run        │
+      ├────────────────────────────────┼──────────────────────────────────────────┤
+      │ ``None`` (default — back-compat)│ LEGADO — primeiras K espessuras geradas    │
+      │                                 │ (aleatórias por run; caller direto/teste)  │
+      └────────────────────────────────┴──────────────────────────────────────────┘
 
     Args:
         models: lista de dicts ``{"n_layers","rho_h","rho_v","thicknesses",...}``.
         n_geometries: K templates por grupo (``None`` → :data:`_TEMPLATE_GEOMETRIES_CAP`).
+        gen_cfg: ``GenConfig`` p/ templates determinísticos (``None`` → legado).
+        stable_seed: semente estável da config (``None`` → legado).
 
     Returns:
         A MESMA lista (mutada in-place) com ``thicknesses`` colapsadas a ≤K por n_layers.
@@ -478,7 +562,17 @@ def _collapse_geometry_to_templates(
             int(n_geometries) if n_geometries is not None else _TEMPLATE_GEOMETRIES_CAP
         )
         k = max(1, min(k_req, g // 2))  # garante K ≤ 0.5·g (agrupável)
-        templates = [list(models[idxs[j]]["thicknesses"]) for j in range(k)]
+        # Determinístico só quando AMBOS são passados (caminho JAX de produção). Inline
+        # (não um bool) p/ o type-checker estreitar ``stable_seed`` → int. Sem eles,
+        # mantém o legado (primeiras K) — preserva callers diretos e testes existentes.
+        if gen_cfg is not None and stable_seed is not None:
+            # Espessuras estáveis entre runs (mesma distribuição) → cache XLA acerta.
+            templates: List[List[float]] = _deterministic_templates(
+                gen_cfg, _n_layers, k, stable_seed
+            )
+        else:
+            # Legado: subconjunto da população (REAL, porém aleatório por run).
+            templates = [list(models[idxs[j]]["thicknesses"]) for j in range(k)]
         for local, original_idx in enumerate(idxs):
             models[original_idx]["thicknesses"] = list(templates[local % k])
     return models
@@ -709,8 +803,20 @@ def _run_simulation(
             # ativo (auto p/ jax/auto). Estocástico-único explodia n_grupos=N →
             # fallback p/ Numba; com templates o JAX-grouped satura a GPU. ρ/λ
             # ficam por-modelo; manual já é groupable (replicado), então não entra.
+            #
+            # Fix regressão JAX-lento (#1): templates DETERMINÍSTICOS (semente estável
+            # da config) → esp idêntico entre runs → o cache XLA de disco ACERTA no 2º
+            # run (349 s → ~30 s). Só a GEOMETRIA é fixada; ρ/λ seguem sorteados
+            # (diversidade Monte-Carlo). Numba nunca entra aqui (só jax/auto), intocado.
             if _templates_active(request):
-                models = _collapse_geometry_to_templates(models, request.n_geometries)
+                gen_cfg = _genconfig_from_request(request)
+                stable_seed = _stable_geometry_seed(gen_cfg)
+                models = _collapse_geometry_to_templates(
+                    models,
+                    request.n_geometries,
+                    gen_cfg=gen_cfg,
+                    stable_seed=stable_seed,
+                )
         h6, info = _simulate_grouped(
             models, positions_z, request, progress_callback, cancel_event, pause_event
         )
