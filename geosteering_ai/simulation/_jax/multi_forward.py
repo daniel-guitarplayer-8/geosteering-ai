@@ -866,6 +866,38 @@ def _simulate_multi_jax_vmap_real(
 #   ✅ Backward-compat: simulate_multi_jax legada inalterada
 
 
+def _balanced_chunk_slices(n_models: int, chunk: Optional[int]) -> "list[slice]":
+    """Particiona o eixo de modelos em fatias BALANCEADAS (tamanhos ~iguais, ≤ ``chunk``).
+
+    O eixo de modelos é uma dim-líder de ``jax.vmap`` → CADA tamanho de fatia distinto
+    vira UMA compilação XLA por bucket. O esquema ingênuo ``[chunk, chunk, …, cauda]``
+    produz DUAS formas (a cauda menor) → 2 compilações/bucket. Fatias de tamanho igual
+    (``⌈n/⌈n/chunk⌉⌉``) colapsam para UMA forma → 1 compilação/bucket (corta ~metade do
+    custo a frio do grupo FIXO grande; ex.: subgrupo de 500 modelos → ``[250, 250]`` em
+    vez de ``[256, 244]``). VRAM ≤ ``chunk`` preservada (fatia balanceada ≤ ``chunk``).
+
+    Args:
+        n_models: nº de modelos no (sub)batch (eixo 0).
+        chunk: teto de modelos por dispatch (``None`` → fatia única, batch inteiro).
+
+    Returns:
+        Lista de ``slice`` contíguas cobrindo ``[0, n_models)``. ``chunk=None`` ou
+        ``n_models ≤ chunk`` → ``[slice(0, n_models)]`` (sem fatiamento).
+
+    Note:
+        Só reparticiona o eixo de modelos — o resultado concatenado é bit-idêntico a
+        qualquer outra partição (paridade <1e-13, ``test_o4_chunk_size_models_invariante``).
+    """
+    if chunk is None or n_models <= chunk:
+        return [slice(0, n_models)]
+    n_chunks = -(-n_models // chunk)  # ⌈n/chunk⌉
+    balanced = -(-n_models // n_chunks)  # ⌈n/n_chunks⌉ → fatias ~iguais (≤ chunk)
+    return [
+        slice(start, min(start + balanced, n_models))
+        for start in range(0, n_models, balanced)
+    ]
+
+
 def simulate_multi_jax_batched(
     rho_h_batch,
     rho_v_batch,
@@ -1128,14 +1160,13 @@ def simulate_multi_jax_batched(
             esp_batch_np=esp_batch_np[sl],
         )
 
-    if _chunk_models is None or n_models <= _chunk_models:
-        H_tensor_np = _dispatch_slice(slice(0, n_models), n_models)
+    # Fatias BALANCEADAS do eixo de modelos (1 forma de vmap = 1 compilação/bucket,
+    # corta o over-slicing [cap, cauda]). VRAM ≤ cap; resultado bit-idêntico.
+    _slices = _balanced_chunk_slices(n_models, _chunk_models)
+    if len(_slices) == 1:
+        H_tensor_np = _dispatch_slice(_slices[0], n_models)
     else:
-        # Loop sobre ⌈n_models/K⌉ fatias; concatena no eixo de modelos (CPU).
-        _parts: list = []
-        for _start in range(0, n_models, _chunk_models):
-            _end = min(_start + _chunk_models, n_models)
-            _parts.append(_dispatch_slice(slice(_start, _end), _end - _start))
+        _parts: list = [_dispatch_slice(_sl, _sl.stop - _sl.start) for _sl in _slices]
         H_tensor_np = np.concatenate(_parts, axis=0)
 
     # ── Metadados z_obs / rho_*_at_obs (NumPy, compartilhado + por modelo) ────

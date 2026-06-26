@@ -201,8 +201,13 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._sim_backend.setCurrentText(vm.backend)
         self._sim_backend.setToolTip(
             "Motor de simulação: numba (CPU, in-thread) · jax (GPU, subprocesso TLS-safe) "
-            "· auto (decide GPU/CPU por tamanho/geometria). jax/auto rodam em subprocesso."
+            "· auto (decide GPU/CPU por tamanho/geometria). jax/auto rodam em subprocesso.\n\n"
+            "DESEMPENHO: JAX é rápido com 'n camadas FIXO' (1 forma XLA — a 1ª execução "
+            "compila e as seguintes reusam o cache). Para ENSEMBLES ragged (n camadas "
+            "variável, ex.: o default de 2000 modelos), a 1ª execução JAX compila MUITAS "
+            "formas (minutos, uma vez); o Numba é mais rápido p/ ragged (sem compilação)."
         )
+        self._sim_backend.currentTextChanged.connect(self._on_sim_backend_changed)
 
         # ── Contadores derivados (nf/ntheta/nº pares T-R) ────────────────────
         # Read-only: derivados dos CSV de freqs/dips/TRs (atualizados em textChanged).
@@ -736,6 +741,27 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             self._output_dir.setText(path)
 
     # ── Slots ─────────────────────────────────────────────────────────────────
+    def _on_sim_backend_changed(self, text: str) -> None:
+        """Aviso honesto de UX ao escolher jax/auto (Turn 8 — fix da regressão JAX).
+
+        JAX é rápido p/ geometria com 'n camadas FIXO' (1 forma XLA). Para ENSEMBLES
+        ragged (n camadas variável — ex.: o default de 2000 modelos), a 1ª execução JAX
+        compila MUITAS formas (minutos, uma vez/máquina; o cache de disco acelera as
+        seguintes) — o Numba é mais rápido. Apenas ORIENTA via status; NÃO bloqueia nem
+        muda o backend (o VM lê o combo ao rodar). Não muta o VM (evita recursão de sync).
+        """
+        if text not in ("jax", "auto"):
+            return
+        if self._vm.n_layers_fixed is None:
+            self._status.setText(
+                "● JAX + ensemble ragged: 1ª execução compila (min, uma vez/máquina; "
+                "cache acelera as seguintes). Numba é mais rápido p/ ragged."
+            )
+        else:
+            self._status.setText(
+                "● JAX (n camadas fixo): 1ª execução compila (~min); seguintes reusam o cache."
+            )
+
     def _on_run_clicked(self) -> None:
         """Parseia os inputs, copia para o VM e dispara a simulação.
 

@@ -395,3 +395,26 @@ def test_view_geology_enable_by_radio(qtbot):
     assert view._geo_generator.isEnabled()
     assert view._geo_rho_min.isEnabled()
     assert not view._edit_layers_btn.isEnabled()
+
+
+@pytest.mark.gui
+def test_view_backend_jax_ux_guard(qtbot):
+    """Turn 8 — UX guard: escolher jax/auto com ensemble ragged mostra aviso honesto
+    (1ª execução compila; Numba é mais rápido p/ ragged); n camadas fixo mostra a nota
+    de geometria fixa; numba não alarma."""
+    from apps.sim_manager.perspectives.simulation.view import SimulatorView
+
+    vm = _make_vm()
+    vm.n_layers_fixed = None  # ragged
+    view = SimulatorView(vm)
+    qtbot.addWidget(view)
+    view._sim_backend.setCurrentText("jax")
+    assert "ragged" in view._status.text().lower()
+    # n camadas fixo → nota de geometria fixa (sem "ragged")
+    vm.n_layers_fixed = 20
+    view._sim_backend.setCurrentText("numba")  # reset
+    view._sim_backend.setCurrentText("auto")
+    assert (
+        "fixo" in view._status.text().lower()
+        and "ragged" not in view._status.text().lower()
+    )
