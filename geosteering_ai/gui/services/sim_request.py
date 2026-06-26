@@ -165,6 +165,28 @@ def _resolve_group_chunk(group_size: int, cap: Optional[int]) -> Optional[int]:
     return cap
 
 
+def _balanced_chunk_dim(n_models: int, chunk: Optional[int]) -> int:
+    """Tamanho da dim-líder do vmap (1ª fatia balanceada) p/ um (sub)batch de modelos.
+
+    ESPELHA ``simulation/_jax/multi_forward._balanced_chunk_slices`` — replicado AQUI
+    (módulo Qt/jax-FREE) p/ o construtor de specs de warmup PREVER a forma compilada SEM
+    importar ``_jax/`` (importar qualquer coisa de ``_jax/`` puxa ``jax`` no processo da
+    GUI — viola o TLS). A paridade entre os dois é garantida por teste
+    (``test_balanced_chunk_dim_matches_slices``).
+
+    Args:
+        n_models: nº de modelos no (sub)batch (eixo 0 do vmap).
+        chunk: teto por dispatch (``None``/``≥n`` → fatia única = ``n_models``).
+
+    Returns:
+        int: tamanho da 1ª fatia balanceada (= a dim-líder XLA). ``n_models`` se não fatia.
+    """
+    if chunk is None or n_models <= chunk:
+        return n_models
+    n_chunks = -(-n_models // chunk)  # ⌈n/chunk⌉
+    return -(-n_models // n_chunks)  # ⌈n/n_chunks⌉ → fatias ~iguais (≤ chunk)
+
+
 @dataclass(frozen=True)
 class SimRequest:
     """Requisição de simulação (Fatia 2 params + Fatia 3 geologia estocástica).

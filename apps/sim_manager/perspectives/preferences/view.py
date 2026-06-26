@@ -157,6 +157,18 @@ class PreferencesPanel(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
             "sm_jax_persistent_worker.md."
         )
 
+        # ── Desempenho — warmup config-aware ao selecionar JAX (default ON) ──
+        self._jax_auto_warmup = QtWidgets.QCheckBox(
+            "Aquecer o JAX com a config ao selecionar backend jax/auto (1ª sim rápida)"
+        )
+        self._jax_auto_warmup.setToolTip(
+            "LIGADO por padrão. Ao escolher o backend jax/auto, pré-compila EM BACKGROUND "
+            "as formas EXATAS da config corrente (geometria determinística + nº de pontos "
+            "+ chunk) no worker persistente → a 1ª simulação real fica cache-hit (~12 s em "
+            "vez de ~190 s). Não-bloqueante (a UI segue responsiva; o Numba continua "
+            "disponível). No-op p/ Numba ou se o JAX não estiver instalado."
+        )
+
         # ── Paths (4 linhas: QLineEdit + "Procurar…") ────────────────────────
         self._path_edits: dict[str, Any] = {}
         paths_form = QtWidgets.QFormLayout()
@@ -230,6 +242,7 @@ class PreferencesPanel(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
         )
         perf_form = QtWidgets.QFormLayout()
         perf_form.addRow(self._jax_boot_warmup)
+        perf_form.addRow(self._jax_auto_warmup)
         content_layout.addWidget(
             _group(
                 "Desempenho (JAX GPU)",
@@ -296,6 +309,7 @@ class PreferencesPanel(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
         self._cache_mb.setValue(int(self._vm.cache_max_mb))
         self._cache_snaps.setValue(int(self._vm.cache_max_snapshots))
         self._jax_boot_warmup.setChecked(self._vm.jax_boot_warmup)
+        self._jax_auto_warmup.setChecked(self._vm.jax_auto_warmup)
         for key, edit in self._path_edits.items():
             edit.setText(self._vm.get_path(key))
 
@@ -321,6 +335,7 @@ class PreferencesPanel(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é 
         self._vm.cache_max_mb = self._cache_mb.value()
         self._vm.cache_max_snapshots = self._cache_snaps.value()
         self._vm.jax_boot_warmup = self._jax_boot_warmup.isChecked()
+        self._vm.jax_auto_warmup = self._jax_auto_warmup.isChecked()
         for key, edit in self._path_edits.items():
             self._vm.set_path(key, edit.text().strip())
 

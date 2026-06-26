@@ -54,17 +54,19 @@ def schedule_boot_warmup(ctx: Any, window: Any, *, enabled: bool) -> Optional[An
     if importlib.util.find_spec("jax") is None:
         logger.info("boot warmup: JAX ausente — pulado.")
         return None
-    # Guard anti-double-schedule: se já há um warmup parkado E em voo, REUSA-o em vez de
-    # sobrescrever ctx.extras — sobrescrever dropava a única ref forte ao service anterior
-    # → GC da QThread em voo (QThread destroyed-while-running). Hoje há 1 call site; este
-    # guard blinda contra um futuro "re-aquecer".
+    # REUSA o JaxWarmupService COMPARTILHADO de ctx.extras (criado no boot p/ o warmup
+    # config-aware da SimulatorView usar o MESMO worker persistente). Se já estiver em voo,
+    # não re-dispara. Só cria um novo se não houver (back-compat p/ callers diretos/testes).
     existing = ctx.extras.get("jax_warmup_service")
     if existing is not None and getattr(existing, "is_busy", lambda: False)():
         return existing
 
-    from geosteering_ai.gui.services.jax_warmup_service import JaxWarmupService
+    if existing is not None:
+        svc = existing
+    else:
+        from geosteering_ai.gui.services.jax_warmup_service import JaxWarmupService
 
-    svc = JaxWarmupService()
+        svc = JaxWarmupService()
 
     def _status(msg: str) -> None:
         # Best-effort: a status bar pode não existir em shells mínimas / teardown.

@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, Optional, Sequence, Union
 
 import numpy as np
 
@@ -72,6 +72,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "warmup_jax_shapes",
     "warmup_jax_simulator",
     "warmup_jax_simulator_from_config",
 ]
@@ -95,6 +96,7 @@ def warmup_jax_simulator(
     n_models: int = 1,
     jax_strategy: str = "bucketed",
     positions_z: Optional[np.ndarray] = None,
+    esp_template: Optional[Union[np.ndarray, Sequence[float]]] = None,
     verbose: bool = False,
 ) -> dict:
     """Pré-compila o caminho bucketed de PRODUÇÃO do simulador JAX GPU.
@@ -133,6 +135,11 @@ def warmup_jax_simulator(
         jax_strategy: ``"bucketed"`` (default, produção GPU) ou ``"unified"``.
         positions_z: Grid explícito ``(n_positions,)``. ``None`` → grid sintético
             cobrindo o modelo. Forneça o grid EXATO de produção p/ warmup pleno.
+        esp_template: Espessuras EXPLÍCITAS ``(n_layers-2,)`` de UMA geometria real
+            (1 dos K templates determinísticos da produção). ``None`` (default) →
+            geometria homogênea sintética (CLI/inversão). Forneça o template real +
+            ``positions_z`` p/ os buckets ``(ct,cr)`` baterem com a 1ª sim do SM
+            (shape-matching). Usado por :func:`warmup_jax_shapes`.
         verbose: Loga timing + buckets aquecidos.
 
     Returns:
@@ -201,10 +208,25 @@ def warmup_jax_simulator(
     n_esp = max(n_layers - 2, 0)
     rho_h_batch = np.full((n_models, n_layers), _WARMUP_RHO_OHM_M, dtype=np.float64)
     rho_v_batch = np.full((n_models, n_layers), _WARMUP_RHO_OHM_M, dtype=np.float64)
-    esp_batch = np.full((n_models, n_esp), _WARMUP_ESP_M, dtype=np.float64)
+    if esp_template is None:
+        # Geometria HOMOGÊNEA sintética (default — inversão/inferência/CLI canônico).
+        esp_batch = np.full((n_models, n_esp), _WARMUP_ESP_M, dtype=np.float64)
+    else:
+        # Geometria EXPLÍCITA (shape-matching): tile do template real (1 das K formas
+        # determinísticas da produção) → buckets (ct,cr) idênticos aos da 1ª sim real.
+        esp_row = np.asarray(esp_template, dtype=np.float64).reshape(-1)
+        if esp_row.shape[0] != n_esp:
+            raise ValueError(
+                f"esp_template tem {esp_row.shape[0]} espessuras, mas n_layers={n_layers} "
+                f"exige n_esp={n_esp} (= n_layers-2)."
+            )
+        esp_batch = np.broadcast_to(esp_row, (n_models, n_esp)).copy()
 
     if positions_z is None:
-        total_thick = _WARMUP_ESP_M * n_esp if n_esp > 0 else _WARMUP_ESP_M
+        if esp_template is None:
+            total_thick = _WARMUP_ESP_M * n_esp if n_esp > 0 else _WARMUP_ESP_M
+        else:
+            total_thick = float(np.asarray(esp_batch[0]).sum()) or _WARMUP_ESP_M
         positions_z = np.linspace(-1.0, total_thick + 1.0, n_positions)
     else:
         positions_z = np.asarray(positions_z, dtype=np.float64)
@@ -331,3 +353,126 @@ def warmup_jax_simulator_from_config(
         jax_strategy=cfg.jax_strategy,
         verbose=verbose,
     )
+
+
+def warmup_jax_shapes(
+    specs: Sequence[dict],
+    *,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+    verbose: bool = False,
+) -> dict:
+    """Aquece os SHAPES EXATOS de uma config do SM (lista de specs determinísticos).
+
+    Diferente de :func:`warmup_jax_simulator` (geometria homogênea sintética), aqui cada
+    ``spec`` carrega a geometria EXPLÍCITA de UM template determinístico da produção (via
+    ``build_warmup_specs``), de modo que os programas XLA compilados sejam **bit-idênticos**
+    aos que a 1ª simulação real dispara → cache-hit total. Itera os specs no caminho JAX
+    DIRETO (``warmup_jax_simulator`` com ``esp_template``), reportando progresso por spec e
+    cooperando com cancelamento ENTRE specs (NUNCA dentro do kernel — atômico).
+
+    Cada ``spec`` é um dict com as chaves: ``esp_template`` (Sequence[float], n_layers-2),
+    ``n_layers`` (int), ``n_models`` (int — dim-líder do vmap = chunk balanceado),
+    ``positions_z`` (np.ndarray), ``freqs_hz``/``tr_spacings_m``/``dip_degs`` (Sequence),
+    ``complex_dtype`` (str), ``hankel_filter`` (str), e opcional ``jax_strategy`` (str).
+
+    Args:
+        specs: lista de specs de warmup (de ``build_warmup_specs``). Vazia → no-op.
+        cancel_cb: callable ``() -> bool``; se retornar ``True`` ENTRE specs, para cedo.
+        progress_cb: callable ``(done, total)`` chamado após CADA spec aquecido.
+        verbose: loga o agregado (programas aquecidos, tempo, cancelado).
+
+    Returns:
+        dict agregado: ``skipped``/``reason`` (JAX ausente), ``programs_warmed`` (delta de
+        ``total_xla_programs``), ``specs_warmed``/``specs_total``, ``elapsed_s``,
+        ``cancelled`` (bool), ``persisted`` (bool), ``total_xla_programs`` (pós-warmup).
+
+    Note:
+        SÓ pré-compila (dispatch REAL, nunca AOT) — não altera numérica nem hot-path.
+        Paridade Fortran <1e-12 estruturalmente preservada. See Also:
+        :func:`warmup_jax_simulator`, ``gui/services/jax_warmup_spec.build_warmup_specs``.
+    """
+    n_total = len(specs)
+    from geosteering_ai.simulation._jax import HAS_JAX
+
+    if not HAS_JAX:
+        logger.info("warmup_jax_shapes: JAX ausente — skip gracioso.")
+        return {
+            "skipped": True,
+            "reason": "jax_absent",
+            "programs_warmed": 0,
+            "specs_warmed": 0,
+            "specs_total": n_total,
+            "elapsed_s": 0.0,
+            "cancelled": False,
+            "persisted": False,
+            "total_xla_programs": 0,
+        }
+
+    import os
+
+    import jax
+
+    from geosteering_ai.simulation._jax.forward_pure import get_jit_cache_info
+
+    info_before = get_jit_cache_info()
+    t0 = time.perf_counter()
+    done = 0
+    cancelled = False
+    for spec in specs:
+        if cancel_cb is not None and cancel_cb():
+            cancelled = True
+            break
+        pz = np.asarray(spec["positions_z"], dtype=np.float64)
+        # Caminho JAX DIRETO (bypassa o dispatcher) com a geometria REAL do template.
+        warmup_jax_simulator(
+            n_layers=int(spec["n_layers"]),
+            n_positions=int(pz.shape[0]),
+            hankel_filter=str(spec["hankel_filter"]),
+            complex_dtype=str(spec["complex_dtype"]),
+            dip_degs=tuple(spec["dip_degs"]),
+            tr_spacings_m=tuple(spec["tr_spacings_m"]),
+            freqs_hz=tuple(spec["freqs_hz"]),
+            n_models=int(spec["n_models"]),
+            jax_strategy=str(spec.get("jax_strategy", "bucketed")),
+            positions_z=pz,
+            esp_template=np.asarray(spec["esp_template"], dtype=np.float64),
+            verbose=False,
+        )
+        done += 1
+        if progress_cb is not None:
+            progress_cb(done, n_total)
+
+    elapsed_s = time.perf_counter() - t0
+    info_after = get_jit_cache_info()
+    programs_warmed = int(info_after["total_xla_programs"]) - int(
+        info_before["total_xla_programs"]
+    )
+    persisted = bool(os.environ.get("JAX_COMPILATION_CACHE_DIR")) or bool(
+        getattr(jax.config, "jax_compilation_cache_dir", None)
+    )
+
+    if verbose:
+        logger.info(
+            "[warmup-jax-shapes] %d/%d specs → %d programas em %.2fs "
+            "(cancelled=%s, persisted=%s, total_xla=%d)",
+            done,
+            n_total,
+            programs_warmed,
+            elapsed_s,
+            cancelled,
+            persisted,
+            int(info_after["total_xla_programs"]),
+        )
+
+    return {
+        "skipped": False,
+        "reason": None,
+        "programs_warmed": programs_warmed,
+        "specs_warmed": done,
+        "specs_total": n_total,
+        "elapsed_s": elapsed_s,
+        "cancelled": cancelled,
+        "persisted": persisted,
+        "total_xla_programs": int(info_after["total_xla_programs"]),
+    }

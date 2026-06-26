@@ -178,14 +178,26 @@ def main(argv: Optional[List[str]] = None, *, show_startup: bool = False) -> int
         )
     window.resize(1180, 800)  # rail + perspectiva + secondary sidebar
     window.show()
-    # ── Boot warmup do JAX (opt-in) — tira o cold-start XLA da 1ª sim (op 3) ──
-    # Lê a pref jax_boot_warmup (default False). schedule_boot_warmup é no-op se
-    # desligado OU sem jax (find_spec — não importa JAX na GUI). Best-effort: uma
-    # falha aqui nunca impede o app de subir.
+    # ── Warmup do JAX GPU (boot canônico opt-in + config-aware on-select) ─────
+    # Cria UM JaxWarmupService COMPARTILHADO em ctx.extras (o boot canônico E o warmup
+    # config-aware da perspectiva de simulação reusam o MESMO worker persistente). Só
+    # instancia se o jax estiver instalado (find_spec NÃO importa jax na GUI). O boot
+    # canônico (pref jax_boot_warmup, default False) é disparado aqui; o config-aware
+    # (pref jax_auto_warmup, default True) é disparado pela SimulatorView ao selecionar
+    # jax/auto. Best-effort: uma falha aqui nunca impede o app de subir.
     try:
+        import importlib.util
+
         from apps.sim_manager.boot_warmup import schedule_boot_warmup
         from apps.sim_manager.perspectives.preferences.service import PreferencesService
 
+        if (
+            importlib.util.find_spec("jax") is not None
+            and "jax_warmup_service" not in ctx.extras
+        ):
+            from geosteering_ai.gui.services.jax_warmup_service import JaxWarmupService
+
+            ctx.extras["jax_warmup_service"] = JaxWarmupService()
         _warmup_on = bool(PreferencesService().load().get("jax_boot_warmup", False))
         schedule_boot_warmup(ctx, window, enabled=_warmup_on)
     except Exception:  # noqa: BLE001 — warmup é otimização; boot nunca falha por isto
