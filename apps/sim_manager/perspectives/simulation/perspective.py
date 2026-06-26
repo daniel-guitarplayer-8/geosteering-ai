@@ -94,7 +94,11 @@ class SimulationPerspective(Perspective):
         sim_vm = self.build_viewmodel(ctx)
         if project_dir:
             sim_vm.output_dir = project_dir  # pré-preenche o campo "Saída"
-        view = SimulatorView(sim_vm)
+        # Injeta o JaxWarmupService COMPARTILHADO (criado no boot, em ctx.extras) p/ o
+        # warmup config-aware ao selecionar jax/auto. None no CI/sem-jax → gatilho no-op.
+        view = SimulatorView(
+            sim_vm, jax_warmup_service=ctx.extras.get("jax_warmup_service")
+        )
         self._sim_vm = sim_vm  # ref viva
 
         # PR-2 (#1): publica o ResultsViewModel p/ a perspectiva "Resultados" (1 VM,

@@ -108,9 +108,18 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         na perspectiva Resultados (PR-2 #1), ligada ao mesmo ``vm.results``.
     """
 
-    def __init__(self, vm: SimulationViewModel, parent: Any = None) -> None:
+    def __init__(
+        self,
+        vm: SimulationViewModel,
+        parent: Any = None,
+        *,
+        jax_warmup_service: Any = None,
+    ) -> None:
         super().__init__(parent)
         self._vm = vm
+        # Service de warmup JAX COMPARTILHADO (de ctx.extras; None no CI/sem-jax/Studio).
+        # Usado p/ o warmup config-aware ao selecionar jax/auto (:meth:`_maybe_warmup_config`).
+        self._jax_warmup_service = jax_warmup_service
 
         # ── Inputs de listas (CSV multi-config) ──────────────────────────────
         self._freqs = QtWidgets.QLineEdit(self._fmt_csv(vm.frequencies))
@@ -761,6 +770,43 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
             self._status.setText(
                 "● JAX (n camadas fixo): 1ª execução compila (~min); seguintes reusam o cache."
             )
+        # Dispara o warmup config-aware em background (pref jax_auto_warmup, default ON) —
+        # pré-compila as formas EXATAS da config p/ a 1ª sim ficar cache-hit (~12 s).
+        self._maybe_warmup_config()
+
+    def _maybe_warmup_config(self) -> None:
+        """Aquece o JAX com as formas da config corrente, em background (on-select).
+
+        Gateado por: presença do ``JaxWarmupService`` (None no CI/sem-jax), pref
+        ``jax_auto_warmup`` (default ON), e guard ``is_busy`` (não empilha — debounce
+        natural). Sincroniza o VM com os widgets (silencioso), monta a ``SimRequest``
+        corrente e submete os specs shape-matching ao worker persistente. Best-effort:
+        NUNCA quebra a UI nem alarma — uma falha de warmup é apenas otimização perdida.
+        """
+        svc = self._jax_warmup_service
+        if svc is None or getattr(svc, "is_busy", lambda: False)():
+            return
+        try:
+            from apps.sim_manager.perspectives.preferences.service import (
+                PreferencesService,
+            )
+
+            if not bool(PreferencesService().load().get("jax_auto_warmup", True)):
+                return
+            if not self._sync_vm_from_widgets(show_errors=False):
+                return
+            from geosteering_ai.gui.services.jax_warmup_spec import build_warmup_specs
+
+            specs = build_warmup_specs(self._vm.build_sim_request())
+            if not specs:
+                return  # numba / grupos < limiar GPU → nada a aquecer
+            self._status.setText(
+                "● Aquecendo JAX GPU em background — a 1ª simulação ficará rápida "
+                "(~12 s). A UI segue livre; o Numba continua disponível."
+            )
+            svc.warmup_config(specs)
+        except Exception:  # noqa: BLE001 — warmup é otimização; UI nunca quebra
+            pass
 
     def _on_run_clicked(self) -> None:
         """Parseia os inputs, copia para o VM e dispara a simulação.
@@ -768,13 +814,29 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         CSV inválido (token não-numérico) → status de erro, SEM chamar o VM e
         SEM crash. A validação de ranges (errata) é responsabilidade do VM.
         """
+        if self._sync_vm_from_widgets():
+            self._vm.run()
+
+    def _sync_vm_from_widgets(self, *, show_errors: bool = True) -> bool:
+        """Parseia os inputs e copia p/ o VM (fonte única do estado corrente).
+
+        Retorna ``False`` se algum CSV for inválido (com ``show_errors`` seta o status de
+        erro; o warmup usa ``show_errors=False`` p/ falhar silenciosamente). Extraído de
+        :meth:`_on_run_clicked` p/ reuso pelo gatilho de warmup config-aware
+        (:meth:`_maybe_warmup_config`) — assim o warmup monta a MESMA ``SimRequest`` que a
+        simulação real, garantindo o shape-matching (cache-hit).
+
+        Mutar o VM aqui é SEGURO mesmo a partir do handler do combo: ``_on_vm_changed``
+        só reage a ``_status``/``_progress`` (não aos campos de input) → sem recursão.
+        """
         try:
             freqs = _parse_csv_floats(self._freqs.text())
             dips = _parse_csv_floats(self._dips.text())
             trs = _parse_csv_floats(self._trs.text())
         except ValueError as exc:
-            self._status.setText(f"entrada inválida: {exc}")
-            return
+            if show_errors:
+                self._status.setText(f"entrada inválida: {exc}")
+            return False
         self._vm.frequencies = freqs
         self._vm.dips = dips
         self._vm.tr_spacings = trs
@@ -814,7 +876,7 @@ class SimulatorView(QtWidgets.QWidget):  # type: ignore[misc] # QtWidgets é Any
         self._vm.save_fortran_artifacts = self._save_artifacts.isChecked()
         self._vm.h1_auto = self._h1_auto.isChecked()
         self._vm.tj_auto = self._tj_auto.isChecked()
-        self._vm.run()
+        return True
 
     def _refresh_n_pos(self, *_: Any) -> None:
         """Atualiza o label ``n_pos`` (convenção Fortran) a partir de dips/tj/p_med.

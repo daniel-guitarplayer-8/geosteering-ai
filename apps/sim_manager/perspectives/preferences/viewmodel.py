@@ -102,6 +102,7 @@ class PreferencesViewModel(BaseViewModel):
         "_cache_max_snapshots",
         "_paths",
         "_jax_boot_warmup",
+        "_jax_auto_warmup",
     )
 
     def __init__(self, service: Any) -> None:
@@ -121,6 +122,7 @@ class PreferencesViewModel(BaseViewModel):
         self._cache_max_snapshots: int = int(defaults["cache_max_snapshots"])
         self._paths: Dict[str, str] = dict(defaults["paths"])
         self._jax_boot_warmup: bool = bool(defaults["jax_boot_warmup"])
+        self._jax_auto_warmup: bool = bool(defaults["jax_auto_warmup"])
 
         self.theme_changed: VMSignal = VMSignal()
         self.plot_backend_changed: VMSignal = VMSignal()
@@ -177,6 +179,16 @@ class PreferencesViewModel(BaseViewModel):
     def jax_boot_warmup(self, value: bool) -> None:
         self._set("_jax_boot_warmup", bool(value))
 
+    @property
+    def jax_auto_warmup(self) -> bool:
+        """Se ``True`` (default), aquece o JAX com as formas da config ao selecionar
+        backend jax/auto (async, background) → 1ª sim cache-hit. No-op p/ Numba/sem-jax."""
+        return self._jax_auto_warmup
+
+    @jax_auto_warmup.setter
+    def jax_auto_warmup(self, value: bool) -> None:
+        self._set("_jax_auto_warmup", bool(value))
+
     def get_path(self, key: str) -> str:
         """Retorna o path da chave (``""`` se ausente)."""
         return self._paths.get(key, "")
@@ -201,6 +213,7 @@ class PreferencesViewModel(BaseViewModel):
             "cache_max_snapshots": self._cache_max_snapshots,
             "paths": dict(self._paths),
             "jax_boot_warmup": self._jax_boot_warmup,
+            "jax_auto_warmup": self._jax_auto_warmup,
         }
 
     def load_session_dict(self, data: Dict[str, Any]) -> None:
@@ -231,6 +244,9 @@ class PreferencesViewModel(BaseViewModel):
         # corrente em tipo inesperado (mesmo contrato de _safe_int nos campos de cache).
         self._jax_boot_warmup = _safe_bool(
             data.get("jax_boot_warmup"), self._jax_boot_warmup
+        )
+        self._jax_auto_warmup = _safe_bool(
+            data.get("jax_auto_warmup"), self._jax_auto_warmup
         )
 
     @classmethod
@@ -284,5 +300,6 @@ class PreferencesViewModel(BaseViewModel):
         if mb_changed or snaps_changed:
             self.cache_changed.emit(self._cache_max_mb, self._cache_max_snapshots)
         self.jax_boot_warmup = bool(defaults["jax_boot_warmup"])
+        self.jax_auto_warmup = bool(defaults["jax_auto_warmup"])
         for key in _PATH_KEYS:
             self.set_path(key, defaults["paths"].get(key, ""))

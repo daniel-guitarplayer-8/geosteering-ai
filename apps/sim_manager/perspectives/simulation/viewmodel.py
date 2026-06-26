@@ -831,25 +831,18 @@ class SimulationViewModel(BaseViewModel):
                 )
         return errors
 
-    def run(self) -> None:
-        """Valida e dispara a simulação (não-bloqueante) via o service injetado.
+    def build_sim_request(self) -> SimRequest:
+        """Constrói o ``SimRequest`` a partir do estado ATUAL do VM (fonte única).
 
-        Em erro de validação NÃO chama o service: status → ``"error"`` e
-        ``last_result = {"errors": [...]}``.
+        Extraído de :meth:`run` (que o reusa) p/ que o gatilho de warmup config-aware
+        (``warmup_config`` ao selecionar JAX) monte a MESMA requisição que a simulação
+        real vai rodar — garantindo que o warmup pré-compile as formas EXATAS (cache-hit).
+        PURO (sem Qt, sem efeito colateral) — não valida nem muda status.
 
-        Guard de re-entrância: se já há uma simulação em voo (``status ==
-        "running"``), retorna sem despachar — o invariante "1 simulação por vez"
-        vive AQUI (camada VM), não num efeito colateral de ``setEnabled`` na View
-        (que depende do filtro de eventos do Qt e não cobre chamadas programáticas).
+        Returns:
+            ``SimRequest`` espelhando o estado corrente do VM.
         """
-        if self._status == "running":
-            return
-        errors = self.validate()
-        if errors:
-            self._last_result = {"errors": errors}
-            self._set("_status", "error")
-            return
-        request = SimRequest(
+        return SimRequest(
             frequencies_hz=self._frequencies,
             tr_spacings_m=self._tr_spacings,
             dip_degs=self._dips,
@@ -889,6 +882,26 @@ class SimulationViewModel(BaseViewModel):
             output_dir=self._output_dir,
             save_fortran_artifacts=self._save_fortran_artifacts,
         )
+
+    def run(self) -> None:
+        """Valida e dispara a simulação (não-bloqueante) via o service injetado.
+
+        Em erro de validação NÃO chama o service: status → ``"error"`` e
+        ``last_result = {"errors": [...]}``.
+
+        Guard de re-entrância: se já há uma simulação em voo (``status ==
+        "running"``), retorna sem despachar — o invariante "1 simulação por vez"
+        vive AQUI (camada VM), não num efeito colateral de ``setEnabled`` na View
+        (que depende do filtro de eventos do Qt e não cobre chamadas programáticas).
+        """
+        if self._status == "running":
+            return
+        errors = self.validate()
+        if errors:
+            self._last_result = {"errors": errors}
+            self._set("_status", "error")
+            return
+        request = self.build_sim_request()
         # Reseta o feedback de execução (Fatia 6a) ANTES de iniciar.
         self._progress_done = 0
         self._progress_total = max(1, int(self._n_models))

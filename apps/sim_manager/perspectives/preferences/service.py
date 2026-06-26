@@ -48,6 +48,10 @@ DEFAULT_PREFERENCES: Dict[str, Any] = {
     # Aquecer o worker JAX GPU no boot (async): tira o cold-start XLA da 1ª sim. Opt-in
     # (False) — não gasta GPU/VRAM no boot de quem só usa Numba (nem do CI/Studio).
     "jax_boot_warmup": False,
+    # Aquecer o JAX GPU com as formas EXATAS da config ao SELECIONAR backend jax/auto
+    # (async, em background): a 1ª sim real fica cache-hit (190 s → ~12 s). Default ON —
+    # não-bloqueante, cancelável e no-op p/ Numba/sem-jax (find_spec). Ver jax_warmup_spec.
+    "jax_auto_warmup": True,
     "paths": {  # paridade com load_paths()/save_paths() do monólito
         "output_dir": "",
         "tatu_binary": "",
